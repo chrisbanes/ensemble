@@ -6,6 +6,8 @@ pub enum EnsembleError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
+    #[error(transparent)]
+    Tracker(#[from] crate::tracker::TrackerError),
 }
 
 #[derive(Debug, Error)]
