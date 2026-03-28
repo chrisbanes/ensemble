@@ -1,8 +1,7 @@
 use crate::config::workflow::WorkflowDefinition;
 use crate::error::ConfigError;
-use serde_yaml::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Typed runtime configuration derived from WORKFLOW.md front matter.
 #[derive(Debug, Clone)]
