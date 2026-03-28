@@ -7,8 +7,8 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 ## 1. Problem Statement
 
 Symphony is a long-running automation service that continuously reads work from an issue tracker
-(Linear in this specification version), creates an isolated workspace for each issue, and runs a
-coding agent session for that issue inside the workspace.
+(GitHub Projects in this specification version), creates an isolated workspace for each issue, and
+runs a coding agent session for that issue inside the workspace.
 
 The service solves four operational problems:
 
@@ -91,7 +91,7 @@ Important boundary:
 6. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + workflow template.
-   - Launches the coding agent app-server client.
+   - Launches the coding agent via ACP over stdio.
    - Streams agent updates back to the orchestrator.
 
 7. `Status Surface` (optional)
@@ -119,7 +119,7 @@ Symphony is easiest to port when kept in these layers:
 4. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+5. `Integration Layer` (GitHub adapter)
    - API calls and normalization for tracker data.
 
 6. `Observability Layer` (logs + optional status surface)
@@ -127,10 +127,11 @@ Symphony is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API (GitHub for `tracker.kind: github` in this specification version).
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable that supports JSON-RPC-like app-server mode over stdio.
+- Coding-agent executable that speaks the Agent Client Protocol (ACP) over stdio (JSON-RPC 2.0,
+  line-delimited).
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -219,16 +220,14 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string, `<thread_id>-<turn_id>`)
-- `thread_id` (string)
-- `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
+- `session_id` (string, the ACP `sessionId` returned by `session/new`)
+- `agent_pid` (string or null)
+- `last_agent_event` (string/enum or null)
+- `last_agent_timestamp` (timestamp or null)
+- `last_agent_message` (summarized payload)
+- `agent_input_tokens` (integer)
+- `agent_output_tokens` (integer)
+- `agent_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -260,8 +259,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `agent_totals` (aggregate tokens + runtime seconds)
+- `agent_rate_limits` (latest rate-limit snapshot from agent events)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -275,7 +274,7 @@ Fields:
 - `Normalized Issue State`
   - Compare states after `lowercase`.
 - `Session ID`
-  - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
+  - Use the `sessionId` returned by the ACP `session/new` response.
 
 ## 5. Workflow Specification (Repository Contract)
 
@@ -323,7 +322,6 @@ Top-level keys:
 - `workspace`
 - `hooks`
 - `agent`
-- `codex`
 
 Unknown keys should be ignored for forward compatibility.
 
@@ -342,19 +340,33 @@ Fields:
 
 - `kind` (string)
   - Required for dispatch.
-  - Current supported value: `linear`
+  - Current supported value: `github`
 - `endpoint` (string)
-  - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
+  - Default for `tracker.kind == "github"`: `https://api.github.com/graphql`
 - `api_key` (string)
   - May be a literal token or `$VAR_NAME`.
-  - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
+  - Canonical environment variable for `tracker.kind == "github"`: `GITHUB_TOKEN`.
+  - The token must have `repo` and `project` scopes (or fine-grained equivalents).
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
-- `project_slug` (string)
-  - Required for dispatch when `tracker.kind == "linear"`.
+- `repository` (string)
+  - Required for dispatch when `tracker.kind == "github"`.
+  - Format: `owner/repo` (for example `acme/my-project`).
+- `project_number` (integer, optional)
+  - GitHub Projects v2 board number.
+  - When set, the service uses the project board's Status single-select field for state filtering.
+  - When omitted, the service fetches issues from the repository directly using label or milestone
+    filtering.
+- `labels_filter` (list of strings, optional)
+  - When set, only issues with at least one of these labels are considered candidates.
+  - Useful when not using a project board for state management.
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress`
+  - When `project_number` is set, these match the project board's Status field values.
+  - When `project_number` is omitted, these are matched against issue labels.
 - `terminal_states` (list of strings)
-  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+  - Default: `Done`, `Closed`
+  - GitHub Issues have a binary open/closed state. Implementations should check both the project
+    board status field (if configured) and the GitHub issue open/closed state.
 
 #### 5.3.2 `polling` (object)
 
@@ -412,28 +424,18 @@ Fields:
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
-
-#### 5.3.6 `codex` (object)
-
-Fields:
-
-For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
-`turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
-Implementors should treat them as pass-through Codex config values rather than relying on a
-hand-maintained enum in this spec. To inspect the installed Codex schema, run
-`codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions referenced
-by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations may validate these
-fields locally if they want stricter startup checks.
-
 - `command` (string shell command)
-  - Default: `codex app-server`
+  - Default: implementation-defined.
   - The runtime launches this command via `bash -lc` in the workspace directory.
-  - The launched process must speak a compatible app-server protocol over stdio.
-- `approval_policy` (Codex `AskForApproval` value)
-  - Default: implementation-defined.
-- `thread_sandbox` (Codex `SandboxMode` value)
-  - Default: implementation-defined.
-- `turn_sandbox_policy` (Codex `SandboxPolicy` value)
+  - The launched process must speak the Agent Client Protocol (ACP) over stdio.
+- `session_mode` (string, optional)
+  - ACP session mode sent via `session/set_mode` after session creation.
+  - Possible values: `code`, `architect`, `ask`.
+  - Default: `code`.
+- `permission_policy` (string, optional)
+  - Defines how the orchestrator handles `session/request_permission` callbacks from the ACP agent.
+  - Values: `auto_approve_all`, `approve_reads_reject_writes`, `reject_all`, or
+    implementation-defined.
   - Default: implementation-defined.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
@@ -464,7 +466,7 @@ Template input variables:
 Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime may use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+  (`You are working on a GitHub issue.`).
 - Workflow file read/parse failures are configuration/validation errors and should not silently fall
   back to a prompt.
 
@@ -509,7 +511,7 @@ Dynamic reload is required:
 - The software should watch `WORKFLOW.md` for changes.
 - On change, it should re-read and re-apply workflow config and prompt template without restart.
 - The software should attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
+  cadence, concurrency limits, active/terminal states, agent settings, workspace paths/hooks, and
   prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
@@ -544,19 +546,21 @@ Validation checks:
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
-- `tracker.project_slug` is present when required by the selected tracker kind.
-- `codex.command` is present and non-empty.
+- `tracker.repository` is present when required by the selected tracker kind.
+- `agent.command` is present and non-empty.
 
 ### 6.4 Config Fields Summary (Cheat Sheet)
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
 
-- `tracker.kind`: string, required, currently `linear`
-- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
-- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
-- `tracker.project_slug`: string, required when `tracker.kind=linear`
+- `tracker.kind`: string, required, currently `github`
+- `tracker.endpoint`: string, default `https://api.github.com/graphql` when `tracker.kind=github`
+- `tracker.api_key`: string or `$VAR`, canonical env `GITHUB_TOKEN` when `tracker.kind=github`
+- `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`
+- `tracker.project_number`: integer, optional; GitHub Projects v2 board number
+- `tracker.labels_filter`: list of strings, optional; restrict candidates to issues with these labels
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
-- `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.terminal_states`: list of strings, default `["Done", "Closed"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
@@ -572,13 +576,12 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `codex.command`: shell command string, default `codex app-server`
-- `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
-- `codex.turn_timeout_ms`: integer, default `3600000`
-- `codex.read_timeout_ms`: integer, default `5000`
-- `codex.stall_timeout_ms`: integer, default `300000`
+- `agent.command`: shell command string, default implementation-defined
+- `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
+- `agent.permission_policy`: string, default implementation-defined
+- `agent.turn_timeout_ms`: integer, default `3600000`
+- `agent.read_timeout_ms`: integer, default `5000`
+- `agent.stall_timeout_ms`: integer, default `300000`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
   for ephemeral local bind, and CLI `--port` overrides it
 
@@ -660,7 +663,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
 
-- `Codex Update Event`
+- `Agent Update Event`
   - Update live session fields, token counters, and rate limits.
 
 - `Retry Timer Fired`
@@ -776,9 +779,9 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
+  - `last_agent_timestamp` if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
+- If `elapsed_ms > agent.stall_timeout_ms`, terminate the worker and queue a retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
@@ -897,34 +900,36 @@ Invariant 3: Workspace key is sanitized.
 - Only `[A-Za-z0-9._-]` allowed in workspace directory names.
 - Replace all other characters with `_`.
 
-## 10. Agent Runner Protocol (Coding Agent Integration)
+## 10. Agent Runner Protocol (ACP Integration)
 
-This section defines the language-neutral contract for integrating a coding agent app-server.
+This section defines the language-neutral contract for integrating a coding agent that speaks the
+Agent Client Protocol (ACP). ACP is a JSON-RPC 2.0 protocol over stdio that provides a standard
+interface for client-agent communication.
+
+Reference: https://agentclientprotocol.com
 
 Compatibility profile:
 
 - The normative contract is message ordering, required behaviors, and the logical fields that must
-  be extracted (for example session IDs, completion state, approval handling, and usage/rate-limit
+  be extracted (for example session IDs, completion state, permission handling, and usage/rate-limit
   telemetry).
-- Exact JSON field names may vary slightly across compatible app-server versions.
 - Implementations should tolerate equivalent payload shapes when they carry the same logical
-  meaning, especially for nested IDs, approval requests, user-input-required signals, and
-  token/rate-limit metadata.
+  meaning, especially for nested IDs, permission requests, and token/rate-limit metadata.
 
 ### 10.1 Launch Contract
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
+- Command: `agent.command`
+- Invocation: `bash -lc <agent.command>`
 - Working directory: workspace path
 - Stdout/stderr: separate streams
-- Framing: line-delimited protocol messages on stdout (JSON-RPC-like JSON per line)
+- Framing: line-delimited JSON-RPC 2.0 messages on stdout
 
 Notes:
 
-- The default command is `codex app-server`.
-- Approval policy, cwd, and prompt are expressed in the protocol messages in Section 10.2.
+- The default command is implementation-defined. Any ACP-compatible agent executable may be used.
+- Session mode, cwd, and prompt are expressed in the protocol messages in Section 10.2.
 
 Recommended additional process settings:
 
@@ -932,71 +937,69 @@ Recommended additional process settings:
 
 ### 10.2 Session Startup Handshake
 
-Reference: https://developers.openai.com/codex/app-server/
+The client must send these ACP protocol messages in order:
 
-The client must send these protocol messages in order:
-
-Illustrative startup transcript (equivalent payload shapes are acceptable if they preserve the same
-semantics):
+Illustrative startup transcript:
 
 ```json
-{"id":1,"method":"initialize","params":{"clientInfo":{"name":"symphony","version":"1.0"},"capabilities":{}}}
-{"method":"initialized","params":{}}
-{"id":2,"method":"thread/start","params":{"approvalPolicy":"<implementation-defined>","sandbox":"<implementation-defined>","cwd":"/abs/workspace"}}
-{"id":3,"method":"turn/start","params":{"threadId":"<thread-id>","input":[{"type":"text","text":"<rendered prompt-or-continuation-guidance>"}],"cwd":"/abs/workspace","title":"ABC-123: Example","approvalPolicy":"<implementation-defined>","sandboxPolicy":{"type":"<implementation-defined>"}}}
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-07-09","clientCapabilities":{"terminal":true},"clientInfo":{"name":"ensemble","version":"1.0"}}}
+{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/abs/workspace","mcpServers":{}}}
+{"jsonrpc":"2.0","method":"session/set_mode","params":{"sessionId":"<session-id>","mode":"code"}}
+{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"sessionId":"<session-id>","content":[{"type":"text","text":"<rendered prompt>"}]}}
 ```
 
 1. `initialize` request
    - Params include:
-     - `clientInfo` object (for example `{name, version}`)
-     - `capabilities` object (may be empty)
-   - If the targeted Codex app-server requires capability negotiation for dynamic tools, include the
-     necessary capability flag(s) here.
-   - Wait for response (`read_timeout_ms`)
-2. `initialized` notification
-3. `thread/start` request
+     - `protocolVersion` (string, for example `"2025-07-09"`)
+     - `clientCapabilities` object (advertise supported capabilities such as `terminal: true` for
+       shell execution)
+     - `clientInfo` object (for example `{name: "ensemble", version: "1.0"}`)
+   - Wait for response containing `agentCapabilities` and `agentInfo` (`read_timeout_ms`)
+2. `session/new` request
    - Params include:
-     - `approvalPolicy` = implementation-defined session approval policy value
-     - `sandbox` = implementation-defined session sandbox value
      - `cwd` = absolute workspace path
-     - If optional client-side tools are implemented, include their advertised tool specs using the
-       protocol mechanism supported by the targeted Codex app-server version.
-4. `turn/start` request
+     - `mcpServers` = map of MCP server configurations to expose to the agent (may be empty)
+     - If optional client-side tools are implemented (for example `github_graphql`), expose them as
+       MCP servers via this parameter.
+   - Response contains `sessionId` (string).
+3. `session/set_mode` notification (optional)
+   - Sent only if `agent.session_mode` is configured and differs from the agent's default.
+   - Params: `sessionId`, `mode` (one of `code`, `architect`, `ask`).
+4. `session/prompt` request
    - Params include:
-     - `threadId`
-     - `input` = single text item containing rendered prompt for the first turn, or continuation
-       guidance for later turns on the same thread
-     - `cwd`
-     - `title` = `<issue.identifier>: <issue.title>`
-     - `approvalPolicy` = implementation-defined turn approval policy value
-     - `sandboxPolicy` = implementation-defined object-form sandbox policy payload when required by
-       the targeted app-server version
+     - `sessionId`
+     - `content` = array of content blocks; first turn uses a single text block containing the
+       rendered prompt; continuation turns use continuation guidance
+   - The agent streams `session/update` notifications in response.
 
 Session identifiers:
 
-- Read `thread_id` from `thread/start` result `result.thread.id`
-- Read `turn_id` from each `turn/start` result `result.turn.id`
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
+- Read `sessionId` from `session/new` result.
+- Emit `session_id = sessionId`.
+- Reuse the same `sessionId` for all continuation prompts within one worker run.
+- Track a `turn_count` integer in the orchestrator, incremented on each `session/prompt` call.
 
 ### 10.3 Streaming Turn Processing
 
-The client reads line-delimited messages until the turn terminates.
+The client reads line-delimited JSON-RPC 2.0 messages until the turn terminates.
 
-Completion conditions:
+Completion conditions (derived from ACP `stopReason` in `session/update` notifications):
 
-- `turn/completed` -> success
-- `turn/failed` -> failure
-- `turn/cancelled` -> failure
-- turn timeout (`turn_timeout_ms`) -> failure
+- `end_turn` -> success (agent completed its work for this turn)
+- `max_tokens` -> potential continuation (agent ran out of output tokens)
+- `cancelled` -> failure
+- `refusal` -> failure (agent declined the request)
+- `max_turn_requests` -> failure (agent hit its internal tool-call limit)
+- turn timeout (`agent.turn_timeout_ms`) -> failure
 - subprocess exit -> failure
 
 Continuation processing:
 
-- If the worker decides to continue after a successful turn, it should issue another `turn/start`
-  on the same live `threadId`.
-- The app-server subprocess should remain alive across those continuation turns and be stopped only
-  when the worker run is ending.
+- If the worker decides to continue after a successful turn (`end_turn`), it should issue another
+  `session/prompt` on the same `sessionId`.
+- The agent subprocess should remain alive across continuation prompts and be stopped only when the
+  worker run is ending.
+- Use `session/cancel` notification to abort an in-progress turn if needed.
 
 Line handling requirements:
 
@@ -1009,69 +1012,78 @@ Line handling requirements:
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The app-server client emits structured events to the orchestrator callback. Each event should
+The ACP session client emits structured events to the orchestrator callback. Each event should
 include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `codex_app_server_pid` (if available)
+- `agent_pid` (if available)
 - optional `usage` map (token counts)
 - payload fields as needed
 
 Important emitted events may include:
 
-- `session_started`
-- `startup_failed`
-- `turn_completed`
-- `turn_failed`
-- `turn_cancelled`
-- `turn_ended_with_error`
-- `turn_input_required`
-- `approval_auto_approved`
-- `unsupported_tool_call`
-- `notification`
-- `other_message`
-- `malformed`
+- `session_started` — after `session/new` succeeds
+- `startup_failed` — if `initialize` or `session/new` fails
+- `turn_started` — after `session/prompt` is sent
+- `turn_update` — on each `session/update` notification with content blocks
+- `turn_completed` — when `session/update` contains `stopReason: "end_turn"`
+- `turn_failed` — when `stopReason` is `refusal`, `cancelled`, or `max_turn_requests`
+- `permission_requested` — when agent sends `session/request_permission`
+- `permission_resolved` — after orchestrator responds to permission request
+- `notification` — generic content update from `session/update`
+- `other_message` — unrecognized JSON-RPC message
+- `malformed` — unparseable line
 
-### 10.5 Approval, Tool Calls, and User Input Policy
+### 10.5 Permission, Tool Calls, and User Input Policy
 
-Approval, sandbox, and user-input behavior is implementation-defined.
+Permission and user-input behavior is governed by `agent.permission_policy`.
 
 Policy requirements:
 
-- Each implementation should document its chosen approval, sandbox, and operator-confirmation
-  posture.
-- Approval requests and user-input-required events must not leave a run stalled indefinitely. An
+- Each implementation should document its chosen permission and operator-confirmation posture.
+- Permission requests and user-input scenarios must not leave a run stalled indefinitely. An
   implementation should either satisfy them, surface them to an operator, auto-resolve them, or
   fail the run according to its documented policy.
 
+ACP permission handling:
+
+- The agent sends `session/request_permission` (agent-to-client JSON-RPC request) when it needs
+  approval for an action (for example executing a command or writing a file).
+- The request includes `permissionId`, `description`, and available response options.
+- The orchestrator responds based on `agent.permission_policy`:
+  - `auto_approve_all`: respond with `allow_always` for all permission requests.
+  - `approve_reads_reject_writes`: approve read operations, reject write operations.
+  - `reject_all`: reject all permission requests.
+  - Implementation-defined policies may apply more nuanced logic.
+- Available response options include: `allow_once`, `allow_always`, `reject_once`, `reject_always`.
+
 Example high-trust behavior:
 
-- Auto-approve command execution approvals for the session.
-- Auto-approve file-change approvals for the session.
-- Treat user-input-required turns as hard failure.
+- Respond with `allow_always` for all `session/request_permission` callbacks.
+- Treat user-input-required scenarios as hard failure.
 
-Unsupported dynamic tool calls:
+Unsupported tool calls:
 
-- Supported dynamic tool calls that are explicitly implemented and advertised by the runtime should
-  be handled according to their extension contract.
-- If the agent requests a dynamic tool call (`item/tool/call`) that is not supported, return a tool
-  failure response and continue the session.
+- ACP reports tool calls via `session/update` notifications with `tool_call_update` content blocks.
+- The orchestrator does not need to intercept tool calls unless it provides client-side tools.
+- If the agent requests a tool call that cannot be fulfilled, the implementation should return a
+  failure result and continue the session.
 - This prevents the session from stalling on unsupported tool execution paths.
 
 Optional client-side tool extension:
 
-- An implementation may expose a limited set of client-side tools to the app-server session.
-- Current optional standardized tool: `linear_graphql`.
-- If implemented, supported tools should be advertised to the app-server session during startup
-  using the protocol mechanism supported by the targeted Codex app-server version.
+- An implementation may expose a limited set of client-side tools to the ACP agent session.
+- In ACP, client-side tools are exposed as MCP servers via the `mcpServers` parameter of
+  `session/new`.
+- Current optional standardized tool: `github_graphql`.
 - Unsupported tool names should still return a failure result and continue the session.
 
-`linear_graphql` extension contract:
+`github_graphql` extension contract:
 
-- Purpose: execute a raw GraphQL query or mutation against Linear using Symphony's configured
+- Purpose: execute a raw GraphQL query or mutation against GitHub using Symphony's configured
   tracker auth for the current session.
-- Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
+- Availability: only meaningful when `tracker.kind == "github"` and valid GitHub auth is configured.
 - Preferred input shape:
 
   ```json
@@ -1090,7 +1102,7 @@ Optional client-side tool extension:
 - Execute one GraphQL operation per tool call.
 - If the provided document contains multiple operations, reject the tool call as invalid input.
 - `operationName` selection is intentionally out of scope for this extension.
-- Reuse the configured Linear endpoint and auth from the active Symphony workflow/runtime config; do
+- Reuse the configured GitHub endpoint and auth from the active Symphony workflow/runtime config; do
   not require the coding agent to read raw tokens from disk.
 - Tool result semantics:
   - transport success + no top-level GraphQL `errors` -> `success=true`
@@ -1100,35 +1112,27 @@ Optional client-side tool extension:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
-Illustrative responses (equivalent payload shapes are acceptable if they preserve the same outcome):
-
-```json
-{"id":"<approval-id>","result":{"approved":true}}
-{"id":"<tool-call-id>","result":{"success":false,"error":"unsupported_tool_call"}}
-```
-
 Hard failure on user input requirement:
 
-- If the agent requests user input, fail the run attempt immediately.
-- The client detects this via:
-  - explicit method (`item/tool/requestUserInput`), or
-  - turn methods/flags indicating input is required.
+- If the agent requests user input (for example via a turn ending that expects further human
+  guidance), fail the run attempt immediately.
+- Symphony is an unattended automation service; interactive input is not supported.
 
 ### 10.6 Timeouts and Error Mapping
 
 Timeouts:
 
-- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `agent.read_timeout_ms`: request/response timeout during startup and sync requests
+- `agent.turn_timeout_ms`: total turn stream timeout
+- `agent.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (recommended normalized categories):
 
-- `codex_not_found`
+- `agent_not_found`
 - `invalid_workspace_cwd`
 - `response_timeout`
 - `turn_timeout`
-- `port_exit`
+- `agent_exit` (subprocess exited unexpectedly)
 - `response_error`
 - `turn_failed`
 - `turn_cancelled`
@@ -1136,28 +1140,28 @@ Error mapping (recommended normalized categories):
 
 ### 10.7 Agent Runner Contract
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+The `Agent Runner` wraps workspace + prompt + ACP session client.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
+3. Start ACP session (`initialize` + `session/new`).
+4. Forward ACP `session/update` events to orchestrator.
 5. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
-## 11. Issue Tracker Integration Contract (Linear-Compatible)
+## 11. Issue Tracker Integration Contract (GitHub-Compatible)
 
 ### 11.1 Required Operations
 
 An implementation must support these tracker adapter operations:
 
 1. `fetch_candidate_issues()`
-   - Return issues in configured active states for a configured project.
+   - Return issues in configured active states for a configured repository/project.
 
 2. `fetch_issues_by_states(state_names)`
    - Used for startup terminal cleanup.
@@ -1165,26 +1169,43 @@ An implementation must support these tracker adapter operations:
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
 
-### 11.2 Query Semantics (Linear)
+### 11.2 Query Semantics (GitHub)
 
-Linear-specific requirements for `tracker.kind == "linear"`:
+GitHub-specific requirements for `tracker.kind == "github"`:
 
-- `tracker.kind == "linear"`
-- GraphQL endpoint (default `https://api.linear.app/graphql`)
-- Auth token sent in `Authorization` header
-- `tracker.project_slug` maps to Linear project `slugId`
-- Candidate issue query filters project using `project: { slugId: { eq: $projectSlug } }`
-- Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
-- Pagination required for candidate issues
+- `tracker.kind == "github"`
+- GraphQL endpoint (default `https://api.github.com/graphql`)
+- Auth token sent in `Authorization: bearer <token>` header
+- `tracker.repository` maps to the GitHub repository `owner/name`
+
+When `tracker.project_number` is set (GitHub Projects v2 mode):
+
+- Query the project's items using the GitHub Projects v2 GraphQL API.
+- Filter project items by the Status single-select field matching `active_states`.
+- The implementation must discover the Status field ID at startup or cache it.
+- Project items are linked to GitHub Issues; extract the issue content from each item.
+- GraphQL query pattern:
+  `query { node(id: "<project-node-id>") { ... on ProjectV2 { items(first: $pageSize, after: $cursor) { ... } } } }`
+
+When `tracker.project_number` is NOT set (repository issues mode):
+
+- Query issues on the repository filtered by state `open`.
+- If `tracker.labels_filter` is configured, filter by those labels.
+- Map `active_states` to issue labels for state classification.
+
+Common requirements:
+
+- Issue-state refresh query uses GitHub Issue node IDs (GraphQL global IDs)
+- Pagination: cursor-based using `pageInfo { hasNextPage endCursor }`
 - Page size default: `50`
 - Network timeout: `30000 ms`
 
 Important:
 
-- Linear GraphQL schema details can drift. Keep query construction isolated and test the exact query
+- GitHub GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types required by this specification.
 
-A non-Linear implementation may change transport details, but the normalized outputs must match the
+A non-GitHub implementation may change transport details, but the normalized outputs must match the
 domain model in Section 4.
 
 ### 11.3 Normalization Rules
@@ -1193,9 +1214,20 @@ Candidate issue normalization should produce fields listed in Section 4.1.1.
 
 Additional normalization details:
 
-- `labels` -> lowercase strings
-- `blocked_by` -> derived from inverse relations where relation type is `blocks`
-- `priority` -> integer only (non-integers become null)
+- `id` -> GitHub Issue node ID (GraphQL global ID)
+- `identifier` -> `<repo-short-name>#<issue-number>` (for example `my-project#42`)
+- `state` -> For project-board mode: the project Status field value (for example `Todo`,
+  `In Progress`). For repository mode: classify from labels or use `open`/`closed`.
+- `priority` -> Derived from GitHub Projects "Priority" single-select field if present, mapped to
+  integers (for example Urgent=1, High=2, Medium=3, Low=4). Otherwise `null`.
+- `labels` -> lowercase strings from GitHub Issue labels
+- `blocked_by` -> GitHub Issues have no native blocking relations. Implementations may populate this
+  by scanning issue body/comments for `blocked by #N` patterns, using a label convention, or leave
+  it as an empty list.
+- `branch_name` -> GitHub Issues do not provide branch metadata natively. Implementations may derive
+  from issue number (for example `issue-42`), check for linked branches via the GitHub API, or
+  leave it `null`.
+- `url` -> GitHub Issue HTML URL
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
 ### 11.4 Error Handling Contract
@@ -1204,12 +1236,12 @@ Recommended error categories:
 
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key`
-- `missing_tracker_project_slug`
-- `linear_api_request` (transport failures)
-- `linear_api_status` (non-200 HTTP)
-- `linear_graphql_errors`
-- `linear_unknown_payload`
-- `linear_missing_end_cursor` (pagination integrity error)
+- `missing_tracker_repository`
+- `github_api_request` (transport failures)
+- `github_api_status` (non-200 HTTP)
+- `github_graphql_errors`
+- `github_unknown_payload`
+- `github_missing_end_cursor` (pagination integrity error)
 
 Orchestrator behavior on tracker errors:
 
@@ -1226,7 +1258,7 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
-- If the optional `linear_graphql` client-side tool extension is implemented, it is still part of
+- If the optional `github_graphql` client-side tool extension is implemented, it is still part of
   the agent toolchain rather than orchestrator business logic.
 
 ## 12. Prompt Construction and Context Assembly
@@ -1301,7 +1333,7 @@ should return:
 - `running` (list of running session rows)
 - each running row should include `turn_count`
 - `retrying` (list of retry queue rows)
-- `codex_totals`
+- `agent_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
@@ -1439,7 +1471,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "codex_totals": {
+      "agent_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -1482,10 +1514,10 @@ Minimum endpoints:
       },
       "retry": null,
       "logs": {
-        "codex_session_logs": [
+        "agent_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
+            "path": "/var/log/symphony/agent/MT-649/latest.log",
             "url": null
           }
         ]
@@ -1659,7 +1691,7 @@ Implications:
 
 ### 15.5 Harness Hardening Guidance
 
-Running Codex agents against repositories, issue trackers, and other inputs that may contain
+Running coding agents against repositories, issue trackers, and other inputs that may contain
 sensitive data or externally-controlled content can be dangerous. A permissive deployment can lead
 to data leaks, destructive mutations, or full machine compromise if the agent is induced to execute
 harmful commands or use overly-powerful integrations.
@@ -1671,13 +1703,13 @@ fully trustworthy just because they originate inside a normal workflow.
 
 Possible hardening measures include:
 
-- Tightening Codex approval and sandbox settings described elsewhere in this specification instead
-  of running with a maximally permissive configuration.
+- Tightening agent permission policy and session mode settings described elsewhere in this
+  specification instead of running with a maximally permissive configuration.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
-  separate credentials beyond the built-in Codex policy controls.
-- Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
+  separate credentials beyond the built-in agent policy controls.
+- Filtering which GitHub issues, projects, labels, or other tracker sources are eligible for
   dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
-- Narrowing the optional `linear_graphql` tool so it can only read or mutate data inside the
+- Narrowing the optional `github_graphql` tool so it can only read or mutate data inside the
   intended project scope, rather than exposing general workspace-wide tracker access.
 - Reducing the set of client-side tools, credentials, filesystem paths, and network destinations
   available to the agent to the minimum needed for the workflow.
@@ -1702,8 +1734,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    codex_rate_limits: null
+    agent_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    agent_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -1795,13 +1827,13 @@ function dispatch_issue(issue, state, attempt):
     identifier: issue.identifier,
     issue,
     session_id: null,
-    codex_app_server_pid: null,
-    last_codex_message: null,
-    last_codex_event: null,
-    last_codex_timestamp: null,
-    codex_input_tokens: 0,
-    codex_output_tokens: 0,
-    codex_total_tokens: 0,
+    agent_pid: null,
+    last_agent_message: null,
+    last_agent_event: null,
+    last_agent_timestamp: null,
+    agent_input_tokens: 0,
+    agent_output_tokens: 0,
+    agent_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -1825,7 +1857,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(workspace=workspace.path)
+  session = acp_client.start_session(workspace=workspace.path)
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
     fail_worker("agent session startup error")
@@ -1836,25 +1868,25 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   while true:
     prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
-      app_server.stop_session(session)
+      acp_client.cancel_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("prompt error")
 
-    turn_result = app_server.run_turn(
+    turn_result = acp_client.send_prompt(
       session=session,
       prompt=prompt,
       issue=issue,
-      on_message=(msg) -> send(orchestrator_channel, {codex_update, issue.id, msg})
+      on_message=(msg) -> send(orchestrator_channel, {agent_update, issue.id, msg})
     )
 
     if turn_result failed:
-      app_server.stop_session(session)
+      acp_client.cancel_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("agent turn error")
 
     refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
     if refreshed_issue failed:
-      app_server.stop_session(session)
+      acp_client.cancel_session(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("issue state refresh error")
 
@@ -1868,7 +1900,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 
     turn_number = turn_number + 1
 
-  app_server.stop_session(session)
+  acp_client.cancel_session(session)
   run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
@@ -1952,11 +1984,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Invalid YAML front matter returns typed error
 - Front matter non-map returns typed error
 - Config defaults apply when optional values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
+- `tracker.kind` validation enforces currently supported kind (`github`)
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
-- `codex.command` is preserved as a shell command string
+- `agent.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and ignores invalid values
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
@@ -1979,14 +2011,14 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
-- Linear query uses the specified project filter field (`slugId`)
+- Candidate issue fetch uses active states and repository
+- GitHub query uses the specified repository and optionally `project_number`
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
-- Blockers are normalized from inverse relations of type `blocks`
+- Blockers are derived from issue body/comment references or labels (implementation-defined)
 - Labels are normalized to lowercase
 - Issue state refresh by ID returns minimal normalized issues
-- Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
+- Issue state refresh query uses GitHub node IDs as specified in Section 11.2
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
@@ -2008,31 +2040,30 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 17.5 ACP Agent Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
-- Startup handshake sends `initialize`, `initialized`, `thread/start`, `turn/start`
-- `initialize` includes client identity/capabilities payload required by the targeted Codex
-  app-server protocol
-- Policy-related startup payloads use the implementation's documented approval/sandbox settings
-- `thread/start` and `turn/start` parse nested IDs and emit `session_started`
+- Launch command uses workspace cwd and invokes `bash -lc <agent.command>`
+- Startup handshake sends `initialize`, `session/new`, `session/prompt`
+- `initialize` includes `protocolVersion`, `clientCapabilities`, and `clientInfo` per ACP spec
+- `session/new` returns `sessionId` and implementation emits `session_started`
+- `session/set_mode` is sent when `agent.session_mode` is configured
 - Request/response read timeout is enforced
 - Turn timeout is enforced
 - Partial JSON lines are buffered until newline
 - Stdout and stderr are handled separately; protocol JSON is parsed from stdout only
 - Non-JSON stderr lines are logged but do not crash parsing
-- Command/file-change approvals are handled according to the implementation's documented policy
-- Unsupported dynamic tool calls are rejected without stalling the session
+- `session/request_permission` callbacks are handled according to `agent.permission_policy`
+- Permission requests do not stall indefinitely
+- Unsupported tool calls are rejected without stalling the session
 - User input requests are handled according to the implementation's documented policy and do not
   stall indefinitely
-- Usage and rate-limit payloads are extracted from nested payload shapes
-- Compatible payload variants for approvals, user-input-required signals, and usage/rate-limit
-  telemetry are accepted when they preserve the same logical meaning
-- If optional client-side tools are implemented, the startup handshake advertises the supported tool
-  specs required for discovery by the targeted app-server version
-- If the optional `linear_graphql` client-side tool extension is implemented:
-  - the tool is advertised to the session
-  - valid `query` / `variables` inputs execute against configured Linear auth
+- ACP `stopReason` values correctly map to success/failure outcomes
+- Usage and rate-limit payloads are extracted from `session/update` notifications
+- If optional client-side tools are implemented, they are exposed as MCP servers via `session/new`
+  `mcpServers` parameter
+- If the optional `github_graphql` client-side tool extension is implemented:
+  - the tool is exposed as an MCP server to the session
+  - valid `query` / `variables` inputs execute against configured GitHub auth
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
@@ -2062,8 +2093,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 These checks are recommended for production readiness and may be skipped in CI when credentials,
 network access, or external service permissions are unavailable.
 
-- A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
-  documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- A real tracker smoke test can be run with valid credentials supplied by `GITHUB_TOKEN` or a
+  documented local bootstrap mechanism (for example `~/.github_token`).
 - Real integration tests should use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test should be reported as skipped, not silently treated as passed.
@@ -2089,8 +2120,8 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- ACP agent subprocess client with JSON-RPC 2.0 line protocol
+- Agent launch command config (`agent.command`, default implementation-defined)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
@@ -2103,14 +2134,14 @@ Use the same validation profiles as Section 17:
 
 - Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
-- Optional `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+- Optional `github_graphql` client-side tool extension exposes raw GitHub GraphQL access through the
+  ACP session using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
-- TODO: Add pluggable issue tracker adapters beyond Linear.
+- TODO: Add pluggable issue tracker adapters beyond GitHub.
 
 ### 18.3 Operational Validation Before Production (Recommended)
 
@@ -2132,8 +2163,8 @@ orchestrator but executes worker runs on one or more remote hosts over SSH.
 - Each worker run is assigned to one host at a time, and that host becomes part of the run's
   effective execution identity along with the issue workspace.
 - `workspace.root` is interpreted on the remote host, not on the orchestrator host.
-- The coding-agent app-server is launched over SSH stdio instead of as a local subprocess, so the
-  orchestrator still owns the session lifecycle even though commands execute remotely.
+- The ACP agent is launched over SSH stdio instead of as a local subprocess, so the orchestrator
+  still owns the session lifecycle even though commands execute remotely.
 - Continuation turns inside one worker lifetime should stay on the same host and workspace.
 - A remote host should satisfy the same basic contract as a local worker environment: reachable
   shell, writable workspace root, coding-agent executable, and any required auth or repository
