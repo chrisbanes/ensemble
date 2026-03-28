@@ -20,9 +20,8 @@ pub fn load_workflow(path: &std::path::Path) -> Result<WorkflowDefinition, Confi
 
 /// Parse workflow content (for testing without filesystem).
 pub fn parse_workflow(content: &str) -> Result<WorkflowDefinition, ConfigError> {
-    if content.starts_with("---") {
+    if let Some(rest) = content.strip_prefix("---") {
         // Find the closing ---
-        let rest = &content[3..];
         if let Some(end_idx) = rest.find("\n---") {
             let yaml_str = &rest[..end_idx];
             let body = &rest[end_idx + 4..]; // skip past \n---
