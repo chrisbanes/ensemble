@@ -336,20 +336,82 @@ Note:
 
 #### 5.3.1 `tracker` (object)
 
-Fields:
+The tracker configuration is pluggable. Each `kind` defines its own required and optional fields.
+Implementations must support at least one tracker kind; additional kinds may be added without
+changing the core orchestration logic.
+
+Common fields (all tracker kinds):
 
 - `kind` (string)
   - Required for dispatch.
-  - Current supported value: `github`
+  - Supported values: `todo_file`, `github`
+- `active_states` (list of strings)
+  - Default: `Todo`, `In Progress`
+- `terminal_states` (list of strings)
+  - Default: `Done`, `Closed`
+
+##### `tracker.kind == "todo_file"`
+
+A file-based tracker that reads issues from a local Markdown file. Each issue is a list item under
+a heading that represents its state. This is the simplest tracker — no API credentials needed.
+
+Fields:
+
+- `path` (string, optional)
+  - Path to the todo file.
+  - Default: `TODO.md` in the current process working directory.
+  - Supports `~` and `$VAR` expansion.
+- `active_states` / `terminal_states`
+  - Headings in the todo file are matched against these state lists (case-insensitive).
+
+File format:
+
+```markdown
+## Todo
+
+- [PROJ-1] Add login page
+  Description of the task goes here.
+
+- [PROJ-2] Fix checkout bug
+
+## In Progress
+
+- [PROJ-3] Refactor auth module
+  Some description.
+
+## Done
+
+- [PROJ-4] Set up CI
+```
+
+Parsing rules:
+
+- Level-2 headings (`## <State>`) define state sections.
+- List items under a heading are issues. The first line is the title.
+- If the title starts with `[<identifier>]`, that bracketed value is the issue identifier.
+  Otherwise, the implementation generates a stable identifier from the title (for example a
+  slugified hash).
+- Indented lines after the title line (before the next list item) are the description.
+- The file is re-read on each poll tick. Implementations may also watch for file changes.
+- Issues are returned in document order within each state section.
+- `priority`: derived from document order (first item = highest priority within its state).
+- `labels`, `blocked_by`, `branch_name`, `url`: not supported; always empty/null.
+
+##### `tracker.kind == "github"`
+
+A GitHub Projects v2 tracker that reads issues from the GitHub GraphQL API.
+
+Fields:
+
 - `endpoint` (string)
-  - Default for `tracker.kind == "github"`: `https://api.github.com/graphql`
+  - Default: `https://api.github.com/graphql`
 - `api_key` (string)
   - May be a literal token or `$VAR_NAME`.
-  - Canonical environment variable for `tracker.kind == "github"`: `GITHUB_TOKEN`.
+  - Canonical environment variable: `GITHUB_TOKEN`.
   - The token must have `repo` and `project` scopes (or fine-grained equivalents).
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `repository` (string)
-  - Required for dispatch when `tracker.kind == "github"`.
+  - Required for dispatch.
   - Format: `owner/repo` (for example `acme/my-project`).
 - `project_number` (integer, optional)
   - GitHub Projects v2 board number.
@@ -359,14 +421,9 @@ Fields:
 - `labels_filter` (list of strings, optional)
   - When set, only issues with at least one of these labels are considered candidates.
   - Useful when not using a project board for state management.
-- `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`
+- `active_states` / `terminal_states`
   - When `project_number` is set, these match the project board's Status field values.
   - When `project_number` is omitted, these are matched against issue labels.
-- `terminal_states` (list of strings)
-  - Default: `Done`, `Closed`
-  - GitHub Issues have a binary open/closed state. Implementations should check both the project
-    board status field (if configured) and the GitHub issue open/closed state.
 
 #### 5.3.2 `polling` (object)
 
@@ -545,7 +602,7 @@ Validation checks:
 
 - Workflow file can be loaded and parsed.
 - `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution.
+- `tracker.api_key` is present after `$` resolution (when required by the selected tracker kind).
 - `tracker.repository` is present when required by the selected tracker kind.
 - `agent.command` is present and non-empty.
 
@@ -553,7 +610,8 @@ Validation checks:
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
 
-- `tracker.kind`: string, required, currently `github`
+- `tracker.kind`: string, required; supported values: `todo_file`, `github`
+- `tracker.path`: string, default `TODO.md`; path to todo file when `tracker.kind=todo_file`
 - `tracker.endpoint`: string, default `https://api.github.com/graphql` when `tracker.kind=github`
 - `tracker.api_key`: string or `$VAR`, canonical env `GITHUB_TOKEN` when `tracker.kind=github`
 - `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`

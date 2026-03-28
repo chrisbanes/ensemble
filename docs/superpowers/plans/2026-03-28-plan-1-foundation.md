@@ -570,15 +570,20 @@ use std::path::{Path, PathBuf};
 /// Typed runtime configuration derived from WORKFLOW.md front matter.
 #[derive(Debug, Clone)]
 pub struct ServiceConfig {
-    // tracker
+    // tracker (common)
     pub tracker_kind: Option<String>,
+    pub tracker_active_states: Vec<String>,
+    pub tracker_terminal_states: Vec<String>,
+
+    // tracker (todo_file)
+    pub tracker_path: PathBuf,
+
+    // tracker (github)
     pub tracker_endpoint: String,
     pub tracker_api_key: Option<String>,
     pub tracker_repository: Option<String>,
     pub tracker_project_number: Option<i64>,
     pub tracker_labels_filter: Vec<String>,
-    pub tracker_active_states: Vec<String>,
-    pub tracker_terminal_states: Vec<String>,
 
     // polling
     pub poll_interval_ms: u64,
@@ -613,13 +618,14 @@ impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             tracker_kind: None,
+            tracker_active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+            tracker_terminal_states: vec!["Done".to_string(), "Closed".to_string()],
+            tracker_path: PathBuf::from("TODO.md"),
             tracker_endpoint: "https://api.github.com/graphql".to_string(),
             tracker_api_key: None,
             tracker_repository: None,
             tracker_project_number: None,
             tracker_labels_filter: vec![],
-            tracker_active_states: vec!["Todo".to_string(), "In Progress".to_string()],
-            tracker_terminal_states: vec!["Done".to_string(), "Closed".to_string()],
             poll_interval_ms: 30_000,
             workspace_root: std::env::temp_dir().join("ensemble_workspaces"),
             hook_after_create: None,
@@ -722,6 +728,10 @@ impl ServiceConfig {
         // tracker
         if let Some(kind) = yaml_string(m, "tracker", "kind") {
             config.tracker_kind = Some(kind);
+        }
+        if let Some(path_str) = yaml_string(m, "tracker", "path") {
+            let resolved = resolve_env_var(&path_str).unwrap_or(path_str.clone());
+            config.tracker_path = expand_tilde(&resolved);
         }
         if let Some(endpoint) = yaml_string(m, "tracker", "endpoint") {
             config.tracker_endpoint = endpoint;
@@ -843,20 +853,29 @@ impl ServiceConfig {
             });
         }
         let kind = self.tracker_kind.as_deref().unwrap();
-        if kind != "github" {
-            return Err(ConfigError::WorkflowParseError {
-                reason: format!("unsupported tracker.kind: {kind}"),
-            });
-        }
-        if self.tracker_api_key.is_none() {
-            return Err(ConfigError::WorkflowParseError {
-                reason: "tracker.api_key is required (or set GITHUB_TOKEN env)".to_string(),
-            });
-        }
-        if self.tracker_repository.is_none() {
-            return Err(ConfigError::WorkflowParseError {
-                reason: "tracker.repository is required when tracker.kind=github".to_string(),
-            });
+        match kind {
+            "todo_file" => {
+                // todo_file only needs a valid path — no API credentials
+            }
+            "github" => {
+                if self.tracker_api_key.is_none() {
+                    return Err(ConfigError::WorkflowParseError {
+                        reason: "tracker.api_key is required (or set GITHUB_TOKEN env)"
+                            .to_string(),
+                    });
+                }
+                if self.tracker_repository.is_none() {
+                    return Err(ConfigError::WorkflowParseError {
+                        reason: "tracker.repository is required when tracker.kind=github"
+                            .to_string(),
+                    });
+                }
+            }
+            _ => {
+                return Err(ConfigError::WorkflowParseError {
+                    reason: format!("unsupported tracker.kind: {kind}"),
+                });
+            }
         }
         if self.agent_command.is_empty() {
             return Err(ConfigError::WorkflowParseError {
@@ -1050,11 +1069,28 @@ workspace:
     }
 
     #[test]
-    fn test_validate_success() {
+    fn test_validate_github_success() {
         let mut config = ServiceConfig::default();
         config.tracker_kind = Some("github".to_string());
         config.tracker_api_key = Some("ghp_xxx".to_string());
         config.tracker_repository = Some("acme/repo".to_string());
+        assert!(config.validate_for_dispatch().is_ok());
+    }
+
+    #[test]
+    fn test_validate_todo_file_success() {
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("todo_file".to_string());
+        // todo_file needs no API key or repository
+        assert!(config.validate_for_dispatch().is_ok());
+    }
+
+    #[test]
+    fn test_validate_todo_file_no_api_key_needed() {
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("todo_file".to_string());
+        config.tracker_api_key = None;
+        config.tracker_repository = None;
         assert!(config.validate_for_dispatch().is_ok());
     }
 

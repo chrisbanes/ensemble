@@ -23,7 +23,7 @@ ensemble/
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── config/           # WORKFLOW.md loader, typed config, validation
-│   │       ├── tracker/          # GitHub Projects v2 GraphQL client
+│   │       ├── tracker/          # pluggable issue trackers (todo_file, github)
 │   │       ├── orchestrator/     # state machine, polling, dispatch, retry, reconciliation
 │   │       ├── workspace/        # workspace manager, hooks, safety invariants
 │   │       ├── agent/            # ACP client (stdio JSON-RPC 2.0)
@@ -49,17 +49,24 @@ The separation ensures the core orchestration logic is testable without Tauri/We
 ### `config/`
 
 - **`workflow.rs`**: Loads `WORKFLOW.md`, splits YAML front matter (via `serde_yaml`) from prompt body. Watches for file changes via the `notify` crate and triggers reload callbacks.
-- **`typed.rs`**: Typed `ServiceConfig` struct with defaults for all fields from SPEC.md Section 5.3. Handles `$VAR` env resolution, `~` path expansion, integer coercion from string values. Validated at startup and before each dispatch tick.
+- **`typed.rs`**: Typed `ServiceConfig` struct with defaults for all fields from SPEC.md Section 5.3. Handles `$VAR` env resolution, `~` path expansion, integer coercion from string values. Validated at startup and before each dispatch tick. Dispatch validation is tracker-kind-aware: `todo_file` only needs a valid path, `github` needs api_key + repository.
 - **`template.rs`**: Liquid-compatible prompt rendering (via `liquid` crate) with strict variable/filter checking. Takes an `Issue` + `Option<u32>` attempt and produces the rendered prompt string. Unknown variables fail rendering.
 
 ### `tracker/`
 
-- **`github.rs`**: GitHub GraphQL client using `reqwest`. Implements three operations:
+The tracker subsystem is pluggable. All tracker implementations share the `IssueTracker` trait and normalize to the same `Issue` model. The orchestrator is tracker-agnostic.
+
+- **`mod.rs`**: `IssueTracker` trait, `TrackerError`, and a factory function that returns the appropriate implementation based on `tracker.kind`.
+- **`todo_file.rs`**: File-based tracker that reads issues from a local Markdown file (default `TODO.md`). Issues are list items under `## <State>` headings. No API credentials needed — ideal for personal use and getting started quickly.
+  - Parses `[IDENTIFIER]` from the start of list items, or generates a stable slug from the title.
+  - Re-reads the file on each poll tick.
+  - Priority derived from document order.
+- **`github.rs`**: GitHub Projects v2 GraphQL client using `reqwest`. Implements three operations:
   - `fetch_candidate_issues()` — Paginates ProjectV2 items filtered by Status field matching `active_states`, or repo issues filtered by open state + optional labels. Page size 50, cursor-based.
   - `fetch_issues_by_states(states)` — For startup terminal cleanup.
   - `fetch_issue_states_by_ids(ids)` — Lightweight batch query for reconciliation (just id + state).
   - At startup (when `project_number` is set), performs a discovery query to resolve the Project v2 node ID, Status field ID, and option name-to-ID mapping. Cached in memory, refreshed on workflow reload.
-- **`model.rs`**: The normalized `Issue` struct and related types:
+- **`model.rs`**: The normalized `Issue` struct and related types (shared by all tracker backends):
 
 ```rust
 pub struct Issue {
@@ -327,3 +334,4 @@ Dashboard is a thin API consumer. Rely on API contract correctness. Add Playwrig
 - Frontend tests (deferred)
 - SSH worker extension (Appendix A of spec — can be added later)
 - `github_graphql` MCP tool extension (optional per spec — can be added later)
+- Linear tracker adapter (post-MVP — the `IssueTracker` trait makes this straightforward to add)
