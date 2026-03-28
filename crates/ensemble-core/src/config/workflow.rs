@@ -26,11 +26,10 @@ pub fn parse_workflow(content: &str) -> Result<WorkflowDefinition, ConfigError> 
             let yaml_str = &rest[..end_idx];
             let body = &rest[end_idx + 4..]; // skip past \n---
 
-            let yaml_value: Value = serde_yaml::from_str(yaml_str).map_err(|e| {
-                ConfigError::WorkflowParseError {
+            let yaml_value: Value =
+                serde_yaml::from_str(yaml_str).map_err(|e| ConfigError::WorkflowParseError {
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
 
             let config = match yaml_value {
                 Value::Mapping(m) => m,
@@ -107,14 +106,20 @@ You are working on {{ issue.identifier }}: {{ issue.title }}
     fn test_parse_invalid_yaml() {
         let content = "---\n: : : invalid\n---\nBody.";
         let result = parse_workflow(content);
-        assert!(matches!(result, Err(ConfigError::WorkflowParseError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConfigError::WorkflowParseError { .. })
+        ));
     }
 
     #[test]
     fn test_parse_unclosed_front_matter() {
         let content = "---\ntracker:\n  kind: github\nNo closing delimiter";
         let result = parse_workflow(content);
-        assert!(matches!(result, Err(ConfigError::WorkflowParseError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConfigError::WorkflowParseError { .. })
+        ));
     }
 
     #[test]
@@ -137,11 +142,7 @@ You are working on {{ issue.identifier }}: {{ issue.title }}
     fn test_load_from_temp_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("WORKFLOW.md");
-        std::fs::write(
-            &path,
-            "---\ntracker:\n  kind: github\n---\nDo the work.",
-        )
-        .unwrap();
+        std::fs::write(&path, "---\ntracker:\n  kind: github\n---\nDo the work.").unwrap();
         let wf = load_workflow(&path).unwrap();
         assert!(wf.config.contains_key("tracker"));
         assert_eq!(wf.prompt_template, "Do the work.");

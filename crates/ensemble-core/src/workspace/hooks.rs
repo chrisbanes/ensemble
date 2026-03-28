@@ -107,8 +107,7 @@ mod tests {
     #[tokio::test]
     async fn test_hook_with_stderr() {
         let dir = setup();
-        let result =
-            run_hook("test_hook", "echo 'oh no' >&2; exit 1", dir.path(), 5000).await;
+        let result = run_hook("test_hook", "echo 'oh no' >&2; exit 1", dir.path(), 5000).await;
         match result {
             Err(WorkspaceError::HookFailed { reason, .. }) => {
                 assert!(reason.contains("oh no"));

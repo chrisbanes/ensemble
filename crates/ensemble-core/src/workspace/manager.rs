@@ -100,7 +100,9 @@ impl WorkspaceManager {
     fn validate_path_inside_root(&self, path: &Path) -> Result<(), WorkspaceError> {
         // Resolve the root to its canonical form.
         let canonical_root = if self.root.exists() {
-            self.root.canonicalize().unwrap_or_else(|_| self.root.clone())
+            self.root
+                .canonicalize()
+                .unwrap_or_else(|_| self.root.clone())
         } else {
             self.root.clone()
         };
@@ -111,7 +113,9 @@ impl WorkspaceManager {
             path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
         } else if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
             let canonical_parent = if parent.exists() {
-                parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf())
+                parent
+                    .canonicalize()
+                    .unwrap_or_else(|_| parent.to_path_buf())
             } else {
                 parent.to_path_buf()
             };

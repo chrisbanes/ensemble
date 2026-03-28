@@ -1,2 +1,2 @@
-pub mod manager;
 pub mod hooks;
+pub mod manager;

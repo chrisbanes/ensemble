@@ -255,12 +255,16 @@ impl ServiceConfig {
 
         // per-state concurrency
         if let Some(section) = m.get("agent") {
-            if let Some(by_state) = section.as_mapping().and_then(|m| m.get("max_concurrent_agents_by_state")) {
+            if let Some(by_state) = section
+                .as_mapping()
+                .and_then(|m| m.get("max_concurrent_agents_by_state"))
+            {
                 if let Some(state_map) = by_state.as_mapping() {
                     for (k, v) in state_map {
                         if let (Some(state_name), Some(limit)) = (
                             k.as_str(),
-                            v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok())),
+                            v.as_i64()
+                                .or_else(|| v.as_str().and_then(|s| s.parse().ok())),
                         ) {
                             if limit > 0 {
                                 config
@@ -296,8 +300,7 @@ impl ServiceConfig {
             "github" => {
                 if self.tracker_api_key.is_none() {
                     return Err(ConfigError::WorkflowParseError {
-                        reason: "tracker.api_key is required (or set GITHUB_TOKEN env)"
-                            .to_string(),
+                        reason: "tracker.api_key is required (or set GITHUB_TOKEN env)".to_string(),
                     });
                 }
                 if self.tracker_repository.is_none() {
@@ -343,14 +346,8 @@ mod tests {
         assert_eq!(config.agent_read_timeout_ms, 5_000);
         assert_eq!(config.agent_stall_timeout_ms, 300_000);
         assert_eq!(config.hook_timeout_ms, 60_000);
-        assert_eq!(
-            config.tracker_active_states,
-            vec!["Todo", "In Progress"]
-        );
-        assert_eq!(
-            config.tracker_terminal_states,
-            vec!["Done", "Closed"]
-        );
+        assert_eq!(config.tracker_active_states, vec!["Todo", "In Progress"]);
+        assert_eq!(config.tracker_terminal_states, vec!["Done", "Closed"]);
     }
 
     #[test]

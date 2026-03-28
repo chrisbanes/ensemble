@@ -10,11 +10,12 @@ pub fn render_prompt(
     issue: &Issue,
     attempt: Option<u32>,
 ) -> Result<String, ConfigError> {
-    let parser = ParserBuilder::with_stdlib()
-        .build()
-        .map_err(|e| ConfigError::TemplateParseError {
-            reason: e.to_string(),
-        })?;
+    let parser =
+        ParserBuilder::with_stdlib()
+            .build()
+            .map_err(|e| ConfigError::TemplateParseError {
+                reason: e.to_string(),
+            })?;
 
     let template = parser
         .parse(template_str)
@@ -115,6 +116,9 @@ mod tests {
     #[test]
     fn test_render_invalid_syntax() {
         let result = render_prompt("{{ unclosed", &test_issue(), None);
-        assert!(matches!(result, Err(ConfigError::TemplateParseError { .. })));
+        assert!(matches!(
+            result,
+            Err(ConfigError::TemplateParseError { .. })
+        ));
     }
 }

@@ -1,3 +1,3 @@
-pub mod workflow;
-pub mod typed;
 pub mod template;
+pub mod typed;
+pub mod workflow;
