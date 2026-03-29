@@ -255,8 +255,6 @@ impl AgentRunner for AcpAgentRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::IssueTracker;
-    use crate::tracker::TrackerError;
 
     /// Mock agent runner for testing the orchestrator.
     pub struct MockAgentRunner {
@@ -299,38 +297,6 @@ mod tests {
                     reason: "mock failure".to_string(),
                 })
             }
-        }
-    }
-
-    /// Mock tracker for testing.
-    pub struct MockTracker {
-        pub issues: Vec<Issue>,
-    }
-
-    #[async_trait]
-    impl IssueTracker for MockTracker {
-        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
-            Ok(self.issues.clone())
-        }
-
-        async fn fetch_issues_by_states(
-            &self,
-            _states: &[String],
-        ) -> Result<Vec<Issue>, TrackerError> {
-            Ok(vec![])
-        }
-
-        async fn fetch_issue_states_by_ids(
-            &self,
-            ids: &[String],
-        ) -> Result<Vec<Issue>, TrackerError> {
-            let matching: Vec<Issue> = self
-                .issues
-                .iter()
-                .filter(|i| ids.contains(&i.id))
-                .cloned()
-                .collect();
-            Ok(matching)
         }
     }
 
