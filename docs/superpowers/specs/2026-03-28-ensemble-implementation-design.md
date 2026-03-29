@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ensemble is a Rust implementation of the Symphony Service Specification (SPEC.md). It orchestrates multi-agent pipelines against issue trackers: polling for work, creating isolated workspaces per issue, running named agents through a step DAG (build, review, etc.), collecting verdicts, and driving tracker state transitions. It provides a web dashboard for observability.
+Ensemble is a Rust implementation of the Ensemble Service Specification (SPEC.md). It orchestrates multi-agent pipelines against issue trackers: polling for work, creating isolated workspaces per issue, running named agents through a step DAG (build, review, etc.), collecting verdicts, and driving tracker state transitions. It provides a web dashboard for observability.
 
 The system ships as two binaries built from a shared core library:
 - **ensemble-desktop**: Tauri app with embedded orchestrator and React dashboard

@@ -35,8 +35,6 @@ ensemble/
 
 Future crates (not yet implemented): `ensemble-agent`, `ensemble-server`, `ensemble-cli`, `ensemble-desktop`.
 
-**Note:** The spec (`SPEC.md`) uses the working name "Symphony" in some places. The project name is **Ensemble**.
-
 ## Build and test
 
 ```sh
