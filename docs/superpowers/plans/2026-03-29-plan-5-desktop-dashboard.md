@@ -329,6 +329,7 @@ export interface RunningSession {
   issue_id: string;
   issue_identifier: string;
   state: string;
+  step_name: string | null;
   session_id: string | null;
   turn_count: number;
   last_event: string | null;
@@ -392,6 +393,7 @@ export interface AgentSessionLog {
 /** Running session detail within issue detail. */
 export interface IssueRunningDetail {
   session_id: string | null;
+  step_name: string | null;
   turn_count: number;
   state: string;
   started_at: string;
@@ -1614,8 +1616,9 @@ use tokio::net::TcpListener;
 use tracing::{error, info};
 
 /// Resolve the HTTP server port.
-/// Priority: CLI --port > config server.port > ephemeral (0).
+/// Priority: CLI --port > ephemeral (0).
 /// Desktop always starts a server, so we default to ephemeral if nothing is configured.
+/// Note: server port is a CLI-only flag, not part of EnsembleConfig.
 fn resolve_port(config_port: Option<u16>) -> u16 {
     // In a full implementation, CLI args would be parsed here.
     // For now, use the config port or fall back to ephemeral.
@@ -1638,7 +1641,7 @@ fn main() {
             // Spawn the orchestrator + HTTP server on the async runtime
             tauri::async_runtime::spawn(async move {
                 // In a full implementation, this would:
-                // 1. Load WORKFLOW.md config
+                // 1. Load ensemble.yaml config via load_config()
                 // 2. Start the ensemble-core orchestrator
                 // 3. Start the axum HTTP server
                 // For now, start the HTTP server with the API router.
@@ -1721,9 +1724,13 @@ Add the following function to `crates/ensemble-core/src/api/router.rs` (the exis
 use std::path::PathBuf;
 use tower_http::services::ServeDir;
 
-/// The shared orchestrator state type used by API handlers.
+/// The shared orchestrator state type used by asset-serving API handlers.
 /// When None, endpoints return 503 (service starting up).
+/// This mirrors Plan 4's `AppState.orchestrator_state` field.
 pub type SharedState = Option<std::sync::Arc<tokio::sync::RwLock<crate::orchestrator::state::OrchestratorState>>>;
+// NOTE: In the full integration, handlers should use Plan 4's `AppState` struct
+// (which includes `orchestrator_state`, `refresh_requested`, and `workspace_root`).
+// `SharedState` is used here only for the standalone `create_router_with_assets()` path.
 
 /// Create the API router with optional static asset serving.
 ///
@@ -1929,7 +1936,7 @@ git commit -m "chore: add .gitignore for React build artifacts and node_modules"
 
 **Files:** (no new files)
 
-This task verifies the entire Plan 3 implementation compiles and builds correctly.
+This task verifies the entire Plan 5 implementation compiles and builds correctly.
 
 - [ ] **Step 1: Build the React dashboard**
 
@@ -1977,7 +1984,7 @@ Expected: Both builds succeed
 
 ```bash
 git add -A
-git commit -m "chore: Plan 3 final verification — all builds pass"
+git commit -m "chore: Plan 5 final verification — all builds pass"
 ```
 
 ---
@@ -1996,4 +2003,4 @@ After completing all 11 tasks, you'll have:
 - A Tauri 2 desktop binary (`ensemble-desktop`) that starts the orchestrator, HTTP server, and WebView in a single process
 - Static asset serving via `tower-http::ServeDir` integrated into the axum router, enabling both the desktop app and headless CLI to host the dashboard
 - SPA-compatible routing (non-API paths fall back to `index.html`)
-- Port selection logic: CLI `--port` > `server.port` from WORKFLOW.md > ephemeral (desktop always starts server)
+- Port selection logic: CLI `--port` > ephemeral (desktop always starts server). Note: `server.port` is not part of `ensemble.yaml`; it is a CLI-only flag per SPEC Section 13.7
