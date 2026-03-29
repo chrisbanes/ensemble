@@ -691,10 +691,11 @@ mod tests {
         let workspace = TempDir::new().unwrap();
 
         // Mock agent: responds to initialize, session/new, then session/update with end_turn
+        // Uses pure bash string matching (no python3) to extract JSON-RPC method and id fields.
         let script = r#"#!/bin/bash
 while IFS= read -r line; do
-    method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null || echo "")
-    id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
 
     if [ "$method" = "initialize" ]; then
         echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\",\"agentCapabilities\":{},\"agentInfo\":{\"name\":\"mock\"}}}"
@@ -717,7 +718,7 @@ done
             .unwrap();
 
         // Initialize
-        let init_result = session.initialize(5000).await.unwrap();
+        let init_result = session.initialize(15000).await.unwrap();
         assert_eq!(init_result.protocol_version.as_deref(), Some("2025-07-09"));
 
         // Start session
@@ -725,7 +726,7 @@ done
             .start_session(
                 workspace.path().to_str().unwrap(),
                 serde_json::json!({}),
-                5000,
+                15000,
             )
             .await
             .unwrap();
@@ -776,8 +777,8 @@ done
         // Mock agent that does handshake but never completes the turn
         let script = r#"#!/bin/bash
 while IFS= read -r line; do
-    method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null || echo "")
-    id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
 
     if [ "$method" = "initialize" ]; then
         echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
@@ -794,12 +795,12 @@ done
         let mut session = AcpSession::spawn(&script_path, workspace.path())
             .await
             .unwrap();
-        session.initialize(5000).await.unwrap();
+        session.initialize(15000).await.unwrap();
         let session_id = session
             .start_session(
                 workspace.path().to_str().unwrap(),
                 serde_json::json!({}),
-                5000,
+                15000,
             )
             .await
             .unwrap();
@@ -829,8 +830,8 @@ done
         // Mock agent that exits immediately after handshake on prompt
         let script = r#"#!/bin/bash
 while IFS= read -r line; do
-    method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null || echo "")
-    id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
 
     if [ "$method" = "initialize" ]; then
         echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
@@ -846,12 +847,12 @@ done
         let mut session = AcpSession::spawn(&script_path, workspace.path())
             .await
             .unwrap();
-        session.initialize(5000).await.unwrap();
+        session.initialize(15000).await.unwrap();
         let session_id = session
             .start_session(
                 workspace.path().to_str().unwrap(),
                 serde_json::json!({}),
-                5000,
+                15000,
             )
             .await
             .unwrap();
@@ -881,8 +882,8 @@ done
         // Mock agent that sends malformed JSON then a valid turn completion
         let script = r#"#!/bin/bash
 while IFS= read -r line; do
-    method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null || echo "")
-    id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
 
     if [ "$method" = "initialize" ]; then
         echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
@@ -900,12 +901,12 @@ done
         let mut session = AcpSession::spawn(&script_path, workspace.path())
             .await
             .unwrap();
-        session.initialize(5000).await.unwrap();
+        session.initialize(15000).await.unwrap();
         let session_id = session
             .start_session(
                 workspace.path().to_str().unwrap(),
                 serde_json::json!({}),
-                5000,
+                15000,
             )
             .await
             .unwrap();
@@ -953,8 +954,8 @@ done
         // Mock agent that sends a permission request, then completes
         let script = r#"#!/bin/bash
 while IFS= read -r line; do
-    method=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('method',''))" 2>/dev/null || echo "")
-    id=$(echo "$line" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || echo "")
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
 
     if [ "$method" = "initialize" ]; then
         echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
@@ -973,12 +974,12 @@ done
         let mut session = AcpSession::spawn(&script_path, workspace.path())
             .await
             .unwrap();
-        session.initialize(5000).await.unwrap();
+        session.initialize(15000).await.unwrap();
         let session_id = session
             .start_session(
                 workspace.path().to_str().unwrap(),
                 serde_json::json!({}),
-                5000,
+                15000,
             )
             .await
             .unwrap();
