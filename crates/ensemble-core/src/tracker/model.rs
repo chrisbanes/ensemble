@@ -64,8 +64,9 @@ pub struct AgentTotals {
 
 /// Sanitize an issue identifier for use as a workspace directory name.
 /// Only [A-Za-z0-9._-] are allowed; all other characters become '_'.
-pub fn sanitize_workspace_key(identifier: &str) -> String {
-    identifier
+/// Returns None if the result would be unsafe (empty, ".", or "..").
+pub fn sanitize_workspace_key(identifier: &str) -> Option<String> {
+    let key: String = identifier
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
@@ -74,7 +75,13 @@ pub fn sanitize_workspace_key(identifier: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+
+    if key.is_empty() || key == "." || key == ".." {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 #[cfg(test)]
@@ -83,27 +90,57 @@ mod tests {
 
     #[test]
     fn test_sanitize_simple_identifier() {
-        assert_eq!(sanitize_workspace_key("my-repo_42"), "my-repo_42");
+        assert_eq!(
+            sanitize_workspace_key("my-repo_42"),
+            Some("my-repo_42".to_string())
+        );
     }
 
     #[test]
     fn test_sanitize_hash_in_identifier() {
-        assert_eq!(sanitize_workspace_key("my-repo#42"), "my-repo_42");
+        assert_eq!(
+            sanitize_workspace_key("my-repo#42"),
+            Some("my-repo_42".to_string())
+        );
     }
 
     #[test]
     fn test_sanitize_slashes_and_spaces() {
-        assert_eq!(sanitize_workspace_key("acme/repo 123"), "acme_repo_123");
+        assert_eq!(
+            sanitize_workspace_key("acme/repo 123"),
+            Some("acme_repo_123".to_string())
+        );
     }
 
     #[test]
     fn test_sanitize_preserves_dots() {
-        assert_eq!(sanitize_workspace_key("v1.2.3-rc1"), "v1.2.3-rc1");
+        assert_eq!(
+            sanitize_workspace_key("v1.2.3-rc1"),
+            Some("v1.2.3-rc1".to_string())
+        );
     }
 
     #[test]
     fn test_sanitize_all_special_chars() {
-        assert_eq!(sanitize_workspace_key("a@b!c$d%e"), "a_b_c_d_e");
+        assert_eq!(
+            sanitize_workspace_key("a@b!c$d%e"),
+            Some("a_b_c_d_e".to_string())
+        );
+    }
+
+    #[test]
+    fn test_sanitize_rejects_dot() {
+        assert_eq!(sanitize_workspace_key("."), None);
+    }
+
+    #[test]
+    fn test_sanitize_rejects_dotdot() {
+        assert_eq!(sanitize_workspace_key(".."), None);
+    }
+
+    #[test]
+    fn test_sanitize_rejects_empty() {
+        assert_eq!(sanitize_workspace_key(""), None);
     }
 
     #[test]

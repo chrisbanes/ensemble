@@ -89,7 +89,10 @@ Description: {{{{ issue.description }}}}
     let ws = mgr.prepare_workspace(&issue.identifier).unwrap();
     assert!(ws.created_now);
     assert!(ws.path.is_dir());
-    assert_eq!(ws.workspace_key, sanitize_workspace_key(&issue.identifier));
+    assert_eq!(
+        ws.workspace_key,
+        sanitize_workspace_key(&issue.identifier).unwrap()
+    );
 
     // 6. Reuse workspace
     let ws2 = mgr.prepare_workspace(&issue.identifier).unwrap();

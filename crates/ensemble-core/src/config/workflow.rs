@@ -19,6 +19,11 @@ pub fn load_workflow(path: &std::path::Path) -> Result<WorkflowDefinition, Confi
 }
 
 /// Parse workflow content (for testing without filesystem).
+///
+/// Limitation: the closing `---` is found by simple string search. A YAML block
+/// scalar that contains a literal `\n---` line will be mis-parsed. This matches
+/// the behavior of Jekyll/Hugo front matter and is acceptable because WORKFLOW.md
+/// front matter is always simple key-value config, never multi-line block scalars.
 pub fn parse_workflow(content: &str) -> Result<WorkflowDefinition, ConfigError> {
     if let Some(rest) = content.strip_prefix("---") {
         // Find the closing ---

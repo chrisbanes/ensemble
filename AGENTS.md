@@ -29,7 +29,9 @@ ensemble/
 └── .github/workflows/ci.yml     # CI: check, test, clippy, fmt
 ```
 
-Future crates (not yet implemented): `ensemble-trackers`, `ensemble-agent`, `ensemble-server`, `ensemble-cli`, `ensemble-desktop`.
+Future crates (not yet implemented): `ensemble-agent`, `ensemble-server`, `ensemble-cli`, `ensemble-desktop`.
+
+**Note:** The spec (`SPEC.md`) uses the working name "Symphony" in some places. The project name is **Ensemble**.
 
 ## Build and test
 
@@ -64,7 +66,7 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 
 ## Key design decisions
 
-- **Pluggable trackers**: `IssueTracker` is an async trait. Implementations (GitHub, todo_file) will live in a separate `ensemble-trackers` crate.
+- **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core`. Tracker implementations (GitHub, todo_file) will be added to `ensemble-core` as sub-modules of `tracker/`.
 - **Config from WORKFLOW.md**: All runtime config lives in YAML front matter of a `WORKFLOW.md` file. The markdown body is the prompt template. `ServiceConfig` provides typed access with defaults and `$ENV_VAR` resolution.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
 - **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.

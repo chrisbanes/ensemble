@@ -23,17 +23,15 @@ pub async fn run_hook(
 
     let duration = Duration::from_millis(timeout_ms);
 
-    let result = timeout(duration, async {
-        Command::new("sh")
-            .arg("-lc")
-            .arg(script)
-            .current_dir(workspace_path)
-            .output()
-            .await
-    })
-    .await;
+    // kill_on_drop ensures the child is killed if we drop it (e.g. on timeout)
+    let child = Command::new("sh")
+        .arg("-lc")
+        .arg(script)
+        .current_dir(workspace_path)
+        .kill_on_drop(true)
+        .output();
 
-    match result {
+    match timeout(duration, child).await {
         Ok(Ok(output)) => {
             if output.status.success() {
                 info!(hook = hook_name, "hook completed successfully");
@@ -62,7 +60,11 @@ pub async fn run_hook(
             })
         }
         Err(_) => {
-            warn!(hook = hook_name, timeout_ms, "hook timed out");
+            // Child future is dropped here, which triggers kill_on_drop
+            warn!(
+                hook = hook_name,
+                timeout_ms, "hook timed out, process killed"
+            );
             Err(WorkspaceError::HookTimedOut {
                 hook: hook_name.to_string(),
                 timeout_ms,

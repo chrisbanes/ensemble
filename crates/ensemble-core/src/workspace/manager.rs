@@ -40,7 +40,10 @@ impl WorkspaceManager {
 
     /// Prepare (create or reuse) a workspace for the given issue identifier.
     pub fn prepare_workspace(&self, identifier: &str) -> Result<WorkspaceResult, WorkspaceError> {
-        let workspace_key = sanitize_workspace_key(identifier);
+        let workspace_key =
+            sanitize_workspace_key(identifier).ok_or_else(|| WorkspaceError::CreationFailed {
+                reason: format!("unsafe workspace key from identifier: {identifier:?}"),
+            })?;
         let workspace_path = self.root.join(&workspace_key);
 
         // Safety: ensure workspace path is inside root
@@ -74,7 +77,10 @@ impl WorkspaceManager {
 
     /// Remove a workspace directory for the given issue identifier.
     pub fn remove_workspace(&self, identifier: &str) -> Result<(), WorkspaceError> {
-        let workspace_key = sanitize_workspace_key(identifier);
+        let workspace_key =
+            sanitize_workspace_key(identifier).ok_or_else(|| WorkspaceError::CreationFailed {
+                reason: format!("unsafe workspace key from identifier: {identifier:?}"),
+            })?;
         let workspace_path = self.root.join(&workspace_key);
 
         self.validate_path_inside_root(&workspace_path)?;
@@ -216,6 +222,20 @@ mod tests {
         std::fs::write(&file_path, "not a directory").unwrap();
 
         let result = mgr.prepare_workspace("my-repo#42");
+        assert!(matches!(result, Err(WorkspaceError::CreationFailed { .. })));
+    }
+
+    #[test]
+    fn test_dot_identifier_rejected() {
+        let (_dir, mgr) = setup();
+        let result = mgr.prepare_workspace(".");
+        assert!(matches!(result, Err(WorkspaceError::CreationFailed { .. })));
+    }
+
+    #[test]
+    fn test_dotdot_identifier_rejected() {
+        let (_dir, mgr) = setup();
+        let result = mgr.prepare_workspace("..");
         assert!(matches!(result, Err(WorkspaceError::CreationFailed { .. })));
     }
 

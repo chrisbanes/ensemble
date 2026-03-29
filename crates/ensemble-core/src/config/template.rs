@@ -23,20 +23,33 @@ pub fn render_prompt(
             reason: e.to_string(),
         })?;
 
-    // Build the issue object for Liquid.
-    // blocked_by, created_at, updated_at are omitted — they are metadata for the
-    // orchestrator, not useful in agent prompts.
-    let issue_obj = liquid::object!({
+    // Build the issue object for Liquid. Option fields use nil when absent so
+    // templates can distinguish missing from empty via `{% if issue.description %}`.
+    let mut issue_obj = liquid::object!({
         "id": issue.id,
         "identifier": issue.identifier,
         "title": issue.title,
-        "description": issue.description.as_deref().unwrap_or(""),
         "priority": issue.priority,
         "state": issue.state,
-        "branch_name": issue.branch_name.as_deref().unwrap_or(""),
-        "url": issue.url.as_deref().unwrap_or(""),
         "labels": issue.labels,
     });
+
+    // Optional string fields: present as value or absent (nil)
+    if let Some(ref desc) = issue.description {
+        issue_obj.insert(
+            "description".into(),
+            liquid::model::Value::scalar(desc.clone()),
+        );
+    }
+    if let Some(ref bn) = issue.branch_name {
+        issue_obj.insert(
+            "branch_name".into(),
+            liquid::model::Value::scalar(bn.clone()),
+        );
+    }
+    if let Some(ref u) = issue.url {
+        issue_obj.insert("url".into(), liquid::model::Value::scalar(u.clone()));
+    }
 
     let mut globals = liquid::object!({
         "issue": issue_obj,
@@ -113,6 +126,15 @@ mod tests {
     fn test_render_empty_template() {
         let result = render_prompt("", &test_issue(), None).unwrap();
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_render_missing_description_is_nil() {
+        let mut issue = test_issue();
+        issue.description = None;
+        let template = "{% if issue.description %}has desc{% else %}no desc{% endif %}";
+        let result = render_prompt(template, &issue, None).unwrap();
+        assert_eq!(result, "no desc");
     }
 
     #[test]
