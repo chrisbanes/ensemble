@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
 use super::model::Issue;
@@ -142,6 +143,50 @@ query($ids: [ID!]!) {
 }
 "#;
 
+const ADD_COMMENT_MUTATION: &str = r#"
+mutation($subjectId: ID!, $body: String!) {
+  addComment(input: {subjectId: $subjectId, body: $body}) {
+    commentEdge {
+      node {
+        id
+      }
+    }
+  }
+}
+"#;
+
+const UPDATE_PROJECT_ITEM_FIELD_MUTATION: &str = r#"
+mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $projectId,
+    itemId: $itemId,
+    fieldId: $fieldId,
+    value: { singleSelectOptionId: $optionId }
+  }) {
+    projectV2Item {
+      id
+    }
+  }
+}
+"#;
+
+const FIND_PROJECT_ITEM_QUERY: &str = r#"
+query($nodeId: ID!) {
+  node(id: $nodeId) {
+    ... on Issue {
+      projectItems(first: 10) {
+        nodes {
+          id
+          project {
+            id
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
 /// GitHub Projects v2 issue tracker using GraphQL.
 pub struct GithubTracker {
     endpoint: String,
@@ -157,6 +202,8 @@ pub struct GithubTracker {
     project_node_id: tokio::sync::RwLock<Option<String>>,
     /// Cached Status field ID.
     status_field_id: tokio::sync::RwLock<Option<String>>,
+    /// Cached Status option name -> option ID map.
+    status_option_ids: tokio::sync::RwLock<HashMap<String, String>>,
 }
 
 impl GithubTracker {
