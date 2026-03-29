@@ -236,7 +236,7 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
     })
 }
 
-/// Validate the config for consistency: prompt config, agent references, etc.
+/// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
     // Each agent must have exactly one of prompt or prompt_template
     for (name, agent) in &config.agents {
@@ -247,6 +247,15 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 });
             }
             _ => {}
+        }
+    }
+    // Step names must be unique
+    let mut seen_names = std::collections::HashSet::new();
+    for step in &config.steps {
+        if !seen_names.insert(&step.name) {
+            return Err(PipelineError::DuplicateStepName {
+                name: step.name.clone(),
+            });
         }
     }
     // Each step must reference a valid agent
@@ -494,5 +503,31 @@ on_failure: Failed
         write!(tmp, "{}", minimal_yaml()).unwrap();
         let config = load_config(tmp.path()).unwrap();
         assert_eq!(config.tracker.kind, "todo_file");
+    }
+
+    #[test]
+    fn test_validate_duplicate_step_names() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(matches!(
+            result,
+            Err(PipelineError::DuplicateStepName { .. })
+        ));
     }
 }

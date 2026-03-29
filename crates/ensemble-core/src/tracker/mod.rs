@@ -45,7 +45,12 @@ pub trait IssueTracker: Send + Sync {
     /// Fetch current states for specific issue IDs (used for reconciliation).
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError>;
 
-    /// Whether this tracker supports write operations.
+    /// Whether this tracker supports state-transition writes (`set_issue_state`).
+    ///
+    /// The pipeline engine checks this at startup to fail fast if the flow requires
+    /// tracker state transitions but the backend cannot perform them.
+    /// Note: `add_comment` may still return `WritesNotSupported` even when this
+    /// returns true (e.g., the todo_file tracker supports state writes but not comments).
     fn supports_writes(&self) -> bool {
         false
     }

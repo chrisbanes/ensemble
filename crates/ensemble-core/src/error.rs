@@ -54,4 +54,6 @@ pub enum PipelineError {
     MaxCyclesExceeded { issue_id: String, max: u32 },
     #[error("agent must have exactly one of 'prompt' or 'prompt_template', got neither or both: {agent}")]
     InvalidPromptConfig { agent: String },
+    #[error("duplicate step name: {name}")]
+    DuplicateStepName { name: String },
 }
