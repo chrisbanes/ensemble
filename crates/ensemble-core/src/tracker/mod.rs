@@ -43,6 +43,21 @@ pub trait IssueTracker: Send + Sync {
 
     /// Fetch current states for specific issue IDs (used for reconciliation).
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError>;
+
+    /// Whether this tracker supports write operations.
+    fn supports_writes(&self) -> bool {
+        false
+    }
+
+    /// Transition an issue to the given state in the tracker.
+    async fn set_issue_state(&self, _id: &str, _state: &str) -> Result<(), TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
+
+    /// Add a comment to an issue in the tracker.
+    async fn add_comment(&self, _id: &str, _body: &str) -> Result<(), TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
 }
 
 /// Create an `IssueTracker` implementation based on the service config.
@@ -161,5 +176,40 @@ mod tests {
         // tracker_kind is None by default
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::UnsupportedKind { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_default_write_methods_return_not_supported() {
+        struct ReadOnlyTracker;
+
+        #[async_trait]
+        impl IssueTracker for ReadOnlyTracker {
+            async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+                Ok(vec![])
+            }
+            async fn fetch_issues_by_states(
+                &self,
+                _: &[String],
+            ) -> Result<Vec<Issue>, TrackerError> {
+                Ok(vec![])
+            }
+            async fn fetch_issue_states_by_ids(
+                &self,
+                _: &[String],
+            ) -> Result<Vec<Issue>, TrackerError> {
+                Ok(vec![])
+            }
+        }
+
+        let tracker = ReadOnlyTracker;
+        assert!(!tracker.supports_writes());
+        assert!(matches!(
+            tracker.set_issue_state("id", "Done").await,
+            Err(TrackerError::WritesNotSupported)
+        ));
+        assert!(matches!(
+            tracker.add_comment("id", "hello").await,
+            Err(TrackerError::WritesNotSupported)
+        ));
     }
 }
