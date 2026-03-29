@@ -38,6 +38,12 @@ impl WorkspaceManager {
         &self.root
     }
 
+    /// Get the workspace path for a given identifier without creating it.
+    /// Returns None if the identifier cannot be sanitized.
+    pub fn workspace_path(&self, identifier: &str) -> Option<PathBuf> {
+        sanitize_workspace_key(identifier).map(|key| self.root.join(key))
+    }
+
     /// Prepare (create or reuse) a workspace for the given issue identifier.
     pub fn prepare_workspace(&self, identifier: &str) -> Result<WorkspaceResult, WorkspaceError> {
         let workspace_key =
