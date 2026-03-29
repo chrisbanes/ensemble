@@ -1,6 +1,6 @@
 # Ensemble
 
-Ensemble is a long-running Rust service that orchestrates coding agents against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs coding agent sessions, and provides observability.
+Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects verdicts, and drives tracker state transitions. Configuration lives in `ensemble.yaml`.
 
 See `SPEC.md` for the full specification. See `docs/superpowers/plans/` for implementation plans.
 
@@ -13,14 +13,18 @@ ensemble/
 │   └── ensemble-core/            # core library (domain model, config, workspace)
 │       ├── src/
 │       │   ├── lib.rs
-│       │   ├── error.rs          # EnsembleError, ConfigError, WorkspaceError
+│       │   ├── error.rs          # EnsembleError, ConfigError, WorkspaceError, PipelineError
 │       │   ├── tracker/
-│       │   │   ├── mod.rs        # IssueTracker trait, TrackerError
+│       │   │   ├── mod.rs        # IssueTracker trait (read + write), TrackerError
 │       │   │   └── model.rs      # Issue, RunningEntry, RetryEntry, AgentTotals
 │       │   ├── config/
-│       │   │   ├── workflow.rs   # WORKFLOW.md loader (YAML front matter + prompt body)
-│       │   │   ├── typed.rs      # ServiceConfig with defaults, env var resolution
+│       │   │   ├── ensemble.rs   # ensemble.yaml loader (EnsembleConfig)
 │       │   │   └── template.rs   # Liquid prompt template renderer
+│       │   ├── pipeline/
+│       │   │   ├── mod.rs        # re-exports
+│       │   │   ├── dag.rs        # DAG construction + validation
+│       │   │   ├── engine.rs     # PipelineRun per-issue execution
+│       │   │   └── verdict.rs    # Verdict parsing (ACP + file fallback)
 │       │   └── workspace/
 │       │       ├── manager.rs    # WorkspaceManager (create/reuse/cleanup directories)
 │       │       └── hooks.rs      # Async hook runner with timeouts
@@ -51,7 +55,7 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 - **Rust 2021 edition**, minimum rust-version 1.80
 - **Error handling**: `thiserror` enums (`EnsembleError`, `ConfigError`, `WorkspaceError`, `TrackerError`). Use `?` propagation, not `.unwrap()` in library code. Tests may unwrap.
 - **Async runtime**: `tokio` with `features = ["full"]`. Async tests use `#[tokio::test]`.
-- **Serialization**: `serde` + `serde_json` for domain types, `serde_yaml` for WORKFLOW.md front matter.
+- **Serialization**: `serde` + `serde_json` for domain types, `serde_yaml` for `ensemble.yaml`.
 - **Templates**: `liquid` crate for prompt rendering. Variables available: `issue.*` and optionally `attempt`.
 - **Logging**: `tracing` crate. Use `info!`/`warn!`/`error!` with structured fields.
 - **Tests**: Unit tests in `#[cfg(test)] mod tests` within each file. Integration tests in `crates/*/tests/`. Use `tempfile` for filesystem tests.
@@ -66,7 +70,8 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 
 ## Key design decisions
 
-- **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core`. Tracker implementations (GitHub, todo_file) will be added to `ensemble-core` as sub-modules of `tracker/`.
-- **Config from WORKFLOW.md**: All runtime config lives in YAML front matter of a `WORKFLOW.md` file. The markdown body is the prompt template. `ServiceConfig` provides typed access with defaults and `$ENV_VAR` resolution.
+- **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core` with read methods and optional write methods (default no-ops). Tracker implementations (GitHub, todo_file) live in `ensemble-core` as sub-modules of `tracker/`.
+- **Config from ensemble.yaml**: All runtime config lives in `ensemble.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. Agent definitions, step DAG, and prompt references are all defined here.
+- **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects verdicts from review agents.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
 - **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.
