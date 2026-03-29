@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ensemble is a Rust implementation of the Symphony Service Specification (SPEC.md). It orchestrates coding agents to work on GitHub issues: polling a GitHub Projects v2 board, creating isolated workspaces per issue, running ACP-compatible coding agents, and providing a web dashboard for observability.
+Ensemble is a Rust implementation of the Symphony Service Specification (SPEC.md). It orchestrates multi-agent pipelines against issue trackers: polling for work, creating isolated workspaces per issue, running named agents through a step DAG (build, review, etc.), collecting verdicts, and driving tracker state transitions. It provides a web dashboard for observability.
 
 The system ships as two binaries built from a shared core library:
 - **ensemble-desktop**: Tauri app with embedded orchestrator and React dashboard
@@ -22,8 +22,9 @@ ensemble/
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs
-│   │       ├── config/           # WORKFLOW.md loader, typed config, validation
-│   │       ├── tracker/          # pluggable issue trackers (todo_file, github)
+│   │       ├── config/           # ensemble.yaml loader, typed config, validation
+│   │       ├── tracker/          # pluggable issue trackers (todo_file, github) with read + write
+│   │       ├── pipeline/         # step DAG, per-issue execution engine, verdict collection
 │   │       ├── orchestrator/     # state machine, polling, dispatch, retry, reconciliation
 │   │       ├── workspace/        # workspace manager, hooks, safety invariants
 │   │       ├── agent/            # ACP client (stdio JSON-RPC 2.0)
@@ -48,24 +49,25 @@ The separation ensures the core orchestration logic is testable without Tauri/We
 
 ### `config/`
 
-- **`workflow.rs`**: Loads `WORKFLOW.md`, splits YAML front matter (via `serde_yaml`) from prompt body. Watches for file changes via the `notify` crate and triggers reload callbacks.
-- **`typed.rs`**: Typed `ServiceConfig` struct with defaults for all fields from SPEC.md Section 5.3. Handles `$VAR` env resolution, `~` path expansion, integer coercion from string values. Validated at startup and before each dispatch tick. Dispatch validation is tracker-kind-aware: `todo_file` only needs a valid path, `github` needs api_key + repository.
-- **`template.rs`**: Liquid-compatible prompt rendering (via `liquid` crate) with strict variable/filter checking. Takes an `Issue` + `Option<u32>` attempt and produces the rendered prompt string. Unknown variables fail rendering.
+- **`ensemble.rs`**: Loads `ensemble.yaml`, parses into typed `EnsembleConfig` (tracker, agents, steps, concurrency, pipeline config). Watches for file changes via the `notify` crate and triggers reload callbacks. Handles `$VAR` env resolution, `~` path expansion, integer coercion from string values. Validated at startup and before each dispatch tick. Dispatch validation is tracker-kind-aware: `todo_file` only needs a valid path, `github` needs api_key + repository. Also validates DAG structure (no cycles, all agent/step references resolve) and write support requirements.
+- **`template.rs`**: Liquid-compatible prompt rendering (via `liquid` crate) with strict variable/filter checking. Takes an `Issue` + `Option<u32>` attempt and produces the rendered prompt string. Unknown variables fail rendering. Used by each agent's prompt (inline or file-referenced).
 
 ### `tracker/`
 
-The tracker subsystem is pluggable. All tracker implementations share the `IssueTracker` trait and normalize to the same `Issue` model. The orchestrator is tracker-agnostic.
+The tracker subsystem is pluggable. All tracker implementations share the `IssueTracker` trait and normalize to the same `Issue` model. The orchestrator is tracker-agnostic. The trait includes both read operations (fetch candidates, fetch states) and write operations (set state, add comment) with default no-op implementations.
 
-- **`mod.rs`**: `IssueTracker` trait, `TrackerError`, and a factory function that returns the appropriate implementation based on `tracker.kind`.
+- **`mod.rs`**: `IssueTracker` trait (read + write methods with default no-ops), `TrackerError` (including `WritesNotSupported`), and a factory function that returns the appropriate implementation based on `tracker.kind`.
 - **`todo_file.rs`**: File-based tracker that reads issues from a local Markdown file (default `TODO.md`). Issues are list items under `## <State>` headings. No API credentials needed — ideal for personal use and getting started quickly.
   - Parses `[IDENTIFIER]` from the start of list items, or generates a stable slug from the title.
   - Re-reads the file on each poll tick.
   - Priority derived from document order.
+  - Write support: `set_issue_state` rewrites the file, moving the issue line between `## Section` headings. `add_comment` returns `WritesNotSupported`.
 - **`github.rs`**: GitHub Projects v2 GraphQL client using `reqwest`. Implements three operations:
   - `fetch_candidate_issues()` — Paginates ProjectV2 items filtered by Status field matching `active_states`, or repo issues filtered by open state + optional labels. Page size 50, cursor-based.
   - `fetch_issues_by_states(states)` — For startup terminal cleanup.
   - `fetch_issue_states_by_ids(ids)` — Lightweight batch query for reconciliation (just id + state).
-  - At startup (when `project_number` is set), performs a discovery query to resolve the Project v2 node ID, Status field ID, and option name-to-ID mapping. Cached in memory, refreshed on workflow reload.
+  - At startup (when `project_number` is set), performs a discovery query to resolve the Project v2 node ID, Status field ID, and option name-to-ID mapping. Cached in memory, refreshed on config reload.
+  - Write support: `set_issue_state` uses GraphQL mutation to update the Status field (project board mode) or labels (repo mode). `add_comment` uses the `addComment` GraphQL mutation.
 - **`model.rs`**: The normalized `Issue` struct and related types (shared by all tracker backends):
 
 ```rust
@@ -108,6 +110,12 @@ Rate limiting: tracks `X-RateLimit-Remaining` header and logs warnings. The 30s 
   - Part B: Tracker state refresh — fetch current states for running issue IDs. Terminal → kill + cleanup workspace. Active → update snapshot. Non-active → kill without cleanup.
 - **`retry.rs`**: Retry queue management. Normal exit → 1s continuation retry. Failure → `min(10s * 2^(attempt-1), max_retry_backoff_ms)`. Retries stored with attempt count, due time, error context.
 
+### `pipeline/`
+
+- **`dag.rs`**: Builds a directed acyclic graph from `steps` config. Validates: all agent references exist, all dependency references resolve, no cycles (topological sort), at least one root step. Implicit sequential rule: the first step is a root; subsequent steps without `depends` implicitly depend on their predecessor.
+- **`engine.rs`**: Per-issue pipeline execution engine. Manages `PipelineRun` state: dispatches root steps, collects verdicts as agents complete, unblocks downstream steps, enforces `max_step_parallelism`. Writes `tracker_state` on step entry, `on_success`/`on_failure` on pipeline completion. Tracks `cycle` count per issue for `max_cycles` enforcement.
+- **`verdict.rs`**: Verdict collection from two sources (priority order): ACP protocol `verdict` field in final status event, or `.ensemble/verdict.json` file in workspace. Parses `approve`/`reject` + optional `summary`. Missing verdict = approve.
+
 ### `workspace/`
 
 - **`manager.rs`**: Deterministic path: `<workspace.root>/<sanitized_identifier>`. Sanitization replaces non-`[A-Za-z0-9._-]` chars with `_`. Validates workspace path stays inside workspace root (absolute path prefix check). Creates directory if missing, reuses if present.
@@ -129,6 +137,8 @@ Rate limiting: tracks `X-RateLimit-Remaining` header and logs warnings. The 30s 
   Turn loop: read `session/update` messages until `stopReason` appears. Map `end_turn` → success, `cancelled`/`refusal`/`max_turn_requests` → failure. Enforce `agent.turn_timeout_ms`.
 
   Permission handling: on `session/request_permission`, respond per `agent.permission_policy`: `auto_approve_all` → `allow_always`, etc.
+
+  Verdict extraction: on agent exit, check the final `session/update` for a `verdict` field. If absent, check `.ensemble/verdict.json` in workspace. No verdict = approve. Pass verdict back to pipeline engine.
 
   Process cleanup: `session/cancel` → SIGTERM → grace period → SIGKILL.
 
@@ -230,7 +240,7 @@ The window closing stops the orchestrator. Single process, single binary.
 
 Both binaries use the same logic for port selection (precedence order):
 1. CLI `--port` argument (if provided)
-2. `server.port` from WORKFLOW.md front matter (if present)
+2. `server.port` from ensemble.yaml (if present)
 3. No HTTP server started (for `ensemble-cli` when no port is configured)
 
 `ensemble-desktop` always starts the HTTP server (needed for the WebView). If no port is configured, it binds to an ephemeral port on `127.0.0.1`.
@@ -250,6 +260,8 @@ enum EnsembleError {
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
     Agent(#[from] AgentError),
+    #[error(transparent)]
+    Pipeline(#[from] PipelineError),
 }
 ```
 
@@ -257,8 +269,9 @@ enum EnsembleError {
 
 | Layer | Failure | Recovery |
 |-------|---------|----------|
-| Config (startup) | Missing WORKFLOW.md, bad YAML | Fail fast with clear error |
+| Config (startup) | Missing ensemble.yaml, bad YAML, invalid DAG | Fail fast with clear error |
 | Config (reload) | Invalid new config | Keep last good config, log error |
+| Pipeline | Step failure, rejection, max cycles | Write on_failure to tracker, halt pipeline |
 | Tracker (candidates) | API/network error | Skip dispatch this tick, retry next tick |
 | Tracker (reconciliation) | State refresh failed | Keep workers running, retry next tick |
 | Tracker (startup cleanup) | Terminal fetch failed | Log warning, continue startup |
@@ -279,6 +292,9 @@ pub trait IssueTracker: Send + Sync {
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError>;
     async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError>;
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError>;
+    fn supports_writes(&self) -> bool { false }
+    async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError>;
+    async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError>;
 }
 
 #[async_trait]
@@ -295,8 +311,9 @@ pub trait AgentRunner: Send + Sync {
 
 ### Unit tests
 
-- **`config/`**: Parse valid/invalid WORKFLOW.md, defaults, `$VAR` resolution, `~` expansion, reload
-- **`tracker/`**: Mock HTTP responses (`wiremock`). Pagination, normalization, error handling
+- **`config/`**: Parse valid/invalid ensemble.yaml, defaults, `$VAR` resolution, `~` expansion, reload, DAG validation (cycles, missing refs, agent prompt validation)
+- **`tracker/`**: Mock HTTP responses (`wiremock`). Pagination, normalization, error handling, write operations (set_issue_state, add_comment)
+- **`pipeline/`**: DAG construction, topological sort, cycle detection, per-issue execution (step dispatch, verdict collection, step transitions, concurrency enforcement, max_cycles)
 - **`orchestrator/`**: Mock tracker + agent traits. Test state transitions: dispatch eligibility, blocker rules, concurrency limits, backoff calculations, reconciliation paths
 - **`workspace/`**: Real filesystem in temp dirs. Sanitization, containment, hook execution with mock scripts
 - **`agent/`**: Mock ACP agent (script that speaks JSON-RPC on stdio). Handshake, turn flow, permission handling, timeouts
@@ -319,7 +336,7 @@ Dashboard is a thin API consumer. Rely on API contract correctness. Add Playwrig
 | `reqwest` | HTTP client (GitHub API) |
 | `serde`, `serde_json`, `serde_yaml` | Serialization |
 | `liquid` | Prompt template rendering |
-| `notify` | Filesystem watching (WORKFLOW.md) |
+| `notify` | Filesystem watching (ensemble.yaml) |
 | `tracing`, `tracing-subscriber` | Structured logging |
 | `thiserror` | Error types |
 | `chrono` | Timestamps |
@@ -335,3 +352,13 @@ Dashboard is a thin API consumer. Rely on API contract correctness. Add Playwrig
 - SSH worker extension (Appendix A of spec — can be added later)
 - `github_graphql` MCP tool extension (optional per spec — can be added later)
 - Linear tracker adapter (post-MVP — the `IssueTracker` trait makes this straightforward to add)
+
+## Multi-Agent Pipeline Architecture
+
+See `docs/superpowers/specs/2026-03-29-multi-agent-pipelines-design.md` for the detailed design of:
+
+- **`ensemble.yaml` config format** — replaces `WORKFLOW.md` with named agents, step DAG, and pipeline config
+- **Pipeline engine** — DAG construction, per-issue execution, verdict collection, tracker state writes
+- **Tracker write methods** — `set_issue_state` and `add_comment` with default no-ops on `IssueTracker` trait
+- **Verdict contract** — ACP protocol field (preferred) and `.ensemble/verdict.json` file (fallback)
+- **Two-level concurrency** — global `max_concurrent_agents` + per-issue `max_step_parallelism`

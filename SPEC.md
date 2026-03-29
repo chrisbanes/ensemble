@@ -15,8 +15,8 @@ The service solves four operational problems:
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
-  settings with their code.
+- It keeps the workflow policy in-repo (`ensemble.yaml`) so teams version the agent prompt and
+  runtime settings with their code.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -26,8 +26,12 @@ require stricter approvals or sandboxing.
 
 Important boundary:
 
-- Symphony is a scheduler/runner and tracker reader.
-- Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
+- Symphony is a scheduler/runner that both reads and writes issue tracker state for lifecycle
+  transitions.
+- The orchestrator writes tracker state at pipeline step boundaries: marking issues "In Progress"
+  on dispatch, "In Review" during review steps, "Done" on success, and "Failed"/"Needs Rework" on
+  failure. These transitions are driven by the declarative pipeline config, not by agent decisions.
+- Rich ticket writes (comments, PR links, code review responses) remain the agent's responsibility
   using tools available in the workflow/runtime environment.
 - A successful run may end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
@@ -41,7 +45,7 @@ Important boundary:
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
+- Load runtime behavior from a repository-owned `ensemble.yaml` contract.
 - Expose operator-visible observability (at minimum structured logs).
 - Support restart recovery without requiring a persistent database.
 
@@ -60,13 +64,13 @@ Important boundary:
 
 ### 3.1 Main Components
 
-1. `Workflow Loader`
-   - Reads `WORKFLOW.md`.
-   - Parses YAML front matter and prompt body.
-   - Returns `{config, prompt_template}`.
+1. `Config Loader`
+   - Reads `ensemble.yaml`.
+   - Parses tracker config, agent definitions, step DAG, and prompt references.
+   - Returns `EnsembleConfig`.
 
 2. `Config Layer`
-   - Exposes typed getters for workflow config values.
+   - Exposes typed getters for config values.
    - Applies defaults and environment variable indirection.
    - Performs validation used by the orchestrator before dispatch.
 
@@ -74,6 +78,8 @@ Important boundary:
    - Fetches candidate issues in active states.
    - Fetches current states for specific issue IDs (reconciliation).
    - Fetches terminal-state issues during startup cleanup.
+   - Writes issue state transitions at pipeline step boundaries.
+   - Optionally adds comments to issues.
    - Normalizes tracker payloads into a stable issue model.
 
 4. `Orchestrator`
@@ -82,23 +88,30 @@ Important boundary:
    - Decides which issues to dispatch, retry, stop, or release.
    - Tracks session metrics and retry queue state.
 
-5. `Workspace Manager`
+5. `Pipeline Engine`
+   - Builds a step DAG from `ensemble.yaml` step definitions.
+   - Executes pipeline steps per issue, dispatching agents and collecting verdicts.
+   - Drives tracker state transitions at step boundaries.
+   - Enforces concurrency limits (global and per-issue).
+
+6. `Workspace Manager`
    - Maps issue identifiers to workspace paths.
    - Ensures per-issue workspace directories exist.
    - Runs workspace lifecycle hooks.
    - Cleans workspaces for terminal issues.
 
-6. `Agent Runner`
+7. `Agent Runner`
    - Creates workspace.
-   - Builds prompt from issue + workflow template.
+   - Builds prompt from issue + agent-specific template.
    - Launches the coding agent via ACP over stdio.
    - Streams agent updates back to the orchestrator.
+   - Collects verdict (ACP protocol field or `.ensemble/verdict.json` fallback).
 
-7. `Status Surface` (optional)
+8. `Status Surface` (optional)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
      operator-facing view).
 
-8. `Logging`
+9. `Logging`
    - Emits structured runtime logs to one or more configured sinks.
 
 ### 3.2 Abstraction Levels
@@ -106,11 +119,11 @@ Important boundary:
 Symphony is easiest to port when kept in these layers:
 
 1. `Policy Layer` (repo-defined)
-   - `WORKFLOW.md` prompt body.
+   - `ensemble.yaml` agent definitions, step DAG, and prompt templates.
    - Team-specific rules for ticket handling, validation, and handoff.
 
 2. `Configuration Layer` (typed getters)
-   - Parses front matter into typed runtime settings.
+   - Parses `ensemble.yaml` into typed runtime settings.
    - Handles defaults, environment tokens, and path normalization.
 
 3. `Coordination Layer` (orchestrator)
@@ -167,29 +180,47 @@ Fields:
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
-#### 4.1.2 Workflow Definition
+#### 4.1.2 Ensemble Config
 
-Parsed `WORKFLOW.md` payload:
+Parsed `ensemble.yaml` payload:
 
-- `config` (map)
-  - YAML front matter root object.
-- `prompt_template` (string)
-  - Markdown body after front matter, trimmed.
+- `tracker` (TrackerConfig)
+  - Tracker kind, active/terminal states, and backend-specific settings.
+- `agents` (map of string to AgentConfig)
+  - Named agent definitions with executor, model, and prompt (inline or file reference).
+- `steps` (list of StepConfig)
+  - Pipeline step DAG. Each step references an agent and optionally declares dependencies.
+- `on_success` (string)
+  - Terminal tracker state when all pipeline steps pass.
+- `on_failure` (string)
+  - Terminal tracker state when any pipeline step fails or rejects.
+- `concurrency` (ConcurrencyConfig)
+  - `max_concurrent_agents` (global cap) and `max_step_parallelism` (per-issue cap).
+- `max_cycles` (integer, default 3)
+  - Maximum times an issue can re-enter the pipeline.
 
-#### 4.1.3 Service Config (Typed View)
+#### 4.1.3 Agent Config
 
-Typed runtime values derived from `WorkflowDefinition.config` plus environment resolution.
+Per-agent configuration within `ensemble.yaml`:
 
-Examples:
+- `executor` (string) — ACP-compatible agent executable identifier.
+- `model` (string) — model to use for the agent.
+- `prompt` (string or null) — inline prompt text.
+- `prompt_template` (path or null) — file reference to a Markdown prompt template.
+- Exactly one of `prompt` or `prompt_template` must be set.
 
-- poll interval
-- workspace root
-- active and terminal issue states
-- concurrency limits
-- coding-agent executable/args/timeouts
-- workspace hooks
+#### 4.1.4 Step Config
 
-#### 4.1.4 Workspace
+Pipeline step definition:
+
+- `name` (string) — unique step identifier.
+- `agent` (string) — references a named agent from `agents`.
+- `depends` (list of strings, optional) — step names this step depends on. If omitted, the step
+  implicitly depends on the step directly before it in the list. The first step has no implicit
+  dependency. Explicit `depends` overrides the implicit rule.
+- `tracker_state` (string, optional) — tracker state to write on step entry.
+
+#### 4.1.5 Workspace
 
 Filesystem workspace assigned to one issue identifier.
 
@@ -200,7 +231,38 @@ Fields (logical):
 - `workspace_key` (sanitized issue identifier)
 - `created_now` (boolean, used to gate `after_create` hook)
 
-#### 4.1.5 Run Attempt
+#### 4.1.6 Pipeline Run
+
+Per-issue pipeline execution state:
+
+- `issue_id` (string)
+- `cycle` (integer, 1-based) — which pipeline cycle this is (bounded by `max_cycles`)
+- `step_states` (map of step name to StepState)
+
+Step states:
+
+- `Pending` — not yet started
+- `Running` — agent dispatched, session active
+- `Passed` — agent exited successfully with approve verdict (or no verdict)
+- `Rejected` — agent exited successfully with reject verdict
+- `Failed` — agent crashed, timed out, or errored
+
+#### 4.1.7 Verdict
+
+Agent judgment returned after a pipeline step completes:
+
+- `verdict` (string: `"approve"`, `"reject"`, or null)
+  - `"approve"` — step passed.
+  - `"reject"` — step failed quality/review check.
+  - null/absent — treated as `"approve"` (backwards compatible for non-review agents).
+- `summary` (string or null) — human-readable explanation of the verdict.
+
+Verdict sources (checked in priority order):
+
+1. ACP protocol: `verdict` field in the final `session/update` status event.
+2. File-based fallback: `.ensemble/verdict.json` in the workspace directory.
+
+#### 4.1.8 Run Attempt
 
 One execution attempt for one issue.
 
@@ -214,7 +276,7 @@ Fields (logical):
 - `status`
 - `error` (optional)
 
-#### 4.1.6 Live Session (Agent Session Metadata)
+#### 4.1.9 Live Session (Agent Session Metadata)
 
 State tracked while a coding-agent subprocess is running.
 
@@ -234,7 +296,7 @@ Fields:
 - `turn_count` (integer)
   - Number of coding-agent turns started within the current worker lifetime.
 
-#### 4.1.7 Retry Entry
+#### 4.1.10 Retry Entry
 
 Scheduled retry state for an issue.
 
@@ -247,7 +309,7 @@ Fields:
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)
 
-#### 4.1.8 Orchestrator Runtime State
+#### 4.1.11 Orchestrator Runtime State
 
 Single authoritative in-memory state owned by the orchestrator.
 
@@ -276,58 +338,57 @@ Fields:
 - `Session ID`
   - Use the `sessionId` returned by the ACP `session/new` response.
 
-## 5. Workflow Specification (Repository Contract)
+## 5. Configuration Specification (Repository Contract)
 
 ### 5.1 File Discovery and Path Resolution
 
-Workflow file path precedence:
+Config file path precedence:
 
 1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
+2. Default: `ensemble.yaml` in the current process working directory.
 
 Loader behavior:
 
-- If the file cannot be read, return `missing_workflow_file` error.
-- The workflow file is expected to be repository-owned and version-controlled.
+- If the file cannot be read, return `missing_config_file` error.
+- The config file is expected to be repository-owned and version-controlled.
 
 ### 5.2 File Format
 
-`WORKFLOW.md` is a Markdown file with optional YAML front matter.
+`ensemble.yaml` is a YAML file containing all pipeline configuration: tracker settings, agent
+definitions, step DAG, concurrency limits, and prompt references.
 
 Design note:
 
-- `WORKFLOW.md` should be self-contained enough to describe and run different workflows (prompt,
-  runtime settings, hooks, and tracker selection/config) without requiring out-of-band
-  service-specific configuration.
+- `ensemble.yaml` should be self-contained enough to describe and run different workflows (agent
+  definitions, step pipeline, runtime settings, hooks, and tracker selection/config) without
+  requiring out-of-band service-specific configuration.
+- Prompt templates are referenced by file path or defined inline within agent definitions.
 
 Parsing rules:
 
-- If file starts with `---`, parse lines until the next `---` as YAML front matter.
-- Remaining lines become the prompt body.
-- If front matter is absent, treat the entire file as prompt body and use an empty config map.
-- YAML front matter must decode to a map/object; non-map YAML is an error.
-- Prompt body is trimmed before use.
+- Parse the file as YAML. The root must be a map/object.
+- Non-map YAML is an error.
 
-Returned workflow object:
-
-- `config`: front matter root object (not nested under a `config` key).
-- `prompt_template`: trimmed Markdown body.
-
-### 5.3 Front Matter Schema
+### 5.3 Top-Level Schema
 
 Top-level keys:
 
 - `tracker`
+- `agents`
+- `steps`
+- `on_success`
+- `on_failure`
+- `concurrency`
+- `max_cycles`
 - `polling`
 - `workspace`
 - `hooks`
-- `agent`
 
 Unknown keys should be ignored for forward compatibility.
 
 Note:
 
-- The workflow front matter is extensible. Optional extensions may define additional top-level keys
+- The config schema is extensible. Optional extensions may define additional top-level keys
   (for example `server`) without changing the core schema above.
 - Extensions should document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
@@ -425,7 +486,68 @@ Fields:
   - When `project_number` is set, these match the project board's Status field values.
   - When `project_number` is omitted, these are matched against issue labels.
 
-#### 5.3.2 `polling` (object)
+#### 5.3.2 `agents` (map of string to object)
+
+Named agent definitions. Each key is the agent name, each value is an object:
+
+- `executor` (string)
+  - Required. ACP-compatible agent executable identifier (for example `claude-code`, `amp`).
+- `model` (string)
+  - Required. Model identifier for the agent (for example `sonnet-4`, `opus-4`).
+- `prompt` (string, optional)
+  - Inline prompt text. Mutually exclusive with `prompt_template`.
+- `prompt_template` (path string, optional)
+  - Path to a Markdown prompt template file. Supports `~` and `$VAR` expansion.
+  - Mutually exclusive with `prompt`.
+- Exactly one of `prompt` or `prompt_template` must be set.
+
+Prompt templates support Liquid variables: `issue.*` and `attempt`.
+
+#### 5.3.3 `steps` (list of objects)
+
+Pipeline step definitions forming a DAG. Each step is an object:
+
+- `name` (string)
+  - Required. Unique step identifier.
+- `agent` (string)
+  - Required. References a named agent from `agents`.
+- `depends` (list of strings, optional)
+  - Step names this step depends on. Steps with the same dependencies run in parallel.
+  - If omitted: the first step in the list has no implicit dependency (it is a root). Each
+    subsequent step that omits `depends` implicitly depends on the step directly before it in the
+    list. A step that explicitly sets `depends` overrides this.
+- `tracker_state` (string, optional)
+  - Tracker state to write when entering this step. If multiple parallel steps share the same
+    `tracker_state`, it is written once.
+
+#### 5.3.4 `on_success` (string)
+
+Terminal tracker state to write when all pipeline steps pass. Required.
+
+#### 5.3.5 `on_failure` (string)
+
+Terminal tracker state to write when any pipeline step fails or a review agent rejects. Required.
+
+#### 5.3.6 `concurrency` (object)
+
+Fields:
+
+- `max_concurrent_agents` (integer)
+  - Default: `4`
+  - Global cap on total agent processes across all issues.
+- `max_step_parallelism` (integer)
+  - Default: `2`
+  - Per-issue cap on concurrent agents within a single pipeline run.
+
+#### 5.3.7 `max_cycles` (integer)
+
+- Default: `3`
+- Maximum number of times an issue can re-enter the pipeline. Re-entry happens when a tracker poll
+  finds an issue back in an active state after a previous pipeline run completed (for example a
+  human moved it from "Needs Rework" back to "Todo"). The orchestrator tracks cycle count per issue
+  identifier.
+
+#### 5.3.8 `polling` (object)
 
 Fields:
 
@@ -433,7 +555,7 @@ Fields:
   - Default: `30000`
   - Changes should be re-applied at runtime and affect future tick scheduling without restart.
 
-#### 5.3.3 `workspace` (object)
+#### 5.3.9 `workspace` (object)
 
 Fields:
 
@@ -443,7 +565,7 @@ Fields:
   - Bare strings without path separators are preserved as-is (relative roots are allowed but
     discouraged).
 
-#### 5.3.4 `hooks` (object)
+#### 5.3.10 `hooks` (object)
 
 Fields:
 
@@ -467,13 +589,12 @@ Fields:
   - Non-positive values should be treated as invalid and fall back to the default.
   - Changes should be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.3.11 `agent` (object)
+
+Global agent runtime defaults. Per-agent `executor` and `model` are defined in `agents` (5.3.2).
 
 Fields:
 
-- `max_concurrent_agents` (integer or string integer)
-  - Default: `10`
-  - Changes should be re-applied at runtime and affect subsequent dispatch decisions.
 - `max_retry_backoff_ms` (integer or string integer)
   - Default: `300000` (5 minutes)
   - Changes should be re-applied at runtime and affect future retry scheduling.
@@ -504,7 +625,8 @@ Fields:
 
 ### 5.4 Prompt Template Contract
 
-The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
+Each agent's prompt is either an inline string (`prompt`) or a file reference (`prompt_template`).
+File-referenced templates are Markdown files.
 
 Rendering requirements:
 
@@ -522,24 +644,31 @@ Template input variables:
 
 Fallback prompt behavior:
 
-- If the workflow prompt body is empty, the runtime may use a minimal default prompt
-  (`You are working on a GitHub issue.`).
-- Workflow file read/parse failures are configuration/validation errors and should not silently fall
+- Each agent must have exactly one of `prompt` or `prompt_template`. If neither is set, fail
+  validation with a clear error.
+- Config file read/parse failures are configuration/validation errors and should not silently fall
   back to a prompt.
 
-### 5.5 Workflow Validation and Error Surface
+### 5.5 Config Validation and Error Surface
 
 Error classes:
 
-- `missing_workflow_file`
-- `workflow_parse_error`
-- `workflow_front_matter_not_a_map`
+- `missing_config_file`
+- `config_parse_error`
+- `config_root_not_a_map`
+- `unknown_agent_reference` (step references non-existent agent)
+- `unknown_step_dependency` (step depends on non-existent step)
+- `cycle_detected` (step DAG contains a cycle)
+- `no_root_steps` (all steps have dependencies)
+- `invalid_prompt_config` (agent has neither or both prompt sources)
 - `template_parse_error` (during prompt rendering)
 - `template_render_error` (unknown variable/filter, invalid interpolation)
+- `writes_required` (pipeline requires tracker writes but tracker does not support them)
 
 Dispatch gating behavior:
 
-- Workflow file read/YAML errors block new dispatches until fixed.
+- Config file read/YAML errors block new dispatches until fixed.
+- DAG validation errors block dispatch at startup.
 - Template errors fail only the affected run attempt.
 
 ## 6. Configuration Specification
@@ -548,8 +677,8 @@ Dispatch gating behavior:
 
 Configuration precedence:
 
-1. Workflow file path selection (runtime setting -> cwd default).
-2. YAML front matter values.
+1. Config file path selection (runtime setting -> cwd default `ensemble.yaml`).
+2. YAML config values.
 3. Environment indirection via `$VAR_NAME` inside selected YAML values.
 4. Built-in defaults.
 
@@ -565,8 +694,8 @@ Value coercion semantics:
 
 Dynamic reload is required:
 
-- The software should watch `WORKFLOW.md` for changes.
-- On change, it should re-read and re-apply workflow config and prompt template without restart.
+- The software should watch `ensemble.yaml` for changes.
+- On change, it should re-read and re-apply config and prompt templates without restart.
 - The software should attempt to adjust live behavior to the new config (for example polling
   cadence, concurrency limits, active/terminal states, agent settings, workspace paths/hooks, and
   prompt content for future runs).
@@ -584,8 +713,7 @@ Dynamic reload is required:
 ### 6.3 Dispatch Preflight Validation
 
 This validation is a scheduler preflight run before attempting to dispatch new work. It validates
-the workflow/config needed to poll and launch workers, not a full audit of all possible workflow
-behavior.
+the config needed to poll and launch workers, not a full audit of all possible runtime behavior.
 
 Startup validation:
 
@@ -600,11 +728,15 @@ Per-tick dispatch validation:
 
 Validation checks:
 
-- Workflow file can be loaded and parsed.
+- Config file can be loaded and parsed.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution (when required by the selected tracker kind).
 - `tracker.repository` is present when required by the selected tracker kind.
-- `agent.command` is present and non-empty.
+- `agents` map is non-empty and each agent has exactly one prompt source.
+- `steps` list is non-empty, all agent references resolve, all dependencies resolve, no cycles.
+- If any step has `tracker_state` or `on_success`/`on_failure` are set, the tracker must support
+  writes (`supports_writes()` returns true).
+- `on_success` and `on_failure` are present.
 
 ### 6.4 Config Fields Summary (Cheat Sheet)
 
@@ -619,6 +751,19 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.labels_filter`: list of strings, optional; restrict candidates to issues with these labels
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Done", "Closed"]`
+- `agents.<name>.executor`: string, required; ACP-compatible agent executable identifier
+- `agents.<name>.model`: string, required; model identifier
+- `agents.<name>.prompt`: string, optional; inline prompt (mutually exclusive with prompt_template)
+- `agents.<name>.prompt_template`: path, optional; file reference to prompt template
+- `steps[].name`: string, required; unique step identifier
+- `steps[].agent`: string, required; references a key in `agents`
+- `steps[].depends`: list of strings, optional; step dependencies for DAG
+- `steps[].tracker_state`: string, optional; tracker state to write on step entry
+- `on_success`: string, required; terminal tracker state on pipeline success
+- `on_failure`: string, required; terminal tracker state on pipeline failure/rejection
+- `concurrency.max_concurrent_agents`: integer, default `4`; global cap
+- `concurrency.max_step_parallelism`: integer, default `2`; per-issue cap
+- `max_cycles`: integer, default `3`; max pipeline re-entries per issue
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path, default `<system-temp>/symphony_workspaces`
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
@@ -630,10 +775,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
-- `agent.max_concurrent_agents`: integer, default `10`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
-- `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `agent.command`: shell command string, default implementation-defined
 - `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
 - `agent.permission_policy`: string, default implementation-defined
@@ -1218,6 +1361,8 @@ Note:
 
 An implementation must support these tracker adapter operations:
 
+Read operations:
+
 1. `fetch_candidate_issues()`
    - Return issues in configured active states for a configured repository/project.
 
@@ -1226,6 +1371,26 @@ An implementation must support these tracker adapter operations:
 
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
+
+Write operations:
+
+4. `supports_writes()`
+   - Returns whether this tracker backend supports write operations.
+   - Required for pipeline execution with `tracker_state`, `on_success`, or `on_failure`.
+   - Backends that do not support writes should return false; the pipeline engine will fail fast
+     at startup.
+
+5. `set_issue_state(issue_id, state)`
+   - Transition an issue to the given state in the tracker.
+   - Used by the pipeline engine at step boundaries (`tracker_state`), on pipeline success
+     (`on_success`), and on pipeline failure/rejection (`on_failure`).
+   - Default implementation returns `WritesNotSupported` error.
+
+6. `add_comment(issue_id, body)`
+   - Add a comment to an issue in the tracker.
+   - Used to surface pipeline results (for example failure summaries, rejection reasons).
+   - Default implementation returns `WritesNotSupported` error.
+   - Trackers without a comment concept (for example `todo_file`) may leave this unimplemented.
 
 ### 11.2 Query Semantics (GitHub)
 
@@ -1300,6 +1465,7 @@ Recommended error categories:
 - `github_graphql_errors`
 - `github_unknown_payload`
 - `github_missing_end_cursor` (pagination integrity error)
+- `writes_not_supported` (tracker does not support write operations)
 
 Orchestrator behavior on tracker errors:
 
@@ -1307,17 +1473,47 @@ Orchestrator behavior on tracker errors:
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
 
-### 11.5 Tracker Writes (Important Boundary)
+### 11.5 Tracker Writes (Hybrid Model)
 
-Symphony does not require first-class tracker write APIs in the orchestrator.
+The orchestrator writes lifecycle state transitions at pipeline step boundaries. Rich ticket writes
+(comments, PR links, code review feedback) remain the agent's responsibility.
 
-- Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
-- The service remains a scheduler/runner and tracker reader.
-- Workflow-specific success often means "reached the next handoff state" (for example
-  `Human Review`) rather than tracker terminal state `Done`.
+Orchestrator-driven writes:
+
+- **Step entry**: When a pipeline step begins, the orchestrator writes the step's `tracker_state`
+  to the tracker (for example "In Progress", "In Review").
+- **Pipeline success**: When all steps pass, the orchestrator writes `on_success` (for example
+  "Done").
+- **Pipeline failure/rejection**: When any step fails or a review agent rejects, the orchestrator
+  writes `on_failure` (for example "Needs Rework"). This is a terminal state from the pipeline's
+  perspective — a human must intervene.
+
+Agent-driven writes:
+
+- The coding agent may still write to the tracker using tools defined by the workflow prompt (for
+  example adding comments, linking PRs, or making fine-grained state transitions within a step).
 - If the optional `github_graphql` client-side tool extension is implemented, it is still part of
-  the agent toolchain rather than orchestrator business logic.
+  the agent toolchain.
+
+Write method contract:
+
+- `set_issue_state` and `add_comment` have default no-op implementations that return
+  `WritesNotSupported`.
+- Tracker backends opt into writes by overriding these methods and returning `true` from
+  `supports_writes()`.
+- The pipeline engine validates write support at startup and fails fast if required writes are
+  not supported by the configured tracker.
+
+Backend-specific write implementations:
+
+- **todo_file**: `set_issue_state` rewrites the markdown file, moving the issue line from its
+  current `## Section` to the target `## State` heading (creating the heading if needed).
+  `add_comment` is not supported (returns `WritesNotSupported`).
+- **github (project board mode)**: `set_issue_state` uses a GraphQL mutation to update the Status
+  single-select field on the project item. `add_comment` uses the `addComment` GraphQL mutation.
+- **github (repository mode)**: `set_issue_state` uses GraphQL mutations to update labels (add
+  target state label, remove old state labels). `add_comment` uses the `addComment` GraphQL
+  mutation.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -1325,7 +1521,7 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 
 Inputs to prompt rendering:
 
-- `workflow.prompt_template`
+- `agent.prompt` or contents of `agent.prompt_template` (per the active pipeline step's agent)
 - normalized `issue` object
 - optional `attempt` integer (retry/continuation metadata)
 
@@ -1465,7 +1661,7 @@ If implemented:
 Enablement (extension):
 
 - Start the HTTP server when a CLI `--port` argument is provided.
-- Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
+- Start the HTTP server when `server.port` is present in `ensemble.yaml`.
 - `server.port` is extension configuration and is intentionally not part of the core front-matter
   schema in Section 5.3.
 - Precedence: CLI `--port` overrides `server.port` when both are present.
@@ -1625,8 +1821,8 @@ API design notes:
 ### 14.1 Failure Classes
 
 1. `Workflow/Config Failures`
-   - Missing `WORKFLOW.md`
-   - Invalid YAML front matter
+   - Missing `ensemble.yaml`
+   - Invalid YAML config
    - Unsupported tracker kind or missing tracker credentials/project slug
    - Missing coding-agent executable
 
@@ -1693,8 +1889,8 @@ After restart:
 
 Operators can control behavior by:
 
-- Editing `WORKFLOW.md` (prompt and most runtime settings).
-- `WORKFLOW.md` changes should be detected and re-applied automatically without restart.
+- Editing `ensemble.yaml` (pipeline config and most runtime settings).
+- `ensemble.yaml` changes should be detected and re-applied automatically without restart.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
@@ -1738,7 +1934,7 @@ Recommended additional hardening for ports:
 
 ### 15.4 Hook Script Safety
 
-Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
+Workspace hooks are arbitrary shell scripts from `ensemble.yaml`.
 
 Implications:
 
@@ -2032,15 +2228,20 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.1 Workflow and Config Parsing
 
-- Workflow file path precedence:
+- Config file path precedence:
   - explicit runtime path is used when provided
-  - cwd default is `WORKFLOW.md` when no explicit runtime path is provided
-- Workflow file changes are detected and trigger re-read/re-apply without restart
-- Invalid workflow reload keeps last known good effective configuration and emits an
+  - cwd default is `ensemble.yaml` when no explicit runtime path is provided
+- Config file changes are detected and trigger re-read/re-apply without restart
+- Invalid config reload keeps last known good effective configuration and emits an
   operator-visible error
-- Missing `WORKFLOW.md` returns typed error
-- Invalid YAML front matter returns typed error
-- Front matter non-map returns typed error
+- Missing `ensemble.yaml` returns typed error
+- Invalid YAML returns typed error
+- Root non-map returns typed error
+- Agent definitions validate: each agent has exactly one of `prompt` or `prompt_template`
+- Step DAG validates: all agent references resolve, all dependencies resolve, no cycles, at least
+  one root step
+- Pipeline write validation: if steps use `tracker_state` or `on_success`/`on_failure`, tracker
+  must support writes
 - Config defaults apply when optional values are missing
 - `tracker.kind` validation enforces currently supported kind (`github`)
 - `tracker.api_key` works (including `$VAR` indirection)
@@ -2139,9 +2340,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
-- CLI accepts an optional positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
-- CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI accepts an optional positional config path argument (`path-to-ensemble.yaml`)
+- CLI uses `./ensemble.yaml` when no config path argument is provided
+- CLI errors on nonexistent explicit config path or missing default `./ensemble.yaml`
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2169,12 +2370,14 @@ Use the same validation profiles as Section 17:
 
 ### 18.1 Required for Conformance
 
-- Workflow path selection supports explicit runtime path and cwd default
-- `WORKFLOW.md` loader with YAML front matter + prompt body split
+- Config path selection supports explicit runtime path and cwd default (`ensemble.yaml`)
+- `ensemble.yaml` loader with agent definitions, step DAG, and prompt references
 - Typed config layer with defaults and `$` resolution
-- Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
+- Dynamic `ensemble.yaml` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
-- Issue tracker client with candidate fetch + state refresh + terminal fetch
+- Issue tracker client with candidate fetch + state refresh + terminal fetch + write operations
+- Pipeline engine with step DAG construction, validation, and per-issue execution
+- Verdict collection from ACP protocol and file-based fallback
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
@@ -2195,10 +2398,8 @@ Use the same validation profiles as Section 17:
 - Optional `github_graphql` client-side tool extension exposes raw GitHub GraphQL access through the
   ACP session using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
-- TODO: Make observability settings configurable in workflow front matter without prescribing UI
-  implementation details.
-- TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
-  of only via agent tools.
+- TODO: Make observability settings configurable in config without prescribing UI implementation
+  details.
 - TODO: Add pluggable issue tracker adapters beyond GitHub.
 
 ### 18.3 Operational Validation Before Production (Recommended)
