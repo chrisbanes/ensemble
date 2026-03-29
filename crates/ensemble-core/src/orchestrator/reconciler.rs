@@ -1,10 +1,10 @@
 use chrono::Utc;
 use tracing::{debug, info, warn};
 
+use super::state::OrchestratorState;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
-use super::state::OrchestratorState;
 
 /// Result of reconciling stalled runs.
 pub struct StallReconcileResult {
@@ -30,12 +30,8 @@ pub fn reconcile_stalled_runs(
     let mut stalled = Vec::new();
 
     for (issue_id, entry) in &state.running {
-        let reference_time = entry
-            .last_agent_timestamp
-            .unwrap_or(entry.started_at);
-        let elapsed_ms = now
-            .signed_duration_since(reference_time)
-            .num_milliseconds();
+        let reference_time = entry.last_agent_timestamp.unwrap_or(entry.started_at);
+        let elapsed_ms = now.signed_duration_since(reference_time).num_milliseconds();
 
         if elapsed_ms > stall_timeout_ms {
             info!(
@@ -397,13 +393,9 @@ mod tests {
             should_fail: false,
         };
 
-        let result = reconcile_tracker_states(
-            &state,
-            &tracker,
-            &default_active(),
-            &default_terminal(),
-        )
-        .await;
+        let result =
+            reconcile_tracker_states(&state, &tracker, &default_active(), &default_terminal())
+                .await;
 
         assert!(result.updates.is_empty());
         assert!(result.terminate_cleanup.is_empty());
@@ -422,13 +414,9 @@ mod tests {
             should_fail: false,
         };
 
-        let result = reconcile_tracker_states(
-            &state,
-            &tracker,
-            &default_active(),
-            &default_terminal(),
-        )
-        .await;
+        let result =
+            reconcile_tracker_states(&state, &tracker, &default_active(), &default_terminal())
+                .await;
 
         assert_eq!(result.updates.len(), 1);
         assert!(result.terminate_cleanup.is_empty());
@@ -446,13 +434,9 @@ mod tests {
             should_fail: false,
         };
 
-        let result = reconcile_tracker_states(
-            &state,
-            &tracker,
-            &default_active(),
-            &default_terminal(),
-        )
-        .await;
+        let result =
+            reconcile_tracker_states(&state, &tracker, &default_active(), &default_terminal())
+                .await;
 
         assert!(result.updates.is_empty());
         assert_eq!(result.terminate_cleanup.len(), 1);
@@ -470,13 +454,9 @@ mod tests {
             should_fail: false,
         };
 
-        let result = reconcile_tracker_states(
-            &state,
-            &tracker,
-            &default_active(),
-            &default_terminal(),
-        )
-        .await;
+        let result =
+            reconcile_tracker_states(&state, &tracker, &default_active(), &default_terminal())
+                .await;
 
         assert!(result.updates.is_empty());
         assert!(result.terminate_cleanup.is_empty());
@@ -494,13 +474,9 @@ mod tests {
             should_fail: true,
         };
 
-        let result = reconcile_tracker_states(
-            &state,
-            &tracker,
-            &default_active(),
-            &default_terminal(),
-        )
-        .await;
+        let result =
+            reconcile_tracker_states(&state, &tracker, &default_active(), &default_terminal())
+                .await;
 
         assert!(result.refresh_failed);
         assert!(result.updates.is_empty());
@@ -522,12 +498,7 @@ mod tests {
             should_fail: false,
         };
 
-        startup_terminal_cleanup(
-            &tracker,
-            &default_terminal(),
-            &workspace_mgr,
-        )
-        .await;
+        startup_terminal_cleanup(&tracker, &default_terminal(), &workspace_mgr).await;
 
         // Workspace should be cleaned up
         assert!(!dir.path().join("repo_42").exists());
@@ -544,11 +515,6 @@ mod tests {
         };
 
         // Should not panic — just logs and continues
-        startup_terminal_cleanup(
-            &tracker,
-            &default_terminal(),
-            &workspace_mgr,
-        )
-        .await;
+        startup_terminal_cleanup(&tracker, &default_terminal(), &workspace_mgr).await;
     }
 }

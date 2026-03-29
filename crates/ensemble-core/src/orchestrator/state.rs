@@ -382,10 +382,7 @@ mod tests {
 
         let entry = state.running.get("1").unwrap();
         assert_eq!(entry.last_agent_event.as_deref(), Some("turn_completed"));
-        assert_eq!(
-            entry.last_agent_message.as_deref(),
-            Some("done with tests")
-        );
+        assert_eq!(entry.last_agent_message.as_deref(), Some("done with tests"));
         assert!(entry.last_agent_timestamp.is_some());
     }
 

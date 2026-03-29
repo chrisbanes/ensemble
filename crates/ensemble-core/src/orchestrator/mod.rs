@@ -1,7 +1,7 @@
-pub mod state;
-pub mod scheduler;
-pub mod retry;
 pub mod reconciler;
+pub mod retry;
+pub mod scheduler;
+pub mod state;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,13 +23,8 @@ use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
 
 use reconciler::{reconcile_stalled_runs, reconcile_tracker_states, startup_terminal_cleanup};
-use retry::{
-    current_time_ms, get_due_retries, next_attempt,
-    schedule_failure_retry,
-};
-use scheduler::{
-    has_available_slots, is_dispatch_eligible, sort_for_dispatch,
-};
+use retry::{current_time_ms, get_due_retries, next_attempt, schedule_failure_retry};
+use scheduler::{has_available_slots, is_dispatch_eligible, sort_for_dispatch};
 use state::OrchestratorState;
 
 /// The main orchestrator that manages the poll-dispatch-reconcile loop.
@@ -313,7 +308,14 @@ impl Orchestrator {
         // Process initial dispatch requests
         if let PipelineAction::Dispatch(requests) = action {
             for req in requests {
-                self.dispatch_step(issue, &req.step_name, &req.agent_name, req.tracker_state.as_deref(), attempt).await;
+                self.dispatch_step(
+                    issue,
+                    &req.step_name,
+                    &req.agent_name,
+                    req.tracker_state.as_deref(),
+                    attempt,
+                )
+                .await;
             }
         }
     }
@@ -353,7 +355,10 @@ impl Orchestrator {
         {
             let mut state = self.state.write().await;
             if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
-                run.mark_running(step_name, format!("{}-{}-{}", issue.id, step_name, agent_name));
+                run.mark_running(
+                    step_name,
+                    format!("{}-{}-{}", issue.id, step_name, agent_name),
+                );
             }
         }
 
@@ -482,11 +487,7 @@ impl Orchestrator {
                 session_id,
                 agent_pid,
             } => {
-                state.update_session_info(
-                    issue_id,
-                    session_id,
-                    agent_pid.as_deref(),
-                );
+                state.update_session_info(issue_id, session_id, agent_pid.as_deref());
                 state.update_agent_event(issue_id, "session_started", None, timestamp);
             }
             AgentEvent::TurnStarted => {
@@ -494,12 +495,7 @@ impl Orchestrator {
                 state.update_agent_event(issue_id, "turn_started", None, timestamp);
             }
             AgentEvent::TurnUpdate { content } => {
-                state.update_agent_event(
-                    issue_id,
-                    "turn_update",
-                    Some(content),
-                    timestamp,
-                );
+                state.update_agent_event(issue_id, "turn_update", Some(content), timestamp);
             }
             AgentEvent::TurnCompleted { usage } => {
                 if let Some(u) = usage {
@@ -521,12 +517,7 @@ impl Orchestrator {
                         u.total_tokens,
                     );
                 }
-                state.update_agent_event(
-                    issue_id,
-                    "turn_failed",
-                    Some(reason),
-                    timestamp,
-                );
+                state.update_agent_event(issue_id, "turn_failed", Some(reason), timestamp);
             }
             AgentEvent::PermissionRequested { description, .. } => {
                 state.update_agent_event(
@@ -537,20 +528,10 @@ impl Orchestrator {
                 );
             }
             AgentEvent::PermissionResolved { .. } => {
-                state.update_agent_event(
-                    issue_id,
-                    "permission_resolved",
-                    None,
-                    timestamp,
-                );
+                state.update_agent_event(issue_id, "permission_resolved", None, timestamp);
             }
             AgentEvent::Notification { message } => {
-                state.update_agent_event(
-                    issue_id,
-                    "notification",
-                    Some(message),
-                    timestamp,
-                );
+                state.update_agent_event(issue_id, "notification", Some(message), timestamp);
             }
             AgentEvent::OtherMessage { raw } => {
                 state.update_agent_event(
@@ -593,7 +574,10 @@ impl Orchestrator {
 
                 // Resolve verdict from workspace
                 let workspace_path = self.workspace_mgr.workspace_path(
-                    issue_snapshot.as_ref().map(|i| i.identifier.as_str()).unwrap_or(issue_id),
+                    issue_snapshot
+                        .as_ref()
+                        .map(|i| i.identifier.as_str())
+                        .unwrap_or(issue_id),
                 );
                 let verdict = match workspace_path {
                     Some(wp) => resolve_verdict(None, &wp).await,
@@ -621,7 +605,8 @@ impl Orchestrator {
                                         &req.agent_name,
                                         req.tracker_state.as_deref(),
                                         None,
-                                    ).await;
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -629,10 +614,10 @@ impl Orchestrator {
                             info!(issue_id = %issue_id, "pipeline succeeded");
                             // Set tracker to on_success state
                             if self.tracker.supports_writes() {
-                                let _ = self.tracker.set_issue_state(
-                                    issue_id,
-                                    &config.on_success,
-                                ).await;
+                                let _ = self
+                                    .tracker
+                                    .set_issue_state(issue_id, &config.on_success)
+                                    .await;
                             }
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
@@ -650,10 +635,10 @@ impl Orchestrator {
                             );
                             // Set tracker to on_failure state
                             if self.tracker.supports_writes() {
-                                let _ = self.tracker.set_issue_state(
-                                    issue_id,
-                                    &config.on_failure,
-                                ).await;
+                                let _ = self
+                                    .tracker
+                                    .set_issue_state(issue_id, &config.on_failure)
+                                    .await;
                             }
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
@@ -690,10 +675,10 @@ impl Orchestrator {
 
                 // Set tracker to on_failure state
                 if self.tracker.supports_writes() {
-                    let _ = self.tracker.set_issue_state(
-                        issue_id,
-                        &config.on_failure,
-                    ).await;
+                    let _ = self
+                        .tracker
+                        .set_issue_state(issue_id, &config.on_failure)
+                        .await;
                 }
 
                 if let Some(entry) = state.remove_running(issue_id) {
@@ -945,8 +930,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator =
-            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
+        let orchestrator = Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Run one tick
         orchestrator.handle_tick().await;
@@ -955,7 +939,10 @@ agent:
         let state = orchestrator.state.read().await;
         assert!(state.is_running("1"), "issue should be running after tick");
         assert!(state.is_claimed("1"), "issue should be claimed after tick");
-        assert!(state.get_pipeline_run("1").is_some(), "should have pipeline run");
+        assert!(
+            state.get_pipeline_run("1").is_some(),
+            "should have pipeline run"
+        );
     }
 
     #[tokio::test]
@@ -1043,7 +1030,10 @@ agent:
         let retry = state.retry_attempts.get("1").unwrap();
         assert_eq!(retry.attempt, 3); // incremented from 2
         assert_eq!(retry.error.as_deref(), Some("agent crashed"));
-        assert!(state.get_pipeline_run("1").is_none(), "pipeline run should be removed");
+        assert!(
+            state.get_pipeline_run("1").is_none(),
+            "pipeline run should be removed"
+        );
     }
 
     #[tokio::test]
@@ -1056,8 +1046,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator =
-            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
+        let orchestrator = Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Add running entry
         {
@@ -1121,8 +1110,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator =
-            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
+        let orchestrator = Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Add a claimed retry
         {

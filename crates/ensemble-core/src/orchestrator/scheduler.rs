@@ -58,10 +58,7 @@ pub fn is_dispatch_eligible(
 
     // Per-state concurrency check
     if available_state_slots(state, max_concurrent_by_state, &issue.state) == 0 {
-        return Some(format!(
-            "no slots available for state '{}'",
-            issue.state
-        ));
+        return Some(format!("no slots available for state '{}'", issue.state));
     }
 
     // Blocker rule: Todo issues with non-terminal blockers are not eligible
@@ -461,10 +458,7 @@ mod tests {
         by_state.insert("todo".to_string(), 2);
 
         assert_eq!(available_state_slots(&state, &by_state, "Todo"), 1);
-        assert_eq!(
-            available_state_slots(&state, &by_state, "In Progress"),
-            9
-        ); // no cap, falls back to global (10 - 1 running)
+        assert_eq!(available_state_slots(&state, &by_state, "In Progress"), 9); // no cap, falls back to global (10 - 1 running)
     }
 
     #[test]

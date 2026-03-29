@@ -10,9 +10,7 @@ use tracing::{debug, info};
 
 use crate::error::AgentError;
 
-use super::events::{
-    AgentEvent, JsonRpcMessage, StopReason, TokenUsage, WorkerEvent,
-};
+use super::events::{AgentEvent, JsonRpcMessage, StopReason, TokenUsage, WorkerEvent};
 
 /// ACP session managing a subprocess and stdio JSON-RPC 2.0 protocol.
 pub struct AcpSession {
@@ -191,6 +189,7 @@ impl AcpSession {
 
     /// Send session/prompt and stream events until the turn completes.
     /// Returns a TurnResult indicating success or failure.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &mut self,
         session_id: &str,
@@ -315,9 +314,7 @@ impl AcpSession {
                     event_tx,
                     issue_id,
                     step_name,
-                    AgentEvent::OtherMessage {
-                        raw: line.clone(),
-                    },
+                    AgentEvent::OtherMessage { raw: line.clone() },
                 )
                 .await;
                 continue;
@@ -352,9 +349,7 @@ impl AcpSession {
                                             },
                                         )
                                         .await;
-                                        return Ok(TurnResult::Completed {
-                                            usage: last_usage,
-                                        });
+                                        return Ok(TurnResult::Completed { usage: last_usage });
                                     } else if stop_reason == StopReason::MaxTokens {
                                         // max_tokens is a potential continuation, treat as success
                                         Self::emit_event(
@@ -366,9 +361,7 @@ impl AcpSession {
                                             },
                                         )
                                         .await;
-                                        return Ok(TurnResult::Completed {
-                                            usage: last_usage,
-                                        });
+                                        return Ok(TurnResult::Completed { usage: last_usage });
                                     } else {
                                         let reason = format!("stop reason: {stop_str}");
                                         Self::emit_event(
@@ -535,7 +528,10 @@ impl AcpSession {
                     return;
                 }
                 Err(_) => {
-                    debug!(pid = pid, "agent did not exit after SIGTERM, sending SIGKILL");
+                    debug!(
+                        pid = pid,
+                        "agent did not exit after SIGTERM, sending SIGKILL"
+                    );
                 }
             }
         }
@@ -572,13 +568,13 @@ impl AcpSession {
     /// Read one line from stdout.
     async fn read_line(&mut self) -> Result<String, AgentError> {
         let mut line = String::new();
-        let bytes_read = self
-            .stdout
-            .read_line(&mut line)
-            .await
-            .map_err(|e| AgentError::IoError {
-                reason: format!("stdout read error: {e}"),
-            })?;
+        let bytes_read =
+            self.stdout
+                .read_line(&mut line)
+                .await
+                .map_err(|e| AgentError::IoError {
+                    reason: format!("stdout read error: {e}"),
+                })?;
 
         if bytes_read == 0 {
             return Err(AgentError::AgentExit {
@@ -665,8 +661,7 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
-                .unwrap();
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         script_path.display().to_string()
     }
@@ -723,10 +718,7 @@ done
 
         // Initialize
         let init_result = session.initialize(5000).await.unwrap();
-        assert_eq!(
-            init_result.protocol_version.as_deref(),
-            Some("2025-07-09")
-        );
+        assert_eq!(init_result.protocol_version.as_deref(), Some("2025-07-09"));
 
         // Start session
         let session_id = session

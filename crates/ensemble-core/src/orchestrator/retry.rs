@@ -117,11 +117,7 @@ pub fn get_due_retries(state: &OrchestratorState) -> Vec<RetryEntry> {
 
 /// Get the next retry fire time (earliest due_at_ms) if any retries exist.
 pub fn next_retry_time(state: &OrchestratorState) -> Option<u64> {
-    state
-        .retry_attempts
-        .values()
-        .map(|e| e.due_at_ms)
-        .min()
+    state.retry_attempts.values().map(|e| e.due_at_ms).min()
 }
 
 #[cfg(test)]
@@ -189,14 +185,8 @@ mod tests {
     fn test_schedule_failure_retry() {
         let mut state = OrchestratorState::new(30000, 10);
 
-        let due = schedule_failure_retry(
-            &mut state,
-            "issue-1",
-            "repo#1",
-            2,
-            300_000,
-            "agent crashed",
-        );
+        let due =
+            schedule_failure_retry(&mut state, "issue-1", "repo#1", 2, 300_000, "agent crashed");
 
         assert!(state.retry_attempts.contains_key("issue-1"));
 
