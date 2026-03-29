@@ -718,10 +718,25 @@ impl GithubTracker {
             });
 
         let state = project_state.unwrap_or_else(|| {
-            node.get("state")
+            let raw_state = node
+                .get("state")
                 .and_then(|v| v.as_str())
                 .unwrap_or("open")
-                .to_lowercase()
+                .to_lowercase();
+
+            // In repo-mode, derive state from labels (matching active/terminal states)
+            // to stay consistent with normalize_repo_issue.
+            labels
+                .iter()
+                .find(|l| {
+                    self.active_states.iter().any(|s| s.eq_ignore_ascii_case(l))
+                        || self
+                            .terminal_states
+                            .iter()
+                            .any(|s| s.eq_ignore_ascii_case(l))
+                })
+                .cloned()
+                .unwrap_or(raw_state)
         });
 
         let url = node
@@ -1324,6 +1339,43 @@ mod tests {
         assert_eq!(issues[1].id, "I_node3");
         assert_eq!(issues[1].state, "closed");
         assert_eq!(issues[1].identifier, "my-repo#99");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_states_by_ids_derives_state_from_labels() {
+        // Regression: repo-mode reconciliation must re-derive state from labels,
+        // not just fall back to raw open/closed.
+        let server = MockServer::start().await;
+
+        let response = graphql_response(json!({
+            "nodes": [
+                {
+                    "id": "I_label_issue",
+                    "number": 55,
+                    "title": "Label-derived state",
+                    "state": "OPEN",
+                    "url": "https://github.com/acme/my-repo/issues/55",
+                    "labels": { "nodes": [{ "name": "todo" }] },
+                    "projectItems": { "nodes": [] }
+                }
+            ]
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), None);
+        let issues = tracker
+            .fetch_issue_states_by_ids(&["I_label_issue".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        // Should derive "todo" from labels, not fall back to "open"
+        assert_eq!(issues[0].state, "todo");
     }
 
     #[tokio::test]

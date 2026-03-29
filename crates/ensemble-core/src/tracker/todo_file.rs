@@ -115,7 +115,8 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
 
             if let Some(state) = &current_state {
                 let rest = rest.trim();
-                let (identifier, title) = extract_identifier_and_title(rest);
+                let (identifier, title) =
+                    extract_identifier_and_title(rest, state, position_in_state);
 
                 current_issue = Some(ParsedIssue {
                     identifier,
@@ -157,8 +158,9 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
 /// Extract identifier and title from a list item.
 ///
 /// If the line starts with `[IDENTIFIER]`, extracts the identifier and remaining title.
-/// Otherwise generates a stable slug from the title.
-fn extract_identifier_and_title(line: &str) -> (String, String) {
+/// Otherwise generates a stable slug from the title, incorporating the state and
+/// position to ensure uniqueness and handle non-alphanumeric-only titles.
+fn extract_identifier_and_title(line: &str, state: &str, position: i32) -> (String, String) {
     if line.starts_with('[') {
         if let Some(end) = line.find(']') {
             let identifier = line[1..end].to_string();
@@ -168,9 +170,17 @@ fn extract_identifier_and_title(line: &str) -> (String, String) {
             }
         }
     }
-    // No bracketed identifier — generate a stable slug
+    // No bracketed identifier — generate a stable slug with position for uniqueness.
+    // The position suffix ensures duplicate titles produce distinct identifiers,
+    // and provides a fallback when the title contains no ASCII alphanumeric chars.
     let slug = generate_slug(line);
-    (slug, line.to_string())
+    let state_slug = generate_slug(state);
+    let identifier = if slug.is_empty() {
+        format!("{}-{}", state_slug, position)
+    } else {
+        format!("{}-{}-{}", state_slug, position, slug)
+    };
+    (identifier, line.to_string())
 }
 
 /// Generate a stable slug identifier from a title string.
@@ -331,10 +341,10 @@ mod tests {
         let issues = parse_todo_content(content);
         assert_eq!(issues.len(), 2);
 
-        assert_eq!(issues[0].identifier, "add-login-page");
+        assert_eq!(issues[0].identifier, "todo-0-add-login-page");
         assert_eq!(issues[0].title, "Add login page");
 
-        assert_eq!(issues[1].identifier, "fix-the-checkout-bug");
+        assert_eq!(issues[1].identifier, "todo-1-fix-the-checkout-bug");
         assert_eq!(issues[1].title, "Fix the checkout bug!");
     }
 
@@ -398,8 +408,8 @@ mod tests {
         let content = "## Todo\n- [] Some title\n";
         let issues = parse_todo_content(content);
         assert_eq!(issues.len(), 1);
-        // Empty brackets -> fallback to slug
-        assert_eq!(issues[0].identifier, "some-title");
+        // Empty brackets -> fallback to slug with state-position prefix
+        assert_eq!(issues[0].identifier, "todo-0-some-title");
         assert_eq!(issues[0].title, "[] Some title");
     }
 
@@ -407,23 +417,40 @@ mod tests {
 
     #[test]
     fn test_extract_with_identifier() {
-        let (id, title) = extract_identifier_and_title("[PROJ-1] Add login page");
+        let (id, title) = extract_identifier_and_title("[PROJ-1] Add login page", "Todo", 0);
         assert_eq!(id, "PROJ-1");
         assert_eq!(title, "Add login page");
     }
 
     #[test]
     fn test_extract_without_identifier() {
-        let (id, title) = extract_identifier_and_title("Add login page");
-        assert_eq!(id, "add-login-page");
+        let (id, title) = extract_identifier_and_title("Add login page", "Todo", 0);
+        assert_eq!(id, "todo-0-add-login-page");
         assert_eq!(title, "Add login page");
     }
 
     #[test]
     fn test_extract_identifier_with_hash() {
-        let (id, title) = extract_identifier_and_title("[my-repo#42] Fix bug");
+        let (id, title) = extract_identifier_and_title("[my-repo#42] Fix bug", "Todo", 0);
         assert_eq!(id, "my-repo#42");
         assert_eq!(title, "Fix bug");
+    }
+
+    #[test]
+    fn test_extract_non_alphanumeric_title_uses_fallback() {
+        let (id, title) = extract_identifier_and_title("!!!", "Todo", 2);
+        // Slug of "!!!" is empty, so falls back to state-position only
+        assert_eq!(id, "todo-2");
+        assert_eq!(title, "!!!");
+    }
+
+    #[test]
+    fn test_extract_duplicate_titles_get_unique_ids() {
+        let (id1, _) = extract_identifier_and_title("Fix bug", "Todo", 0);
+        let (id2, _) = extract_identifier_and_title("Fix bug", "Todo", 1);
+        assert_ne!(id1, id2);
+        assert_eq!(id1, "todo-0-fix-bug");
+        assert_eq!(id2, "todo-1-fix-bug");
     }
 
     // --- generate_slug tests ---
