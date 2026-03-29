@@ -393,24 +393,34 @@ impl IssueTracker for TodoFileTracker {
             output.push('\n');
         }
 
-        // Atomic write: write to a temp file in the same directory, then rename.
+        // Atomic write: write to a unique temp file in the same directory, then rename.
         let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
-        let tmp_path = parent.join(format!(".ensemble-tmp-{}", std::process::id()));
+        let unique_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let tmp_path = parent.join(format!(
+            ".ensemble-tmp-{}-{}",
+            std::process::id(),
+            unique_id
+        ));
         tokio::fs::write(&tmp_path, &output)
             .await
             .map_err(|e| TrackerError::IoError {
                 reason: format!("failed to write temp file {}: {}", tmp_path.display(), e),
             })?;
-        tokio::fs::rename(&tmp_path, &self.path)
-            .await
-            .map_err(|e| TrackerError::IoError {
+        if let Err(e) = tokio::fs::rename(&tmp_path, &self.path).await {
+            // Clean up temp file on rename failure
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(TrackerError::IoError {
                 reason: format!(
                     "failed to rename {} -> {}: {}",
                     tmp_path.display(),
                     self.path.display(),
                     e
                 ),
-            })?;
+            });
+        }
 
         Ok(())
     }

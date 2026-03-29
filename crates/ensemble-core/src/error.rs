@@ -14,12 +14,10 @@ pub enum EnsembleError {
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("missing workflow file: {path}")]
-    MissingWorkflowFile { path: String },
-    #[error("workflow parse error: {reason}")]
-    WorkflowParseError { reason: String },
-    #[error("front matter is not a map")]
-    FrontMatterNotAMap,
+    #[error("missing config file: {path}")]
+    MissingConfigFile { path: String },
+    #[error("config parse error: {reason}")]
+    ConfigParseError { reason: String },
     #[error("template parse error: {reason}")]
     TemplateParseError { reason: String },
     #[error("template render error: {reason}")]

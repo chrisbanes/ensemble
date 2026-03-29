@@ -655,11 +655,11 @@ Error classes:
 
 - `missing_config_file`
 - `config_parse_error`
-- `config_root_not_a_map`
 - `unknown_agent_reference` (step references non-existent agent)
 - `unknown_step_dependency` (step depends on non-existent step)
 - `cycle_detected` (step DAG contains a cycle)
 - `no_root_steps` (all steps have dependencies)
+- `duplicate_step_name` (two steps share the same name)
 - `invalid_prompt_config` (agent has neither or both prompt sources)
 - `template_parse_error` (during prompt rendering)
 - `template_render_error` (unknown variable/filter, invalid interpolation)
@@ -1497,7 +1497,7 @@ Agent-driven writes:
 
 Write method contract:
 
-- `set_issue_state` and `add_comment` have default no-op implementations that return
+- `set_issue_state` and `add_comment` have default stub implementations that return
   `WritesNotSupported`.
 - Tracker backends opt into writes by overriding these methods and returning `true` from
   `supports_writes()`.

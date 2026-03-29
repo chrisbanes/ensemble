@@ -245,11 +245,9 @@ fn expand_tilde(path_str: &str) -> PathBuf {
 }
 
 /// Resolve a path string: expand `$VAR` then `~`.
-fn resolve_path(path_str: &str) -> PathBuf {
-    match resolve_env_var(path_str) {
-        Some(resolved) => expand_tilde(&resolved),
-        None => PathBuf::from(path_str),
-    }
+/// Returns `None` if the path references an unset/empty env var.
+fn resolve_path(path_str: &str) -> Option<PathBuf> {
+    resolve_env_var(path_str).map(|resolved| expand_tilde(&resolved))
 }
 
 impl EnsembleConfig {
@@ -272,20 +270,19 @@ impl EnsembleConfig {
         // tracker.path: $VAR + ~ expansion
         if let Some(ref path) = self.tracker.path {
             let path_str = path.to_string_lossy();
-            self.tracker.path = Some(resolve_path(&path_str));
+            self.tracker.path = resolve_path(&path_str);
         }
 
         // workspace.root: $VAR + ~ expansion
         if let Some(ref root) = self.workspace.root {
-            let resolved = resolve_path(root);
-            self.workspace.root = Some(resolved.to_string_lossy().into_owned());
+            self.workspace.root = resolve_path(root).map(|p| p.to_string_lossy().into_owned());
         }
 
         // agents.*.prompt_template: $VAR + ~ expansion
         for agent in self.agents.values_mut() {
             if let Some(ref path) = agent.prompt_template {
                 let path_str = path.to_string_lossy();
-                agent.prompt_template = Some(resolve_path(&path_str));
+                agent.prompt_template = resolve_path(&path_str);
             }
         }
     }
@@ -294,7 +291,7 @@ impl EnsembleConfig {
 /// Load and parse an `ensemble.yaml` file from the given path.
 pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::error::ConfigError> {
     let content = std::fs::read_to_string(path).map_err(|_| {
-        crate::error::ConfigError::MissingWorkflowFile {
+        crate::error::ConfigError::MissingConfigFile {
             path: path.display().to_string(),
         }
     })?;
@@ -307,7 +304,7 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
 /// Note: Does NOT resolve `$VAR` or `~`. Call `config.resolve_env()` after
 /// parsing, or use `load_config()` which does both.
 pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigError> {
-    serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::WorkflowParseError {
+    serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::ConfigParseError {
         reason: e.to_string(),
     })
 }
@@ -565,7 +562,7 @@ on_failure: Failed
         let result = load_config(std::path::Path::new("/nonexistent/ensemble.yaml"));
         assert!(result.is_err());
         match result.unwrap_err() {
-            crate::error::ConfigError::MissingWorkflowFile { path } => {
+            crate::error::ConfigError::MissingConfigFile { path } => {
                 assert!(path.contains("ensemble.yaml"));
             }
             other => panic!("unexpected error: {other:?}"),

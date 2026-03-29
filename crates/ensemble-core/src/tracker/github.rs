@@ -122,7 +122,7 @@ query($ids: [ID!]!) {
           name
         }
       }
-      projectItems(first: 10) {
+      projectItems(first: 100) {
         nodes {
           fieldValues(first: 20) {
             nodes {
@@ -174,7 +174,7 @@ const FIND_PROJECT_ITEM_QUERY: &str = r#"
 query($nodeId: ID!) {
   node(id: $nodeId) {
     ... on Issue {
-      projectItems(first: 10) {
+      projectItems(first: 100) {
         nodes {
           id
           project {

@@ -54,9 +54,9 @@ The separation ensures the core orchestration logic is testable without Tauri/We
 
 ### `tracker/`
 
-The tracker subsystem is pluggable. All tracker implementations share the `IssueTracker` trait and normalize to the same `Issue` model. The orchestrator is tracker-agnostic. The trait includes both read operations (fetch candidates, fetch states) and write operations (set state, add comment) with default no-op implementations.
+The tracker subsystem is pluggable. All tracker implementations share the `IssueTracker` trait and normalize to the same `Issue` model. The orchestrator is tracker-agnostic. The trait includes both read operations (fetch candidates, fetch states) and write operations (set state, add comment) with default stub implementations that return `WritesNotSupported`.
 
-- **`mod.rs`**: `IssueTracker` trait (read + write methods with default no-ops), `TrackerError` (including `WritesNotSupported`), and a factory function that returns the appropriate implementation based on `tracker.kind`.
+- **`mod.rs`**: `IssueTracker` trait (read + write methods with default stubs returning `WritesNotSupported`), `TrackerError`, and a factory function that returns the appropriate implementation based on `tracker.kind`.
 - **`todo_file.rs`**: File-based tracker that reads issues from a local Markdown file (default `TODO.md`). Issues are list items under `## <State>` headings. No API credentials needed — ideal for personal use and getting started quickly.
   - Parses `[IDENTIFIER]` from the start of list items, or generates a stable slug from the title.
   - Re-reads the file on each poll tick.
