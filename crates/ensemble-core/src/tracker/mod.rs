@@ -1,5 +1,8 @@
+pub mod github;
 pub mod model;
+pub mod todo_file;
 
+use crate::config::typed::ServiceConfig;
 use async_trait::async_trait;
 use model::Issue;
 
@@ -36,4 +39,123 @@ pub trait IssueTracker: Send + Sync {
 
     /// Fetch current states for specific issue IDs (used for reconciliation).
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError>;
+}
+
+/// Create an `IssueTracker` implementation based on the service config.
+///
+/// Matches on `tracker_kind` to return the right backend:
+/// - `"todo_file"` -> `TodoFileTracker`
+/// - `"github"` -> `GithubTracker`
+///
+/// Returns an error if the tracker kind is missing or unsupported, or
+/// if required configuration is absent (e.g., missing API key for GitHub).
+pub fn create_tracker(config: &ServiceConfig) -> Result<Box<dyn IssueTracker>, TrackerError> {
+    let kind = config
+        .tracker_kind
+        .as_deref()
+        .ok_or_else(|| TrackerError::UnsupportedKind {
+            kind: "<none>".to_string(),
+        })?;
+
+    match kind {
+        "todo_file" => {
+            let tracker = todo_file::TodoFileTracker::new(
+                config.tracker_path.clone(),
+                config.tracker_active_states.clone(),
+            );
+            Ok(Box::new(tracker))
+        }
+        "github" => {
+            let token = config
+                .tracker_api_key
+                .as_ref()
+                .ok_or(TrackerError::MissingApiKey)?;
+            let repository = config
+                .tracker_repository
+                .as_ref()
+                .ok_or(TrackerError::MissingRepository)?;
+
+            let tracker = github::GithubTracker::new(
+                config.tracker_endpoint.clone(),
+                token.clone(),
+                repository.clone(),
+                config.tracker_project_number,
+                config.tracker_active_states.clone(),
+                config.tracker_terminal_states.clone(),
+                config.tracker_labels_filter.clone(),
+            )?;
+            Ok(Box::new(tracker))
+        }
+        other => Err(TrackerError::UnsupportedKind {
+            kind: other.to_string(),
+        }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::typed::ServiceConfig;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_create_todo_file_tracker() {
+        let dir = TempDir::new().unwrap();
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("todo_file".to_string());
+        config.tracker_path = dir.path().join("TODO.md");
+
+        let tracker = create_tracker(&config);
+        assert!(tracker.is_ok());
+    }
+
+    #[test]
+    fn test_create_github_tracker() {
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("github".to_string());
+        config.tracker_api_key = Some("ghp_test_token".to_string());
+        config.tracker_repository = Some("acme/repo".to_string());
+
+        let tracker = create_tracker(&config);
+        assert!(tracker.is_ok());
+    }
+
+    #[test]
+    fn test_create_github_tracker_missing_api_key() {
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("github".to_string());
+        config.tracker_api_key = None;
+        config.tracker_repository = Some("acme/repo".to_string());
+
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::MissingApiKey)));
+    }
+
+    #[test]
+    fn test_create_github_tracker_missing_repository() {
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("github".to_string());
+        config.tracker_api_key = Some("ghp_test_token".to_string());
+        config.tracker_repository = None;
+
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::MissingRepository)));
+    }
+
+    #[test]
+    fn test_create_unsupported_kind() {
+        let mut config = ServiceConfig::default();
+        config.tracker_kind = Some("linear".to_string());
+
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::UnsupportedKind { .. })));
+    }
+
+    #[test]
+    fn test_create_no_kind() {
+        let config = ServiceConfig::default();
+        // tracker_kind is None by default
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::UnsupportedKind { .. })));
+    }
 }
