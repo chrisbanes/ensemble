@@ -1,0 +1,35 @@
+ AGENTS.md                                          |   23 +-
+ Cargo.lock                                         | 1142 ++++++++++-
+ Cargo.toml                                         |    4 +
+ SPEC.md                                            |  461 +++--
+ crates/ensemble-core/Cargo.toml                    |    4 +
+ crates/ensemble-core/src/agent/acp_client.rs       | 1037 ++++++++++
+ crates/ensemble-core/src/agent/events.rs           |  291 +++
+ crates/ensemble-core/src/agent/mod.rs              |  413 ++++
+ crates/ensemble-core/src/config/ensemble.rs        |  707 +++++++
+ crates/ensemble-core/src/config/mod.rs             |    3 +-
+ crates/ensemble-core/src/config/typed.rs           |  614 ------
+ crates/ensemble-core/src/config/workflow.rs        |  155 --
+ crates/ensemble-core/src/error.rs                  |   64 +-
+ crates/ensemble-core/src/lib.rs                    |    3 +
+ crates/ensemble-core/src/orchestrator/mod.rs       | 1186 ++++++++++++
+ .../ensemble-core/src/orchestrator/reconciler.rs   |  520 +++++
+ crates/ensemble-core/src/orchestrator/retry.rs     |  286 +++
+ crates/ensemble-core/src/orchestrator/scheduler.rs |  471 +++++
+ crates/ensemble-core/src/orchestrator/state.rs     |  467 +++++
+ crates/ensemble-core/src/pipeline/dag.rs           |  311 +++
+ crates/ensemble-core/src/pipeline/engine.rs        |  477 +++++
+ crates/ensemble-core/src/pipeline/mod.rs           |    3 +
+ crates/ensemble-core/src/pipeline/verdict.rs       |  224 +++
+ crates/ensemble-core/src/tracker/github.rs         | 1934 +++++++++++++++++++
+ crates/ensemble-core/src/tracker/mod.rs            |  199 ++
+ crates/ensemble-core/src/tracker/todo_file.rs      |  898 +++++++++
+ crates/ensemble-core/src/workspace/manager.rs      |    6 +
+ crates/ensemble-core/tests/tracker_integration.rs  |  180 ++
+ .../ensemble-core/tests/workflow_to_workspace.rs   |   95 +-
+ .../2026-03-29-plan-2b-multi-agent-pipelines.md    | 2015 ++++++++++++++++++++
+ ....md => 2026-03-29-plan-3-agent-orchestrator.md} |  633 ++++--
+ ... => 2026-03-29-plan-4-api-observability-cli.md} |  235 ++-
+ ...d.md => 2026-03-29-plan-5-desktop-dashboard.md} |  283 +--
+ .../2026-03-28-ensemble-implementation-design.md   |   55 +-
+ 34 files changed, 13865 insertions(+), 1534 deletions(-)
