@@ -240,6 +240,7 @@ impl GithubTracker {
             client,
             project_node_id: tokio::sync::RwLock::new(None),
             status_field_id: tokio::sync::RwLock::new(None),
+            status_option_ids: tokio::sync::RwLock::new(HashMap::new()),
         })
     }
 
@@ -374,19 +375,40 @@ impl GithubTracker {
                 reason: "project fields not found".to_string(),
             })?;
 
-        let status_field_id = fields
+        let status_field = fields
             .iter()
             .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("Status"))
-            .and_then(|f| f.get("id"))
-            .and_then(|v| v.as_str())
             .ok_or_else(|| TrackerError::UnexpectedPayload {
                 reason: "Status field not found in project".to_string(),
+            })?;
+
+        let status_field_id = status_field
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: "Status field ID not found".to_string(),
             })?
             .to_string();
+
+        // Extract status option name -> ID map
+        let option_ids: HashMap<String, String> = status_field
+            .pointer("/options")
+            .and_then(|v| v.as_array())
+            .map(|opts| {
+                opts.iter()
+                    .filter_map(|opt| {
+                        let name = opt.get("name")?.as_str()?.to_string();
+                        let id = opt.get("id")?.as_str()?.to_string();
+                        Some((name, id))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
 
         info!(
             project_id = %project_id,
             status_field_id = %status_field_id,
+            option_count = option_ids.len(),
             "project metadata discovered"
         );
 
@@ -398,6 +420,10 @@ impl GithubTracker {
         {
             let mut field_id_lock = self.status_field_id.write().await;
             *field_id_lock = Some(status_field_id.clone());
+        }
+        {
+            let mut option_ids_lock = self.status_option_ids.write().await;
+            *option_ids_lock = option_ids;
         }
 
         Ok((project_id, status_field_id))
@@ -756,6 +782,41 @@ impl GithubTracker {
         Ok(issues)
     }
 
+    /// Find the project item ID for an issue node within the configured project.
+    async fn find_project_item_id(&self, issue_node_id: &str) -> Result<String, TrackerError> {
+        let variables = json!({ "nodeId": issue_node_id });
+        let data = self.graphql(FIND_PROJECT_ITEM_QUERY, variables).await?;
+
+        let project_id = {
+            let lock = self.project_node_id.read().await;
+            lock.clone()
+                .ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: "project node ID not set".to_string(),
+                })?
+        };
+
+        let items = data
+            .pointer("/node/projectItems/nodes")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: "missing projectItems in response".to_string(),
+            })?;
+
+        for item in items {
+            if let Some(proj_id) = item.pointer("/project/id").and_then(|v| v.as_str()) {
+                if proj_id == project_id {
+                    if let Some(item_id) = item.get("id").and_then(|v| v.as_str()) {
+                        return Ok(item_id.to_string());
+                    }
+                }
+            }
+        }
+
+        Err(TrackerError::UnexpectedPayload {
+            reason: format!("issue {} not found in project", issue_node_id),
+        })
+    }
+
     /// Normalize a node from the state refresh query.
     fn normalize_state_node(&self, node: &Value) -> Option<Issue> {
         let id = node.get("id")?.as_str()?;
@@ -903,6 +964,69 @@ impl IssueTracker for GithubTracker {
     /// Fetch current states for specific issue IDs (used for reconciliation).
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
         self.fetch_states_by_node_ids(ids).await
+    }
+
+    fn supports_writes(&self) -> bool {
+        true
+    }
+
+    async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
+        let variables = json!({
+            "subjectId": id,
+            "body": body,
+        });
+        self.graphql(ADD_COMMENT_MUTATION, variables).await?;
+        Ok(())
+    }
+
+    async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+        if self.project_number.is_some() {
+            // Ensure project metadata is discovered (populates project_node_id,
+            // status_field_id, and status_option_ids).
+            self.ensure_project_metadata().await?;
+
+            let project_id = {
+                let lock = self.project_node_id.read().await;
+                lock.clone()
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: "project node ID not discovered".to_string(),
+                    })?
+            };
+            let field_id = {
+                let lock = self.status_field_id.read().await;
+                lock.clone()
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: "status field ID not discovered".to_string(),
+                    })?
+            };
+            let option_id = {
+                let lock = self.status_option_ids.read().await;
+                lock.get(state)
+                    .cloned()
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: format!("unknown status option: {}", state),
+                    })?
+            };
+
+            let item_id = self.find_project_item_id(id).await?;
+
+            let variables = json!({
+                "projectId": project_id,
+                "itemId": item_id,
+                "fieldId": field_id,
+                "optionId": option_id,
+            });
+            self.graphql(UPDATE_PROJECT_ITEM_FIELD_MUTATION, variables)
+                .await?;
+            Ok(())
+        } else {
+            tracing::warn!(
+                issue_id = id,
+                target_state = state,
+                "set_issue_state in repo mode: label-based state transitions not yet implemented"
+            );
+            Err(TrackerError::WritesNotSupported)
+        }
     }
 }
 
