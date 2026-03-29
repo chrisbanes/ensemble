@@ -355,7 +355,7 @@ Dashboard is a thin API consumer. Rely on API contract correctness. Add Playwrig
 
 ## Multi-Agent Pipeline Architecture
 
-See `docs/superpowers/specs/2026-03-29-multi-agent-pipelines-design.md` for the detailed design of:
+The pipeline architecture is documented inline in the module descriptions above (`config/`, `pipeline/`, `tracker/`) and specified in SPEC.md Sections 4-5 and 11.5. Key design points:
 
 - **`ensemble.yaml` config format** — replaces `WORKFLOW.md` with named agents, step DAG, and pipeline config
 - **Pipeline engine** — DAG construction, per-issue execution, verdict collection, tracker state writes

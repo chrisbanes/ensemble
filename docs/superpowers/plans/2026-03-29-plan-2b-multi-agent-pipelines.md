@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2021, tokio, serde/serde_yaml, thiserror, async-trait, liquid, tempfile (tests)
 
-**Spec:** `docs/superpowers/specs/2026-03-29-multi-agent-pipelines-design.md`
+**Spec:** `SPEC.md` (Sections 4-5, 11.5) and `docs/superpowers/specs/2026-03-28-ensemble-implementation-design.md`
 
 ---
 
