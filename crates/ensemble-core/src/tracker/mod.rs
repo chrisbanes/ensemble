@@ -15,6 +15,8 @@ pub enum TrackerError {
     MissingApiKey,
     #[error("missing tracker repository")]
     MissingRepository,
+    #[error("I/O error: {reason}")]
+    IoError { reason: String },
     #[error("GitHub API request failed: {reason}")]
     ApiRequestFailed { reason: String },
     #[error("GitHub API returned status {status}: {body}")]

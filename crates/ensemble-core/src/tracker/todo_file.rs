@@ -38,15 +38,15 @@ impl TodoFileTracker {
     }
 
     /// Read and parse the TODO file, returning all issues across all state sections.
-    fn parse_file(&self) -> Result<Vec<ParsedIssue>, TrackerError> {
-        let content = match std::fs::read_to_string(&self.path) {
+    async fn parse_file(&self) -> Result<Vec<ParsedIssue>, TrackerError> {
+        let content = match tokio::fs::read_to_string(&self.path).await {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 warn!(path = %self.path.display(), "TODO file not found, returning empty list");
                 return Ok(vec![]);
             }
             Err(e) => {
-                return Err(TrackerError::ApiRequestFailed {
+                return Err(TrackerError::IoError {
                     reason: format!("failed to read {}: {}", self.path.display(), e),
                 });
             }
@@ -242,7 +242,7 @@ impl IssueTracker for TodoFileTracker {
     ///
     /// Reads the file, parses all issues, returns those in active states.
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
-        let parsed = self.parse_file()?;
+        let parsed = self.parse_file().await?;
         let issues = parsed
             .iter()
             .filter(|p| state_matches(&p.state, &self.active_states))
@@ -255,7 +255,7 @@ impl IssueTracker for TodoFileTracker {
     ///
     /// Reads the file, returns issues whose state matches any in the provided list.
     async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
-        let parsed = self.parse_file()?;
+        let parsed = self.parse_file().await?;
         let issues = parsed
             .iter()
             .filter(|p| state_matches(&p.state, states))
@@ -268,7 +268,7 @@ impl IssueTracker for TodoFileTracker {
     ///
     /// Reads the file, returns issues whose identifier matches any in the provided list.
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
-        let parsed = self.parse_file()?;
+        let parsed = self.parse_file().await?;
         let issues = parsed
             .iter()
             .filter(|p| ids.iter().any(|id| id == &p.identifier))

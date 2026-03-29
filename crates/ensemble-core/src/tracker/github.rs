@@ -81,7 +81,7 @@ query($projectId: ID!, $cursor: String) {
 const REPO_ISSUES_QUERY: &str = r#"
 query($owner: String!, $repo: String!, $cursor: String, $labels: [String!]) {
   repository(owner: $owner, name: $repo) {
-    issues(first: 50, after: $cursor, states: [OPEN], labels: $labels, orderBy: {field: CREATED_AT, direction: ASC}) {
+    issues(first: 50, after: $cursor, states: [OPEN, CLOSED], labels: $labels, orderBy: {field: CREATED_AT, direction: ASC}) {
       pageInfo {
         hasNextPage
         endCursor
@@ -458,6 +458,17 @@ impl GithubTracker {
             .map(|s| s.to_string());
 
         let labels = extract_labels(content);
+
+        // Client-side label filtering for project-board mode (repo-mode uses
+        // the GraphQL `labels` argument, but project-board queries don't support it).
+        if !self.labels_filter.is_empty()
+            && !labels
+                .iter()
+                .any(|l| self.labels_filter.iter().any(|f| f.eq_ignore_ascii_case(l)))
+        {
+            return None;
+        }
+
         let priority = extract_priority_from_field_values(node);
 
         let created_at = content
@@ -486,6 +497,31 @@ impl GithubTracker {
             created_at,
             updated_at,
         })
+    }
+
+    /// Map a set of lowercased labels to the canonical configured state name.
+    ///
+    /// Finds the first label that case-insensitively matches an active or terminal
+    /// state, then returns the *configured* name (preserving casing) instead of
+    /// the lowercased label value.  Falls back to `fallback` if no label matches.
+    fn canonical_state_from_labels(&self, labels: &[String], fallback: String) -> String {
+        for label in labels {
+            if let Some(s) = self
+                .active_states
+                .iter()
+                .find(|s| s.eq_ignore_ascii_case(label))
+            {
+                return s.clone();
+            }
+            if let Some(s) = self
+                .terminal_states
+                .iter()
+                .find(|s| s.eq_ignore_ascii_case(label))
+            {
+                return s.clone();
+            }
+        }
+        fallback
     }
 
     /// Extract the Status field value from a project item's fieldValues.
@@ -585,27 +621,15 @@ impl GithubTracker {
 
         let labels = extract_labels(node);
 
-        // Determine state from labels or open/closed
+        // Determine state: match labels to canonical configured names,
+        // falling back to raw GitHub open/closed.
         let raw_state = node
             .get("state")
             .and_then(|v| v.as_str())
             .unwrap_or("open")
             .to_lowercase();
 
-        // Map GitHub state to tracker state:
-        // If labels contain any active_states value, use that.
-        // Otherwise use open/closed.
-        let state = labels
-            .iter()
-            .find(|l| {
-                self.active_states.iter().any(|s| s.eq_ignore_ascii_case(l))
-                    || self
-                        .terminal_states
-                        .iter()
-                        .any(|s| s.eq_ignore_ascii_case(l))
-            })
-            .cloned()
-            .unwrap_or(raw_state);
+        let state = self.canonical_state_from_labels(&labels, raw_state);
 
         // Filter by state
         if !filter_states.is_empty()
@@ -724,19 +748,9 @@ impl GithubTracker {
                 .unwrap_or("open")
                 .to_lowercase();
 
-            // In repo-mode, derive state from labels (matching active/terminal states)
-            // to stay consistent with normalize_repo_issue.
-            labels
-                .iter()
-                .find(|l| {
-                    self.active_states.iter().any(|s| s.eq_ignore_ascii_case(l))
-                        || self
-                            .terminal_states
-                            .iter()
-                            .any(|s| s.eq_ignore_ascii_case(l))
-                })
-                .cloned()
-                .unwrap_or(raw_state)
+            // In repo-mode, derive canonical state from labels to stay consistent
+            // with normalize_repo_issue.
+            self.canonical_state_from_labels(&labels, raw_state)
         });
 
         let url = node
@@ -1374,8 +1388,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(issues.len(), 1);
-        // Should derive "todo" from labels, not fall back to "open"
-        assert_eq!(issues[0].state, "todo");
+        // Should derive canonical "Todo" from labels, not fall back to "open"
+        assert_eq!(issues[0].state, "Todo");
     }
 
     #[tokio::test]
@@ -1631,5 +1645,118 @@ mod tests {
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].priority, Some(2)); // High = 2
+    }
+
+    #[tokio::test]
+    async fn test_project_board_label_filtering() {
+        let server = MockServer::start().await;
+
+        let discovery = graphql_response(json!({
+            "repository": {
+                "projectV2": {
+                    "id": "PVT_1",
+                    "fields": {
+                        "nodes": [{
+                            "id": "F_status",
+                            "name": "Status",
+                            "options": []
+                        }]
+                    }
+                }
+            }
+        }));
+
+        let items = graphql_response(json!({
+            "node": {
+                "items": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [
+                        {
+                            "fieldValues": { "nodes": [{ "name": "Todo", "field": { "name": "Status" } }] },
+                            "content": {
+                                "id": "I_match", "number": 1, "title": "Has matching label",
+                                "body": "", "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-01T00:00:00Z",
+                                "url": "https://github.com/acme/my-repo/issues/1",
+                                "labels": { "nodes": [{ "name": "Bug" }] }
+                            }
+                        },
+                        {
+                            "fieldValues": { "nodes": [{ "name": "Todo", "field": { "name": "Status" } }] },
+                            "content": {
+                                "id": "I_no_match", "number": 2, "title": "No matching label",
+                                "body": "", "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-01T00:00:00Z",
+                                "url": "https://github.com/acme/my-repo/issues/2",
+                                "labels": { "nodes": [{ "name": "Feature" }] }
+                            }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("projectNumber"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&discovery))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("projectId"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&items))
+            .mount(&server)
+            .await;
+
+        // Tracker with labels_filter = ["bug"]
+        let tracker = GithubTracker::new(
+            format!("{}/graphql", server.uri()),
+            "ghp_test_token".to_string(),
+            "acme/my-repo".to_string(),
+            Some(1),
+            vec!["Todo".to_string()],
+            vec!["Done".to_string()],
+            vec!["bug".to_string()],
+        )
+        .unwrap();
+
+        let issues = tracker.fetch_candidate_issues().await.unwrap();
+
+        // Only the issue with "Bug" label should pass the filter
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "I_match");
+    }
+
+    #[tokio::test]
+    async fn test_repo_mode_canonical_state_casing() {
+        let server = MockServer::start().await;
+
+        let response = graphql_response(json!({
+            "repository": {
+                "issues": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [{
+                        "id": "I_1", "number": 1, "title": "Test",
+                        "body": "", "createdAt": "2025-01-01T00:00:00Z", "updatedAt": "2025-01-01T00:00:00Z",
+                        "url": "https://github.com/acme/my-repo/issues/1",
+                        "state": "OPEN",
+                        "labels": { "nodes": [{ "name": "TODO" }] }
+                    }]
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), None);
+        let issues = tracker.fetch_candidate_issues().await.unwrap();
+
+        assert_eq!(issues.len(), 1);
+        // Label "TODO" (lowercased to "todo") should map to canonical "Todo"
+        assert_eq!(issues[0].state, "Todo");
     }
 }
