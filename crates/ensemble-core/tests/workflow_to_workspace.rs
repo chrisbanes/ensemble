@@ -1,8 +1,7 @@
-//! Integration test: load WORKFLOW.md -> parse config -> create workspace -> run hooks
+//! Integration test: load ensemble.yaml -> parse config -> create workspace -> run hooks
 
+use ensemble_core::config::ensemble::{parse_config, EnsembleConfig};
 use ensemble_core::config::template::render_prompt;
-use ensemble_core::config::typed::ServiceConfig;
-use ensemble_core::config::workflow::load_workflow;
 use ensemble_core::tracker::model::{sanitize_workspace_key, Issue};
 use ensemble_core::workspace::hooks::run_hook;
 use ensemble_core::workspace::manager::WorkspaceManager;
@@ -25,16 +24,9 @@ fn sample_issue() -> Issue {
     }
 }
 
-#[test]
-fn test_full_config_flow() {
-    let dir = TempDir::new().unwrap();
-    let workflow_path = dir.path().join("WORKFLOW.md");
-    let ws_root = dir.path().join("workspaces");
-
-    std::fs::write(
-        &workflow_path,
-        format!(
-            r#"---
+fn make_config(ws_root: &std::path::Path) -> EnsembleConfig {
+    let yaml = format!(
+        r#"
 tracker:
   kind: github
   repository: acme/test-repo
@@ -43,49 +35,56 @@ workspace:
   root: {}
 agent:
   command: echo hello
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "You are working on {{{{ issue.identifier }}}}: {{{{ issue.title }}}}"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+concurrency:
   max_concurrent_agents: 3
 hooks:
-  after_create: echo "workspace created"
----
-You are working on {{{{ issue.identifier }}}}: {{{{ issue.title }}}}
-
-Description: {{{{ issue.description }}}}
-
-{{%- if attempt %}}This is retry attempt {{{{ attempt }}}}.{{%- endif %}}
+  after_create: 'echo "workspace created"'
 "#,
-            ws_root.display()
-        ),
-    )
-    .unwrap();
+        ws_root.display()
+    );
+    parse_config(&yaml).unwrap()
+}
 
-    // 1. Load workflow
-    let workflow = load_workflow(&workflow_path).unwrap();
-    assert!(!workflow.prompt_template.is_empty());
+#[test]
+fn test_full_config_flow() {
+    let dir = TempDir::new().unwrap();
+    let ws_root = dir.path().join("workspaces");
 
-    // 2. Parse config
-    let config = ServiceConfig::from_workflow(&workflow).unwrap();
-    assert_eq!(config.tracker_kind.as_deref(), Some("github"));
-    assert_eq!(config.tracker_repository.as_deref(), Some("acme/test-repo"));
-    assert_eq!(config.agent_max_concurrent, 3);
-    assert_eq!(config.workspace_root, ws_root);
+    // 1. Parse config
+    let config = make_config(&ws_root);
+    assert_eq!(config.tracker.kind, "github");
+    assert_eq!(config.tracker.repository.as_deref(), Some("acme/test-repo"));
+    assert_eq!(config.concurrency.max_concurrent_agents, 3);
+    assert_eq!(
+        config.workspace.root.as_deref(),
+        Some(ws_root.to_str().unwrap())
+    );
 
-    // 3. Validate for dispatch
-    assert!(config.validate_for_dispatch().is_ok());
-
-    // 4. Render prompt
+    // 2. Render prompt from an agent's inline prompt
     let issue = sample_issue();
-    let prompt = render_prompt(&workflow.prompt_template, &issue, None).unwrap();
+    let prompt_template = config
+        .agents
+        .get("build")
+        .unwrap()
+        .prompt
+        .as_deref()
+        .unwrap();
+    let prompt = render_prompt(prompt_template, &issue, None).unwrap();
     assert!(prompt.contains("test-repo#7"));
     assert!(prompt.contains("Add dark mode"));
-    assert!(prompt.contains("Users want dark mode"));
-    assert!(!prompt.contains("retry attempt"));
 
-    // Render with retry
-    let retry_prompt = render_prompt(&workflow.prompt_template, &issue, Some(2)).unwrap();
-    assert!(retry_prompt.contains("retry attempt 2"));
-
-    // 5. Create workspace
-    let mgr = WorkspaceManager::new(&config.workspace_root).unwrap();
+    // 3. Create workspace
+    let mgr = WorkspaceManager::new(&ws_root).unwrap();
     let ws = mgr.prepare_workspace(&issue.identifier).unwrap();
     assert!(ws.created_now);
     assert!(ws.path.is_dir());
@@ -94,12 +93,12 @@ Description: {{{{ issue.description }}}}
         sanitize_workspace_key(&issue.identifier).unwrap()
     );
 
-    // 6. Reuse workspace
+    // 4. Reuse workspace
     let ws2 = mgr.prepare_workspace(&issue.identifier).unwrap();
     assert!(!ws2.created_now);
     assert_eq!(ws.path, ws2.path);
 
-    // 7. Cleanup
+    // 5. Cleanup
     mgr.remove_workspace(&issue.identifier).unwrap();
     assert!(!ws.path.exists());
 }

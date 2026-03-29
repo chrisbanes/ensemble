@@ -1,9 +1,22 @@
 //! Integration test: create a todo_file tracker from config, write a TODO.md, fetch candidates.
 
-use ensemble_core::config::typed::ServiceConfig;
-use ensemble_core::config::workflow::parse_workflow;
+use ensemble_core::config::ensemble::TrackerConfig;
 use ensemble_core::tracker::create_tracker;
 use tempfile::TempDir;
+
+fn todo_file_tracker_config(path: std::path::PathBuf) -> TrackerConfig {
+    TrackerConfig {
+        kind: "todo_file".to_string(),
+        active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+        terminal_states: vec!["Done".to_string(), "Closed".to_string()],
+        path: Some(path),
+        endpoint: None,
+        api_key: None,
+        repository: None,
+        project_number: None,
+        labels_filter: vec![],
+    }
+}
 
 #[tokio::test]
 async fn test_todo_file_tracker_via_factory() {
@@ -28,20 +41,7 @@ async fn test_todo_file_tracker_via_factory() {
     )
     .unwrap();
 
-    // Build config from a WORKFLOW.md-like string
-    let workflow_content = format!(
-        r#"---
-tracker:
-  kind: todo_file
-  path: {}
----
-Do the work on {{{{ issue.identifier }}}}.
-"#,
-        todo_path.display()
-    );
-
-    let workflow = parse_workflow(&workflow_content).unwrap();
-    let config = ServiceConfig::from_workflow(&workflow).unwrap();
+    let config = todo_file_tracker_config(todo_path);
 
     // Create tracker via factory
     let tracker = create_tracker(&config).unwrap();
@@ -105,10 +105,7 @@ async fn test_todo_file_tracker_fetch_by_states() {
     )
     .unwrap();
 
-    let mut config = ServiceConfig::default();
-    config.tracker_kind = Some("todo_file".to_string());
-    config.tracker_path = todo_path;
-
+    let config = todo_file_tracker_config(todo_path);
     let tracker = create_tracker(&config).unwrap();
 
     // Fetch terminal states
@@ -149,10 +146,7 @@ async fn test_todo_file_tracker_fetch_states_by_ids() {
     )
     .unwrap();
 
-    let mut config = ServiceConfig::default();
-    config.tracker_kind = Some("todo_file".to_string());
-    config.tracker_path = todo_path;
-
+    let config = todo_file_tracker_config(todo_path);
     let tracker = create_tracker(&config).unwrap();
 
     let issues = tracker
@@ -169,16 +163,18 @@ async fn test_todo_file_tracker_fetch_states_by_ids() {
 
 #[tokio::test]
 async fn test_factory_rejects_unsupported_kind() {
-    let mut config = ServiceConfig::default();
-    config.tracker_kind = Some("jira".to_string());
+    let config = TrackerConfig {
+        kind: "jira".to_string(),
+        active_states: vec!["Todo".to_string()],
+        terminal_states: vec!["Done".to_string()],
+        path: None,
+        endpoint: None,
+        api_key: None,
+        repository: None,
+        project_number: None,
+        labels_filter: vec![],
+    };
 
-    let result = create_tracker(&config);
-    assert!(result.is_err());
-}
-
-#[tokio::test]
-async fn test_factory_rejects_missing_kind() {
-    let config = ServiceConfig::default();
     let result = create_tracker(&config);
     assert!(result.is_err());
 }

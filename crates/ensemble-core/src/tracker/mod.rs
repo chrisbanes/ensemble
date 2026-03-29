@@ -2,9 +2,10 @@ pub mod github;
 pub mod model;
 pub mod todo_file;
 
-use crate::config::typed::ServiceConfig;
+use crate::config::ensemble::TrackerConfig;
 use async_trait::async_trait;
 use model::Issue;
+use std::path::PathBuf;
 
 /// Error type for tracker operations.
 #[derive(Debug, thiserror::Error)]
@@ -60,48 +61,44 @@ pub trait IssueTracker: Send + Sync {
     }
 }
 
-/// Create an `IssueTracker` implementation based on the service config.
+/// Create an `IssueTracker` implementation based on the tracker config.
 ///
-/// Matches on `tracker_kind` to return the right backend:
+/// Matches on `kind` to return the right backend:
 /// - `"todo_file"` -> `TodoFileTracker`
 /// - `"github"` -> `GithubTracker`
 ///
-/// Returns an error if the tracker kind is missing or unsupported, or
+/// Returns an error if the tracker kind is unsupported, or
 /// if required configuration is absent (e.g., missing API key for GitHub).
-pub fn create_tracker(config: &ServiceConfig) -> Result<Box<dyn IssueTracker>, TrackerError> {
-    let kind = config
-        .tracker_kind
-        .as_deref()
-        .ok_or_else(|| TrackerError::UnsupportedKind {
-            kind: "<none>".to_string(),
-        })?;
-
-    match kind {
+pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, TrackerError> {
+    match config.kind.as_str() {
         "todo_file" => {
             let tracker = todo_file::TodoFileTracker::new(
-                config.tracker_path.clone(),
-                config.tracker_active_states.clone(),
+                config
+                    .path
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("TODO.md")),
+                config.active_states.clone(),
             );
             Ok(Box::new(tracker))
         }
         "github" => {
-            let token = config
-                .tracker_api_key
-                .as_ref()
-                .ok_or(TrackerError::MissingApiKey)?;
+            let token = config.api_key.as_ref().ok_or(TrackerError::MissingApiKey)?;
             let repository = config
-                .tracker_repository
+                .repository
                 .as_ref()
                 .ok_or(TrackerError::MissingRepository)?;
 
             let tracker = github::GithubTracker::new(
-                config.tracker_endpoint.clone(),
+                config
+                    .endpoint
+                    .clone()
+                    .unwrap_or_else(|| "https://api.github.com/graphql".to_string()),
                 token.clone(),
                 repository.clone(),
-                config.tracker_project_number,
-                config.tracker_active_states.clone(),
-                config.tracker_terminal_states.clone(),
-                config.tracker_labels_filter.clone(),
+                config.project_number,
+                config.active_states.clone(),
+                config.terminal_states.clone(),
+                config.labels_filter.clone(),
             )?;
             Ok(Box::new(tracker))
         }
@@ -114,15 +111,41 @@ pub fn create_tracker(config: &ServiceConfig) -> Result<Box<dyn IssueTracker>, T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::typed::ServiceConfig;
+    use crate::config::ensemble::TrackerConfig;
     use tempfile::TempDir;
+
+    fn todo_file_config(path: PathBuf) -> TrackerConfig {
+        TrackerConfig {
+            kind: "todo_file".to_string(),
+            active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+            terminal_states: vec!["Done".to_string(), "Closed".to_string()],
+            path: Some(path),
+            endpoint: None,
+            api_key: None,
+            repository: None,
+            project_number: None,
+            labels_filter: vec![],
+        }
+    }
+
+    fn github_config(api_key: Option<String>, repository: Option<String>) -> TrackerConfig {
+        TrackerConfig {
+            kind: "github".to_string(),
+            active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+            terminal_states: vec!["Done".to_string(), "Closed".to_string()],
+            path: None,
+            endpoint: None,
+            api_key,
+            repository,
+            project_number: None,
+            labels_filter: vec![],
+        }
+    }
 
     #[test]
     fn test_create_todo_file_tracker() {
         let dir = TempDir::new().unwrap();
-        let mut config = ServiceConfig::default();
-        config.tracker_kind = Some("todo_file".to_string());
-        config.tracker_path = dir.path().join("TODO.md");
+        let config = todo_file_config(dir.path().join("TODO.md"));
 
         let tracker = create_tracker(&config);
         assert!(tracker.is_ok());
@@ -130,10 +153,10 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker() {
-        let mut config = ServiceConfig::default();
-        config.tracker_kind = Some("github".to_string());
-        config.tracker_api_key = Some("ghp_test_token".to_string());
-        config.tracker_repository = Some("acme/repo".to_string());
+        let config = github_config(
+            Some("ghp_test_token".to_string()),
+            Some("acme/repo".to_string()),
+        );
 
         let tracker = create_tracker(&config);
         assert!(tracker.is_ok());
@@ -141,10 +164,7 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker_missing_api_key() {
-        let mut config = ServiceConfig::default();
-        config.tracker_kind = Some("github".to_string());
-        config.tracker_api_key = None;
-        config.tracker_repository = Some("acme/repo".to_string());
+        let config = github_config(None, Some("acme/repo".to_string()));
 
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::MissingApiKey)));
@@ -152,10 +172,7 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker_missing_repository() {
-        let mut config = ServiceConfig::default();
-        config.tracker_kind = Some("github".to_string());
-        config.tracker_api_key = Some("ghp_test_token".to_string());
-        config.tracker_repository = None;
+        let config = github_config(Some("ghp_test_token".to_string()), None);
 
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::MissingRepository)));
@@ -163,17 +180,18 @@ mod tests {
 
     #[test]
     fn test_create_unsupported_kind() {
-        let mut config = ServiceConfig::default();
-        config.tracker_kind = Some("linear".to_string());
+        let config = TrackerConfig {
+            kind: "linear".to_string(),
+            active_states: vec![],
+            terminal_states: vec![],
+            path: None,
+            endpoint: None,
+            api_key: None,
+            repository: None,
+            project_number: None,
+            labels_filter: vec![],
+        };
 
-        let result = create_tracker(&config);
-        assert!(matches!(result, Err(TrackerError::UnsupportedKind { .. })));
-    }
-
-    #[test]
-    fn test_create_no_kind() {
-        let config = ServiceConfig::default();
-        // tracker_kind is None by default
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::UnsupportedKind { .. })));
     }
