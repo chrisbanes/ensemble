@@ -58,6 +58,10 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 - **Dependencies**: Declare in `[workspace.dependencies]`, reference with `{ workspace = true }` in crate Cargo.toml.
 - **Module organization**: One responsibility per file. `mod.rs` files re-export submodules.
 
+## Git policy
+
+- **No agent attribution**: Do not add `Co-Authored-By`, `Signed-off-by`, or any other trailer attributing work to an AI agent in commits or PRs. Do not modify git config (user.name, user.email) to reference an agent. Commits should look like they came from the human developer.
+
 ## Key design decisions
 
 - **Pluggable trackers**: `IssueTracker` is an async trait. Implementations (GitHub, todo_file) will live in a separate `ensemble-trackers` crate.
