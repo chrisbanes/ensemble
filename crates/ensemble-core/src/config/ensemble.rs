@@ -68,8 +68,9 @@ pub struct AgentConfig {
 pub struct StepConfig {
     pub name: String,
     pub agent: String,
-    #[serde(default)]
-    pub depends: Vec<String>,
+    /// Explicit dependencies. `None` means "use implicit sequential rule" (depend on
+    /// previous step). `Some(vec![])` means "no dependencies" (explicit root).
+    pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
 }
 
@@ -430,7 +431,7 @@ on_failure: Failed
         assert!(config.agents.contains_key("build"));
         assert!(config.agents.contains_key("review"));
         assert_eq!(config.steps.len(), 2);
-        assert_eq!(config.steps[1].depends, vec!["build"]);
+        assert_eq!(config.steps[1].depends, Some(vec!["build".to_string()]));
         assert_eq!(config.steps[1].tracker_state.as_deref(), Some("Review"));
         assert_eq!(config.concurrency.max_concurrent_agents, 8);
         assert_eq!(config.concurrency.max_step_parallelism, 4);

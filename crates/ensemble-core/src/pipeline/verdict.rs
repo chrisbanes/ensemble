@@ -38,11 +38,8 @@ pub async fn read_verdict_file(workspace: &Path) -> Result<Option<Verdict>, std:
     let path = workspace.join(".ensemble").join("verdict.json");
     match tokio::fs::read_to_string(&path).await {
         Ok(contents) => {
-            let payload: VerdictPayload =
-                serde_json::from_str(&contents).unwrap_or(VerdictPayload {
-                    verdict: None,
-                    summary: None,
-                });
+            let payload: VerdictPayload = serde_json::from_str(&contents)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
             Ok(verdict_from_payload(&payload))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -65,11 +62,18 @@ pub async fn resolve_verdict(acp_verdict: Option<&serde_json::Value>, workspace:
     }
 
     // 2. Try file.
-    if let Ok(Some(v)) = read_verdict_file(workspace).await {
-        return v;
+    match read_verdict_file(workspace).await {
+        Ok(Some(v)) => return v,
+        Ok(None) => {} // file doesn't exist — fall through to default
+        Err(e) => {
+            // Malformed verdict file — treat as rejection, not silent approval.
+            return Verdict::Reject {
+                summary: format!("failed to parse .ensemble/verdict.json: {e}"),
+            };
+        }
     }
 
-    // 3. Default.
+    // 3. Default (no ACP verdict, no file).
     Verdict::Approve
 }
 
@@ -199,5 +203,22 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let result = resolve_verdict(None, dir.path()).await;
         assert_eq!(result, Verdict::Approve);
+    }
+
+    #[tokio::test]
+    async fn test_read_verdict_file_malformed_json_is_error() {
+        let dir = TempDir::new().unwrap();
+        write_verdict_file(&dir, "this is not json").await;
+        let result = read_verdict_file(dir.path()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_verdict_malformed_file_rejects() {
+        // Malformed verdict.json should reject, not silently approve.
+        let dir = TempDir::new().unwrap();
+        write_verdict_file(&dir, "not valid json").await;
+        let result = resolve_verdict(None, dir.path()).await;
+        assert!(matches!(result, Verdict::Reject { .. }));
     }
 }

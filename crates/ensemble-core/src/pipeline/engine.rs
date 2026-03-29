@@ -201,10 +201,15 @@ mod tests {
     use crate::pipeline::dag::build_dag;
 
     fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
+        let deps = if depends.is_empty() {
+            None
+        } else {
+            Some(depends.iter().map(|s| s.to_string()).collect())
+        };
         StepConfig {
             name: name.to_string(),
             agent: agent.to_string(),
-            depends: depends.iter().map(|s| s.to_string()).collect(),
+            depends: deps,
             tracker_state: None,
         }
     }
@@ -215,10 +220,15 @@ mod tests {
         depends: &[&str],
         tracker_state: &str,
     ) -> StepConfig {
+        let deps = if depends.is_empty() {
+            None
+        } else {
+            Some(depends.iter().map(|s| s.to_string()).collect())
+        };
         StepConfig {
             name: name.to_string(),
             agent: agent.to_string(),
-            depends: depends.iter().map(|s| s.to_string()).collect(),
+            depends: deps,
             tracker_state: Some(tracker_state.to_string()),
         }
     }

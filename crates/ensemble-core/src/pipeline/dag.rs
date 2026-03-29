@@ -43,9 +43,9 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
     // Resolve each step's dependency list, applying the implicit sequential rule.
     let mut resolved: Vec<DagStep> = Vec::with_capacity(steps.len());
     for (i, step) in steps.iter().enumerate() {
-        let deps: Vec<String> = if !step.depends.is_empty() {
-            // Explicit deps — validate all references exist.
-            for dep in &step.depends {
+        let deps: Vec<String> = if let Some(ref explicit_deps) = step.depends {
+            // Explicit deps (including empty vec for explicit roots) — validate references.
+            for dep in explicit_deps {
                 if !known.contains(dep.as_str()) {
                     return Err(PipelineError::UnknownDependency {
                         step: step.name.clone(),
@@ -53,7 +53,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
                     });
                 }
             }
-            step.depends.clone()
+            explicit_deps.clone()
         } else if i > 0 {
             // Implicit sequential: depend on the previous step.
             vec![steps[i - 1].name.clone()]
@@ -148,10 +148,24 @@ mod tests {
     use super::*;
 
     fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
+        let deps = if depends.is_empty() {
+            None // implicit sequential
+        } else {
+            Some(depends.iter().map(|s| s.to_string()).collect())
+        };
         StepConfig {
             name: name.to_string(),
             agent: agent.to_string(),
-            depends: depends.iter().map(|s| s.to_string()).collect(),
+            depends: deps,
+            tracker_state: None,
+        }
+    }
+
+    fn make_root_step(name: &str, agent: &str) -> StepConfig {
+        StepConfig {
+            name: name.to_string(),
+            agent: agent.to_string(),
+            depends: Some(vec![]), // explicit root
             tracker_state: None,
         }
     }
@@ -278,5 +292,20 @@ mod tests {
             matches!(result, Err(PipelineError::CycleDetected)),
             "expected CycleDetected for self-dep, got {result:?}"
         );
+    }
+
+    #[test]
+    fn test_explicit_parallel_roots() {
+        // Two steps both explicitly declared as roots via depends: []
+        let steps = vec![
+            make_root_step("lint", "linter"),
+            make_root_step("build", "builder"),
+            make_step("test", "tester", &["lint", "build"]),
+        ];
+        let dag = build_dag(&steps).unwrap();
+        let roots = root_steps(&dag);
+        assert!(roots.contains(&"lint"));
+        assert!(roots.contains(&"build"));
+        assert!(!roots.contains(&"test"));
     }
 }

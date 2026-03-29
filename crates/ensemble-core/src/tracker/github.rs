@@ -967,7 +967,8 @@ impl IssueTracker for GithubTracker {
     }
 
     fn supports_writes(&self) -> bool {
-        true
+        // Repo mode doesn't support state writes yet (label-based transitions not implemented).
+        self.project_number.is_some()
     }
 
     async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
