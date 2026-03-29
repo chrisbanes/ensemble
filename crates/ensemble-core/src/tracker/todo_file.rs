@@ -276,6 +276,131 @@ impl IssueTracker for TodoFileTracker {
             .collect();
         Ok(issues)
     }
+
+    fn supports_writes(&self) -> bool {
+        true
+    }
+
+    /// Move an issue to a different state section in the TODO file.
+    ///
+    /// Reads the file, finds the issue block matching `[{id}]`, removes it from its
+    /// current section, and inserts it under the `## {target_state}` heading.
+    /// If the heading does not exist, it is appended at the end of the file.
+    async fn set_issue_state(&self, id: &str, target_state: &str) -> Result<(), TrackerError> {
+        let content =
+            tokio::fs::read_to_string(&self.path)
+                .await
+                .map_err(|e| TrackerError::IoError {
+                    reason: format!("failed to read {}: {}", self.path.display(), e),
+                })?;
+
+        let lines: Vec<&str> = content.lines().collect();
+
+        // Identify the issue block: the `- [ID]` line plus any immediately following
+        // indented continuation lines.
+        let issue_prefix = format!("- [{id}]");
+        let issue_line_idx = lines.iter().position(|l| {
+            l.starts_with(&issue_prefix) && {
+                // Confirm the character after `]` is either end-of-line, a space, or nothing
+                // (avoids matching `[PROJ-10]` when searching for `[PROJ-1]`).
+                let after = &l[issue_prefix.len()..];
+                after.is_empty() || after.starts_with(' ')
+            }
+        });
+
+        let issue_line_idx = match issue_line_idx {
+            Some(i) => i,
+            None => {
+                return Err(TrackerError::IoError {
+                    reason: format!("issue [{id}] not found in {}", self.path.display()),
+                });
+            }
+        };
+
+        // Collect the full issue block (title line + indented continuation lines).
+        let mut issue_block: Vec<String> = vec![lines[issue_line_idx].to_string()];
+        let mut end_idx = issue_line_idx + 1;
+        while end_idx < lines.len() {
+            let line = lines[end_idx];
+            // A continuation line is either blank or starts with whitespace.
+            if line.is_empty() || line.starts_with("  ") || line.starts_with('\t') {
+                issue_block.push(line.to_string());
+                end_idx += 1;
+            } else {
+                break;
+            }
+        }
+
+        // Trim trailing blank lines from the issue block so we don't accumulate extra whitespace.
+        while issue_block
+            .last()
+            .map(|l| l.trim().is_empty())
+            .unwrap_or(false)
+        {
+            issue_block.pop();
+        }
+
+        // Build the new file content without the issue block.
+        let mut new_lines: Vec<String> = lines
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i < issue_line_idx || *i >= end_idx)
+            .map(|(_, l)| l.to_string())
+            .collect();
+
+        // Find the target heading index in the new_lines vector.
+        let target_heading = format!("## {target_state}");
+        let heading_idx = new_lines
+            .iter()
+            .position(|l| l.trim() == target_heading.trim());
+
+        match heading_idx {
+            Some(h_idx) => {
+                // Insert the issue block right after the heading (and any blank line that
+                // immediately follows it).
+                let insert_at = if new_lines
+                    .get(h_idx + 1)
+                    .map(|l| l.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    h_idx + 2
+                } else {
+                    h_idx + 1
+                };
+                for (offset, issue_line) in issue_block.iter().enumerate() {
+                    new_lines.insert(insert_at + offset, issue_line.clone());
+                }
+            }
+            None => {
+                // Heading doesn't exist — append it at the end of the file.
+                // Ensure there is a blank separator before the new heading.
+                if new_lines
+                    .last()
+                    .map(|l| !l.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    new_lines.push(String::new());
+                }
+                new_lines.push(target_heading);
+                new_lines.push(String::new());
+                new_lines.extend(issue_block);
+            }
+        }
+
+        // Reconstruct file content, preserving a single trailing newline.
+        let mut output = new_lines.join("\n");
+        if !output.ends_with('\n') {
+            output.push('\n');
+        }
+
+        tokio::fs::write(&self.path, output)
+            .await
+            .map_err(|e| TrackerError::IoError {
+                reason: format!("failed to write {}: {}", self.path.display(), e),
+            })?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -644,5 +769,107 @@ mod tests {
         assert!(issue.blocked_by.is_empty());
         assert!(issue.created_at.is_none());
         assert!(issue.updated_at.is_none());
+    }
+
+    // --- set_issue_state tests ---
+
+    #[test]
+    fn test_supports_writes_true() {
+        let tracker = TodoFileTracker::new(std::path::PathBuf::from("/dev/null"), active_states());
+        assert!(tracker.supports_writes());
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_moves_issue() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- [PROJ-1] First task
+  Some description.
+- [PROJ-2] Second task
+
+## In Progress
+- [PROJ-3] Active task
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        tracker
+            .set_issue_state("PROJ-1", "In Progress")
+            .await
+            .unwrap();
+
+        // Re-parse to confirm the move
+        let all_issues = tracker
+            .fetch_issues_by_states(&["Todo".to_string(), "In Progress".to_string()])
+            .await
+            .unwrap();
+
+        // PROJ-1 should now be In Progress
+        let proj1 = all_issues
+            .iter()
+            .find(|i| i.identifier == "PROJ-1")
+            .unwrap();
+        assert_eq!(proj1.state, "In Progress");
+
+        // PROJ-2 should remain in Todo
+        let proj2 = all_issues
+            .iter()
+            .find(|i| i.identifier == "PROJ-2")
+            .unwrap();
+        assert_eq!(proj2.state, "Todo");
+
+        // PROJ-3 should still be In Progress
+        let proj3 = all_issues
+            .iter()
+            .find(|i| i.identifier == "PROJ-3")
+            .unwrap();
+        assert_eq!(proj3.state, "In Progress");
+
+        // Verify PROJ-1 comes before PROJ-3 in the In Progress section
+        // (it was inserted right after the heading)
+        let in_progress: Vec<_> = all_issues
+            .iter()
+            .filter(|i| i.state == "In Progress")
+            .collect();
+        assert_eq!(in_progress[0].identifier, "PROJ-1");
+        assert_eq!(in_progress[1].identifier, "PROJ-3");
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_creates_new_heading() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- [PROJ-1] First task
+- [PROJ-2] Second task
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        // Move PROJ-1 to "Done" — a heading that doesn't exist yet
+        tracker.set_issue_state("PROJ-1", "Done").await.unwrap();
+
+        // Fetch all issues including Done
+        let done_issues = tracker
+            .fetch_issues_by_states(&["Done".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(done_issues.len(), 1);
+        assert_eq!(done_issues[0].identifier, "PROJ-1");
+        assert_eq!(done_issues[0].state, "Done");
+
+        // PROJ-2 should still be in Todo
+        let todo_issues = tracker
+            .fetch_issues_by_states(&["Todo".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(todo_issues.len(), 1);
+        assert_eq!(todo_issues[0].identifier, "PROJ-2");
+
+        // The "## Done" heading must be present in the file
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(
+            written.contains("## Done"),
+            "expected '## Done' heading in file"
+        );
     }
 }
