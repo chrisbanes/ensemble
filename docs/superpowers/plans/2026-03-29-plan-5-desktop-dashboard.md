@@ -295,7 +295,7 @@ export default function App() {
 
 Run:
 ```bash
-cd crates/ensemble-desktop/src-ui && npm install
+npm --prefix crates/ensemble-desktop/src-ui install
 ```
 Expected: `node_modules` created, no errors
 
@@ -376,19 +376,8 @@ export interface StateResponse {
   rate_limits: RateLimitSnapshot | null;
 }
 
-/** A recent event entry in issue detail. */
-export interface RecentEvent {
-  at: string;
-  event: string;
-  message: string | null;
-}
-
-/** Agent session log reference. */
-export interface AgentSessionLog {
-  label: string;
-  path: string | null;
-  url: string | null;
-}
+// NOTE: RecentEvent and AgentSessionLog interfaces are not yet provided by
+// Plan 4's API. They will be added here when Plan 4 gains event/log collection.
 
 /** Running session detail within issue detail. */
 export interface IssueRunningDetail {
@@ -424,12 +413,9 @@ export interface IssueDetailResponse {
   };
   running: IssueRunningDetail | null;
   retry: IssueRetryDetail | null;
-  logs: {
-    agent_session_logs: AgentSessionLog[];
-  };
-  recent_events: RecentEvent[];
   last_error: string | null;
-  tracked: Record<string, unknown>;
+  // NOTE: `logs`, `recent_events`, and `tracked` fields will be added when
+  // Plan 4 gains event/log collection support.
 }
 
 /** Response from POST /api/v1/refresh. */
@@ -1215,62 +1201,8 @@ export default function IssueDetail() {
         </section>
       )}
 
-      {/* Recent Events */}
-      <section className="bg-white rounded-lg border border-gray-200 p-4">
-        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-3">
-          Recent Events
-        </h2>
-        {data.recent_events.length === 0 ? (
-          <p className="text-sm text-gray-500">No recent events.</p>
-        ) : (
-          <div className="space-y-2">
-            {data.recent_events.map((evt, i) => (
-              <div
-                key={i}
-                className="flex items-start space-x-3 text-sm border-b border-gray-50 pb-2 last:border-0"
-              >
-                <span className="text-gray-400 font-mono text-xs whitespace-nowrap mt-0.5">
-                  {new Date(evt.at).toLocaleTimeString()}
-                </span>
-                <span className="font-medium text-gray-700">{evt.event}</span>
-                {evt.message && (
-                  <span className="text-gray-500 truncate">{evt.message}</span>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      {/* Session Logs */}
-      {data.logs.agent_session_logs.length > 0 && (
-        <section className="bg-white rounded-lg border border-gray-200 p-4">
-          <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wider mb-2">
-            Session Logs
-          </h2>
-          <ul className="space-y-1">
-            {data.logs.agent_session_logs.map((log, i) => (
-              <li key={i} className="text-sm">
-                <span className="font-medium text-gray-700">{log.label}:</span>{" "}
-                {log.url ? (
-                  <a
-                    href={log.url}
-                    className="text-blue-600 hover:text-blue-800"
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    {log.path ?? log.url}
-                  </a>
-                ) : (
-                  <span className="font-mono text-gray-600">
-                    {log.path ?? "-"}
-                  </span>
-                )}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      {/* Event log and session history placeholder */}
+      <p className="text-sm text-gray-400">Event log and session history will be available in a future release.</p>
     </div>
   );
 }
@@ -1280,7 +1212,7 @@ export default function IssueDetail() {
 
 ```bash
 git add crates/ensemble-desktop/src-ui/src/pages/IssueDetail.tsx
-git commit -m "feat: Issue Detail page with workspace path, attempts, tokens, events, and logs"
+git commit -m "feat: Issue Detail page with workspace path, attempts, and tokens"
 ```
 
 ---
@@ -1486,7 +1418,7 @@ export default function ConfigStatus() {
 
 Run:
 ```bash
-cd crates/ensemble-desktop/src-ui && npm run build
+npm --prefix crates/ensemble-desktop/src-ui run build
 ```
 Expected: Build completes with no TypeScript or Vite errors. Output in `crates/ensemble-desktop/src-ui/dist/`.
 
@@ -1667,15 +1599,20 @@ fn main() {
                 }
 
                 // Build the axum router.
-                // In a full implementation, this uses ensemble_core::api::router
-                // with shared orchestrator state. For now, create a minimal router
-                // that serves the static dashboard assets.
+                // Construct Plan 4's AppState with empty orchestrator state,
+                // then wrap it with static asset serving for the desktop app.
                 let assets_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                     .join("src-ui")
                     .join("dist");
 
+                let app_state = ensemble_core::api::router::AppState {
+                    orchestrator_state: None,
+                    refresh_requested: std::sync::Arc::new(tokio::sync::Notify::new()),
+                    workspace_root: std::path::PathBuf::from("."),
+                };
+
                 let router = ensemble_core::api::router::create_router_with_assets(
-                    None, // orchestrator state — will be wired in full integration
+                    app_state,
                     Some(assets_dir),
                 );
 
@@ -1723,175 +1660,38 @@ Add the following function to `crates/ensemble-core/src/api/router.rs` (the exis
 ```rust
 use std::path::PathBuf;
 use tower_http::services::ServeDir;
-
-/// The shared orchestrator state type used by asset-serving API handlers.
-/// When None, endpoints return 503 (service starting up).
-/// This mirrors Plan 4's `AppState.orchestrator_state` field.
-pub type SharedState = Option<std::sync::Arc<tokio::sync::RwLock<crate::orchestrator::state::OrchestratorState>>>;
-// NOTE: In the full integration, handlers should use Plan 4's `AppState` struct
-// (which includes `orchestrator_state`, `refresh_requested`, and `workspace_root`).
-// `SharedState` is used here only for the standalone `create_router_with_assets()` path.
+use crate::api::router::{AppState, create_api_router};
 
 /// Create the API router with optional static asset serving.
 ///
-/// - `state`: shared orchestrator state (None if not yet initialized)
-/// - `assets_dir`: optional path to the React build output directory.
-///   When provided, `GET /` and all non-`/api/*` paths serve files from this directory,
-///   with fallback to `index.html` for client-side routing.
+/// Wraps Plan 4's `create_api_router` with an asset serving layer.
+/// When `assets_dir` is provided and exists, non-API paths serve from that
+/// directory with SPA fallback to `index.html`.
 pub fn create_router_with_assets(
-    state: SharedState,
+    app_state: AppState,
     assets_dir: Option<PathBuf>,
 ) -> axum::Router {
-    let api_router = create_api_routes(state);
+    let api_router = create_api_router(app_state);
 
     match assets_dir {
         Some(dir) if dir.is_dir() => {
             let serve_dir = ServeDir::new(&dir)
                 .not_found_service(tower_http::services::ServeFile::new(dir.join("index.html")));
 
-            axum::Router::new()
-                .nest("/api/v1", api_router)
-                .fallback_service(serve_dir)
+            api_router.fallback_service(serve_dir)
         }
         _ => {
-            axum::Router::new()
-                .nest("/api/v1", api_router)
-                .fallback(|| async {
-                    axum::response::Response::builder()
-                        .status(axum::http::StatusCode::NOT_FOUND)
-                        .header("content-type", "application/json")
-                        .body(axum::body::Body::from(
-                            r#"{"error":{"code":"not_found","message":"Dashboard assets not available. Build the React app first."}}"#,
-                        ))
-                        .unwrap()
-                })
+            api_router.fallback(|| async {
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::NOT_FOUND)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"error":{"code":"not_found","message":"Dashboard assets not available. Build the React app first."}}"#,
+                    ))
+                    .unwrap()
+            })
         }
     }
-}
-
-/// Create just the API route handlers (no static assets).
-fn create_api_routes(state: SharedState) -> axum::Router {
-    use axum::routing::{get, post};
-    use axum::extract::State;
-    use axum::Json;
-
-    let state_for_handlers = state;
-
-    axum::Router::new()
-        .route("/state", get({
-            let s = state_for_handlers.clone();
-            move || handle_get_state(s)
-        }))
-        .route("/{identifier}", get({
-            let s = state_for_handlers.clone();
-            move |path: axum::extract::Path<String>| handle_get_issue(s, path)
-        }))
-        .route("/refresh", post({
-            let s = state_for_handlers.clone();
-            move || handle_post_refresh(s)
-        }))
-}
-
-async fn handle_get_state(state: SharedState) -> axum::response::Response {
-    use axum::http::StatusCode;
-
-    // When orchestrator state is not yet available, return 503
-    let _state = match state {
-        Some(s) => s,
-        None => {
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":{"code":"starting","message":"Orchestrator is starting up"}}"#,
-                ))
-                .unwrap();
-        }
-    };
-
-    // Read the orchestrator state and produce a snapshot
-    let state_guard = _state.read().await;
-    let snapshot = crate::observability::snapshot::build_state_snapshot(&state_guard);
-    let json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
-
-    axum::response::Response::builder()
-        .status(StatusCode::OK)
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(json))
-        .unwrap()
-}
-
-async fn handle_get_issue(
-    state: SharedState,
-    axum::extract::Path(identifier): axum::extract::Path<String>,
-) -> axum::response::Response {
-    use axum::http::StatusCode;
-
-    let _state = match state {
-        Some(s) => s,
-        None => {
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":{"code":"starting","message":"Orchestrator is starting up"}}"#,
-                ))
-                .unwrap();
-        }
-    };
-
-    let state_guard = _state.read().await;
-    match crate::observability::snapshot::build_issue_snapshot(&state_guard, &identifier) {
-        Some(snapshot) => {
-            let json = serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".to_string());
-            axum::response::Response::builder()
-                .status(StatusCode::OK)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(json))
-                .unwrap()
-        }
-        None => {
-            axum::response::Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(format!(
-                    r#"{{"error":{{"code":"issue_not_found","message":"Issue '{}' not found in current state"}}}}"#,
-                    identifier
-                )))
-                .unwrap()
-        }
-    }
-}
-
-async fn handle_post_refresh(state: SharedState) -> axum::response::Response {
-    use axum::http::StatusCode;
-
-    let _state = match state {
-        Some(_s) => _s,
-        None => {
-            return axum::response::Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header("content-type", "application/json")
-                .body(axum::body::Body::from(
-                    r#"{"error":{"code":"starting","message":"Orchestrator is starting up"}}"#,
-                ))
-                .unwrap();
-        }
-    };
-
-    // In a full implementation, this would signal the orchestrator's poll loop
-    // to run an immediate tick. For now, return 202 Accepted.
-    let now = chrono::Utc::now().to_rfc3339();
-    let json = format!(
-        r#"{{"queued":true,"coalesced":false,"requested_at":"{}","operations":["poll","reconcile"]}}"#,
-        now
-    );
-
-    axum::response::Response::builder()
-        .status(StatusCode::ACCEPTED)
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(json))
-        .unwrap()
 }
 ```
 
@@ -1942,7 +1742,7 @@ This task verifies the entire Plan 5 implementation compiles and builds correctl
 
 Run:
 ```bash
-cd crates/ensemble-desktop/src-ui && npm run build
+npm --prefix crates/ensemble-desktop/src-ui run build
 ```
 Expected: Build succeeds. `dist/` directory contains `index.html` and JS/CSS assets.
 
@@ -1971,7 +1771,7 @@ Expected: All existing tests pass, plus any new API tests
 Run:
 ```bash
 # Build the React app first
-cd crates/ensemble-desktop/src-ui && npm run build && cd ../../..
+npm --prefix crates/ensemble-desktop/src-ui run build
 
 # Start a quick test: build and run the CLI with the assets path
 # (In a full setup, the CLI would auto-detect the assets. For now, verify compilation.)
@@ -1998,7 +1798,7 @@ After completing all 11 tasks, you'll have:
 - TanStack Query hooks with 2-3 second polling for live data updates
 - Three dashboard pages:
   - **Dashboard**: running agents table, retry queue with countdowns, aggregate token/runtime totals, rate limit status, force-refresh button
-  - **Issue Detail**: workspace path, attempt history, running session details with token breakdown, recent events timeline, session log links
+  - **Issue Detail**: workspace path, attempt history, running session details with token breakdown
   - **Config Status**: connection health, validation indicators, runtime snapshot, rate limit usage bar
 - A Tauri 2 desktop binary (`ensemble-desktop`) that starts the orchestrator, HTTP server, and WebView in a single process
 - Static asset serving via `tower-http::ServeDir` integrated into the axum router, enabling both the desktop app and headless CLI to host the dashboard

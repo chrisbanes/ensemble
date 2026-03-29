@@ -85,9 +85,10 @@ Agent(#[from] AgentError),
 Update `crates/ensemble-core/src/lib.rs`:
 
 ```rust
-pub mod error;
-pub mod tracker;
 pub mod config;
+pub mod error;
+pub mod pipeline;
+pub mod tracker;
 pub mod workspace;
 pub mod agent;
 pub mod orchestrator;

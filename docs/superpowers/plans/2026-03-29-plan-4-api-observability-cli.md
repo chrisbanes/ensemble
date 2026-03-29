@@ -62,9 +62,10 @@ pub mod observability;
 The full `lib.rs` should now contain:
 
 ```rust
-pub mod error;
-pub mod tracker;
 pub mod config;
+pub mod error;
+pub mod pipeline;
+pub mod tracker;
 pub mod workspace;
 pub mod agent;
 pub mod orchestrator;
@@ -77,9 +78,11 @@ Create `crates/ensemble-core/src/observability/snapshot.rs`:
 
 ```rust
 use crate::orchestrator::state::OrchestratorState;
+use crate::pipeline::engine::{PipelineRun, StepState};
 use crate::tracker::model::{RunningEntry, RetryEntry};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Top-level runtime snapshot matching SPEC.md Section 13.7.2 GET /api/v1/state shape.
 #[derive(Debug, Serialize)]
@@ -129,7 +132,7 @@ pub struct RetryRow {
     pub issue_id: String,
     pub issue_identifier: String,
     pub attempt: u32,
-    pub due_at: DateTime<Utc>,
+    pub due_at_ms: u64,
     pub error: Option<String>,
 }
 
@@ -200,7 +203,7 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
     let running_rows: Vec<RunningSessionRow> = state
         .running
         .values()
-        .map(|entry| running_entry_to_row(entry))
+        .map(|entry| running_entry_to_row(entry, &state.pipeline_runs))
         .collect();
 
     let retry_rows: Vec<RetryRow> = state
@@ -271,7 +274,10 @@ pub fn build_issue_snapshot(
         return None;
     };
 
-    let workspace_key = crate::tracker::model::sanitize_workspace_key(identifier);
+    let workspace_key = match crate::tracker::model::sanitize_workspace_key(identifier) {
+        Some(key) => key,
+        None => return None,  // Can't build detail for unsanitizable identifier
+    };
     let workspace_path = format!("{}/{}", workspace_root, workspace_key);
 
     let status = if running_entry.is_some() {
@@ -290,20 +296,31 @@ pub fn build_issue_snapshot(
 
     let restart_count = current_retry_attempt.unwrap_or(0);
 
-    let running_detail = running_entry.map(|entry| RunningDetail {
-        session_id: entry.session_id.clone(),
-        step_name: entry.step_name.clone(),
-        turn_count: entry.turn_count,
-        state: entry.issue.state.clone(),
-        started_at: entry.started_at,
-        last_event: entry.last_agent_event.clone(),
-        last_message: entry.last_agent_message.clone(),
-        last_event_at: entry.last_agent_timestamp,
-        tokens: TokenSnapshot {
-            input_tokens: entry.agent_input_tokens,
-            output_tokens: entry.agent_output_tokens,
-            total_tokens: entry.agent_total_tokens,
-        },
+    let running_detail = running_entry.map(|entry| {
+        let step_name = state.pipeline_runs.get(&entry.issue_id).and_then(|run| {
+            run.step_states.iter().find_map(|(name, step_state)| {
+                if matches!(step_state, StepState::Running { .. }) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        RunningDetail {
+            session_id: entry.session_id.clone(),
+            step_name,
+            turn_count: entry.turn_count,
+            state: entry.issue.state.clone(),
+            started_at: entry.started_at,
+            last_event: entry.last_agent_event.clone(),
+            last_message: entry.last_agent_message.clone(),
+            last_event_at: entry.last_agent_timestamp,
+            tokens: TokenSnapshot {
+                input_tokens: entry.agent_input_tokens,
+                output_tokens: entry.agent_output_tokens,
+                total_tokens: entry.agent_total_tokens,
+            },
+        }
     });
 
     let retry_detail = retry_entry.map(|entry| retry_entry_to_row(entry));
@@ -328,12 +345,21 @@ pub fn build_issue_snapshot(
 }
 
 /// Convert a RunningEntry to a RunningSessionRow for the snapshot.
-fn running_entry_to_row(entry: &RunningEntry) -> RunningSessionRow {
+fn running_entry_to_row(entry: &RunningEntry, pipeline_runs: &HashMap<String, PipelineRun>) -> RunningSessionRow {
+    let step_name = pipeline_runs.get(&entry.issue_id).and_then(|run| {
+        run.step_states.iter().find_map(|(name, state)| {
+            if matches!(state, StepState::Running { .. }) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+    });
     RunningSessionRow {
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         state: entry.issue.state.clone(),
-        step_name: entry.step_name.clone(),
+        step_name,
         session_id: entry.session_id.clone(),
         turn_count: entry.turn_count,
         last_event: entry.last_agent_event.clone(),
@@ -350,17 +376,11 @@ fn running_entry_to_row(entry: &RunningEntry) -> RunningSessionRow {
 
 /// Convert a RetryEntry to a RetryRow for the snapshot.
 fn retry_entry_to_row(entry: &RetryEntry) -> RetryRow {
-    // Convert due_at_ms to a DateTime<Utc>
-    let due_at_secs = (entry.due_at_ms / 1000) as i64;
-    let due_at_nanos = ((entry.due_at_ms % 1000) * 1_000_000) as u32;
-    let due_at = DateTime::from_timestamp(due_at_secs, due_at_nanos)
-        .unwrap_or_else(|| Utc::now());
-
     RetryRow {
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         attempt: entry.attempt,
-        due_at,
+        due_at_ms: entry.due_at_ms,
         error: entry.error.clone(),
     }
 }
@@ -640,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_row_due_at_conversion() {
+    fn test_retry_row_due_at_ms_passthrough() {
         let entry = RetryEntry {
             issue_id: "NODE_789".to_string(),
             identifier: "test#1".to_string(),
@@ -650,8 +670,7 @@ mod tests {
         };
 
         let row = retry_entry_to_row(&entry);
-        // Verify it produces a valid DateTime (not the fallback Utc::now())
-        assert_eq!(row.due_at.timestamp(), 1711641600);
+        assert_eq!(row.due_at_ms, 1711641600000);
     }
 }
 ```
@@ -933,9 +952,10 @@ pub mod api;
 The full `lib.rs` should now contain:
 
 ```rust
-pub mod error;
-pub mod tracker;
 pub mod config;
+pub mod error;
+pub mod pipeline;
+pub mod tracker;
 pub mod workspace;
 pub mod agent;
 pub mod orchestrator;
@@ -1478,7 +1498,6 @@ use ensemble_core::config::ensemble::{load_config, validate_config, EnsembleConf
 use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
-use ensemble_core::tracker::model::AgentTotals;
 
 /// Ensemble: orchestrate coding agents to work on project issues.
 #[derive(Parser, Debug)]
@@ -1538,18 +1557,14 @@ async fn main() -> ExitCode {
     );
 
     // 5. Create orchestrator state
-    let orchestrator_state = Arc::new(RwLock::new(OrchestratorState {
-        running: std::collections::HashMap::new(),
-        claimed: std::collections::HashSet::new(),
-        retry_attempts: std::collections::HashMap::new(),
-        completed: std::collections::HashSet::new(),
-        agent_totals: AgentTotals::default(),
-        agent_rate_limits: None,
-    }));
+    let orchestrator_state = Arc::new(RwLock::new(OrchestratorState::new(
+        config.polling.interval_ms,
+        config.concurrency.max_concurrent_agents,
+    )));
 
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
 
-    // 6. Determine HTTP server port: CLI --port flag (server.port is not in ensemble.yaml)
+    // 6. Determine HTTP server port (CLI-only — not part of ensemble.yaml config)
     let effective_port = cli.port;
 
     // 7. Optionally start HTTP server
@@ -1869,7 +1884,7 @@ async fn test_get_state_endpoint() {
     assert_eq!(retry["issue_id"], "NODE_456");
     assert_eq!(retry["issue_identifier"], "my-repo#99");
     assert_eq!(retry["attempt"], 3);
-    assert!(retry.get("due_at").is_some());
+    assert!(retry.get("due_at_ms").is_some());
     assert_eq!(retry["error"], "no available orchestrator slots");
 
     // Verify agent_totals shape
