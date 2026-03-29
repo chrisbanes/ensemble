@@ -219,6 +219,77 @@ impl Default for AgentRuntimeConfig {
     }
 }
 
+/// Resolve `$VAR_NAME` in a string value to its environment variable.
+/// Returns the literal string if it doesn't start with `$`.
+/// Returns None if the env var is empty or unset.
+fn resolve_env_var(value: &str) -> Option<String> {
+    if let Some(var_name) = value.strip_prefix('$') {
+        match std::env::var(var_name) {
+            Ok(v) if !v.is_empty() => Some(v),
+            _ => None,
+        }
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Expand `~` to home directory in a path string.
+fn expand_tilde(path_str: &str) -> PathBuf {
+    if let Some(rest) = path_str.strip_prefix('~') {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(rest.strip_prefix('/').unwrap_or(rest));
+        }
+    }
+    PathBuf::from(path_str)
+}
+
+/// Resolve a path string: expand `$VAR` then `~`.
+fn resolve_path(path_str: &str) -> PathBuf {
+    match resolve_env_var(path_str) {
+        Some(resolved) => expand_tilde(&resolved),
+        None => PathBuf::from(path_str),
+    }
+}
+
+impl EnsembleConfig {
+    /// Resolve environment variables and path expansions in config values.
+    ///
+    /// Call this after `parse_config()` to process `$VAR` and `~` in:
+    /// - `tracker.api_key`
+    /// - `tracker.path`
+    /// - `workspace.root`
+    /// - `agents.*.prompt_template`
+    pub fn resolve_env(&mut self) {
+        // tracker.api_key: $VAR resolution
+        if let Some(ref raw) = self.tracker.api_key {
+            self.tracker.api_key = resolve_env_var(raw);
+        } else {
+            // Try canonical env var
+            self.tracker.api_key = resolve_env_var("$GITHUB_TOKEN");
+        }
+
+        // tracker.path: $VAR + ~ expansion
+        if let Some(ref path) = self.tracker.path {
+            let path_str = path.to_string_lossy();
+            self.tracker.path = Some(resolve_path(&path_str));
+        }
+
+        // workspace.root: $VAR + ~ expansion
+        if let Some(ref root) = self.workspace.root {
+            let resolved = resolve_path(root);
+            self.workspace.root = Some(resolved.to_string_lossy().into_owned());
+        }
+
+        // agents.*.prompt_template: $VAR + ~ expansion
+        for agent in self.agents.values_mut() {
+            if let Some(ref path) = agent.prompt_template {
+                let path_str = path.to_string_lossy();
+                agent.prompt_template = Some(resolve_path(&path_str));
+            }
+        }
+    }
+}
+
 /// Load and parse an `ensemble.yaml` file from the given path.
 pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::error::ConfigError> {
     let content = std::fs::read_to_string(path).map_err(|_| {
@@ -226,10 +297,14 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
             path: path.display().to_string(),
         }
     })?;
-    parse_config(&content)
+    let mut config = parse_config(&content)?;
+    config.resolve_env();
+    Ok(config)
 }
 
 /// Parse an `ensemble.yaml` YAML string into an `EnsembleConfig`.
+/// Note: Does NOT resolve `$VAR` or `~`. Call `config.resolve_env()` after
+/// parsing, or use `load_config()` which does both.
 pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigError> {
     serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::WorkflowParseError {
         reason: e.to_string(),
@@ -529,5 +604,106 @@ on_failure: Failed
             result,
             Err(PipelineError::DuplicateStepName { .. })
         ));
+    }
+
+    #[test]
+    fn test_resolve_env_api_key() {
+        std::env::set_var("ENSEMBLE_TEST_KEY_2B", "secret123");
+        let yaml = r#"
+tracker:
+  kind: github
+  api_key: $ENSEMBLE_TEST_KEY_2B
+  repository: acme/repo
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        assert_eq!(config.tracker.api_key.as_deref(), Some("secret123"));
+        std::env::remove_var("ENSEMBLE_TEST_KEY_2B");
+    }
+
+    #[test]
+    fn test_resolve_env_empty_var_is_none() {
+        std::env::set_var("ENSEMBLE_EMPTY_2B", "");
+        let yaml = r#"
+tracker:
+  kind: github
+  api_key: $ENSEMBLE_EMPTY_2B
+  repository: acme/repo
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        assert_eq!(config.tracker.api_key, None);
+        std::env::remove_var("ENSEMBLE_EMPTY_2B");
+    }
+
+    #[test]
+    fn test_resolve_tilde_in_path() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: ~/my_todos.md
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            config.tracker.path.unwrap(),
+            PathBuf::from(home).join("my_todos.md")
+        );
+    }
+
+    #[test]
+    fn test_resolve_tilde_in_workspace_root() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+workspace:
+  root: ~/workspaces
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        let home = std::env::var("HOME").unwrap();
+        let expected = format!("{}/workspaces", home);
+        assert_eq!(config.workspace.root.as_deref(), Some(expected.as_str()));
     }
 }
