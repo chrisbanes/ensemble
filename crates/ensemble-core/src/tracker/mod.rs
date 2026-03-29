@@ -27,6 +27,8 @@ pub enum TrackerError {
     UnexpectedPayload { reason: String },
     #[error("pagination error: missing end cursor")]
     MissingEndCursor,
+    #[error("tracker does not support write operations")]
+    WritesNotSupported,
 }
 
 /// Trait for issue tracker adapters.

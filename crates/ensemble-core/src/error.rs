@@ -8,6 +8,8 @@ pub enum EnsembleError {
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
     Tracker(#[from] crate::tracker::TrackerError),
+    #[error(transparent)]
+    Pipeline(#[from] PipelineError),
 }
 
 #[derive(Debug, Error)]
@@ -34,4 +36,22 @@ pub enum WorkspaceError {
     HookTimedOut { hook: String, timeout_ms: u64 },
     #[error("workspace path outside root: {path}")]
     PathOutsideRoot { path: String },
+}
+
+#[derive(Debug, Error)]
+pub enum PipelineError {
+    #[error("unknown agent reference: {name}")]
+    UnknownAgent { name: String },
+    #[error("unknown step dependency: {step} depends on {dependency}")]
+    UnknownDependency { step: String, dependency: String },
+    #[error("cycle detected in step graph")]
+    CycleDetected,
+    #[error("no root steps found (all steps have dependencies)")]
+    NoRootSteps,
+    #[error("step {step} requires tracker writes but tracker does not support them")]
+    WritesRequired { step: String },
+    #[error("max cycles ({max}) exceeded for issue {issue_id}")]
+    MaxCyclesExceeded { issue_id: String, max: u32 },
+    #[error("agent must have exactly one of 'prompt' or 'prompt_template', got neither or both: {agent}")]
+    InvalidPromptConfig { agent: String },
 }
