@@ -98,7 +98,9 @@ impl WorkspaceManager {
     /// When `path` does not yet exist (pre-creation), its parent is canonicalized
     /// and the final component is re-appended, preserving the intended semantics.
     fn validate_path_inside_root(&self, path: &Path) -> Result<(), WorkspaceError> {
-        // Resolve the root to its canonical form.
+        // Resolve the root to its canonical form. Canonicalize can fail if
+        // permissions prevent stat — fall back to the raw path, which is safe
+        // because a non-canonical path only makes the starts_with check stricter.
         let canonical_root = if self.root.exists() {
             self.root
                 .canonicalize()

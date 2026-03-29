@@ -5,6 +5,10 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracing::{info, warn};
 
+/// Max chars of stderr to include in hook error messages. Prevents oversized error
+/// strings from long-running hooks that dump large output on failure.
+const STDERR_TRUNCATE_LIMIT: usize = 500;
+
 /// Run a shell hook script in the given workspace directory with a timeout.
 ///
 /// The script is executed via `sh -lc <script>` with cwd set to `workspace_path`.
@@ -39,8 +43,7 @@ pub async fn run_hook(
                 let reason = if stderr.is_empty() {
                     format!("exit code: {}", output.status)
                 } else {
-                    // Truncate stderr for logging
-                    let truncated: String = stderr.chars().take(500).collect();
+                    let truncated: String = stderr.chars().take(STDERR_TRUNCATE_LIMIT).collect();
                     format!("exit code: {} — {}", output.status, truncated)
                 };
                 warn!(hook = hook_name, %reason, "hook failed");

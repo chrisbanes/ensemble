@@ -23,7 +23,9 @@ pub fn render_prompt(
             reason: e.to_string(),
         })?;
 
-    // Build the issue object for Liquid
+    // Build the issue object for Liquid.
+    // blocked_by, created_at, updated_at are omitted — they are metadata for the
+    // orchestrator, not useful in agent prompts.
     let issue_obj = liquid::object!({
         "id": issue.id,
         "identifier": issue.identifier,

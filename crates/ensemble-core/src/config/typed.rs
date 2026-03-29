@@ -101,22 +101,11 @@ fn resolve_env_var(value: &str) -> Option<String> {
 /// Expand `~` to home directory in a path string.
 fn expand_tilde(path_str: &str) -> PathBuf {
     if let Some(rest) = path_str.strip_prefix('~') {
-        if let Some(home) = dirs_next().or_else(|| std::env::var("HOME").ok()) {
+        if let Ok(home) = std::env::var("HOME") {
             return PathBuf::from(home).join(rest.strip_prefix('/').unwrap_or(rest));
         }
     }
     PathBuf::from(path_str)
-}
-
-fn dirs_next() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        std::env::var("HOME").ok()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        std::env::var("HOME").ok()
-    }
 }
 
 /// Extract a string value from a YAML mapping at the given key path.
