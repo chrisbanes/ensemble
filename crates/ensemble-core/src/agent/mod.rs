@@ -113,22 +113,26 @@ impl AgentRunner for AcpAgentRunner {
 
         // 1. Run before_run hook
         if let Some(ref script) = config.hooks.before_run {
-            run_hook("before_run", script, workspace_path, config.hooks.timeout_ms)
-                .await
-                .map_err(|e| AgentError::HookFailed {
-                    reason: e.to_string(),
-                })?;
+            run_hook(
+                "before_run",
+                script,
+                workspace_path,
+                config.hooks.timeout_ms,
+            )
+            .await
+            .map_err(|e| AgentError::HookFailed {
+                reason: e.to_string(),
+            })?;
         }
 
         // 2. Spawn ACP agent and do handshake
         let mut session = AcpSession::spawn(&config.agent.command, workspace_path).await?;
 
-        let cwd_str =
-            workspace_path
-                .to_str()
-                .ok_or_else(|| AgentError::InvalidWorkspaceCwd {
-                    path: workspace_path.display().to_string(),
-                })?;
+        let cwd_str = workspace_path
+            .to_str()
+            .ok_or_else(|| AgentError::InvalidWorkspaceCwd {
+                path: workspace_path.display().to_string(),
+            })?;
 
         // Initialize
         session.initialize(config.agent.read_timeout_ms).await?;
@@ -357,7 +361,14 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
 
         let result = runner
-            .run(&test_issue(), "builder", "build", None, workspace.path(), tx)
+            .run(
+                &test_issue(),
+                "builder",
+                "build",
+                None,
+                workspace.path(),
+                tx,
+            )
             .await;
 
         assert!(result.is_ok());
@@ -386,7 +397,14 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
 
         let result = runner
-            .run(&test_issue(), "builder", "build", None, workspace.path(), tx)
+            .run(
+                &test_issue(),
+                "builder",
+                "build",
+                None,
+                workspace.path(),
+                tx,
+            )
             .await;
 
         assert!(result.is_err());
