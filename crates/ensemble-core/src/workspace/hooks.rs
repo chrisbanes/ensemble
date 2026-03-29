@@ -41,7 +41,11 @@ pub async fn run_hook(
                 let reason = if stderr.is_empty() {
                     format!("exit code: {}", output.status)
                 } else {
-                    let truncated: String = stderr.chars().take(STDERR_TRUNCATE_LIMIT).collect();
+                    let mut truncated: String =
+                        stderr.chars().take(STDERR_TRUNCATE_LIMIT).collect();
+                    if stderr.chars().count() > STDERR_TRUNCATE_LIMIT {
+                        truncated.push('\u{2026}');
+                    }
                     format!("exit code: {} — {}", output.status, truncated)
                 };
                 warn!(hook = hook_name, %reason, "hook failed");
