@@ -21,7 +21,7 @@ ensemble/
 │   │       ├── lib.rs                          # add api + observability modules
 │   │       ├── observability/
 │   │       │   ├── mod.rs                      # re-exports
-│   │       │   ├── snapshot.rs                 # RuntimeSnapshot, build_snapshot()
+│   │       │   ├── snapshot.rs                 # RuntimeSnapshot, build_state_snapshot()
 │   │       │   └── logging.rs                  # init_logging()
 │   │       └── api/
 │   │           ├── mod.rs                      # re-exports
@@ -62,9 +62,10 @@ pub mod observability;
 The full `lib.rs` should now contain:
 
 ```rust
-pub mod error;
-pub mod tracker;
 pub mod config;
+pub mod error;
+pub mod pipeline;
+pub mod tracker;
 pub mod workspace;
 pub mod agent;
 pub mod orchestrator;
@@ -77,9 +78,11 @@ Create `crates/ensemble-core/src/observability/snapshot.rs`:
 
 ```rust
 use crate::orchestrator::state::OrchestratorState;
+use crate::pipeline::engine::{PipelineRun, StepState};
 use crate::tracker::model::{RunningEntry, RetryEntry};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 
 /// Top-level runtime snapshot matching SPEC.md Section 13.7.2 GET /api/v1/state shape.
 #[derive(Debug, Serialize)]
@@ -105,6 +108,7 @@ pub struct RunningSessionRow {
     pub issue_id: String,
     pub issue_identifier: String,
     pub state: String,
+    pub step_name: Option<String>,
     pub session_id: Option<String>,
     pub turn_count: u32,
     pub last_event: Option<String>,
@@ -128,7 +132,7 @@ pub struct RetryRow {
     pub issue_id: String,
     pub issue_identifier: String,
     pub attempt: u32,
-    pub due_at: DateTime<Utc>,
+    pub due_at_ms: u64,
     pub error: Option<String>,
 }
 
@@ -142,6 +146,14 @@ pub struct AgentTotalsSnapshot {
 }
 
 /// Per-issue detail snapshot for GET /api/v1/{identifier}.
+///
+/// NOTE: Plan 5 (Dashboard) expects additional fields `logs` and `recent_events`
+/// in the API response. When implementing the dashboard integration, extend this
+/// struct with:
+///   - `logs: IssueLogInfo` (containing `agent_session_logs: Vec<AgentSessionLog>`)
+///   - `recent_events: Vec<RecentEvent>`
+/// These are omitted here because Plan 4 does not yet have the event/log collection
+/// infrastructure, but the JSON shape should be forward-compatible.
 #[derive(Debug, Serialize)]
 pub struct IssueDetailSnapshot {
     pub issue_identifier: String,
@@ -171,6 +183,7 @@ pub struct AttemptInfo {
 #[derive(Debug, Serialize)]
 pub struct RunningDetail {
     pub session_id: Option<String>,
+    pub step_name: Option<String>,
     pub turn_count: u32,
     pub state: String,
     pub started_at: DateTime<Utc>,
@@ -184,13 +197,13 @@ pub struct RunningDetail {
 ///
 /// This computes `seconds_running` as the sum of cumulative ended-session runtime
 /// plus elapsed time for all currently active sessions (from their `started_at`).
-pub fn build_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
+pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
     let now = Utc::now();
 
     let running_rows: Vec<RunningSessionRow> = state
         .running
         .values()
-        .map(|entry| running_entry_to_row(entry))
+        .map(|entry| running_entry_to_row(entry, &state.pipeline_runs))
         .collect();
 
     let retry_rows: Vec<RetryRow> = state
@@ -232,7 +245,7 @@ pub fn build_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
 /// Build an IssueDetailSnapshot for a specific issue by identifier.
 ///
 /// Returns None if the identifier is not found in running or retry maps.
-pub fn build_issue_detail(
+pub fn build_issue_snapshot(
     state: &OrchestratorState,
     identifier: &str,
     workspace_root: &str,
@@ -261,7 +274,10 @@ pub fn build_issue_detail(
         return None;
     };
 
-    let workspace_key = crate::tracker::model::sanitize_workspace_key(identifier);
+    let workspace_key = match crate::tracker::model::sanitize_workspace_key(identifier) {
+        Some(key) => key,
+        None => return None,  // Can't build detail for unsanitizable identifier
+    };
     let workspace_path = format!("{}/{}", workspace_root, workspace_key);
 
     let status = if running_entry.is_some() {
@@ -280,19 +296,31 @@ pub fn build_issue_detail(
 
     let restart_count = current_retry_attempt.unwrap_or(0);
 
-    let running_detail = running_entry.map(|entry| RunningDetail {
-        session_id: entry.session_id.clone(),
-        turn_count: entry.turn_count,
-        state: entry.issue.state.clone(),
-        started_at: entry.started_at,
-        last_event: entry.last_agent_event.clone(),
-        last_message: entry.last_agent_message.clone(),
-        last_event_at: entry.last_agent_timestamp,
-        tokens: TokenSnapshot {
-            input_tokens: entry.agent_input_tokens,
-            output_tokens: entry.agent_output_tokens,
-            total_tokens: entry.agent_total_tokens,
-        },
+    let running_detail = running_entry.map(|entry| {
+        let step_name = state.pipeline_runs.get(&entry.issue_id).and_then(|run| {
+            run.step_states.iter().find_map(|(name, step_state)| {
+                if matches!(step_state, StepState::Running { .. }) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+        });
+        RunningDetail {
+            session_id: entry.session_id.clone(),
+            step_name,
+            turn_count: entry.turn_count,
+            state: entry.issue.state.clone(),
+            started_at: entry.started_at,
+            last_event: entry.last_agent_event.clone(),
+            last_message: entry.last_agent_message.clone(),
+            last_event_at: entry.last_agent_timestamp,
+            tokens: TokenSnapshot {
+                input_tokens: entry.agent_input_tokens,
+                output_tokens: entry.agent_output_tokens,
+                total_tokens: entry.agent_total_tokens,
+            },
+        }
     });
 
     let retry_detail = retry_entry.map(|entry| retry_entry_to_row(entry));
@@ -317,11 +345,21 @@ pub fn build_issue_detail(
 }
 
 /// Convert a RunningEntry to a RunningSessionRow for the snapshot.
-fn running_entry_to_row(entry: &RunningEntry) -> RunningSessionRow {
+fn running_entry_to_row(entry: &RunningEntry, pipeline_runs: &HashMap<String, PipelineRun>) -> RunningSessionRow {
+    let step_name = pipeline_runs.get(&entry.issue_id).and_then(|run| {
+        run.step_states.iter().find_map(|(name, state)| {
+            if matches!(state, StepState::Running { .. }) {
+                Some(name.clone())
+            } else {
+                None
+            }
+        })
+    });
     RunningSessionRow {
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         state: entry.issue.state.clone(),
+        step_name,
         session_id: entry.session_id.clone(),
         turn_count: entry.turn_count,
         last_event: entry.last_agent_event.clone(),
@@ -338,17 +376,11 @@ fn running_entry_to_row(entry: &RunningEntry) -> RunningSessionRow {
 
 /// Convert a RetryEntry to a RetryRow for the snapshot.
 fn retry_entry_to_row(entry: &RetryEntry) -> RetryRow {
-    // Convert due_at_ms to a DateTime<Utc>
-    let due_at_secs = (entry.due_at_ms / 1000) as i64;
-    let due_at_nanos = ((entry.due_at_ms % 1000) * 1_000_000) as u32;
-    let due_at = DateTime::from_timestamp(due_at_secs, due_at_nanos)
-        .unwrap_or_else(|| Utc::now());
-
     RetryRow {
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         attempt: entry.attempt,
-        due_at,
+        due_at_ms: entry.due_at_ms,
         error: entry.error.clone(),
     }
 }
@@ -439,7 +471,7 @@ mod tests {
     #[test]
     fn test_build_snapshot_counts() {
         let state = build_test_state();
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
 
         assert_eq!(snapshot.counts.running, 1);
         assert_eq!(snapshot.counts.retrying, 1);
@@ -448,7 +480,7 @@ mod tests {
     #[test]
     fn test_build_snapshot_running_row() {
         let state = build_test_state();
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
 
         assert_eq!(snapshot.running.len(), 1);
         let row = &snapshot.running[0];
@@ -467,7 +499,7 @@ mod tests {
     #[test]
     fn test_build_snapshot_retry_row() {
         let state = build_test_state();
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
 
         assert_eq!(snapshot.retrying.len(), 1);
         let row = &snapshot.retrying[0];
@@ -480,7 +512,7 @@ mod tests {
     #[test]
     fn test_build_snapshot_agent_totals() {
         let state = build_test_state();
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
 
         assert_eq!(snapshot.agent_totals.input_tokens, 5000);
         assert_eq!(snapshot.agent_totals.output_tokens, 2400);
@@ -492,14 +524,14 @@ mod tests {
     #[test]
     fn test_build_snapshot_rate_limits_null() {
         let state = build_test_state();
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
         assert!(snapshot.rate_limits.is_none());
     }
 
     #[test]
     fn test_build_snapshot_json_shape() {
         let state = build_test_state();
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
         let json = serde_json::to_value(&snapshot).unwrap();
 
         // Verify top-level keys match SPEC.md Section 13.7.2
@@ -555,7 +587,7 @@ mod tests {
             agent_rate_limits: None,
         };
 
-        let snapshot = build_snapshot(&state);
+        let snapshot = build_state_snapshot(&state);
         assert_eq!(snapshot.counts.running, 0);
         assert_eq!(snapshot.counts.retrying, 0);
         assert!(snapshot.running.is_empty());
@@ -564,9 +596,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_issue_detail_found_running() {
+    fn test_build_issue_snapshot_found_running() {
         let state = build_test_state();
-        let detail = build_issue_detail(&state, "my-repo#42", "/tmp/workspaces");
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces");
 
         assert!(detail.is_some());
         let detail = detail.unwrap();
@@ -583,9 +615,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_issue_detail_found_retrying() {
+    fn test_build_issue_snapshot_found_retrying() {
         let state = build_test_state();
-        let detail = build_issue_detail(&state, "my-repo#99", "/tmp/workspaces");
+        let detail = build_issue_snapshot(&state, "my-repo#99", "/tmp/workspaces");
 
         assert!(detail.is_some());
         let detail = detail.unwrap();
@@ -598,16 +630,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_issue_detail_not_found() {
+    fn test_build_issue_snapshot_not_found() {
         let state = build_test_state();
-        let detail = build_issue_detail(&state, "nonexistent#999", "/tmp/workspaces");
+        let detail = build_issue_snapshot(&state, "nonexistent#999", "/tmp/workspaces");
         assert!(detail.is_none());
     }
 
     #[test]
-    fn test_issue_detail_json_shape() {
+    fn test_issue_snapshot_json_shape() {
         let state = build_test_state();
-        let detail = build_issue_detail(&state, "my-repo#42", "/tmp/workspaces").unwrap();
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
         let json = serde_json::to_value(&detail).unwrap();
 
         assert!(json.get("issue_identifier").is_some());
@@ -628,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_row_due_at_conversion() {
+    fn test_retry_row_due_at_ms_passthrough() {
         let entry = RetryEntry {
             issue_id: "NODE_789".to_string(),
             identifier: "test#1".to_string(),
@@ -638,8 +670,7 @@ mod tests {
         };
 
         let row = retry_entry_to_row(&entry);
-        // Verify it produces a valid DateTime (not the fallback Utc::now())
-        assert_eq!(row.due_at.timestamp(), 1711641600);
+        assert_eq!(row.due_at_ms, 1711641600000);
     }
 }
 ```
@@ -661,7 +692,7 @@ Expected: All tests pass
 
 ```bash
 git add crates/ensemble-core/src/observability/ crates/ensemble-core/src/lib.rs
-git commit -m "feat: runtime snapshot types and build_snapshot() for API observability"
+git commit -m "feat: runtime snapshot types and build_state_snapshot() for API observability"
 ```
 
 ---
@@ -921,9 +952,10 @@ pub mod api;
 The full `lib.rs` should now contain:
 
 ```rust
-pub mod error;
-pub mod tracker;
 pub mod config;
+pub mod error;
+pub mod pipeline;
+pub mod tracker;
 pub mod workspace;
 pub mod agent;
 pub mod orchestrator;
@@ -1076,7 +1108,7 @@ Replace the contents of `crates/ensemble-core/src/api/handlers.rs`:
 
 ```rust
 use crate::api::router::AppState;
-use crate::observability::snapshot::{build_issue_detail, build_snapshot};
+use crate::observability::snapshot::{build_issue_snapshot, build_state_snapshot};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -1114,7 +1146,7 @@ impl ApiError {
 /// and returns it as JSON. Returns 503 if the lock cannot be acquired.
 pub async fn get_state(State(state): State<AppState>) -> impl IntoResponse {
     let lock = state.orchestrator_state.read().await;
-    let snapshot = build_snapshot(&lock);
+    let snapshot = build_state_snapshot(&lock);
     drop(lock);
 
     (StatusCode::OK, Json(snapshot))
@@ -1129,7 +1161,7 @@ pub async fn get_issue_detail(
     Path(identifier): Path<String>,
 ) -> impl IntoResponse {
     let lock = state.orchestrator_state.read().await;
-    let detail = build_issue_detail(&lock, &identifier, &state.workspace_root);
+    let detail = build_issue_snapshot(&lock, &identifier, &state.workspace_root);
     drop(lock);
 
     match detail {
@@ -1462,22 +1494,21 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use ensemble_core::api::router::{AppState, create_api_router};
-use ensemble_core::config::typed::ServiceConfig;
-use ensemble_core::config::workflow::load_workflow;
+use ensemble_core::config::ensemble::{load_config, validate_config, EnsembleConfig};
 use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
-use ensemble_core::tracker::model::AgentTotals;
+use ensemble_core::pipeline::dag::build_dag;
 
 /// Ensemble: orchestrate coding agents to work on project issues.
 #[derive(Parser, Debug)]
 #[command(name = "ensemble", about = "Orchestrate coding agents")]
 struct Cli {
-    /// Path to WORKFLOW.md
-    #[arg(default_value = "WORKFLOW.md")]
-    workflow_path: PathBuf,
+    /// Path to ensemble.yaml
+    #[arg(default_value = "ensemble.yaml")]
+    config_path: PathBuf,
 
     /// HTTP server port (enables API + dashboard).
-    /// Overrides server.port from WORKFLOW.md when provided.
+    /// CLI-only flag; not part of ensemble.yaml.
     #[arg(long)]
     port: Option<u16>,
 }
@@ -1491,64 +1522,59 @@ async fn main() -> ExitCode {
     init_logging();
 
     info!(
-        workflow_path = %cli.workflow_path.display(),
+        config_path = %cli.config_path.display(),
         "starting ensemble"
     );
 
-    // 3. Load and validate WORKFLOW.md
-    let workflow = match load_workflow(&cli.workflow_path) {
-        Ok(wf) => wf,
-        Err(e) => {
-            error!(error = %e, path = %cli.workflow_path.display(), "failed to load workflow");
-            eprintln!("error: failed to load {}: {}", cli.workflow_path.display(), e);
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let config = match ServiceConfig::from_workflow(&workflow) {
+    // 3. Load and validate ensemble.yaml
+    let config = match load_config(&cli.config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
-            error!(error = %e, "failed to parse config");
-            eprintln!("error: invalid workflow config: {}", e);
+            error!(error = %e, path = %cli.config_path.display(), "failed to load config");
+            eprintln!("error: failed to load {}: {}", cli.config_path.display(), e);
             return ExitCode::FAILURE;
         }
     };
 
-    // 4. Validate config for dispatch
-    if let Err(e) = config.validate_for_dispatch() {
+    // 4. Validate config and build step DAG
+    if let Err(e) = validate_config(&config) {
         error!(error = %e, "config validation failed");
         eprintln!("error: config validation failed: {}", e);
         return ExitCode::FAILURE;
     }
 
+    if let Err(e) = build_dag(&config.steps) {
+        error!(error = %e, "step DAG validation failed");
+        eprintln!("error: step DAG validation failed: {}", e);
+        return ExitCode::FAILURE;
+    }
+
     info!(
-        tracker_kind = config.tracker_kind.as_deref().unwrap_or("none"),
-        poll_interval_ms = config.poll_interval_ms,
-        max_concurrent = config.agent_max_concurrent,
+        tracker_kind = %config.tracker.kind,
+        poll_interval_ms = config.polling.interval_ms,
+        max_concurrent = config.concurrency.max_concurrent_agents,
         "config loaded successfully"
     );
 
     // 5. Create orchestrator state
-    let orchestrator_state = Arc::new(RwLock::new(OrchestratorState {
-        running: std::collections::HashMap::new(),
-        claimed: std::collections::HashSet::new(),
-        retry_attempts: std::collections::HashMap::new(),
-        completed: std::collections::HashSet::new(),
-        agent_totals: AgentTotals::default(),
-        agent_rate_limits: None,
-    }));
+    let orchestrator_state = Arc::new(RwLock::new(OrchestratorState::new(
+        config.polling.interval_ms,
+        config.concurrency.max_concurrent_agents,
+    )));
 
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
 
-    // 6. Determine HTTP server port: CLI --port overrides server.port from config
-    let effective_port = cli.port.or(config.server_port);
+    // 6. Determine HTTP server port (CLI-only — not part of ensemble.yaml config)
+    let effective_port = cli.port;
 
     // 7. Optionally start HTTP server
     let server_handle = if let Some(port) = effective_port {
         let app_state = AppState {
             orchestrator_state: orchestrator_state.clone(),
             refresh_requested: refresh_notify.clone(),
-            workspace_root: config.workspace_root.display().to_string(),
+            workspace_root: config.workspace.root.as_deref()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| std::env::temp_dir().join("ensemble_workspaces").display().to_string()),
         };
         let router = create_api_router(app_state);
 
@@ -1577,7 +1603,7 @@ async fn main() -> ExitCode {
         None
     };
 
-    // 8. TODO: Start orchestrator poll loop (Plans 2-3 wire this up).
+    // 8. TODO: Start orchestrator poll loop (Plan 3 wires this up).
     //    For now the CLI starts, optionally serves the API, and waits for shutdown.
     info!("ensemble is running (orchestrator loop placeholder, press Ctrl+C to stop)");
 
@@ -1608,28 +1634,28 @@ mod tests {
     #[test]
     fn test_cli_parse_defaults() {
         let cli = Cli::parse_from(["ensemble"]);
-        assert_eq!(cli.workflow_path, PathBuf::from("WORKFLOW.md"));
+        assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         assert_eq!(cli.port, None);
     }
 
     #[test]
     fn test_cli_parse_custom_path() {
-        let cli = Cli::parse_from(["ensemble", "custom/WORKFLOW.md"]);
-        assert_eq!(cli.workflow_path, PathBuf::from("custom/WORKFLOW.md"));
+        let cli = Cli::parse_from(["ensemble", "custom/ensemble.yaml"]);
+        assert_eq!(cli.config_path, PathBuf::from("custom/ensemble.yaml"));
         assert_eq!(cli.port, None);
     }
 
     #[test]
     fn test_cli_parse_with_port() {
         let cli = Cli::parse_from(["ensemble", "--port", "8080"]);
-        assert_eq!(cli.workflow_path, PathBuf::from("WORKFLOW.md"));
+        assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         assert_eq!(cli.port, Some(8080));
     }
 
     #[test]
     fn test_cli_parse_all_options() {
-        let cli = Cli::parse_from(["ensemble", "--port", "3000", "my/WORKFLOW.md"]);
-        assert_eq!(cli.workflow_path, PathBuf::from("my/WORKFLOW.md"));
+        let cli = Cli::parse_from(["ensemble", "--port", "3000", "my/ensemble.yaml"]);
+        assert_eq!(cli.config_path, PathBuf::from("my/ensemble.yaml"));
         assert_eq!(cli.port, Some(3000));
     }
 
@@ -1651,22 +1677,22 @@ Expected: Compiles with no errors (may have warnings about unused imports for or
 Run: `cargo test -p ensemble-cli`
 Expected: All CLI parsing tests pass
 
-- [ ] **Step 6: Verify the binary runs and exits cleanly on missing WORKFLOW.md**
+- [ ] **Step 6: Verify the binary runs and exits cleanly on missing ensemble.yaml**
 
-Run from a temp directory where WORKFLOW.md does not exist:
+Run from a temp directory where ensemble.yaml does not exist:
 
 ```bash
 cd /tmp && cargo run -p ensemble-cli 2>&1 || true
 ```
 
-Expected output should contain: `error: failed to load WORKFLOW.md`
+Expected output should contain: `error: failed to load ensemble.yaml`
 Expected exit code: non-zero
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add crates/ensemble-cli/ Cargo.toml
-git commit -m "feat: ensemble-cli binary with arg parsing, logging, config loading, and optional HTTP server"
+git commit -m "feat: ensemble-cli binary with arg parsing, logging, ensemble.yaml loading, and optional HTTP server"
 ```
 
 ---
@@ -1858,7 +1884,7 @@ async fn test_get_state_endpoint() {
     assert_eq!(retry["issue_id"], "NODE_456");
     assert_eq!(retry["issue_identifier"], "my-repo#99");
     assert_eq!(retry["attempt"], 3);
-    assert!(retry.get("due_at").is_some());
+    assert!(retry.get("due_at_ms").is_some());
     assert_eq!(retry["error"], "no available orchestrator slots");
 
     // Verify agent_totals shape
@@ -2061,16 +2087,17 @@ git commit -m "test: API endpoint integration tests verifying SPEC.md 13.7.2 JSO
 
 After completing all 6 tasks, you will have:
 
-- **Runtime snapshot types** (`observability/snapshot.rs`) — `RuntimeSnapshot`, `RunningSessionRow`, `RetryRow`, `AgentTotalsSnapshot`, `IssueDetailSnapshot` and the `build_snapshot()` / `build_issue_detail()` functions that produce JSON matching SPEC.md Section 13.7.2
+- **Runtime snapshot types** (`observability/snapshot.rs`) — `RuntimeSnapshot`, `RunningSessionRow`, `RetryRow`, `AgentTotalsSnapshot`, `IssueDetailSnapshot` and the `build_state_snapshot()` / `build_issue_snapshot()` functions that produce JSON matching SPEC.md Section 13.7.2
 - **Structured logging** (`observability/logging.rs`) — `init_logging()` with JSON/human format auto-detection, `ENSEMBLE_LOG` / `RUST_LOG` env filter support, and terminal detection
 - **Axum HTTP router** (`api/router.rs`) — `create_api_router()` with `AppState` containing the shared orchestrator state, refresh notify, and workspace root
 - **API handlers** (`api/handlers.rs`) — `get_state` (200 + snapshot), `get_issue_detail` (200 or 404), `post_refresh` (202), `method_not_allowed` (405), all with the `{"error":{"code":"...","message":"..."}}` envelope format
-- **CLI binary** (`ensemble-cli/`) — `ensemble` binary with clap-derived arg parsing, workflow loading, config validation, optional HTTP server startup, and clean shutdown on Ctrl+C
+- **CLI binary** (`ensemble-cli/`) — `ensemble` binary with clap-derived arg parsing, `ensemble.yaml` config loading via `load_config()`, config + DAG validation, optional HTTP server startup, and clean shutdown on Ctrl+C
 - **Integration tests** verifying all API endpoints return correct status codes and JSON shapes against the SPEC
 
 **Dependencies on earlier plans:**
-- Plan 1: `Issue`, `RunningEntry`, `RetryEntry`, `AgentTotals`, `ServiceConfig`, `ConfigError`, `WorkspaceError`, `WorkspaceManager`, `IssueTracker` trait, `TrackerError`, `sanitize_workspace_key()`
-- Plan 2: `TodoFileTracker`, `GithubTracker`, `create_tracker()` factory (not directly used in Plan 4 but available for the CLI to wire up)
+- Plan 1: `EnsembleError`, `ConfigError`, `WorkspaceError`, `WorkspaceManager`, `IssueTracker` trait, `TrackerError`, `sanitize_workspace_key()`
+- Plan 2A: `TodoFileTracker`, `GithubTracker`, `create_tracker()` factory (not directly used in Plan 4 but available for the CLI to wire up)
+- Plan 2B: `EnsembleConfig`, `TrackerConfig`, `AgentConfig`, `StepConfig`, `ConcurrencyConfig`, `PollingConfig`, `WorkspaceConfig`, `HooksConfig`, `AgentRuntimeConfig`, `load_config()`, `parse_config()`, `validate_config()` — all config types and loaders. `PipelineRun`, `StepState`, `PipelineAction`, `DispatchRequest` from the pipeline engine. `Issue`, `RunningEntry`, `RetryEntry`, `AgentTotals`, `BlockerRef` from the tracker model. `build_dag()` from the pipeline DAG module.
 - Plan 3: `AgentEvent`, `WorkerEvent`, `WorkerResult`, `TokenUsage`, `AgentError`, `AgentRunner` trait, `AcpAgentRunner`, `OrchestratorState`, `Orchestrator` (Plan 4 reads `OrchestratorState` for snapshots)
 
 **Next:** Plan 5 will add the Tauri desktop binary and React dashboard frontend.

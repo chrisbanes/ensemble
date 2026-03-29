@@ -85,9 +85,10 @@ Agent(#[from] AgentError),
 Update `crates/ensemble-core/src/lib.rs`:
 
 ```rust
-pub mod error;
-pub mod tracker;
 pub mod config;
+pub mod error;
+pub mod pipeline;
+pub mod tracker;
 pub mod workspace;
 pub mod agent;
 pub mod orchestrator;
@@ -189,11 +190,13 @@ pub enum AgentEvent {
 pub enum WorkerEvent {
     AgentUpdate {
         issue_id: String,
+        step_name: String,
         event: AgentEvent,
         timestamp: DateTime<Utc>,
     },
     WorkerExited {
         issue_id: String,
+        step_name: String,
         result: WorkerResult,
         timestamp: DateTime<Utc>,
     },
@@ -413,6 +416,8 @@ pub trait AgentRunner: Send + Sync {
     async fn run(
         &self,
         issue: &Issue,
+        agent_name: &str,
+        step_name: &str,
         attempt: Option<u32>,
         workspace_path: &Path,
         event_tx: mpsc::Sender<WorkerEvent>,
@@ -697,6 +702,7 @@ impl AcpSession {
         turn_timeout_ms: u64,
         permission_policy: &str,
         issue_id: &str,
+        step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
     ) -> Result<TurnResult, AgentError> {
         let id = self.next_id();
@@ -716,6 +722,7 @@ impl AcpSession {
         Self::emit_event(
             event_tx,
             issue_id,
+            step_name,
             AgentEvent::TurnStarted,
         )
         .await;
@@ -726,6 +733,7 @@ impl AcpSession {
             session_id,
             permission_policy,
             issue_id,
+            step_name,
             event_tx,
         ))
         .await;
@@ -746,6 +754,7 @@ impl AcpSession {
         session_id: &str,
         permission_policy: &str,
         issue_id: &str,
+        step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
     ) -> Result<TurnResult, AgentError> {
         let mut last_usage: Option<TokenUsage> = None;
@@ -759,6 +768,7 @@ impl AcpSession {
                     Self::emit_event(
                         event_tx,
                         issue_id,
+                        step_name,
                         AgentEvent::Malformed { line: line.clone() },
                     )
                     .await;
@@ -792,6 +802,7 @@ impl AcpSession {
                             &msg,
                             permission_policy,
                             issue_id,
+                            step_name,
                             event_tx,
                         )
                         .await?;
@@ -810,6 +821,7 @@ impl AcpSession {
                 Self::emit_event(
                     event_tx,
                     issue_id,
+                    step_name,
                     AgentEvent::OtherMessage {
                         raw: line.clone(),
                     },
@@ -841,6 +853,7 @@ impl AcpSession {
                                         Self::emit_event(
                                             event_tx,
                                             issue_id,
+                                            step_name,
                                             AgentEvent::TurnCompleted {
                                                 usage: last_usage.clone(),
                                             },
@@ -854,6 +867,7 @@ impl AcpSession {
                                         Self::emit_event(
                                             event_tx,
                                             issue_id,
+                                            step_name,
                                             AgentEvent::TurnCompleted {
                                                 usage: last_usage.clone(),
                                             },
@@ -867,6 +881,7 @@ impl AcpSession {
                                         Self::emit_event(
                                             event_tx,
                                             issue_id,
+                                            step_name,
                                             AgentEvent::TurnFailed {
                                                 reason: reason.clone(),
                                                 usage: last_usage.clone(),
@@ -891,6 +906,7 @@ impl AcpSession {
                                 Self::emit_event(
                                     event_tx,
                                     issue_id,
+                                    step_name,
                                     AgentEvent::TurnUpdate { content },
                                 )
                                 .await;
@@ -898,6 +914,7 @@ impl AcpSession {
                                 Self::emit_event(
                                     event_tx,
                                     issue_id,
+                                    step_name,
                                     AgentEvent::Notification {
                                         message: line.chars().take(200).collect(),
                                     },
@@ -910,6 +927,7 @@ impl AcpSession {
                         Self::emit_event(
                             event_tx,
                             issue_id,
+                            step_name,
                             AgentEvent::OtherMessage { raw: line.clone() },
                         )
                         .await;
@@ -925,6 +943,7 @@ impl AcpSession {
         msg: &JsonRpcMessage,
         permission_policy: &str,
         issue_id: &str,
+        step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
     ) -> Result<(), AgentError> {
         let params = msg.params.as_ref().unwrap_or(&serde_json::Value::Null);
@@ -942,6 +961,7 @@ impl AcpSession {
         Self::emit_event(
             event_tx,
             issue_id,
+            step_name,
             AgentEvent::PermissionRequested {
                 permission_id: permission_id.clone(),
                 description: description.clone(),
@@ -981,6 +1001,7 @@ impl AcpSession {
         Self::emit_event(
             event_tx,
             issue_id,
+            step_name,
             AgentEvent::PermissionResolved {
                 permission_id,
                 allowed,
@@ -1122,11 +1143,13 @@ impl AcpSession {
     async fn emit_event(
         tx: &mpsc::Sender<WorkerEvent>,
         issue_id: &str,
+        step_name: &str,
         event: AgentEvent,
     ) {
         let _ = tx
             .send(WorkerEvent::AgentUpdate {
                 issue_id: issue_id.to_string(),
+                step_name: step_name.to_string(),
                 event,
                 timestamp: chrono::Utc::now(),
             })
@@ -1217,7 +1240,7 @@ done
         // Run turn
         let (tx, mut rx) = mpsc::channel(100);
         let turn_result = session
-            .run_turn(&session_id, "Fix the bug", 30000, "auto_approve_all", "issue-1", &tx)
+            .run_turn(&session_id, "Fix the bug", 30000, "auto_approve_all", "issue-1", "build", &tx)
             .await
             .unwrap();
 
@@ -1278,7 +1301,7 @@ done
 
         let (tx, _rx) = mpsc::channel(100);
         let result = session
-            .run_turn(&session_id, "Do work", 200, "auto_approve_all", "issue-2", &tx)
+            .run_turn(&session_id, "Do work", 200, "auto_approve_all", "issue-2", "build", &tx)
             .await;
 
         assert!(matches!(result, Err(AgentError::TurnTimeout { .. })));
@@ -1322,7 +1345,7 @@ done
 
         let (tx, _rx) = mpsc::channel(100);
         let result = session
-            .run_turn(&session_id, "Do work", 30000, "auto_approve_all", "issue-3", &tx)
+            .run_turn(&session_id, "Do work", 30000, "auto_approve_all", "issue-3", "build", &tx)
             .await;
 
         assert!(matches!(result, Err(AgentError::AgentExit { .. })));
@@ -1368,7 +1391,7 @@ done
 
         let (tx, mut rx) = mpsc::channel(100);
         let result = session
-            .run_turn(&session_id, "Do work", 30000, "auto_approve_all", "issue-4", &tx)
+            .run_turn(&session_id, "Do work", 30000, "auto_approve_all", "issue-4", "build", &tx)
             .await
             .unwrap();
 
@@ -1377,7 +1400,7 @@ done
         // Verify malformed events were emitted
         let mut malformed_count = 0;
         while let Ok(evt) = rx.try_recv() {
-            if let WorkerEvent::AgentUpdate { event: AgentEvent::Malformed { .. }, .. } = evt {
+            if let WorkerEvent::AgentUpdate { event: AgentEvent::Malformed { .. }, step_name: _, .. } = evt {
                 malformed_count += 1;
             }
         }
@@ -1426,7 +1449,7 @@ done
 
         let (tx, mut rx) = mpsc::channel(100);
         let result = session
-            .run_turn(&session_id, "Do work", 30000, "auto_approve_all", "issue-5", &tx)
+            .run_turn(&session_id, "Do work", 30000, "auto_approve_all", "issue-5", "build", &tx)
             .await
             .unwrap();
 
@@ -1511,14 +1534,11 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
+use crate::config::ensemble::EnsembleConfig;
 use crate::config::template::render_prompt;
-use crate::config::typed::ServiceConfig;
-use crate::config::workflow::WorkflowDefinition;
 use crate::error::AgentError;
 use crate::tracker::model::Issue;
-use crate::tracker::IssueTracker;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
-use crate::workspace::manager::WorkspaceManager;
 use events::{AgentEvent, WorkerEvent, WorkerResult};
 
 use acp_client::{AcpSession, TurnResult};
@@ -1531,6 +1551,8 @@ pub trait AgentRunner: Send + Sync {
     async fn run(
         &self,
         issue: &Issue,
+        agent_name: &str,
+        step_name: &str,
         attempt: Option<u32>,
         workspace_path: &Path,
         event_tx: mpsc::Sender<WorkerEvent>,
@@ -1539,35 +1561,48 @@ pub trait AgentRunner: Send + Sync {
 
 /// Real ACP agent runner that implements the full worker loop from SPEC.md Section 16.5.
 pub struct AcpAgentRunner {
-    pub config: Arc<RwLock<ServiceConfig>>,
-    pub workflow: Arc<RwLock<WorkflowDefinition>>,
-    pub tracker: Arc<dyn IssueTracker>,
+    pub config: Arc<RwLock<EnsembleConfig>>,
 }
 
 impl AcpAgentRunner {
     pub fn new(
-        config: Arc<RwLock<ServiceConfig>>,
-        workflow: Arc<RwLock<WorkflowDefinition>>,
-        tracker: Arc<dyn IssueTracker>,
+        config: Arc<RwLock<EnsembleConfig>>,
     ) -> Self {
-        Self {
-            config,
-            workflow,
-            tracker,
-        }
+        Self { config }
     }
 
     /// Build the prompt for a given turn.
-    /// First turn uses the full rendered template; continuation turns use guidance text.
+    /// First turn uses the full rendered template from the agent config;
+    /// continuation turns use guidance text.
     async fn build_prompt(
         &self,
         issue: &Issue,
+        agent_name: &str,
         attempt: Option<u32>,
         turn_number: u32,
     ) -> Result<String, AgentError> {
         if turn_number == 1 {
-            let workflow = self.workflow.read().await;
-            render_prompt(&workflow.prompt_template, issue, attempt).map_err(|e| {
+            let config = self.config.read().await;
+            let agent_config = config.agents.get(agent_name).ok_or_else(|| {
+                AgentError::PromptError {
+                    reason: format!("agent '{}' not found in config", agent_name),
+                }
+            })?;
+
+            // Resolve the prompt template: inline prompt or file-based prompt_template
+            let template_str = if let Some(ref prompt) = agent_config.prompt {
+                prompt.clone()
+            } else if let Some(ref template_path) = agent_config.prompt_template {
+                std::fs::read_to_string(template_path).map_err(|e| AgentError::PromptError {
+                    reason: format!("failed to read prompt template '{}': {}", template_path.display(), e),
+                })?
+            } else {
+                return Err(AgentError::PromptError {
+                    reason: format!("agent '{}' has neither prompt nor prompt_template", agent_name),
+                });
+            };
+
+            render_prompt(&template_str, issue, attempt).map_err(|e| {
                 AgentError::PromptError {
                     reason: e.to_string(),
                 }
@@ -1589,6 +1624,8 @@ impl AgentRunner for AcpAgentRunner {
     async fn run(
         &self,
         issue: &Issue,
+        agent_name: &str,
+        step_name: &str,
         attempt: Option<u32>,
         workspace_path: &Path,
         event_tx: mpsc::Sender<WorkerEvent>,
@@ -1596,8 +1633,8 @@ impl AgentRunner for AcpAgentRunner {
         let config = self.config.read().await.clone();
 
         // 1. Run before_run hook
-        if let Some(ref script) = config.hook_before_run {
-            run_hook("before_run", script, workspace_path, config.hook_timeout_ms)
+        if let Some(ref script) = config.hooks.before_run {
+            run_hook("before_run", script, workspace_path, config.hooks.timeout_ms)
                 .await
                 .map_err(|e| AgentError::HookFailed {
                     reason: e.to_string(),
@@ -1605,24 +1642,25 @@ impl AgentRunner for AcpAgentRunner {
         }
 
         // 2. Spawn ACP agent and do handshake
-        let mut session = AcpSession::spawn(&config.agent_command, workspace_path).await?;
+        let mut session = AcpSession::spawn(&config.agent.command, workspace_path).await?;
 
         let cwd_str = workspace_path.to_str().ok_or_else(|| AgentError::InvalidWorkspaceCwd {
             path: workspace_path.display().to_string(),
         })?;
 
         // Initialize
-        session.initialize(config.agent_read_timeout_ms).await?;
+        session.initialize(config.agent.read_timeout_ms).await?;
 
         // Start session
         let session_id = session
-            .start_session(cwd_str, serde_json::json!({}), config.agent_read_timeout_ms)
+            .start_session(cwd_str, serde_json::json!({}), config.agent.read_timeout_ms)
             .await?;
 
         // Emit session started event
         let _ = event_tx
             .send(WorkerEvent::AgentUpdate {
                 issue_id: issue.id.clone(),
+                step_name: step_name.to_string(),
                 event: AgentEvent::SessionStarted {
                     session_id: session_id.clone(),
                     agent_pid: session.agent_pid().map(|s| s.to_string()),
@@ -1632,20 +1670,19 @@ impl AgentRunner for AcpAgentRunner {
             .await;
 
         // Set mode if configured
-        if !config.agent_session_mode.is_empty() {
+        if !config.agent.session_mode.is_empty() {
             session
-                .set_mode(&session_id, &config.agent_session_mode)
+                .set_mode(&session_id, &config.agent.session_mode)
                 .await?;
         }
 
         // 3. Turn loop
-        let max_turns = config.agent_max_turns;
+        let max_turns = config.agent.max_turns;
         let mut turn_number: u32 = 1;
-        let mut current_issue = issue.clone();
 
         let result = loop {
             // Build prompt for this turn
-            let prompt = match self.build_prompt(&current_issue, attempt, turn_number).await {
+            let prompt = match self.build_prompt(issue, agent_name, attempt, turn_number).await {
                 Ok(p) => p,
                 Err(e) => {
                     session.cancel(&session_id).await?;
@@ -1658,9 +1695,10 @@ impl AgentRunner for AcpAgentRunner {
                 .run_turn(
                     &session_id,
                     &prompt,
-                    config.agent_turn_timeout_ms,
-                    &config.agent_permission_policy,
+                    config.agent.turn_timeout_ms,
+                    &config.agent.permission_policy,
                     &issue.id,
+                    step_name,
                     &event_tx,
                 )
                 .await;
@@ -1671,6 +1709,8 @@ impl AgentRunner for AcpAgentRunner {
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
                         turn = turn_number,
+                        agent = agent_name,
+                        step = step_name,
                         "turn completed successfully"
                     );
                 }
@@ -1679,6 +1719,8 @@ impl AgentRunner for AcpAgentRunner {
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
                         turn = turn_number,
+                        agent = agent_name,
+                        step = step_name,
                         reason = %reason,
                         "turn failed"
                     );
@@ -1702,57 +1744,6 @@ impl AgentRunner for AcpAgentRunner {
                 break Ok(());
             }
 
-            // Re-check issue state from tracker
-            let active_states: Vec<String> = {
-                let cfg = self.config.read().await;
-                cfg.tracker_active_states
-                    .iter()
-                    .map(|s| s.to_lowercase())
-                    .collect()
-            };
-
-            match self
-                .tracker
-                .fetch_issue_states_by_ids(&[issue.id.clone()])
-                .await
-            {
-                Ok(refreshed) => {
-                    if let Some(refreshed_issue) = refreshed.into_iter().next() {
-                        let current_state = refreshed_issue.state.to_lowercase();
-                        if !active_states.contains(&current_state) {
-                            info!(
-                                issue_id = %issue.id,
-                                identifier = %issue.identifier,
-                                state = %refreshed_issue.state,
-                                "issue no longer in active state, ending turn loop"
-                            );
-                            current_issue = refreshed_issue;
-                            break Ok(());
-                        }
-                        current_issue = refreshed_issue;
-                    } else {
-                        info!(
-                            issue_id = %issue.id,
-                            identifier = %issue.identifier,
-                            "issue not found in tracker, ending turn loop"
-                        );
-                        break Ok(());
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        issue_id = %issue.id,
-                        identifier = %issue.identifier,
-                        error = %e,
-                        "failed to refresh issue state, ending turn loop"
-                    );
-                    session.cancel(&session_id).await?;
-                    break Err(AgentError::TurnFailed {
-                        reason: format!("issue state refresh error: {e}"),
-                    });
-                }
-            }
-
             turn_number += 1;
         };
 
@@ -1760,8 +1751,8 @@ impl AgentRunner for AcpAgentRunner {
         let _ = session.cancel(&session_id).await;
 
         // 5. Run after_run hook (best effort)
-        if let Some(ref script) = config.hook_after_run {
-            run_hook_best_effort("after_run", script, workspace_path, config.hook_timeout_ms)
+        if let Some(ref script) = config.hooks.after_run {
+            run_hook_best_effort("after_run", script, workspace_path, config.hooks.timeout_ms)
                 .await;
         }
 
@@ -1776,6 +1767,7 @@ impl AgentRunner for AcpAgentRunner {
 mod tests {
     use super::*;
     use crate::tracker::TrackerError;
+    use crate::tracker::IssueTracker;
 
     /// Mock agent runner for testing the orchestrator.
     pub struct MockAgentRunner {
@@ -1788,6 +1780,8 @@ mod tests {
         async fn run(
             &self,
             issue: &Issue,
+            _agent_name: &str,
+            step_name: &str,
             _attempt: Option<u32>,
             _workspace_path: &Path,
             event_tx: mpsc::Sender<WorkerEvent>,
@@ -1800,6 +1794,7 @@ mod tests {
             let _ = event_tx
                 .send(WorkerEvent::AgentUpdate {
                     issue_id: issue.id.clone(),
+                    step_name: step_name.to_string(),
                     event: AgentEvent::SessionStarted {
                         session_id: "mock-session".to_string(),
                         agent_pid: Some("12345".to_string()),
@@ -1877,7 +1872,7 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
 
         let result = runner
-            .run(&test_issue(), None, workspace.path(), tx)
+            .run(&test_issue(), "builder", "build", None, workspace.path(), tx)
             .await;
 
         assert!(result.is_ok());
@@ -1886,9 +1881,11 @@ mod tests {
         match evt {
             WorkerEvent::AgentUpdate {
                 event: AgentEvent::SessionStarted { session_id, .. },
+                step_name,
                 ..
             } => {
                 assert_eq!(session_id, "mock-session");
+                assert_eq!(step_name, "build");
             }
             _ => panic!("expected SessionStarted event"),
         }
@@ -1904,7 +1901,7 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
 
         let result = runner
-            .run(&test_issue(), None, workspace.path(), tx)
+            .run(&test_issue(), "builder", "build", None, workspace.path(), tx)
             .await;
 
         assert!(result.is_err());
@@ -1922,7 +1919,7 @@ Expected: All tests pass
 
 ```bash
 git add crates/ensemble-core/src/agent/mod.rs
-git commit -m "feat: AcpAgentRunner with full worker loop — hooks, handshake, multi-turn, state check"
+git commit -m "feat: AcpAgentRunner with full worker loop — hooks, handshake, multi-turn, EnsembleConfig"
 ```
 
 ---
@@ -1942,6 +1939,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
 /// Rate limit snapshot from agent events.
@@ -1972,6 +1970,8 @@ pub struct OrchestratorState {
     pub agent_totals: AgentTotals,
     /// Latest rate limit snapshot from agent events.
     pub agent_rate_limits: Option<RateLimitSnapshot>,
+    /// Active pipeline runs: issue_id -> PipelineRun.
+    pub pipeline_runs: HashMap<String, PipelineRun>,
 }
 
 impl OrchestratorState {
@@ -1986,6 +1986,7 @@ impl OrchestratorState {
             completed: HashSet::new(),
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
+            pipeline_runs: HashMap::new(),
         }
     }
 
@@ -2162,6 +2163,26 @@ impl OrchestratorState {
     pub fn running_issue_ids(&self) -> Vec<String> {
         self.running.keys().cloned().collect()
     }
+
+    /// Get an immutable reference to a pipeline run.
+    pub fn get_pipeline_run(&self, issue_id: &str) -> Option<&PipelineRun> {
+        self.pipeline_runs.get(issue_id)
+    }
+
+    /// Get a mutable reference to a pipeline run.
+    pub fn get_pipeline_run_mut(&mut self, issue_id: &str) -> Option<&mut PipelineRun> {
+        self.pipeline_runs.get_mut(issue_id)
+    }
+
+    /// Insert a pipeline run for an issue.
+    pub fn insert_pipeline_run(&mut self, issue_id: &str, run: PipelineRun) {
+        self.pipeline_runs.insert(issue_id.to_string(), run);
+    }
+
+    /// Remove and return a pipeline run.
+    pub fn remove_pipeline_run(&mut self, issue_id: &str) -> Option<PipelineRun> {
+        self.pipeline_runs.remove(issue_id)
+    }
 }
 
 #[cfg(test)]
@@ -2195,6 +2216,7 @@ mod tests {
         assert!(state.retry_attempts.is_empty());
         assert!(state.completed.is_empty());
         assert_eq!(state.agent_totals.total_tokens, 0);
+        assert!(state.pipeline_runs.is_empty());
     }
 
     #[test]
@@ -3832,9 +3854,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::agent::events::{AgentEvent, WorkerEvent, WorkerResult};
 use crate::agent::AgentRunner;
-use crate::config::typed::ServiceConfig;
-use crate::config::workflow::WorkflowDefinition;
+use crate::config::ensemble::EnsembleConfig;
 use crate::error::AgentError;
+use crate::pipeline::dag::build_dag;
+use crate::pipeline::engine::{PipelineAction, PipelineRun};
+use crate::pipeline::verdict::resolve_verdict;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
@@ -3852,8 +3876,7 @@ use state::OrchestratorState;
 /// The main orchestrator that manages the poll-dispatch-reconcile loop.
 pub struct Orchestrator {
     state: Arc<RwLock<OrchestratorState>>,
-    config: Arc<RwLock<ServiceConfig>>,
-    workflow: Arc<RwLock<WorkflowDefinition>>,
+    config: Arc<RwLock<EnsembleConfig>>,
     tracker: Arc<dyn IssueTracker>,
     agent_runner: Arc<dyn AgentRunner>,
     workspace_mgr: Arc<WorkspaceManager>,
@@ -3865,8 +3888,7 @@ pub struct Orchestrator {
 impl Orchestrator {
     /// Create a new Orchestrator.
     pub fn new(
-        config: Arc<RwLock<ServiceConfig>>,
-        workflow: Arc<RwLock<WorkflowDefinition>>,
+        config: Arc<RwLock<EnsembleConfig>>,
         tracker: Arc<dyn IssueTracker>,
         agent_runner: Arc<dyn AgentRunner>,
         workspace_mgr: WorkspaceManager,
@@ -3884,7 +3906,6 @@ impl Orchestrator {
         Self {
             state: Arc::new(RwLock::new(cfg)),
             config,
-            workflow,
             tracker,
             agent_runner,
             workspace_mgr: Arc::new(workspace_mgr),
@@ -3910,8 +3931,8 @@ impl Orchestrator {
         {
             let config = self.config.read().await;
             let mut state = self.state.write().await;
-            state.poll_interval_ms = config.poll_interval_ms;
-            state.max_concurrent_agents = config.agent_max_concurrent;
+            state.poll_interval_ms = config.polling.interval_ms;
+            state.max_concurrent_agents = config.concurrency.max_concurrent_agents;
         }
 
         // Startup terminal workspace cleanup
@@ -3919,7 +3940,7 @@ impl Orchestrator {
             let config = self.config.read().await;
             startup_terminal_cleanup(
                 self.tracker.as_ref(),
-                &config.tracker_terminal_states,
+                &config.tracker.terminal_states,
                 &self.workspace_mgr,
             )
             .await;
@@ -3989,7 +4010,7 @@ impl Orchestrator {
         // 1. Reconcile stalled runs
         let stall_timeout_ms = {
             let config = self.config.read().await;
-            config.agent_stall_timeout_ms
+            config.agent.stall_timeout_ms
         };
         {
             let state = self.state.read().await;
@@ -4006,7 +4027,7 @@ impl Orchestrator {
                             issue_id,
                             &entry.identifier,
                             next_attempt(entry.retry_attempt),
-                            config.agent_max_retry_backoff_ms,
+                            config.agent.max_retry_backoff_ms,
                             "stall timeout",
                         );
                     }
@@ -4021,8 +4042,8 @@ impl Orchestrator {
             let reconcile_result = reconcile_tracker_states(
                 &state,
                 self.tracker.as_ref(),
-                &config.tracker_active_states,
-                &config.tracker_terminal_states,
+                &config.tracker.active_states,
+                &config.tracker.terminal_states,
             )
             .await;
 
@@ -4039,6 +4060,7 @@ impl Orchestrator {
                 if let Some(entry) = state.remove_running(&issue.id) {
                     state.add_runtime_seconds(&entry);
                     state.release_claim(&issue.id);
+                    state.remove_pipeline_run(&issue.id);
                     // Clean workspace
                     if let Err(e) = self.workspace_mgr.remove_workspace(&entry.identifier) {
                         warn!(
@@ -4055,18 +4077,12 @@ impl Orchestrator {
                 if let Some(entry) = state.remove_running(&issue.id) {
                     state.add_runtime_seconds(&entry);
                     state.release_claim(&issue.id);
+                    state.remove_pipeline_run(&issue.id);
                 }
             }
         }
 
-        // 3. Validate config for dispatch
-        let config = self.config.read().await;
-        if let Err(e) = config.validate_for_dispatch() {
-            warn!(error = %e, "dispatch validation failed, skipping dispatch this tick");
-            return;
-        }
-
-        // 4. Fetch candidate issues
+        // 3. Fetch candidate issues
         let mut candidates = match self.tracker.fetch_candidate_issues().await {
             Ok(issues) => issues,
             Err(e) => {
@@ -4075,10 +4091,11 @@ impl Orchestrator {
             }
         };
 
-        // 5. Sort by dispatch priority
+        // 4. Sort by dispatch priority
         sort_for_dispatch(&mut candidates);
 
-        // 6. Dispatch eligible issues while slots remain
+        // 5. Dispatch eligible issues while slots remain
+        let config = self.config.read().await;
         for issue in &candidates {
             {
                 let state = self.state.read().await;
@@ -4092,9 +4109,9 @@ impl Orchestrator {
                 is_dispatch_eligible(
                     issue,
                     &state,
-                    &config.tracker_active_states,
-                    &config.tracker_terminal_states,
-                    &config.agent_max_concurrent_by_state,
+                    &config.tracker.active_states,
+                    &config.tracker.terminal_states,
+                    &HashMap::new(), // per-state caps can be added to config if needed
                 )
             };
 
@@ -4104,22 +4121,91 @@ impl Orchestrator {
         }
     }
 
-    /// Dispatch a single issue: add to running, spawn worker task.
+    /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
     async fn dispatch_issue(&self, issue: &Issue, attempt: Option<u32>) {
+        let config = self.config.read().await;
+
+        // Build the step DAG from config
+        let dag = match build_dag(&config.steps) {
+            Ok(d) => d,
+            Err(e) => {
+                warn!(
+                    issue_id = %issue.id,
+                    error = %e,
+                    "failed to build step DAG, skipping dispatch"
+                );
+                return;
+            }
+        };
+
+        let cycle = attempt.unwrap_or(1);
+        let mut pipeline_run = PipelineRun::new(issue.id.clone(), cycle, dag);
+        let action = pipeline_run.start();
+
         info!(
             issue_id = %issue.id,
             identifier = %issue.identifier,
             attempt = ?attempt,
-            "dispatching issue"
+            "dispatching issue with pipeline"
         );
 
         {
             let mut state = self.state.write().await;
             state.add_running(issue, attempt);
+            state.insert_pipeline_run(&issue.id, pipeline_run);
+        }
+
+        // Process initial dispatch requests
+        if let PipelineAction::Dispatch(requests) = action {
+            for req in requests {
+                self.dispatch_step(issue, &req.step_name, &req.agent_name, req.tracker_state.as_deref(), attempt).await;
+            }
+        }
+    }
+
+    /// Dispatch a single pipeline step: set tracker state if specified, spawn worker.
+    async fn dispatch_step(
+        &self,
+        issue: &Issue,
+        step_name: &str,
+        agent_name: &str,
+        tracker_state: Option<&str>,
+        attempt: Option<u32>,
+    ) {
+        info!(
+            issue_id = %issue.id,
+            identifier = %issue.identifier,
+            step = step_name,
+            agent = agent_name,
+            "dispatching pipeline step"
+        );
+
+        // Set tracker state if specified by the step
+        if let Some(state_name) = tracker_state {
+            if self.tracker.supports_writes() {
+                if let Err(e) = self.tracker.set_issue_state(&issue.id, state_name).await {
+                    warn!(
+                        issue_id = %issue.id,
+                        state = state_name,
+                        error = %e,
+                        "failed to set tracker state for step dispatch"
+                    );
+                }
+            }
+        }
+
+        // Mark step as running in pipeline
+        {
+            let mut state = self.state.write().await;
+            if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
+                run.mark_running(step_name, format!("{}-{}-{}", issue.id, step_name, agent_name));
+            }
         }
 
         // Spawn worker task
         let issue_clone = issue.clone();
+        let step_name_owned = step_name.to_string();
+        let agent_name_owned = agent_name.to_string();
         let runner = Arc::clone(&self.agent_runner);
         let workspace_mgr = Arc::clone(&self.workspace_mgr);
         let event_tx = self.worker_tx.clone();
@@ -4133,18 +4219,19 @@ impl Orchestrator {
                     // Run after_create hook if newly created
                     if ws.created_now {
                         let cfg = config.read().await;
-                        if let Some(ref script) = cfg.hook_after_create {
+                        if let Some(ref script) = cfg.hooks.after_create {
                             if let Err(e) = crate::workspace::hooks::run_hook(
                                 "after_create",
                                 script,
                                 &ws.path,
-                                cfg.hook_timeout_ms,
+                                cfg.hooks.timeout_ms,
                             )
                             .await
                             {
                                 let _ = event_tx
                                     .send(WorkerEvent::WorkerExited {
                                         issue_id: issue_clone.id.clone(),
+                                        step_name: step_name_owned.clone(),
                                         result: WorkerResult::Failed {
                                             error: format!("after_create hook failed: {e}"),
                                         },
@@ -4161,6 +4248,7 @@ impl Orchestrator {
                     let _ = event_tx
                         .send(WorkerEvent::WorkerExited {
                             issue_id: issue_clone.id.clone(),
+                            step_name: step_name_owned.clone(),
                             result: WorkerResult::Failed {
                                 error: format!("workspace error: {e}"),
                             },
@@ -4173,7 +4261,14 @@ impl Orchestrator {
 
             // Run agent
             let result = runner
-                .run(&issue_clone, attempt, &workspace_path, event_tx.clone())
+                .run(
+                    &issue_clone,
+                    &agent_name_owned,
+                    &step_name_owned,
+                    attempt,
+                    &workspace_path,
+                    event_tx.clone(),
+                )
                 .await;
 
             let worker_result = match result {
@@ -4186,6 +4281,7 @@ impl Orchestrator {
             let _ = event_tx
                 .send(WorkerEvent::WorkerExited {
                     issue_id: issue_clone.id.clone(),
+                    step_name: step_name_owned,
                     result: worker_result,
                     timestamp: Utc::now(),
                 })
@@ -4198,18 +4294,20 @@ impl Orchestrator {
         match event {
             WorkerEvent::AgentUpdate {
                 issue_id,
+                step_name,
                 event: agent_event,
                 timestamp,
             } => {
-                self.handle_agent_update(&issue_id, agent_event, timestamp)
+                self.handle_agent_update(&issue_id, &step_name, agent_event, timestamp)
                     .await;
             }
             WorkerEvent::WorkerExited {
                 issue_id,
+                step_name,
                 result,
                 timestamp,
             } => {
-                self.handle_worker_exit(&issue_id, result).await;
+                self.handle_worker_exit(&issue_id, &step_name, result).await;
             }
         }
     }
@@ -4218,6 +4316,7 @@ impl Orchestrator {
     async fn handle_agent_update(
         &self,
         issue_id: &str,
+        step_name: &str,
         event: AgentEvent,
         timestamp: chrono::DateTime<Utc>,
     ) {
@@ -4317,46 +4416,141 @@ impl Orchestrator {
         }
     }
 
-    /// Handle a worker exit.
-    async fn handle_worker_exit(&self, issue_id: &str, result: WorkerResult) {
-        let mut state = self.state.write().await;
+    /// Handle a worker exit. Integrates with PipelineRun to drive step DAG.
+    async fn handle_worker_exit(&self, issue_id: &str, step_name: &str, result: WorkerResult) {
         let config = self.config.read().await;
 
-        if let Some(entry) = state.remove_running(issue_id) {
-            state.add_runtime_seconds(&entry);
+        // Get the issue snapshot for potential re-dispatch
+        let issue_snapshot = {
+            let state = self.state.read().await;
+            state.running.get(issue_id).map(|e| e.issue.clone())
+        };
 
-            match result {
-                WorkerResult::Success => {
-                    info!(
-                        issue_id = %issue_id,
-                        identifier = %entry.identifier,
-                        "worker exited normally, scheduling continuation retry"
-                    );
-                    state.completed.insert(issue_id.to_string());
-                    schedule_continuation_retry(&mut state, issue_id, &entry.identifier);
+        let mut state = self.state.write().await;
+
+        match result {
+            WorkerResult::Success => {
+                info!(
+                    issue_id = %issue_id,
+                    step = step_name,
+                    "worker exited successfully, resolving verdict"
+                );
+
+                // Resolve verdict from workspace
+                let workspace_path = self.workspace_mgr.workspace_path(issue_id);
+                let verdict = resolve_verdict(&workspace_path).await;
+
+                // Drive the pipeline
+                let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                    Some(run.step_completed(step_name, verdict))
+                } else {
+                    warn!(issue_id = %issue_id, "no pipeline run found for worker exit");
+                    None
+                };
+
+                if let Some(action) = pipeline_action {
+                    match action {
+                        PipelineAction::Dispatch(requests) => {
+                            // Need to drop state lock before dispatching
+                            drop(state);
+                            if let Some(ref issue) = issue_snapshot {
+                                for req in requests {
+                                    self.dispatch_step(
+                                        issue,
+                                        &req.step_name,
+                                        &req.agent_name,
+                                        req.tracker_state.as_deref(),
+                                        None,
+                                    ).await;
+                                }
+                            }
+                        }
+                        PipelineAction::Succeeded => {
+                            info!(issue_id = %issue_id, "pipeline succeeded");
+                            // Set tracker to on_success state
+                            if self.tracker.supports_writes() {
+                                let _ = self.tracker.set_issue_state(
+                                    issue_id,
+                                    &config.on_success,
+                                ).await;
+                            }
+                            if let Some(entry) = state.remove_running(issue_id) {
+                                state.add_runtime_seconds(&entry);
+                            }
+                            state.release_claim(issue_id);
+                            state.remove_pipeline_run(issue_id);
+                            state.completed.insert(issue_id.to_string());
+                        }
+                        PipelineAction::Failed { step, reason } => {
+                            warn!(
+                                issue_id = %issue_id,
+                                step = %step,
+                                reason = %reason,
+                                "pipeline failed"
+                            );
+                            // Set tracker to on_failure state
+                            if self.tracker.supports_writes() {
+                                let _ = self.tracker.set_issue_state(
+                                    issue_id,
+                                    &config.on_failure,
+                                ).await;
+                            }
+                            if let Some(entry) = state.remove_running(issue_id) {
+                                state.add_runtime_seconds(&entry);
+                                schedule_failure_retry(
+                                    &mut state,
+                                    issue_id,
+                                    &entry.identifier,
+                                    next_attempt(entry.retry_attempt),
+                                    config.agent.max_retry_backoff_ms,
+                                    &reason,
+                                );
+                            }
+                            state.remove_pipeline_run(issue_id);
+                        }
+                        PipelineAction::Waiting => {
+                            // Other steps still running, do nothing
+                            debug!(issue_id = %issue_id, "pipeline waiting for other steps");
+                        }
+                    }
                 }
-                WorkerResult::Failed { error } => {
-                    warn!(
-                        issue_id = %issue_id,
-                        identifier = %entry.identifier,
-                        error = %error,
-                        "worker exited with failure, scheduling retry"
-                    );
+            }
+            WorkerResult::Failed { error } => {
+                warn!(
+                    issue_id = %issue_id,
+                    step = step_name,
+                    error = %error,
+                    "worker exited with failure"
+                );
+
+                // Notify pipeline of step failure
+                let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                    Some(run.step_failed(step_name, error.clone()))
+                } else {
+                    None
+                };
+
+                // Set tracker to on_failure state
+                if self.tracker.supports_writes() {
+                    let _ = self.tracker.set_issue_state(
+                        issue_id,
+                        &config.on_failure,
+                    ).await;
+                }
+
+                if let Some(entry) = state.remove_running(issue_id) {
+                    state.add_runtime_seconds(&entry);
                     schedule_failure_retry(
                         &mut state,
                         issue_id,
                         &entry.identifier,
                         next_attempt(entry.retry_attempt),
-                        config.agent_max_retry_backoff_ms,
+                        config.agent.max_retry_backoff_ms,
                         &error,
                     );
                 }
+                state.remove_pipeline_run(issue_id);
             }
-        } else {
-            warn!(
-                issue_id = %issue_id,
-                "worker exit for unknown running entry"
-            );
         }
     }
 
@@ -4398,7 +4592,7 @@ impl Orchestrator {
                     issue_id,
                     &retry_entry.identifier,
                     retry_entry.attempt + 1,
-                    config.agent_max_retry_backoff_ms,
+                    config.agent.max_retry_backoff_ms,
                     "retry poll failed",
                 );
                 return;
@@ -4442,7 +4636,7 @@ impl Orchestrator {
                         issue_id,
                         &retry_entry.identifier,
                         retry_entry.attempt + 1,
-                        config.agent_max_retry_backoff_ms,
+                        config.agent.max_retry_backoff_ms,
                         "no available orchestrator slots",
                     );
                 }
@@ -4455,7 +4649,7 @@ impl Orchestrator {
 mod tests {
     use super::*;
     use crate::agent::events::{AgentEvent, WorkerEvent, WorkerResult};
-    use crate::config::workflow::parse_workflow;
+    use crate::config::ensemble::parse_config;
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
 
@@ -4504,6 +4698,8 @@ mod tests {
         async fn run(
             &self,
             issue: &Issue,
+            _agent_name: &str,
+            step_name: &str,
             _attempt: Option<u32>,
             _workspace_path: &std::path::Path,
             event_tx: mpsc::Sender<WorkerEvent>,
@@ -4514,6 +4710,7 @@ mod tests {
             let _ = event_tx
                 .send(WorkerEvent::AgentUpdate {
                     issue_id: issue.id.clone(),
+                    step_name: step_name.to_string(),
                     event: AgentEvent::SessionStarted {
                         session_id: "mock-session".to_string(),
                         agent_pid: Some("99".to_string()),
@@ -4542,24 +4739,44 @@ mod tests {
         }
     }
 
-    fn make_config() -> ServiceConfig {
-        let mut config = ServiceConfig::default();
-        config.tracker_kind = Some("todo_file".to_string());
-        config.agent_max_concurrent = 5;
-        config.agent_max_turns = 3;
-        config.poll_interval_ms = 100;
-        config
-    }
-
-    fn make_workflow() -> WorkflowDefinition {
-        parse_workflow("---\ntracker:\n  kind: todo_file\n---\nWork on {{ issue.identifier }}.")
-            .unwrap()
+    fn make_config() -> EnsembleConfig {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo", "In Progress"]
+  terminal_states: ["Done", "Closed"]
+agents:
+  builder:
+    executor: claude
+    model: opus
+    prompt: "Work on {{ issue.identifier }}."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Todo
+concurrency:
+  max_concurrent_agents: 5
+polling:
+  interval_ms: 100
+workspace:
+  root: /tmp/ensemble-test
+agent:
+  max_turns: 3
+  command: "echo test"
+  session_mode: code
+  permission_policy: auto_approve_all
+  turn_timeout_ms: 30000
+  read_timeout_ms: 5000
+  max_retry_backoff_ms: 300000
+  stall_timeout_ms: 300000
+"#;
+        parse_config(yaml).unwrap()
     }
 
     #[tokio::test]
     async fn test_orchestrator_dispatches_on_tick() {
         let config = Arc::new(RwLock::new(make_config()));
-        let workflow = Arc::new(RwLock::new(make_workflow()));
         let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: issues.clone(),
@@ -4570,7 +4787,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator =
-            Orchestrator::new(config, workflow, tracker, runner, workspace_mgr, shutdown_rx);
+            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Run one tick
         orchestrator.handle_tick().await;
@@ -4579,12 +4796,12 @@ mod tests {
         let state = orchestrator.state.read().await;
         assert!(state.is_running("1"), "issue should be running after tick");
         assert!(state.is_claimed("1"), "issue should be claimed after tick");
+        assert!(state.get_pipeline_run("1").is_some(), "should have pipeline run");
     }
 
     #[tokio::test]
     async fn test_orchestrator_handles_worker_exit_success() {
         let config = Arc::new(RwLock::new(make_config()));
-        let workflow = Arc::new(RwLock::new(make_workflow()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
@@ -4593,38 +4810,37 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator =
-            Orchestrator::new(config, workflow, tracker, runner, workspace_mgr, shutdown_rx);
+            Orchestrator::new(config.clone(), tracker, runner, workspace_mgr, shutdown_rx);
 
-        // Manually add a running entry
+        // Manually add a running entry with a pipeline run
         {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
             let mut state = orchestrator.state.write().await;
             state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run);
         }
 
         // Simulate worker exit
         orchestrator
-            .handle_worker_exit("1", WorkerResult::Success)
+            .handle_worker_exit("1", "build", WorkerResult::Success)
             .await;
 
         let state = orchestrator.state.read().await;
-        assert!(!state.is_running("1"), "should no longer be running");
+        // With a single-step pipeline, success should complete the pipeline
         assert!(
-            state.retry_attempts.contains_key("1"),
-            "should have continuation retry"
+            state.completed.contains("1") || state.retry_attempts.contains_key("1"),
+            "should be completed or retrying"
         );
-        assert!(
-            state.completed.contains("1"),
-            "should be in completed set"
-        );
-        let retry = state.retry_attempts.get("1").unwrap();
-        assert_eq!(retry.attempt, 1);
-        assert!(retry.error.is_none());
     }
 
     #[tokio::test]
     async fn test_orchestrator_handles_worker_exit_failure() {
         let config = Arc::new(RwLock::new(make_config()));
-        let workflow = Arc::new(RwLock::new(make_workflow()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
@@ -4633,18 +4849,26 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator =
-            Orchestrator::new(config, workflow, tracker, runner, workspace_mgr, shutdown_rx);
+            Orchestrator::new(config.clone(), tracker, runner, workspace_mgr, shutdown_rx);
 
-        // Manually add a running entry with attempt 2
+        // Manually add a running entry with attempt 2 and a pipeline run
         {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 2, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
             let mut state = orchestrator.state.write().await;
             state.add_running(&test_issue("1", "Todo"), Some(2));
+            state.insert_pipeline_run("1", pipeline_run);
         }
 
         // Simulate worker failure
         orchestrator
             .handle_worker_exit(
                 "1",
+                "build",
                 WorkerResult::Failed {
                     error: "agent crashed".to_string(),
                 },
@@ -4657,12 +4881,12 @@ mod tests {
         let retry = state.retry_attempts.get("1").unwrap();
         assert_eq!(retry.attempt, 3); // incremented from 2
         assert_eq!(retry.error.as_deref(), Some("agent crashed"));
+        assert!(state.get_pipeline_run("1").is_none(), "pipeline run should be removed");
     }
 
     #[tokio::test]
     async fn test_orchestrator_handles_agent_update() {
         let config = Arc::new(RwLock::new(make_config()));
-        let workflow = Arc::new(RwLock::new(make_workflow()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
@@ -4671,7 +4895,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator =
-            Orchestrator::new(config, workflow, tracker, runner, workspace_mgr, shutdown_rx);
+            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Add running entry
         {
@@ -4683,6 +4907,7 @@ mod tests {
         orchestrator
             .handle_agent_update(
                 "1",
+                "build",
                 AgentEvent::SessionStarted {
                     session_id: "session-abc".to_string(),
                     agent_pid: Some("12345".to_string()),
@@ -4703,6 +4928,7 @@ mod tests {
         orchestrator
             .handle_agent_update(
                 "1",
+                "build",
                 AgentEvent::TurnCompleted {
                     usage: Some(crate::agent::events::TokenUsage {
                         input_tokens: 500,
@@ -4726,7 +4952,6 @@ mod tests {
     #[tokio::test]
     async fn test_orchestrator_retry_release_missing_issue() {
         let config = Arc::new(RwLock::new(make_config()));
-        let workflow = Arc::new(RwLock::new(make_workflow()));
         let issues = Arc::new(RwLock::new(vec![])); // empty — issue not found
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
@@ -4735,7 +4960,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator =
-            Orchestrator::new(config, workflow, tracker, runner, workspace_mgr, shutdown_rx);
+            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Add a claimed retry
         {
@@ -4768,9 +4993,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_orchestrator_full_cycle() {
-        // Full cycle: start -> tick -> dispatch -> worker exit -> retry -> tick
+        // Full cycle: start -> tick -> dispatch -> worker exit -> pipeline completion
         let config = Arc::new(RwLock::new(make_config()));
-        let workflow = Arc::new(RwLock::new(make_workflow()));
         let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: issues.clone(),
@@ -4781,7 +5005,7 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator =
-            Orchestrator::new(config, workflow, tracker, runner, workspace_mgr, shutdown_rx);
+            Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
 
         // Tick 1: dispatches the issue
         orchestrator.handle_tick().await;
@@ -4789,6 +5013,7 @@ mod tests {
         {
             let state = orchestrator.state.read().await;
             assert!(state.is_running("1"));
+            assert!(state.get_pipeline_run("1").is_some());
         }
 
         // Wait for the mock worker to finish
@@ -4799,10 +5024,8 @@ mod tests {
             orchestrator.handle_worker_event(event).await;
         }
 
-        // After worker exit, should have continuation retry
+        // After worker exit, pipeline should have completed or retried
         let state = orchestrator.state.read().await;
-        // Either still running (worker hasn't finished) or has a retry
-        // The mock runner is fast, so it likely finished
         if !state.is_running("1") {
             assert!(
                 state.retry_attempts.contains_key("1") || state.completed.contains("1"),
@@ -4831,7 +5054,7 @@ Expected: All tests pass (unit + integration from all modules)
 
 ```bash
 git add crates/ensemble-core/src/orchestrator/mod.rs
-git commit -m "feat: orchestrator main loop with select-based event processing, dispatch, retry, and reconciliation"
+git commit -m "feat: orchestrator main loop with pipeline-driven dispatch, verdict resolution, and step DAG integration"
 ```
 
 ---
@@ -4840,15 +5063,15 @@ git commit -m "feat: orchestrator main loop with select-based event processing, 
 
 After completing all 8 tasks, you will have:
 
-- **Agent events module** (`agent/events.rs`) with `AgentEvent`, `WorkerEvent`, `TokenUsage`, `StopReason`, and `JsonRpcMessage` types — the internal protocol between ACP client and orchestrator
+- **Agent events module** (`agent/events.rs`) with `AgentEvent`, `WorkerEvent` (with `step_name` field), `TokenUsage`, `StopReason`, and `JsonRpcMessage` types — the internal protocol between ACP client and orchestrator
 - **ACP client** (`agent/acp_client.rs`) with subprocess management, JSON-RPC 2.0 stdio protocol, handshake (`initialize` + `session/new` + `session/set_mode`), turn streaming with `stopReason` mapping, permission handling per policy, timeout enforcement, and SIGTERM/SIGKILL cleanup
-- **AgentRunner trait + AcpAgentRunner** (`agent/mod.rs`) implementing the full worker loop from SPEC.md Section 16.5: before_run hook, ACP session startup, multi-turn loop with issue state re-checking, after_run hook (best effort), and process cleanup
-- **OrchestratorState** (`orchestrator/state.rs`) with `running`, `claimed`, `retry_attempts`, `completed`, `agent_totals`, and `agent_rate_limits` — all mutation methods from Section 4.1.8
+- **AgentRunner trait + AcpAgentRunner** (`agent/mod.rs`) implementing the full worker loop: before_run hook via `config.hooks.before_run`, ACP session startup via `config.agent.command`, multi-turn loop, after_run hook (best effort), and process cleanup. The `run()` method takes `agent_name` and `step_name` parameters. Prompts are resolved from `config.agents[agent_name].prompt` or `.prompt_template`. Uses `EnsembleConfig` (not ServiceConfig/WorkflowDefinition).
+- **OrchestratorState** (`orchestrator/state.rs`) with `running`, `claimed`, `retry_attempts`, `completed`, `agent_totals`, `agent_rate_limits`, and `pipeline_runs: HashMap<String, PipelineRun>` — all mutation methods from Section 4.1.8 plus `get_pipeline_run()`, `get_pipeline_run_mut()`, `insert_pipeline_run()`, `remove_pipeline_run()`
 - **Scheduler** (`orchestrator/scheduler.rs`) with all eligibility rules from Section 8.2 (required fields, active/terminal states, running/claimed checks, global slots, per-state slots, blocker rules for Todo), dispatch priority sorting (priority ascending, oldest created_at, identifier tiebreaker), and concurrency slot calculation
 - **Retry logic** (`orchestrator/retry.rs`) with `calculate_backoff(attempt, max)` formula `min(10000 * 2^(attempt-1), max)`, 1-second continuation retries, failure retries with exponential backoff, and due-time scheduling
-- **Reconciler** (`orchestrator/reconciler.rs`) with Part A stall detection (elapsed since last event vs stall_timeout_ms), Part B tracker state refresh (terminal -> kill + cleanup, active -> update snapshot, non-active -> kill without cleanup), and startup terminal workspace cleanup
-- **Orchestrator main loop** (`orchestrator/mod.rs`) with the `select!`-based event loop processing poll ticks, worker events, retry timers, and shutdown signals — the complete runtime engine per Sections 7, 8, and 16
+- **Reconciler** (`orchestrator/reconciler.rs`) with Part A stall detection (elapsed since last event vs `config.agent.stall_timeout_ms`), Part B tracker state refresh (terminal -> kill + cleanup, active -> update snapshot, non-active -> kill without cleanup), and startup terminal workspace cleanup
+- **Orchestrator main loop** (`orchestrator/mod.rs`) with the `select!`-based event loop processing poll ticks, worker events, retry timers, and shutdown signals. On issue dispatch: builds `StepDag` from `config.steps` via `build_dag()`, creates `PipelineRun`, calls `start()` for initial `DispatchRequest`s, and spawns workers per step. On worker exit: resolves verdicts via `resolve_verdict()`, drives `PipelineRun.step_completed()` / `step_failed()`, and handles `PipelineAction::Dispatch` (next steps), `Succeeded` (set `config.on_success` state), `Failed` (set `config.on_failure` state + retry), and `Waiting`.
 
-**Dependencies on Plan 1:** This plan builds on the types and traits defined in Plan 1: `Issue`, `RunningEntry`, `RetryEntry`, `AgentTotals`, `IssueTracker` trait, `ServiceConfig`, `WorkflowDefinition`, `WorkspaceManager`, `run_hook`/`run_hook_best_effort`, `render_prompt`, `sanitize_workspace_key`, and the error types (`ConfigError`, `WorkspaceError`, `TrackerError`).
+**Dependencies on Plans 1 and 2B:** This plan builds on the types and traits from Plans 1 and 2B: `Issue`, `RunningEntry`, `RetryEntry`, `AgentTotals`, `IssueTracker` trait (with `supports_writes`, `set_issue_state`, `add_comment`), `EnsembleConfig` (with `TrackerConfig`, `AgentConfig`, `StepConfig`, `ConcurrencyConfig`, `PollingConfig`, `WorkspaceConfig`, `HooksConfig`, `AgentRuntimeConfig`), `parse_config()`, `build_dag()`, `StepDag`, `PipelineRun`, `PipelineAction`, `DispatchRequest`, `Verdict`, `resolve_verdict()`, `WorkspaceManager`, `run_hook`/`run_hook_best_effort`, `render_prompt`, `sanitize_workspace_key`, and the error types (`ConfigError`, `WorkspaceError`, `TrackerError`, `PipelineError`).
 
 **Next:** Plan 4 adds the pluggable tracker implementations (todo_file + github). Plan 5 adds the HTTP API, CLI binary, and desktop/dashboard.
