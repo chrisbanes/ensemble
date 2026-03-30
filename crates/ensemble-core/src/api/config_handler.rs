@@ -18,9 +18,14 @@ pub struct ConfigResponse {
 ///
 /// Returns the effective ensemble configuration and validation state.
 pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<ConfigResponse>) {
-    let config = state.config.as_ref().clone();
+    let mut config = state.config.as_ref().clone();
     let errors = collect_validation_errors(&config);
     let valid = errors.is_empty();
+
+    // Redact secrets before sending to the client.
+    if config.tracker.api_key.is_some() {
+        config.tracker.api_key = Some("••••••••".to_string());
+    }
 
     let response = ConfigResponse {
         valid,
@@ -123,6 +128,36 @@ on_failure: Failed
         assert!(response.errors.is_empty());
         assert_eq!(response.config_path, "ensemble.yaml");
         assert_eq!(response.config.tracker.kind, "todo_file");
+    }
+
+    #[tokio::test]
+    async fn test_get_config_redacts_api_key() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: github
+  api_key: ghp_secret_token_12345
+  repository: acme/repo
+agents:
+  build:
+    executor: claude-code
+    model: test
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+        let state = build_app_state(config);
+        let (status, Json(response)) = get_config(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response.config.tracker.api_key.as_deref(),
+            Some("••••••••")
+        );
     }
 
     #[tokio::test]
