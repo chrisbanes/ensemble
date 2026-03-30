@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
+    "dev": "npm run codegen && vite",
+    "build": "npm run codegen && tsc && vite build",
     "preview": "vite preview",
     "codegen:spec": "cd ../../../ && cargo test -p ensemble-core --test openapi_spec write_openapi_spec",
     "codegen:client": "orval",
