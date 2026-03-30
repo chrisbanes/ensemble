@@ -20,9 +20,12 @@ struct Cli {
     #[arg(default_value = "ensemble.yaml")]
     config_path: PathBuf,
 
+    /// HTTP server bind address.
+    #[arg(long, env = "HOST", default_value = "127.0.0.1")]
+    host: String,
+
     /// HTTP server port (enables API + dashboard).
-    /// CLI-only flag; not part of ensemble.yaml.
-    #[arg(long)]
+    #[arg(long, env = "PORT")]
     port: Option<u16>,
 }
 
@@ -100,7 +103,7 @@ async fn main() -> ExitCode {
         };
         let router = create_api_router(app_state);
 
-        let bind_addr = format!("127.0.0.1:{}", port);
+        let bind_addr = format!("{}:{}", cli.host, port);
         info!(addr = %bind_addr, "starting HTTP server");
 
         let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
@@ -153,37 +156,115 @@ async fn main() -> ExitCode {
 mod tests {
     use super::*;
 
+    /// Helper: clear HOST/PORT env vars for test isolation, returning saved values.
+    fn clear_env() -> (Option<String>, Option<String>) {
+        let host = std::env::var("HOST").ok();
+        let port = std::env::var("PORT").ok();
+        std::env::remove_var("HOST");
+        std::env::remove_var("PORT");
+        (host, port)
+    }
+
+    /// Helper: restore previously saved HOST/PORT env vars.
+    fn restore_env(saved: (Option<String>, Option<String>)) {
+        match saved.0 {
+            Some(v) => std::env::set_var("HOST", v),
+            None => std::env::remove_var("HOST"),
+        }
+        match saved.1 {
+            Some(v) => std::env::set_var("PORT", v),
+            None => std::env::remove_var("PORT"),
+        }
+    }
+
     #[test]
     fn test_cli_parse_defaults() {
+        let saved = clear_env();
         let cli = Cli::parse_from(["ensemble"]);
         assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
+        assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, None);
+        restore_env(saved);
     }
 
     #[test]
     fn test_cli_parse_custom_path() {
+        let saved = clear_env();
         let cli = Cli::parse_from(["ensemble", "custom/ensemble.yaml"]);
         assert_eq!(cli.config_path, PathBuf::from("custom/ensemble.yaml"));
         assert_eq!(cli.port, None);
+        restore_env(saved);
     }
 
     #[test]
     fn test_cli_parse_with_port() {
+        let saved = clear_env();
         let cli = Cli::parse_from(["ensemble", "--port", "8080"]);
         assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         assert_eq!(cli.port, Some(8080));
+        restore_env(saved);
+    }
+
+    #[test]
+    fn test_cli_parse_with_host() {
+        let saved = clear_env();
+        let cli = Cli::parse_from(["ensemble", "--host", "0.0.0.0", "--port", "3000"]);
+        assert_eq!(cli.host, "0.0.0.0");
+        assert_eq!(cli.port, Some(3000));
+        restore_env(saved);
     }
 
     #[test]
     fn test_cli_parse_all_options() {
-        let cli = Cli::parse_from(["ensemble", "--port", "3000", "my/ensemble.yaml"]);
+        let saved = clear_env();
+        let cli = Cli::parse_from([
+            "ensemble",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "3000",
+            "my/ensemble.yaml",
+        ]);
         assert_eq!(cli.config_path, PathBuf::from("my/ensemble.yaml"));
+        assert_eq!(cli.host, "0.0.0.0");
         assert_eq!(cli.port, Some(3000));
+        restore_env(saved);
     }
 
     #[test]
     fn test_cli_parse_ephemeral_port() {
+        let saved = clear_env();
         let cli = Cli::parse_from(["ensemble", "--port", "0"]);
         assert_eq!(cli.port, Some(0));
+        restore_env(saved);
+    }
+
+    #[test]
+    fn test_cli_env_host() {
+        let saved = clear_env();
+        std::env::set_var("HOST", "10.0.0.1");
+        let cli = Cli::parse_from(["ensemble"]);
+        assert_eq!(cli.host, "10.0.0.1");
+        restore_env(saved);
+    }
+
+    #[test]
+    fn test_cli_env_port() {
+        let saved = clear_env();
+        std::env::set_var("PORT", "9090");
+        let cli = Cli::parse_from(["ensemble"]);
+        assert_eq!(cli.port, Some(9090));
+        restore_env(saved);
+    }
+
+    #[test]
+    fn test_cli_flag_overrides_env() {
+        let saved = clear_env();
+        std::env::set_var("HOST", "10.0.0.1");
+        std::env::set_var("PORT", "9090");
+        let cli = Cli::parse_from(["ensemble", "--host", "0.0.0.0", "--port", "3000"]);
+        assert_eq!(cli.host, "0.0.0.0");
+        assert_eq!(cli.port, Some(3000));
+        restore_env(saved);
     }
 }
