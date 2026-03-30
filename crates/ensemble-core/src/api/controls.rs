@@ -201,7 +201,6 @@ mod tests {
     use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry};
-    use chrono::Utc;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::RwLock;
