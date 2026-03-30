@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import type { RetryEntry } from "../types";
+import type { RetryEntry } from "@/types";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 
 interface RetryQueueProps {
   entries: RetryEntry[];
@@ -18,7 +20,6 @@ function formatCountdown(dueAtMs: number): string {
 export default function RetryQueue({ entries, onRetry }: RetryQueueProps) {
   const [, setTick] = useState(0);
 
-  // Tick every second to update countdowns.
   useEffect(() => {
     if (entries.length === 0) return;
     const interval = setInterval(() => setTick((t) => t + 1), 1000);
@@ -26,48 +27,39 @@ export default function RetryQueue({ entries, onRetry }: RetryQueueProps) {
   }, [entries.length]);
 
   if (entries.length === 0) {
-    return (
-      <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-        No issues in retry queue.
-      </div>
-    );
+    return <div className="text-center py-8 text-muted-foreground">No issues in retry queue.</div>;
   }
 
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-        <thead className="bg-gray-50 dark:bg-gray-800">
-          <tr>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Issue</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Attempt</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Retry In</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Error</th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Actions</th>
-          </tr>
-        </thead>
-        <tbody className="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
-          {entries.map((e) => (
-            <tr key={e.issue_id} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-              <td className="px-4 py-3 text-sm">
-                <Link to={`/issue/${encodeURIComponent(e.issue_identifier)}`} className="text-blue-600 dark:text-blue-400 hover:underline font-medium">
-                  {e.issue_identifier}
-                </Link>
-              </td>
-              <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{e.attempt}</td>
-              <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{formatCountdown(e.due_at_ms)}</td>
-              <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300 max-w-xs truncate">{e.error ?? "—"}</td>
-              <td className="px-4 py-3 text-sm">
-                <button
-                  onClick={() => onRetry(e.issue_identifier)}
-                  className="text-blue-600 dark:text-blue-400 hover:underline text-sm font-medium"
-                >
-                  Retry Now
-                </button>
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Issue</TableHead>
+          <TableHead>Attempt</TableHead>
+          <TableHead>Retry In</TableHead>
+          <TableHead>Error</TableHead>
+          <TableHead>Actions</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {entries.map((e) => (
+          <TableRow key={e.issue_id}>
+            <TableCell>
+              <Link to={`/issue/${encodeURIComponent(e.issue_identifier)}`} className="text-primary hover:underline font-medium">
+                {e.issue_identifier}
+              </Link>
+            </TableCell>
+            <TableCell className="text-muted-foreground">{e.attempt}</TableCell>
+            <TableCell className="text-muted-foreground">{formatCountdown(e.due_at_ms)}</TableCell>
+            <TableCell className="text-muted-foreground max-w-xs truncate">{e.error ?? "\u2014"}</TableCell>
+            <TableCell>
+              <Button variant="link" size="sm" className="h-auto p-0" onClick={() => onRetry(e.issue_identifier)}>
+                Retry Now
+              </Button>
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
   );
 }

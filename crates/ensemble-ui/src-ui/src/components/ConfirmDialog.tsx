@@ -1,9 +1,20 @@
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
 interface ConfirmDialogProps {
   open: boolean;
   title: string;
   message: string;
   confirmLabel: string;
-  confirmClass?: string;
+  destructive?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -13,32 +24,27 @@ export default function ConfirmDialog({
   title,
   message,
   confirmLabel,
-  confirmClass = "bg-red-600 hover:bg-red-500",
+  destructive = true,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  if (!open) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl p-6 max-w-sm w-full mx-4">
-        <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{title}</h3>
-        <p className="mt-2 text-sm text-gray-600 dark:text-gray-400">{message}</p>
-        <div className="mt-4 flex justify-end gap-3">
-          <button
-            onClick={onCancel}
-            className="px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-          >
-            Cancel
-          </button>
-          <button
+    <AlertDialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onCancel(); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{message}</AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
             onClick={onConfirm}
-            className={`px-3 py-2 text-sm rounded-md text-white ${confirmClass}`}
+            className={destructive ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : undefined}
           >
             {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

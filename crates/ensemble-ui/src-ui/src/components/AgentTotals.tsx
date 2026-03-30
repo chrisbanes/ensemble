@@ -1,4 +1,5 @@
-import type { AgentTotals as AgentTotalsType, RateLimitSnapshot } from "../types";
+import type { AgentTotals as AgentTotalsType, RateLimitSnapshot } from "@/types";
+import { Card, CardContent } from "@/components/ui/card";
 
 interface AgentTotalsProps {
   totals: AgentTotalsType;
@@ -21,10 +22,12 @@ function formatSeconds(seconds: number): string {
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-      <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">{label}</dt>
-      <dd className="mt-1 text-2xl font-semibold text-gray-900 dark:text-gray-100">{value}</dd>
-    </div>
+    <Card>
+      <CardContent className="p-4">
+        <dt className="text-sm font-medium text-muted-foreground">{label}</dt>
+        <dd className="mt-1 text-2xl font-semibold">{value}</dd>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -36,17 +39,19 @@ export default function AgentTotals({ totals, rateLimits }: AgentTotalsProps) {
       <StatCard label="Total Tokens" value={formatTokens(totals.total_tokens)} />
       <StatCard label="Total Runtime" value={formatSeconds(totals.seconds_running)} />
       {rateLimits && (
-        <div className="col-span-2 sm:col-span-4 bg-white dark:bg-gray-800 rounded-lg shadow p-4">
-          <dt className="text-sm font-medium text-gray-500 dark:text-gray-400">Rate Limit</dt>
-          <dd className="mt-1 text-sm text-gray-900 dark:text-gray-100">
-            {rateLimits.remaining}/{rateLimits.limit} remaining
-            {rateLimits.reset_at && (
-              <span className="ml-2 text-gray-500 dark:text-gray-400">
-                (resets {new Date(rateLimits.reset_at).toLocaleTimeString()})
-              </span>
-            )}
-          </dd>
-        </div>
+        <Card className="col-span-2 sm:col-span-4">
+          <CardContent className="p-4">
+            <dt className="text-sm font-medium text-muted-foreground">Rate Limit</dt>
+            <dd className="mt-1 text-sm">
+              {rateLimits.remaining}/{rateLimits.limit} remaining
+              {rateLimits.reset_at && (
+                <span className="ml-2 text-muted-foreground">
+                  (resets {new Date(rateLimits.reset_at).toLocaleTimeString()})
+                </span>
+              )}
+            </dd>
+          </CardContent>
+        </Card>
       )}
     </div>
   );

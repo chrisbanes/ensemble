@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useHistoryQuery } from "../api";
-import StatusBadge from "../components/StatusBadge";
+import { useHistoryQuery } from "@/api";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
+import StatusBadge from "@/components/StatusBadge";
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -34,97 +39,91 @@ export default function History() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">History</h1>
+      <h1 className="text-2xl font-bold">History</h1>
 
-      {/* Filters */}
       <div className="flex flex-wrap gap-3">
-        <input
-          type="text"
+        <Input
           placeholder="Search by issue..."
           value={filters.issue}
           onChange={(e) => { setFilters((f) => ({ ...f, issue: e.target.value })); setCursor(undefined); }}
-          className="px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+          className="w-48"
         />
-        <select
-          value={filters.outcome}
-          onChange={(e) => { setFilters((f) => ({ ...f, outcome: e.target.value })); setCursor(undefined); }}
-          className="px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-        >
-          <option value="">All outcomes</option>
-          <option value="succeeded">Succeeded</option>
-          <option value="failed">Failed</option>
-          <option value="stopped">Stopped</option>
-        </select>
-        <select
-          value={filters.since}
-          onChange={(e) => { setFilters((f) => ({ ...f, since: e.target.value })); setCursor(undefined); }}
-          className="px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-        >
-          <option value="">All time</option>
-          <option value="1h">Last hour</option>
-          <option value="24h">Last 24h</option>
-          <option value="7d">Last 7 days</option>
-        </select>
-        <input
-          type="text"
+        <Select value={filters.outcome} onValueChange={(v) => { setFilters((f) => ({ ...f, outcome: v === "all" ? "" : v })); setCursor(undefined); }}>
+          <SelectTrigger className="w-40">
+            <SelectValue placeholder="All outcomes" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All outcomes</SelectItem>
+            <SelectItem value="succeeded">Succeeded</SelectItem>
+            <SelectItem value="failed">Failed</SelectItem>
+            <SelectItem value="stopped">Stopped</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={filters.since} onValueChange={(v) => { setFilters((f) => ({ ...f, since: v === "all" ? "" : v })); setCursor(undefined); }}>
+          <SelectTrigger className="w-36">
+            <SelectValue placeholder="All time" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All time</SelectItem>
+            <SelectItem value="1h">Last hour</SelectItem>
+            <SelectItem value="24h">Last 24h</SelectItem>
+            <SelectItem value="7d">Last 7 days</SelectItem>
+          </SelectContent>
+        </Select>
+        <Input
           placeholder="Filter by step..."
           value={filters.step}
           onChange={(e) => { setFilters((f) => ({ ...f, step: e.target.value })); setCursor(undefined); }}
-          className="px-3 py-2 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100"
+          className="w-40"
         />
       </div>
 
-      {/* Results */}
-      {isLoading && <div className="text-center py-8 text-gray-500 dark:text-gray-400">Loading...</div>}
-      {isError && <div className="text-center py-8 text-red-600 dark:text-red-400">Failed to load history.</div>}
+      {isLoading && <div className="text-center py-8 text-muted-foreground">Loading...</div>}
+      {isError && <div className="text-center py-8 text-destructive">Failed to load history.</div>}
 
       {data && (
         <>
-          <div className="overflow-x-auto bg-white dark:bg-gray-800 rounded-lg shadow">
-            <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-              <thead className="bg-gray-50 dark:bg-gray-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Issue</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Outcome</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Steps</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Attempts</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Tokens</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Completed</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+          <Card>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Issue</TableHead>
+                  <TableHead>Outcome</TableHead>
+                  <TableHead>Steps</TableHead>
+                  <TableHead>Attempts</TableHead>
+                  <TableHead>Tokens</TableHead>
+                  <TableHead>Duration</TableHead>
+                  <TableHead>Completed</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {data.records.map((r) => (
-                  <tr key={`${r.issue_id}-${r.completed_at}`} className="hover:bg-gray-50 dark:hover:bg-gray-800">
-                    <td className="px-4 py-3 text-sm">
-                      <Link to={`/issue/${encodeURIComponent(r.issue_identifier)}`} className="text-blue-600 dark:text-blue-400 hover:underline font-medium">
+                  <TableRow key={`${r.issue_id}-${r.completed_at}`}>
+                    <TableCell>
+                      <Link to={`/issue/${encodeURIComponent(r.issue_identifier)}`} className="text-primary hover:underline font-medium">
                         {r.issue_identifier}
                       </Link>
-                    </td>
-                    <td className="px-4 py-3 text-sm"><StatusBadge status={r.outcome} /></td>
-                    <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{r.steps_traversed.join(" → ")}</td>
-                    <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{r.attempts}</td>
-                    <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{formatTokens(r.tokens.total_tokens)}</td>
-                    <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{formatDuration(r.duration_seconds)}</td>
-                    <td className="px-4 py-3 text-sm text-gray-600 dark:text-gray-300">{new Date(r.completed_at).toLocaleString()}</td>
-                  </tr>
+                    </TableCell>
+                    <TableCell><StatusBadge status={r.outcome} /></TableCell>
+                    <TableCell className="text-muted-foreground">{r.steps_traversed.join(" \u2192 ")}</TableCell>
+                    <TableCell className="text-muted-foreground">{r.attempts}</TableCell>
+                    <TableCell className="text-muted-foreground">{formatTokens(r.tokens.total_tokens)}</TableCell>
+                    <TableCell className="text-muted-foreground">{formatDuration(r.duration_seconds)}</TableCell>
+                    <TableCell className="text-muted-foreground">{new Date(r.completed_at).toLocaleString()}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </TableBody>
+            </Table>
+          </Card>
 
-          {/* Pagination */}
           {data.records.length === 0 && (
-            <div className="text-center py-8 text-gray-500 dark:text-gray-400">No records match the current filters.</div>
+            <div className="text-center py-8 text-muted-foreground">No records match the current filters.</div>
           )}
           {data.pagination.has_more && data.pagination.next_cursor && (
             <div className="flex justify-center">
-              <button
-                onClick={() => setCursor(data.pagination.next_cursor ?? undefined)}
-                className="px-4 py-2 text-sm font-medium rounded-md bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700"
-              >
+              <Button variant="outline" onClick={() => setCursor(data.pagination.next_cursor ?? undefined)}>
                 Load More
-              </button>
+              </Button>
             </div>
           )}
         </>

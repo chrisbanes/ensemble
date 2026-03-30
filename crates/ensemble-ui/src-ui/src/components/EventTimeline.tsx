@@ -1,4 +1,5 @@
-import type { WsEventData } from "../types";
+import type { WsEventData } from "@/types";
+import { cn } from "@/lib/utils";
 
 interface EventTimelineProps {
   events: WsEventData[];
@@ -22,7 +23,7 @@ function formatTime(timestamp: string): string {
 export default function EventTimeline({ events, live, onViewConversation }: EventTimelineProps) {
   if (events.length === 0) {
     return (
-      <div className="text-center py-8 text-gray-500 dark:text-gray-400">
+      <div className="text-center py-8 text-muted-foreground">
         {live ? "Waiting for events..." : "No events recorded."}
       </div>
     );
@@ -50,24 +51,24 @@ export default function EventTimeline({ events, live, onViewConversation }: Even
               <li key={idx}>
                 <div className="relative pb-8">
                   {!isLast && (
-                    <span className="absolute left-3 top-4 -ml-px h-full w-0.5 bg-gray-200 dark:bg-gray-700" aria-hidden="true" />
+                    <span className="absolute left-3 top-4 -ml-px h-full w-0.5 bg-border" aria-hidden="true" />
                   )}
                   <div className="relative flex items-start gap-3">
                     <div className="flex-shrink-0">
-                      <span className={`inline-flex h-6 w-6 items-center justify-center rounded-full ${dotColor}`}>
+                      <span className={cn("inline-flex h-6 w-6 items-center justify-center rounded-full", dotColor)}>
                         <span className="sr-only">{event.type}</span>
                       </span>
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm text-gray-900 dark:text-gray-100">
+                      <div className="text-sm">
                         <span className="font-medium">{event.type}</span>
-                        <span className="ml-2 text-gray-500 dark:text-gray-400 text-xs">{formatTime(event.timestamp)}</span>
+                        <span className="ml-2 text-muted-foreground text-xs">{formatTime(event.timestamp)}</span>
                       </div>
-                      <p className="mt-0.5 text-sm text-gray-600 dark:text-gray-300">{event.detail}</p>
+                      <p className="mt-0.5 text-sm text-muted-foreground">{event.detail}</p>
                       {event.type === "turn_completed" && conversationIndex != null && onViewConversation && (
                         <button
                           onClick={() => onViewConversation(conversationIndex)}
-                          className="mt-1 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+                          className="mt-1 text-xs text-primary hover:underline"
                         >
                           View in conversation
                         </button>
