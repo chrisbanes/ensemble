@@ -15,6 +15,7 @@ tower-http = { workspace = true }
 rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64 = "0.22"
 mime_guess = "2"
 
 [build-dependencies]

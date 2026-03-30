@@ -9,6 +9,7 @@ use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
 /// Desktop orchestrator state
+#[derive(Clone)]
 pub struct DesktopOrchestrator {
     pub state: Arc<RwLock<OrchestratorState>>,
     pub event_bus: EventBus,
