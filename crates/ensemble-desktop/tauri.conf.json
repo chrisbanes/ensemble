@@ -1,0 +1,22 @@
+{
+  "productName": "Ensemble",
+  "version": "0.1.0",
+  "identifier": "com.ensemble.dashboard",
+  "build": {
+    "frontendDist": "../ensemble-ui/src-ui/dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm --prefix ensemble-ui/src-ui run dev",
+    "beforeBuildCommand": "npm --prefix ensemble-ui/src-ui run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Ensemble Dashboard",
+        "width": 1280,
+        "height": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ]
+  }
+}

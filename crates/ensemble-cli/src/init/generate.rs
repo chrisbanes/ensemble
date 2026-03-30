@@ -91,6 +91,8 @@ pub fn generate_yaml(
     yaml
 }
 
+/// Find the step name associated with an agent role.
+/// Falls back to the role name itself if no matching step is found.
 fn find_step_for_agent(role: &str, steps: &[PipelineStep]) -> String {
     steps
         .iter()

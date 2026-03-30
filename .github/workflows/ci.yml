@@ -28,10 +28,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --exclude ensemble-desktop -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --exclude ensemble-desktop
 
   frontend:
     name: Frontend Test and Build
@@ -64,3 +64,72 @@ jobs:
       - name: Frontend build
         run: npm run build
         working-directory: crates/ensemble-ui/src-ui
+
+  tauri-linux:
+    name: Build Tauri Desktop App (Linux)
+    runs-on: ubuntu-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/ensemble-ui/src-ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Generate frontend API client
+        run: npm run codegen
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Install Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Build Tauri app
+        run: cargo build -p ensemble-desktop
+
+  tauri-macos:
+    name: Build Tauri Desktop App (macOS)
+    runs-on: macos-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/ensemble-ui/src-ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Generate frontend API client
+        run: npm run codegen
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Build Tauri app
+        run: cargo build -p ensemble-desktop
