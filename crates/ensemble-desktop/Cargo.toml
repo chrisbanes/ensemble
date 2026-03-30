@@ -1,0 +1,10 @@
+[package]
+name = "ensemble-desktop"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# This crate is a placeholder for the desktop wrapper (Plan 6).
+# The React dashboard lives in src-ui/ and is built with npm/Vite.
