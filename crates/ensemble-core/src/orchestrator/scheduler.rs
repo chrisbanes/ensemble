@@ -51,6 +51,11 @@ pub fn is_dispatch_eligible(
         return Some("already claimed".to_string());
     }
 
+    // Must not already be completed (tracker may re-surface stale issues)
+    if state.completed.contains(&issue.id) {
+        return Some("already completed".to_string());
+    }
+
     // Global concurrency check
     if available_global_slots(state) == 0 {
         return Some("no global slots available".to_string());
@@ -257,6 +262,24 @@ mod tests {
         );
         assert!(result.is_some());
         assert!(result.unwrap().contains("already claimed"));
+    }
+
+    #[test]
+    fn test_ineligible_already_completed() {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.completed.insert("1".to_string());
+
+        let issue = test_issue("1", "Todo");
+
+        let result = is_dispatch_eligible(
+            &issue,
+            &state,
+            &default_active(),
+            &default_terminal(),
+            &HashMap::new(),
+        );
+        assert!(result.is_some());
+        assert!(result.unwrap().contains("already completed"));
     }
 
     #[test]

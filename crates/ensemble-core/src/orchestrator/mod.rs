@@ -177,6 +177,7 @@ impl Orchestrator {
                             &entry.identifier,
                             next_attempt(entry.retry_attempt),
                             config.agent.max_retry_backoff_ms,
+                            config.max_cycles,
                             "stall timeout",
                         );
                     }
@@ -614,10 +615,13 @@ impl Orchestrator {
                             info!(issue_id = %issue_id, "pipeline succeeded");
                             // Set tracker to on_success state
                             if self.tracker.supports_writes() {
-                                let _ = self
+                                if let Err(e) = self
                                     .tracker
                                     .set_issue_state(issue_id, &config.on_success)
-                                    .await;
+                                    .await
+                                {
+                                    warn!(issue_id = %issue_id, error = %e, "failed to set tracker success state");
+                                }
                             }
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
@@ -635,10 +639,13 @@ impl Orchestrator {
                             );
                             // Set tracker to on_failure state
                             if self.tracker.supports_writes() {
-                                let _ = self
+                                if let Err(e) = self
                                     .tracker
                                     .set_issue_state(issue_id, &config.on_failure)
-                                    .await;
+                                    .await
+                                {
+                                    warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                                }
                             }
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
@@ -648,6 +655,7 @@ impl Orchestrator {
                                     &entry.identifier,
                                     next_attempt(entry.retry_attempt),
                                     config.agent.max_retry_backoff_ms,
+                                    config.max_cycles,
                                     &reason,
                                 );
                             }
@@ -675,10 +683,13 @@ impl Orchestrator {
 
                 // Set tracker to on_failure state
                 if self.tracker.supports_writes() {
-                    let _ = self
+                    if let Err(e) = self
                         .tracker
                         .set_issue_state(issue_id, &config.on_failure)
-                        .await;
+                        .await
+                    {
+                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                    }
                 }
 
                 if let Some(entry) = state.remove_running(issue_id) {
@@ -689,6 +700,7 @@ impl Orchestrator {
                         &entry.identifier,
                         next_attempt(entry.retry_attempt),
                         config.agent.max_retry_backoff_ms,
+                        config.max_cycles,
                         &error,
                     );
                 }
@@ -736,6 +748,7 @@ impl Orchestrator {
                     &retry_entry.identifier,
                     retry_entry.attempt + 1,
                     config.agent.max_retry_backoff_ms,
+                    config.max_cycles,
                     "retry poll failed",
                 );
                 return;
@@ -780,6 +793,7 @@ impl Orchestrator {
                         &retry_entry.identifier,
                         retry_entry.attempt + 1,
                         config.agent.max_retry_backoff_ms,
+                        config.max_cycles,
                         "no available orchestrator slots",
                     );
                 }
@@ -897,6 +911,7 @@ agents:
 steps:
   - name: build
     agent: builder
+max_cycles: 10
 on_success: Done
 on_failure: Todo
 concurrency:

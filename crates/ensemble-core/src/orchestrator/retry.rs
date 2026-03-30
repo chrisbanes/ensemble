@@ -1,4 +1,4 @@
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::tracker::model::RetryEntry;
 
@@ -50,14 +50,29 @@ pub fn schedule_continuation_retry(
 }
 
 /// Schedule a failure retry with exponential backoff.
+/// Returns `Some(due_at_ms)` if the retry was scheduled, or `None` if `max_cycles`
+/// has been reached and the issue should not be retried.
 pub fn schedule_failure_retry(
     state: &mut OrchestratorState,
     issue_id: &str,
     identifier: &str,
     attempt: u32,
     max_backoff_ms: u64,
+    max_cycles: u32,
     error: &str,
-) -> u64 {
+) -> Option<u64> {
+    if attempt >= max_cycles {
+        warn!(
+            issue_id = issue_id,
+            identifier = identifier,
+            attempt = attempt,
+            max_cycles = max_cycles,
+            error = error,
+            "max retry cycles reached, not scheduling further retries"
+        );
+        return None;
+    }
+
     let delay = calculate_backoff(attempt, max_backoff_ms);
     let due_at_ms = current_time_ms() + delay;
 
@@ -79,7 +94,7 @@ pub fn schedule_failure_retry(
     );
 
     state.add_retry(entry);
-    due_at_ms
+    Some(due_at_ms)
 }
 
 /// Determine the next attempt number from a running entry.
@@ -185,15 +200,53 @@ mod tests {
     fn test_schedule_failure_retry() {
         let mut state = OrchestratorState::new(30000, 10);
 
-        let due =
-            schedule_failure_retry(&mut state, "issue-1", "repo#1", 2, 300_000, "agent crashed");
+        let due = schedule_failure_retry(
+            &mut state,
+            "issue-1",
+            "repo#1",
+            2,
+            300_000,
+            5,
+            "agent crashed",
+        );
 
+        assert!(due.is_some());
         assert!(state.retry_attempts.contains_key("issue-1"));
 
         let entry = state.retry_attempts.get("issue-1").unwrap();
         assert_eq!(entry.attempt, 2);
         assert_eq!(entry.error.as_deref(), Some("agent crashed"));
-        assert!(due > 0);
+    }
+
+    #[test]
+    fn test_schedule_failure_retry_respects_max_cycles() {
+        let mut state = OrchestratorState::new(30000, 10);
+
+        // attempt 3, max_cycles 3 → should NOT schedule
+        let due = schedule_failure_retry(
+            &mut state,
+            "issue-1",
+            "repo#1",
+            3,
+            300_000,
+            3,
+            "agent crashed",
+        );
+        assert!(due.is_none());
+        assert!(!state.retry_attempts.contains_key("issue-1"));
+
+        // attempt 2, max_cycles 3 → should schedule
+        let due = schedule_failure_retry(
+            &mut state,
+            "issue-2",
+            "repo#2",
+            2,
+            300_000,
+            3,
+            "agent crashed",
+        );
+        assert!(due.is_some());
+        assert!(state.retry_attempts.contains_key("issue-2"));
     }
 
     #[test]
