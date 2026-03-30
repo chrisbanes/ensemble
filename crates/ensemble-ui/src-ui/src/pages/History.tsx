@@ -125,9 +125,9 @@ export default function History() {
           {data.records.length === 0 && (
             <div className="text-center py-8 text-muted-foreground">No records match the current filters.</div>
           )}
-          {data.pagination.has_more && data.pagination.next_cursor && (
+          {data.next_cursor != null && (
             <div className="flex justify-center">
-              <Button variant="outline" onClick={() => setCursor(data.pagination.next_cursor ?? undefined)}>
+              <Button variant="outline" onClick={() => setCursor(String(data.next_cursor))}>
                 Load More
               </Button>
             </div>

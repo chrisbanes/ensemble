@@ -156,10 +156,8 @@ export interface HistoryRecord {
 
 export interface HistoryResponse {
   records: HistoryRecord[];
-  pagination: {
-    has_more: boolean;
-    next_cursor: string | null;
-  };
+  total: number;
+  next_cursor: number | null;
 }
 
 // --- Config types (matches EnsembleConfig JSON serialization) ---
