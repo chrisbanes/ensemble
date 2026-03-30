@@ -6,6 +6,7 @@ use axum::Router;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// Shared application state passed to all API handlers.
 #[derive(Clone)]
@@ -34,9 +35,19 @@ pub struct AppState {
 /// - `GET /api/v1/{identifier}/conversation/{index}` — single conversation message
 /// - `POST /api/v1/{identifier}/stop` — stop a running agent
 /// - `POST /api/v1/{identifier}/retry` — retry a failed issue
+/// - `GET /ws/events/{identifier}` — WebSocket live event stream
 ///
-/// Unsupported methods on defined routes return 405.
+/// If `static_dir` is provided, unmatched routes serve static files from that
+/// directory with SPA fallback to `index.html`.
 pub fn create_api_router(state: AppState) -> Router {
+    create_api_router_with_static(state, None)
+}
+
+/// Create the API router with optional static file serving for the dashboard SPA.
+pub fn create_api_router_with_static(
+    state: AppState,
+    static_dir: Option<PathBuf>,
+) -> Router {
     let api_routes = Router::new()
         .route("/state", get(handlers::get_state))
         .route(
@@ -56,14 +67,8 @@ pub fn create_api_router(state: AppState) -> Router {
             "/{identifier}/conversation/{index}",
             get(conversation::get_conversation_message),
         )
-        .route(
-            "/{identifier}/stop",
-            post(controls::post_stop),
-        )
-        .route(
-            "/{identifier}/retry",
-            post(controls::post_retry),
-        )
+        .route("/{identifier}/stop", post(controls::post_stop))
+        .route("/{identifier}/retry", post(controls::post_retry))
         .route(
             "/{identifier}",
             get(handlers::get_issue_detail)
@@ -73,13 +78,17 @@ pub fn create_api_router(state: AppState) -> Router {
                 .patch(handlers::method_not_allowed),
         );
 
-    Router::new()
+    let mut router = Router::new()
         .nest("/api/v1", api_routes)
-        .route(
-            "/ws/events/{identifier}",
-            get(ws::ws_events),
-        )
-        .with_state(state)
+        .route("/ws/events/{identifier}", get(ws::ws_events))
+        .with_state(state);
+
+    if let Some(dir) = static_dir {
+        let serve = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
+        router = router.fallback_service(serve);
+    }
+
+    router
 }
 
 #[cfg(test)]
@@ -101,5 +110,12 @@ mod tests {
     fn test_router_creation_does_not_panic() {
         let state = test_app_state();
         let _router = create_api_router(state);
+    }
+
+    #[test]
+    fn test_router_with_static_dir_does_not_panic() {
+        let state = test_app_state();
+        let _router =
+            create_api_router_with_static(state, Some(PathBuf::from("/tmp/dashboard")));
     }
 }
