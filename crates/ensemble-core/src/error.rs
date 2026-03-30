@@ -86,4 +86,6 @@ pub enum PipelineError {
     InvalidPromptConfig { agent: String },
     #[error("duplicate step name: {name}")]
     DuplicateStepName { name: String },
+    #[error("agent must have 'acpx_agent' or both 'executor' and 'model': {agent}")]
+    InvalidAgentConfig { agent: String },
 }

@@ -48,6 +48,37 @@ fn branch_exists(repo_path: &PathBuf, branch: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn ask_branch_with_retry(repo_path: &PathBuf, initial_branch: &str) -> Option<String> {
+    if branch_exists(repo_path, initial_branch) {
+        return Some(initial_branch.to_string());
+    }
+
+    println!(
+        "Branch '{}' does not exist in '{}'. Enter a different branch name (blank to skip this repo):",
+        initial_branch,
+        repo_path.display()
+    );
+
+    let retry_prompt = format!("Retry branch for '{}'", repo_path.display());
+    let retry_input = inquire::Text::new(&retry_prompt).prompt().ok()?;
+    let retry_branch = retry_input.trim().to_string();
+
+    if retry_branch.is_empty() {
+        return None;
+    }
+
+    if branch_exists(repo_path, &retry_branch) {
+        Some(retry_branch)
+    } else {
+        println!(
+            "Branch '{}' also does not exist. Skipping repo '{}'.",
+            retry_branch,
+            repo_path.display()
+        );
+        None
+    }
+}
+
 /// Run the repos wizard step.
 ///
 /// Prints a header, then loops asking for repo paths (numbered). A blank
@@ -109,41 +140,16 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
         let branch = branch_input.trim().to_string();
 
         // Validate the branch exists. Offer one retry on failure.
-        if branch_exists(&canonical, &branch) {
-            repos.push(RepoEntry {
-                path: canonical,
-                branch,
-            });
-            index += 1;
-        } else {
-            println!(
-                "Branch '{}' does not exist in '{}'. Enter a different branch name (blank to skip this repo):",
-                branch,
-                canonical.display()
-            );
-
-            let retry_prompt = format!("Retry branch for '{}'", canonical.display());
-            let retry_input = inquire::Text::new(&retry_prompt).prompt()?;
-            let retry_branch = retry_input.trim().to_string();
-
-            if retry_branch.is_empty() {
-                println!("Skipping repo '{}'.", canonical.display());
-                // Don't increment index; this repo slot is abandoned.
-                continue;
-            }
-
-            if branch_exists(&canonical, &retry_branch) {
+        match ask_branch_with_retry(&canonical, &branch) {
+            Some(branch) => {
                 repos.push(RepoEntry {
                     path: canonical,
-                    branch: retry_branch,
+                    branch,
                 });
                 index += 1;
-            } else {
-                println!(
-                    "Branch '{}' also does not exist. Skipping repo '{}'.",
-                    retry_branch,
-                    canonical.display()
-                );
+            }
+            None => {
+                println!("Skipping repo '{}'.", canonical.display());
             }
         }
     }

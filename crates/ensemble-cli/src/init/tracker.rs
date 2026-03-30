@@ -63,24 +63,24 @@ async fn ask_github_tracker() -> Result<TrackerChoice, inquire::InquireError> {
     };
 
     // Check for $GITHUB_TOKEN in env
-    let api_key_env = if std::env::var("GITHUB_TOKEN").is_ok() {
+    let token = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         println!("GitHub token ($GITHUB_TOKEN detected ✓)");
-        "GITHUB_TOKEN".to_string()
+        t
     } else {
-        let token = Password::new("GitHub token (not found in $GITHUB_TOKEN — enter now):")
+        let t = Password::new("GitHub token (not found in $GITHUB_TOKEN — enter now):")
             .with_help_message(
                 "The token will be stored as $GITHUB_TOKEN reference in ensemble.yaml",
             )
             .prompt()?;
-        // Set it in the current process so subsequent API calls can use it
-        std::env::set_var("GITHUB_TOKEN", &token);
-        "GITHUB_TOKEN".to_string()
+        t
     };
+
+    // api_key_env is used in the generated config to reference the env var
+    let api_key_env = "GITHUB_TOKEN".to_string();
 
     // Fetch real board statuses if project_number is provided
     let available_statuses: Vec<String> = if let Some(proj_num) = project_number {
         let owner = repository.split('/').next().unwrap_or("").to_string();
-        let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
         println!("Fetching board statuses...");
         match fetch_board_statuses(&owner, proj_num, &token).await {
             Ok(statuses) if !statuses.is_empty() => {
@@ -255,7 +255,10 @@ async fn execute_graphql(
     let response = client
         .post("https://api.github.com/graphql")
         .header("Authorization", format!("Bearer {}", token))
-        .header("User-Agent", "ensemble-cli/0.1.0")
+        .header(
+            "User-Agent",
+            concat!("ensemble-cli/", env!("CARGO_PKG_VERSION")),
+        )
         .header("Content-Type", "application/json")
         .json(&body)
         .send()
@@ -263,13 +266,26 @@ async fn execute_graphql(
         .map_err(|e| format!("request failed: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("HTTP {}", response.status()));
+        return Err(format!("GitHub API HTTP error: {}", response.status()));
     }
 
-    response
-        .json::<serde_json::Value>()
+    let body: serde_json::Value = response
+        .json()
         .await
-        .map_err(|e| format!("failed to parse response: {}", e))
+        .map_err(|e| format!("failed to parse GitHub API response: {}", e))?;
+
+    if let Some(errors) = body.get("errors").and_then(|e| e.as_array()) {
+        let messages: Vec<String> = errors
+            .iter()
+            .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
+            .map(String::from)
+            .collect();
+        if !messages.is_empty() {
+            return Err(format!("GitHub GraphQL error: {}", messages.join("; ")));
+        }
+    }
+
+    Ok(body)
 }
 
 /// Walk a JSON path and extract the `name` fields from an array of option objects.

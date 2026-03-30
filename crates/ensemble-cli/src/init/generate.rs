@@ -141,6 +141,19 @@ pub fn write_files(
     for step in steps {
         let template = generate_template(&step.name);
         let path = format!("templates/{}.liquid", step.name);
+        if std::path::Path::new(&path).exists() {
+            match inquire::Confirm::new(&format!("Template '{}' already exists. Overwrite?", path))
+                .with_default(true)
+                .prompt()
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    println!("  Skipping {path}");
+                    continue;
+                }
+                Err(_) => return Ok(()),
+            }
+        }
         std::fs::write(&path, &template)?;
         println!("  ✓ {path}");
     }

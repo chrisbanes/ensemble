@@ -321,7 +321,6 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
-    // Each agent must have exactly one of prompt or prompt_template
     for (name, agent) in &config.agents {
         match (&agent.prompt, &agent.prompt_template) {
             (Some(_), Some(_)) | (None, None) => {
@@ -330,6 +329,15 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 });
             }
             _ => {}
+        }
+
+        let has_acpx = agent.acpx_agent.is_some();
+        let has_executor = agent.executor.is_some();
+        let has_model = agent.model.is_some();
+        if !has_acpx && (!has_executor || !has_model) {
+            return Err(PipelineError::InvalidAgentConfig {
+                agent: name.clone(),
+            });
         }
     }
     // Step names must be unique
@@ -802,5 +810,56 @@ workspace:
         let home = std::env::var("HOME").unwrap();
         let expected = format!("{}/workspaces", home);
         assert_eq!(config.workspace.root.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_validate_agent_requires_acpx_or_executor_model() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidAgentConfig { agent } => {
+                assert_eq!(agent, "build");
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_agent_with_only_executor() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidAgentConfig { agent } => {
+                assert_eq!(agent, "build");
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 }

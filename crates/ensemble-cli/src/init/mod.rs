@@ -58,6 +58,13 @@ pub async fn run_wizard() -> ExitCode {
 
     let proceed =
         validate::run_validation(&tracker_result, &repos, &discovered_agents, &steps).await;
+    let proceed = match proceed {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error during validation: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
     if !proceed {
         println!("Aborted.");
         return ExitCode::SUCCESS;

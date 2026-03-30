@@ -15,7 +15,7 @@ pub async fn run_validation(
     repos: &[RepoEntry],
     agents: &[AgentEntry],
     steps: &[PipelineStep],
-) -> bool {
+) -> Result<bool, inquire::InquireError> {
     println!("\nValidating configuration...\n");
 
     let mut checks = Vec::new();
@@ -139,7 +139,7 @@ pub async fn run_validation(
 
     if failures == 0 {
         println!("All checks passed! ✓\n");
-        return true;
+        return Ok(true);
     }
 
     println!("{failures} check(s) failed.");
@@ -147,7 +147,6 @@ pub async fn run_validation(
     inquire::Confirm::new("Write config anyway?")
         .with_default(false)
         .prompt()
-        .is_ok_and(|v| v)
 }
 
 fn validate_dag(steps: &[PipelineStep]) -> bool {
