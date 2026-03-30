@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct HistoryRecord {
     pub issue_identifier: String,
     pub issue_id: String,
@@ -17,7 +17,7 @@ pub struct HistoryRecord {
     pub workspace_path: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct TokenTotals {
     pub input_tokens: u64,
     pub output_tokens: u64,

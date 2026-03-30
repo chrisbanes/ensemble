@@ -1,4 +1,5 @@
-use crate::api::{controls, conversation, handlers, history_handler, ws};
+use crate::api::{config_handler, controls, conversation, handlers, history_handler, ws};
+use crate::config::ensemble::EnsembleConfig;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use axum::http::StatusCode;
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
+use utoipa::OpenApi;
 
 /// Shared application state passed to all API handlers.
 #[derive(Clone)]
@@ -24,6 +26,10 @@ pub struct AppState {
     pub history_path: PathBuf,
     /// Event bus for pipeline event broadcasting.
     pub event_bus: EventBus,
+    /// The loaded ensemble configuration.
+    pub config: Arc<EnsembleConfig>,
+    /// Path to the ensemble.yaml config file.
+    pub config_path: String,
 }
 
 /// Create the axum router for the Ensemble HTTP API.
@@ -66,6 +72,7 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
                 .patch(handlers::method_not_allowed),
         )
         .route("/history", get(history_handler::get_history))
+        .route("/config", get(config_handler::get_config))
         .route(
             "/{identifier}/conversation",
             get(conversation::get_conversation),
@@ -86,7 +93,19 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
         )
         .fallback(api_not_found);
 
+    // Generate OpenAPI spec once at startup.
+    let openapi_json = crate::api::openapi::ApiDoc::openapi()
+        .to_json()
+        .expect("OpenAPI spec serialization should not fail");
+
     let mut router = Router::new()
+        .route(
+            "/api/openapi.json",
+            get(move || {
+                let json = openapi_json.clone();
+                async move { (StatusCode::OK, [("content-type", "application/json")], json) }
+            }),
+        )
         .nest("/api/v1", api_routes)
         .route("/ws/events/{identifier}", get(ws::ws_events))
         .with_state(state);
@@ -121,6 +140,8 @@ mod tests {
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
+            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            config_path: "ensemble.yaml".to_string(),
         }
     }
 

@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 
 /// Top-level runtime snapshot matching SPEC.md Section 13.7.2 GET /api/v1/state shape.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RuntimeSnapshot {
     pub generated_at: DateTime<Utc>,
     pub counts: SnapshotCounts,
@@ -17,14 +17,14 @@ pub struct RuntimeSnapshot {
 }
 
 /// Summary counts of running and retrying sessions.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SnapshotCounts {
     pub running: usize,
     pub retrying: usize,
 }
 
 /// A single row in the running sessions list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RunningSessionRow {
     pub issue_id: String,
     pub issue_identifier: String,
@@ -40,7 +40,7 @@ pub struct RunningSessionRow {
 }
 
 /// Token counts for a single session.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TokenSnapshot {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -48,7 +48,7 @@ pub struct TokenSnapshot {
 }
 
 /// A single row in the retry queue list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RetryRow {
     pub issue_id: String,
     pub issue_identifier: String,
@@ -58,7 +58,7 @@ pub struct RetryRow {
 }
 
 /// Aggregate token and runtime totals for the snapshot.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AgentTotalsSnapshot {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -73,7 +73,7 @@ pub struct AgentTotalsSnapshot {
 /// struct with `logs` and `recent_events` fields.
 /// These are omitted here because Plan 4 does not yet have the event/log collection
 /// infrastructure, but the JSON shape should be forward-compatible.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct IssueDetailSnapshot {
     pub issue_identifier: String,
     pub issue_id: String,
@@ -86,20 +86,20 @@ pub struct IssueDetailSnapshot {
 }
 
 /// Workspace path info for issue detail.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WorkspaceInfo {
     pub path: String,
 }
 
 /// Attempt tracking for issue detail.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AttemptInfo {
     pub restart_count: u32,
     pub current_retry_attempt: Option<u32>,
 }
 
 /// Running session detail for issue detail.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RunningDetail {
     pub session_id: Option<String>,
     pub step_name: Option<String>,

@@ -27,3 +27,4 @@ axum = { version = "0.8", features = ["ws"] }
 futures-util = "0.3"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 clap = { version = "4", features = ["derive", "env"] }
+utoipa = { version = "5.3", features = ["axum_extras", "chrono"] }

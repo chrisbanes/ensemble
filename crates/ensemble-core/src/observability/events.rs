@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 
 /// A lightweight event emitted by the orchestrator at pipeline boundaries.
 /// These are broadcast to WebSocket subscribers and used for the event timeline.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(tag = "event_type", rename_all = "snake_case")]
 pub enum PipelineEvent {
     SessionStarted {
@@ -58,7 +58,7 @@ pub enum PipelineEvent {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TokensDelta {
     pub input: u64,
     pub output: u64,

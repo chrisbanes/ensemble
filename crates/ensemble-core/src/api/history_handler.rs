@@ -1,5 +1,5 @@
 use crate::api::router::AppState;
-use crate::history::reader::{read_history, HistoryQuery};
+use crate::history::reader::{read_history, HistoryQuery, HistoryResponse};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -8,6 +8,17 @@ use axum::Json;
 /// GET /api/v1/history
 ///
 /// Returns paginated history records with optional filtering by outcome or step.
+#[utoipa::path(
+    get,
+    path = "/api/v1/history",
+    operation_id = "getHistory",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "History records", body = HistoryResponse),
+        (status = 500, description = "Read error", body = crate::api::handlers::ApiError)
+    ),
+    tag = "history"
+)]
 pub async fn get_history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
@@ -47,6 +58,8 @@ mod tests {
             workspace_root: "/tmp/workspaces".to_string(),
             history_path,
             event_bus: EventBus::new(),
+            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            config_path: "ensemble.yaml".to_string(),
         }
     }
 
