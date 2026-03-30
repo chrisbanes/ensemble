@@ -45,7 +45,7 @@ export default function EventTimeline({ events, live, onViewConversation }: Even
           {events.map((event, idx) => {
             const dotColor = dotColors[event.type] ?? "bg-gray-400";
             const isLast = idx === events.length - 1;
-            const conversationIndex = event["conversation_index"] as number | undefined;
+            const conversationIndex = event.conversationIndex;
 
             return (
               <li key={idx}>

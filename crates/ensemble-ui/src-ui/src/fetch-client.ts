@@ -17,9 +17,14 @@ export const customFetch = async <T>(
   url: string,
   options?: RequestInit,
 ): Promise<T> => {
+  const headers = new Headers(options?.headers);
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/json");
+  }
+
   const res = await fetch(url, {
-    headers: { Accept: "application/json" },
     ...options,
+    headers,
   });
 
   if (!res.ok) {

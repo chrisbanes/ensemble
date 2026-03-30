@@ -4,7 +4,8 @@ import { ArrowLeft } from "lucide-react";
 import { useIssueDetailQuery, useStopMutation, useRetryMutation } from "@/hooks";
 import { connectWs } from "@/ws";
 import type { WsStatus } from "@/ws";
-import type { WsEventData, WsEventMessage } from "@/ws-types";
+import type { WsEventData, WsPipelineEvent } from "@/ws-types";
+import { isCompletionEvent, normalizePipelineEvent } from "@/ws-events";
 import { addNotification, requestPermissionIfNeeded } from "@/notifications";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -13,13 +14,15 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import EventTimeline from "@/components/EventTimeline";
 import ConversationViewer from "@/components/ConversationViewer";
 
-function triggerNotification(event: WsEventMessage, identifier: string) {
+function triggerNotification(event: WsPipelineEvent, identifier: string) {
+  const detail = event.detail ?? event.event_type;
+
   if (event.event_type === "error") {
-    addNotification("failure", "Agent error", event.detail, identifier);
+    addNotification("failure", "Agent error", detail, identifier);
   } else if (event.event_type === "retry_scheduled") {
-    addNotification("warning", "Retry scheduled", event.detail, identifier);
+    addNotification("warning", "Retry scheduled", detail, identifier);
   } else if (event.event_type === "verdict" && event.verdict) {
-    addNotification("info", `Verdict: ${event.verdict}`, event.detail, identifier);
+    addNotification("info", `Verdict: ${event.verdict}`, detail, identifier);
   }
 }
 
@@ -49,13 +52,21 @@ export default function IssueDetail() {
       enabled: isLiveRun,
       onMessage: (msg) => {
         if (msg.type === "snapshot") {
-          setEvents(msg.events);
+          setEvents([]);
         } else if (msg.type === "event") {
-          setEvents((prev) => [msg as unknown as WsEventData, ...prev]);
-          triggerNotification(msg, identifier);
-        } else if (msg.type === "complete") {
-          const severity = msg.outcome === "succeeded" ? "success" : "failure";
-          addNotification(severity, `Run ${msg.outcome}`, `${identifier} ${msg.outcome}`, identifier);
+          const event = normalizePipelineEvent(msg.data);
+          setEvents((prev) => [event, ...prev]);
+          triggerNotification(msg.data, identifier);
+
+          if (isCompletionEvent(msg.data)) {
+            const severity = msg.data.outcome === "succeeded" ? "success" : "failure";
+            addNotification(
+              severity,
+              `Run ${msg.data.outcome}`,
+              `${identifier} ${msg.data.outcome}`,
+              identifier,
+            );
+          }
         }
       },
       onStatusChange: setWsStatus,

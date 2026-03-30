@@ -2,6 +2,7 @@ use ensemble_core::api::openapi::ApiDoc;
 use utoipa::OpenApi;
 
 #[test]
+#[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();
     let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
