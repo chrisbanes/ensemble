@@ -17,6 +17,8 @@ export default function ConfigStatus() {
 
   if (!data) return null;
 
+  const { config } = data;
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Configuration</h1>
@@ -58,18 +60,20 @@ export default function ConfigStatus() {
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead>Command</TableHead>
+                <TableHead>Executor</TableHead>
                 <TableHead>Model</TableHead>
-                <TableHead>Max Turns</TableHead>
+                <TableHead>Prompt</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.agents.map((agent) => (
-                <TableRow key={agent.name}>
-                  <TableCell className="font-medium">{agent.name}</TableCell>
-                  <TableCell><code className="bg-muted px-1 rounded text-sm">{agent.command}</code></TableCell>
+              {Object.entries(config.agents).map(([name, agent]) => (
+                <TableRow key={name}>
+                  <TableCell className="font-medium">{name}</TableCell>
+                  <TableCell><code className="bg-muted px-1 rounded text-sm">{agent.executor}</code></TableCell>
                   <TableCell className="text-muted-foreground">{agent.model}</TableCell>
-                  <TableCell className="text-muted-foreground">{agent.max_turns}</TableCell>
+                  <TableCell className="text-muted-foreground max-w-xs truncate">
+                    {agent.prompt ? "inline" : agent.prompt_template ?? "\u2014"}
+                  </TableCell>
                 </TableRow>
               ))}
             </TableBody>
@@ -84,16 +88,16 @@ export default function ConfigStatus() {
         </CardHeader>
         <CardContent>
           <div className="flex flex-wrap items-center gap-2">
-            {data.pipeline.steps.map((step, idx) => (
+            {config.steps.map((step, idx) => (
               <div key={step.name} className="flex items-center gap-2">
                 <Badge variant="secondary" className="px-3 py-1.5">
                   <span className="font-medium">{step.name}</span>
                   <span className="ml-1 opacity-70">({step.agent})</span>
-                  {step.depends.length > 0 && (
+                  {step.depends && step.depends.length > 0 && (
                     <span className="ml-1 opacity-60">after {step.depends.join(", ")}</span>
                   )}
                 </Badge>
-                {idx < data.pipeline.steps.length - 1 && (
+                {idx < config.steps.length - 1 && (
                   <span className="text-muted-foreground">&rarr;</span>
                 )}
               </div>
@@ -111,27 +115,54 @@ export default function ConfigStatus() {
           <dl className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Max Concurrent</dt>
-              <dd className="text-sm">{data.runtime.max_concurrent}</dd>
+              <dd className="text-sm">{config.concurrency.max_concurrent_agents}</dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Max Retries</dt>
-              <dd className="text-sm">{data.runtime.max_retries}</dd>
+              <dd className="text-sm">{config.max_cycles}</dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Poll Interval</dt>
-              <dd className="text-sm">{data.runtime.poll_interval_seconds}s</dd>
+              <dd className="text-sm">{config.polling.interval_ms / 1000}s</dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Workspace Root</dt>
-              <dd className="text-sm"><code className="bg-muted px-1 rounded">{data.runtime.workspace_root}</code></dd>
+              <dd className="text-sm"><code className="bg-muted px-1 rounded">{config.workspace.root ?? "default"}</code></dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Tracker</dt>
-              <dd className="text-sm">{data.runtime.tracker}</dd>
+              <dd className="text-sm">{config.tracker.kind}</dd>
             </div>
             <div>
-              <dt className="text-sm font-medium text-muted-foreground">Server Port</dt>
-              <dd className="text-sm">{data.runtime.server_port}</dd>
+              <dt className="text-sm font-medium text-muted-foreground">Max Turns</dt>
+              <dd className="text-sm">{config.agent.max_turns}</dd>
+            </div>
+          </dl>
+        </CardContent>
+      </Card>
+
+      {/* Transition states */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">State Transitions</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+            <div>
+              <dt className="text-sm font-medium text-muted-foreground">On Success</dt>
+              <dd className="text-sm">{config.on_success}</dd>
+            </div>
+            <div>
+              <dt className="text-sm font-medium text-muted-foreground">On Failure</dt>
+              <dd className="text-sm">{config.on_failure}</dd>
+            </div>
+            <div>
+              <dt className="text-sm font-medium text-muted-foreground">Active States</dt>
+              <dd className="text-sm">{config.tracker.active_states.join(", ")}</dd>
+            </div>
+            <div>
+              <dt className="text-sm font-medium text-muted-foreground">Terminal States</dt>
+              <dd className="text-sm">{config.tracker.terminal_states.join(", ")}</dd>
             </div>
           </dl>
         </CardContent>

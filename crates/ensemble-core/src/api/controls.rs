@@ -239,6 +239,8 @@ mod tests {
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
+            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            config_path: "ensemble.yaml".to_string(),
         }
     }
 
@@ -257,6 +259,8 @@ mod tests {
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
+            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            config_path: "ensemble.yaml".to_string(),
         }
     }
 

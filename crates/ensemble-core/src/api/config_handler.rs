@@ -1,0 +1,152 @@
+use crate::api::router::AppState;
+use crate::config::ensemble::EnsembleConfig;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::Json;
+use serde::Serialize;
+
+/// Response for GET /api/v1/config.
+#[derive(Debug, Serialize)]
+pub struct ConfigResponse {
+    pub valid: bool,
+    pub errors: Vec<String>,
+    pub config_path: String,
+    pub config: EnsembleConfig,
+}
+
+/// GET /api/v1/config
+///
+/// Returns the effective ensemble configuration and validation state.
+pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<ConfigResponse>) {
+    let config = state.config.as_ref().clone();
+    let errors = collect_validation_errors(&config);
+    let valid = errors.is_empty();
+
+    let response = ConfigResponse {
+        valid,
+        errors,
+        config_path: state.config_path.clone(),
+        config,
+    };
+
+    (StatusCode::OK, Json(response))
+}
+
+/// Collect validation errors without failing. Returns empty vec if config is valid.
+fn collect_validation_errors(config: &EnsembleConfig) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for (name, agent) in &config.agents {
+        match (&agent.prompt, &agent.prompt_template) {
+            (Some(_), Some(_)) => {
+                errors.push(format!(
+                    "agent '{}' has both prompt and prompt_template (use one)",
+                    name
+                ));
+            }
+            (None, None) => {
+                errors.push(format!(
+                    "agent '{}' has neither prompt nor prompt_template",
+                    name
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    let mut seen_names = std::collections::HashSet::new();
+    for step in &config.steps {
+        if !seen_names.insert(&step.name) {
+            errors.push(format!("duplicate step name '{}'", step.name));
+        }
+        if !config.agents.contains_key(&step.agent) {
+            errors.push(format!(
+                "step '{}' references unknown agent '{}'",
+                step.name, step.agent
+            ));
+        }
+    }
+
+    errors
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ensemble::parse_config;
+    use crate::observability::events::EventBus;
+    use crate::orchestrator::state::OrchestratorState;
+    use axum::extract::State;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn test_config() -> EnsembleConfig {
+        parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap()
+    }
+
+    fn build_app_state(config: EnsembleConfig) -> AppState {
+        AppState {
+            orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
+            refresh_requested: Arc::new(tokio::sync::Notify::new()),
+            workspace_root: "/tmp/workspaces".to_string(),
+            history_path: PathBuf::from("/tmp/history.jsonl"),
+            event_bus: EventBus::new(),
+            config: Arc::new(config),
+            config_path: "ensemble.yaml".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_config_valid() {
+        let state = build_app_state(test_config());
+        let (status, Json(response)) = get_config(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.valid);
+        assert!(response.errors.is_empty());
+        assert_eq!(response.config_path, "ensemble.yaml");
+        assert_eq!(response.config.tracker.kind, "todo_file");
+    }
+
+    #[tokio::test]
+    async fn test_get_config_with_errors() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    model: test
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+        let state = build_app_state(config);
+        let (status, Json(response)) = get_config(State(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!response.valid);
+        assert!(!response.errors.is_empty());
+    }
+}

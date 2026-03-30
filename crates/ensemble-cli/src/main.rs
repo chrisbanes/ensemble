@@ -104,6 +104,8 @@ async fn main() -> ExitCode {
             workspace_root,
             history_path,
             event_bus: EventBus::new(),
+            config: Arc::new(config.clone()),
+            config_path: cli.config_path.display().to_string(),
         };
         let router = create_api_router_with_static(app_state, cli.static_dir.clone());
 

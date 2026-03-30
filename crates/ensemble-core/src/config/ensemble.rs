@@ -1,10 +1,10 @@
 use crate::error::PipelineError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level configuration parsed from `ensemble.yaml`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EnsembleConfig {
     pub tracker: TrackerConfig,
     pub agents: HashMap<String, AgentConfig>,
@@ -30,7 +30,7 @@ fn default_max_cycles() -> u32 {
 }
 
 /// Tracker configuration: which issue tracker to use and how to connect to it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TrackerConfig {
     pub kind: String,
     #[serde(default = "default_active_states")]
@@ -55,7 +55,7 @@ fn default_terminal_states() -> Vec<String> {
 }
 
 /// Per-agent definition: which executor to use and what prompt to send.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentConfig {
     pub executor: String,
     pub model: String,
@@ -64,7 +64,7 @@ pub struct AgentConfig {
 }
 
 /// A single step in the pipeline DAG.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StepConfig {
     pub name: String,
     pub agent: String,
@@ -75,7 +75,7 @@ pub struct StepConfig {
 }
 
 /// Concurrency limits for the pipeline orchestrator.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConcurrencyConfig {
     #[serde(default = "default_max_concurrent_agents")]
     pub max_concurrent_agents: u32,
@@ -101,7 +101,7 @@ impl Default for ConcurrencyConfig {
 }
 
 /// How often to poll the tracker for new issues.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PollingConfig {
     #[serde(default = "default_polling_interval_ms")]
     pub interval_ms: u64,
@@ -120,13 +120,13 @@ impl Default for PollingConfig {
 }
 
 /// Workspace directory configuration.
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct WorkspaceConfig {
     pub root: Option<String>,
 }
 
 /// Shell hooks run at lifecycle events in each workspace.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HooksConfig {
     pub after_create: Option<String>,
     pub before_run: Option<String>,
@@ -153,7 +153,7 @@ impl Default for HooksConfig {
 }
 
 /// Runtime configuration for the agent executor.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AgentRuntimeConfig {
     #[serde(default = "default_agent_max_turns")]
     pub max_turns: u32,

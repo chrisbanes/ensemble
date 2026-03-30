@@ -162,33 +162,69 @@ export interface HistoryResponse {
   };
 }
 
-// --- Config types ---
+// --- Config types (matches EnsembleConfig JSON serialization) ---
+
+export interface AgentConfig {
+  executor: string;
+  model: string;
+  prompt: string | null;
+  prompt_template: string | null;
+}
+
+export interface StepConfig {
+  name: string;
+  agent: string;
+  depends: string[] | null;
+  tracker_state: string | null;
+}
+
+export interface EnsembleConfig {
+  tracker: {
+    kind: string;
+    active_states: string[];
+    terminal_states: string[];
+    path: string | null;
+    endpoint: string | null;
+    api_key: string | null;
+    repository: string | null;
+    project_number: number | null;
+    labels_filter: string[];
+  };
+  agents: Record<string, AgentConfig>;
+  steps: StepConfig[];
+  on_success: string;
+  on_failure: string;
+  concurrency: {
+    max_concurrent_agents: number;
+    max_step_parallelism: number;
+  };
+  max_cycles: number;
+  polling: { interval_ms: number };
+  workspace: { root: string | null };
+  hooks: {
+    after_create: string | null;
+    before_run: string | null;
+    after_run: string | null;
+    before_remove: string | null;
+    timeout_ms: number;
+  };
+  agent: {
+    max_turns: number;
+    max_retry_backoff_ms: number;
+    command: string;
+    session_mode: string;
+    permission_policy: string;
+    turn_timeout_ms: number;
+    read_timeout_ms: number;
+    stall_timeout_ms: number;
+  };
+}
 
 export interface ConfigResponse {
   valid: boolean;
   errors: string[];
   config_path: string;
-  agents: Array<{
-    name: string;
-    command: string;
-    model: string;
-    max_turns: number;
-  }>;
-  pipeline: {
-    steps: Array<{
-      name: string;
-      agent: string;
-      depends: string[];
-    }>;
-  };
-  runtime: {
-    max_concurrent: number;
-    max_retries: number;
-    poll_interval_seconds: number;
-    workspace_root: string;
-    tracker: string;
-    server_port: number;
-  };
+  config: EnsembleConfig;
 }
 
 // --- WebSocket types ---
