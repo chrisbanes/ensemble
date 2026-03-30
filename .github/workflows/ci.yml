@@ -101,3 +101,35 @@ jobs:
 
       - name: Build Tauri app
         run: cargo build -p ensemble-desktop
+
+  tauri-macos:
+    name: Build Tauri Desktop App (macOS)
+    runs-on: macos-latest
+    needs: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/ensemble-ui/src-ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Generate frontend API client
+        run: npm run codegen
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Build Tauri app
+        run: cargo build -p ensemble-desktop
