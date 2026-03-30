@@ -85,97 +85,84 @@ fn should_use_json() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate logging-related env vars.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved: Vec<_> = vars.iter().map(|&k| (k, std::env::var(k).ok())).collect();
+            for &k in vars {
+                std::env::remove_var(k);
+            }
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(val) => std::env::set_var(k, val),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    const LOG_VARS: &[&str] = &["ENSEMBLE_LOG", "RUST_LOG", "ENSEMBLE_LOG_FORMAT"];
 
     #[test]
     fn test_build_env_filter_default() {
-        // When neither ENSEMBLE_LOG nor RUST_LOG is set, default to info
-        let saved_ensemble = std::env::var("ENSEMBLE_LOG").ok();
-        let saved_rust = std::env::var("RUST_LOG").ok();
-        std::env::remove_var("ENSEMBLE_LOG");
-        std::env::remove_var("RUST_LOG");
-
+        let _env = EnvGuard::lock(LOG_VARS);
         let filter = build_env_filter();
         let _ = format!("{:?}", filter);
-
-        if let Some(val) = saved_ensemble {
-            std::env::set_var("ENSEMBLE_LOG", val);
-        }
-        if let Some(val) = saved_rust {
-            std::env::set_var("RUST_LOG", val);
-        }
     }
 
     #[test]
     fn test_build_env_filter_from_ensemble_log() {
-        let saved = std::env::var("ENSEMBLE_LOG").ok();
+        let _env = EnvGuard::lock(LOG_VARS);
         std::env::set_var("ENSEMBLE_LOG", "debug");
-
         let filter = build_env_filter();
         let _ = format!("{:?}", filter);
-
-        if let Some(val) = saved {
-            std::env::set_var("ENSEMBLE_LOG", val);
-        } else {
-            std::env::remove_var("ENSEMBLE_LOG");
-        }
     }
 
     #[test]
     fn test_build_env_filter_invalid_falls_back() {
-        let saved = std::env::var("ENSEMBLE_LOG").ok();
+        let _env = EnvGuard::lock(LOG_VARS);
         std::env::set_var("ENSEMBLE_LOG", "not a valid filter {{{}}}");
-
         let filter = build_env_filter();
-        // Should fall back to "info" without panicking
         let _ = format!("{:?}", filter);
-
-        if let Some(val) = saved {
-            std::env::set_var("ENSEMBLE_LOG", val);
-        } else {
-            std::env::remove_var("ENSEMBLE_LOG");
-        }
     }
 
     #[test]
     fn test_should_use_json_with_env_var() {
-        let saved = std::env::var("ENSEMBLE_LOG_FORMAT").ok();
+        let _env = EnvGuard::lock(LOG_VARS);
         std::env::set_var("ENSEMBLE_LOG_FORMAT", "json");
-
         assert!(should_use_json());
-
-        if let Some(val) = saved {
-            std::env::set_var("ENSEMBLE_LOG_FORMAT", val);
-        } else {
-            std::env::remove_var("ENSEMBLE_LOG_FORMAT");
-        }
     }
 
     #[test]
     fn test_should_use_json_case_insensitive() {
-        let saved = std::env::var("ENSEMBLE_LOG_FORMAT").ok();
+        let _env = EnvGuard::lock(LOG_VARS);
         std::env::set_var("ENSEMBLE_LOG_FORMAT", "JSON");
-
         assert!(should_use_json());
-
-        if let Some(val) = saved {
-            std::env::set_var("ENSEMBLE_LOG_FORMAT", val);
-        } else {
-            std::env::remove_var("ENSEMBLE_LOG_FORMAT");
-        }
     }
 
     #[test]
     fn test_should_not_use_json_with_text_format() {
-        let saved = std::env::var("ENSEMBLE_LOG_FORMAT").ok();
+        let _env = EnvGuard::lock(LOG_VARS);
         std::env::set_var("ENSEMBLE_LOG_FORMAT", "text");
-
-        // When format is not "json", terminal detection applies.
         let _ = should_use_json();
-
-        if let Some(val) = saved {
-            std::env::set_var("ENSEMBLE_LOG_FORMAT", val);
-        } else {
-            std::env::remove_var("ENSEMBLE_LOG_FORMAT");
-        }
     }
 }

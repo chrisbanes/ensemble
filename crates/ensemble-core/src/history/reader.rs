@@ -70,7 +70,7 @@ pub async fn read_history(
 
     let total = filtered.len();
     let cursor = query.cursor.unwrap_or(0);
-    let limit = query.limit.unwrap_or(50);
+    let limit = query.limit.unwrap_or(50).min(200);
 
     let page: Vec<HistoryRecord> = filtered.into_iter().skip(cursor).take(limit).collect();
 

@@ -104,7 +104,7 @@ pub async fn get_conversation(
 
     let total = all_messages.len();
     let cursor = query.cursor.unwrap_or(0);
-    let limit = query.limit.unwrap_or(50);
+    let limit = query.limit.unwrap_or(50).min(200);
 
     let page: Vec<ConversationMessage> =
         all_messages.into_iter().skip(cursor).take(limit).collect();

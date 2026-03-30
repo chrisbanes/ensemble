@@ -86,15 +86,23 @@ pub async fn post_stop(
     if let Some(entry) = lock.running.get(&issue_id) {
         if let Some(ref pid_str) = entry.agent_pid {
             if let Ok(pid) = pid_str.parse::<i32>() {
-                // Best-effort SIGTERM — don't fail the API call if the process is already gone
-                unsafe {
-                    libc::kill(pid, libc::SIGTERM);
+                if pid > 0 {
+                    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+                    if rc == -1 {
+                        tracing::warn!(pid, issue_id = %issue_id, "failed to send SIGTERM");
+                    }
+                } else {
+                    tracing::warn!(pid, issue_id = %issue_id, "skipping SIGTERM for non-positive PID");
                 }
             }
         }
     }
 
-    // Remove from running state
+    // TODO: Once the orchestrator event loop exists (Plan 3), stop requests
+    // should be routed through a command channel instead of mutating state
+    // directly. This avoids a race where the orchestrator's WorkerExited
+    // handler processes a stale entry. For now, direct mutation is correct
+    // because the orchestrator loop is a placeholder.
     if let Some(entry) = lock.remove_running(&issue_id) {
         lock.add_runtime_seconds(&entry);
     }
