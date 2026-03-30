@@ -7,6 +7,8 @@ pub enum EnsembleError {
     #[error(transparent)]
     Workspace(#[from] WorkspaceError),
     #[error(transparent)]
+    Worktree(#[from] WorktreeError),
+    #[error(transparent)]
     Tracker(#[from] crate::tracker::TrackerError),
     #[error(transparent)]
     Pipeline(#[from] PipelineError),
@@ -36,6 +38,24 @@ pub enum WorkspaceError {
     HookTimedOut { hook: String, timeout_ms: u64 },
     #[error("workspace path outside root: {path}")]
     PathOutsideRoot { path: String },
+}
+
+#[derive(Debug, Error)]
+pub enum WorktreeError {
+    #[error("worktree creation failed for repo {repo}: {reason}")]
+    CreationFailed { repo: String, reason: String },
+    #[error("worktree already exists at {path}")]
+    AlreadyExists { path: String },
+    #[error("worktree not found at {path}")]
+    NotFound { path: String },
+    #[error("git command failed: {command} — {reason}")]
+    GitCommandFailed { command: String, reason: String },
+    #[error("branch creation failed: {branch} — {reason}")]
+    BranchCreationFailed { branch: String, reason: String },
+    #[error("rollback failed during cleanup: {reason}")]
+    RollbackFailed { reason: String },
+    #[error("invalid repo path: {path}")]
+    InvalidRepoPath { path: String },
 }
 
 #[derive(Debug, Error)]
