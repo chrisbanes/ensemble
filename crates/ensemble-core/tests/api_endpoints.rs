@@ -61,9 +61,7 @@ fn build_populated_app_state() -> AppState {
     };
 
     let mut state = OrchestratorState::new(30000, 10);
-    state
-        .running
-        .insert("NODE_123".to_string(), running_entry);
+    state.running.insert("NODE_123".to_string(), running_entry);
     state
         .retry_attempts
         .insert("NODE_456".to_string(), retry_entry);
@@ -121,10 +119,7 @@ async fn test_get_state_endpoint() {
     assert!(json.get("counts").is_some(), "missing counts");
     assert!(json.get("running").is_some(), "missing running");
     assert!(json.get("retrying").is_some(), "missing retrying");
-    assert!(
-        json.get("agent_totals").is_some(),
-        "missing agent_totals"
-    );
+    assert!(json.get("agent_totals").is_some(), "missing agent_totals");
     assert!(json.get("rate_limits").is_some(), "missing rate_limits");
 
     // Verify counts
@@ -198,10 +193,7 @@ async fn test_get_issue_detail_running() {
     // Verify workspace info
     let workspace = json.get("workspace").unwrap();
     assert!(workspace.get("path").is_some());
-    assert!(workspace["path"]
-        .as_str()
-        .unwrap()
-        .contains("my-repo_42"));
+    assert!(workspace["path"].as_str().unwrap().contains("my-repo_42"));
 
     // Verify attempts info
     let attempts = json.get("attempts").unwrap();
@@ -283,9 +275,7 @@ async fn test_post_refresh_endpoint() {
     assert!(json.get("requested_at").is_some());
     let ops = json["operations"].as_array().unwrap();
     assert!(ops.contains(&serde_json::Value::String("poll".to_string())));
-    assert!(ops.contains(&serde_json::Value::String(
-        "reconcile".to_string()
-    )));
+    assert!(ops.contains(&serde_json::Value::String("reconcile".to_string())));
 }
 
 #[tokio::test]

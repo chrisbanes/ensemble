@@ -35,9 +35,7 @@ impl ApiError {
 ///
 /// Acquires a read lock on the orchestrator state, builds a RuntimeSnapshot,
 /// and returns it as JSON.
-pub async fn get_state(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<RuntimeSnapshot>) {
+pub async fn get_state(State(state): State<AppState>) -> (StatusCode, Json<RuntimeSnapshot>) {
     let lock = state.orchestrator_state.read().await;
     let snapshot = build_state_snapshot(&lock);
     drop(lock);
@@ -58,11 +56,9 @@ pub async fn get_issue_detail(
     drop(lock);
 
     match detail {
-        Some(detail) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(detail).unwrap()),
-        )
-            .into_response(),
+        Some(detail) => {
+            (StatusCode::OK, Json(serde_json::to_value(detail).unwrap())).into_response()
+        }
         None => {
             let error = ApiError::new(
                 "issue_not_found",
@@ -93,9 +89,7 @@ pub struct RefreshResponse {
 ///
 /// Signals the orchestrator to run an immediate tick (poll + reconcile).
 /// Returns 202 Accepted with a confirmation body.
-pub async fn post_refresh(
-    State(state): State<AppState>,
-) -> (StatusCode, Json<RefreshResponse>) {
+pub async fn post_refresh(State(state): State<AppState>) -> (StatusCode, Json<RefreshResponse>) {
     state.refresh_requested.notify_one();
 
     let response = RefreshResponse {
@@ -248,8 +242,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_detail_found() {
         let app_state = build_populated_state();
-        let response =
-            get_issue_detail(State(app_state), Path("my-repo#42".to_string())).await;
+        let response = get_issue_detail(State(app_state), Path("my-repo#42".to_string())).await;
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -289,7 +282,10 @@ mod tests {
 
         assert!(json.get("error").is_some());
         let err = json.get("error").unwrap();
-        assert_eq!(err.get("code").unwrap().as_str().unwrap(), "issue_not_found");
+        assert_eq!(
+            err.get("code").unwrap().as_str().unwrap(),
+            "issue_not_found"
+        );
         assert_eq!(
             err.get("message").unwrap().as_str().unwrap(),
             "no such issue"
@@ -299,8 +295,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_detail_retrying_issue() {
         let app_state = build_populated_state();
-        let response =
-            get_issue_detail(State(app_state), Path("my-repo#99".to_string())).await;
+        let response = get_issue_detail(State(app_state), Path("my-repo#99".to_string())).await;
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);

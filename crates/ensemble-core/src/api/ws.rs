@@ -37,7 +37,9 @@ async fn handle_ws(socket: WebSocket, state: AppState, identifier: String) {
         });
 
         if sender
-            .send(Message::Text(serde_json::to_string(&initial_msg).unwrap().into()))
+            .send(Message::Text(
+                serde_json::to_string(&initial_msg).unwrap().into(),
+            ))
             .await
             .is_err()
         {

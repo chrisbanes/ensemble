@@ -49,11 +49,13 @@ pub async fn get_conversation(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::to_value(ApiError::new(
-                    "invalid_identifier",
-                    "identifier cannot be sanitized to a workspace key",
-                ))
-                .unwrap()),
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "invalid_identifier",
+                        "identifier cannot be sanitized to a workspace key",
+                    ))
+                    .unwrap(),
+                ),
             )
                 .into_response();
         }
@@ -69,12 +71,14 @@ pub async fn get_conversation(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return (
                 StatusCode::OK,
-                Json(serde_json::to_value(ConversationResponse {
-                    messages: vec![],
-                    total: 0,
-                    next_cursor: None,
-                })
-                .unwrap()),
+                Json(
+                    serde_json::to_value(ConversationResponse {
+                        messages: vec![],
+                        total: 0,
+                        next_cursor: None,
+                    })
+                    .unwrap(),
+                ),
             )
                 .into_response();
         }
@@ -137,11 +141,13 @@ pub async fn get_conversation_message(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::to_value(ApiError::new(
-                    "invalid_identifier",
-                    "identifier cannot be sanitized to a workspace key",
-                ))
-                .unwrap()),
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "invalid_identifier",
+                        "identifier cannot be sanitized to a workspace key",
+                    ))
+                    .unwrap(),
+                ),
             )
                 .into_response();
         }

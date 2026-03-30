@@ -137,10 +137,7 @@ pub async fn post_retry(
         Some(id) => id,
         None => {
             // Check if it's running instead
-            let is_running = lock
-                .running
-                .values()
-                .any(|e| e.identifier == identifier);
+            let is_running = lock.running.values().any(|e| e.identifier == identifier);
 
             if is_running {
                 return (

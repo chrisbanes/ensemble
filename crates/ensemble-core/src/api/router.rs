@@ -44,10 +44,7 @@ pub fn create_api_router(state: AppState) -> Router {
 }
 
 /// Create the API router with optional static file serving for the dashboard SPA.
-pub fn create_api_router_with_static(
-    state: AppState,
-    static_dir: Option<PathBuf>,
-) -> Router {
+pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Router {
     let api_routes = Router::new()
         .route("/state", get(handlers::get_state))
         .route(
@@ -115,7 +112,6 @@ mod tests {
     #[test]
     fn test_router_with_static_dir_does_not_panic() {
         let state = test_app_state();
-        let _router =
-            create_api_router_with_static(state, Some(PathBuf::from("/tmp/dashboard")));
+        let _router = create_api_router_with_static(state, Some(PathBuf::from("/tmp/dashboard")));
     }
 }

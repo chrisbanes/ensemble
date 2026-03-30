@@ -170,10 +170,7 @@ pub fn build_issue_snapshot(
     workspace_root: &str,
 ) -> Option<IssueDetailSnapshot> {
     // Check running entries first
-    let running_entry = state
-        .running
-        .values()
-        .find(|e| e.identifier == identifier);
+    let running_entry = state.running.values().find(|e| e.identifier == identifier);
 
     // Check retry entries
     let retry_entry = state
@@ -359,8 +356,12 @@ mod tests {
 
     fn build_test_state() -> OrchestratorState {
         let mut state = OrchestratorState::new(30000, 10);
-        state.running.insert("NODE_123".to_string(), test_running_entry());
-        state.retry_attempts.insert("NODE_456".to_string(), test_retry_entry());
+        state
+            .running
+            .insert("NODE_123".to_string(), test_running_entry());
+        state
+            .retry_attempts
+            .insert("NODE_456".to_string(), test_retry_entry());
         state.claimed.insert("NODE_123".to_string());
         state.claimed.insert("NODE_456".to_string());
         state.agent_totals = AgentTotals {
@@ -410,7 +411,10 @@ mod tests {
         assert_eq!(row.issue_id, "NODE_456");
         assert_eq!(row.issue_identifier, "my-repo#99");
         assert_eq!(row.attempt, 3);
-        assert_eq!(row.error, Some("no available orchestrator slots".to_string()));
+        assert_eq!(
+            row.error,
+            Some("no available orchestrator slots".to_string())
+        );
     }
 
     #[test]

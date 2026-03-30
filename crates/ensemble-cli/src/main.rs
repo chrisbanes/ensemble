@@ -44,11 +44,7 @@ async fn main() -> ExitCode {
         Ok(cfg) => cfg,
         Err(e) => {
             error!(error = %e, path = %cli.config_path.display(), "failed to load config");
-            eprintln!(
-                "error: failed to load {}: {}",
-                cli.config_path.display(),
-                e
-            );
+            eprintln!("error: failed to load {}: {}", cli.config_path.display(), e);
             return ExitCode::FAILURE;
         }
     };
@@ -94,8 +90,7 @@ async fn main() -> ExitCode {
                     .display()
                     .to_string()
             });
-        let history_path =
-            std::path::PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
+        let history_path = std::path::PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
         let app_state = AppState {
             orchestrator_state: orchestrator_state.clone(),
             refresh_requested: refresh_notify.clone(),
