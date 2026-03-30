@@ -1,3 +1,6 @@
+mod commands;
+mod embedded_ui;
+
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,8 +14,6 @@ use ensemble_core::observability::events::EventBus;
 use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
-
-mod init;
 
 /// Ensemble: orchestrate coding agents to work on project issues.
 #[derive(Parser, Debug)]
@@ -68,7 +69,7 @@ async fn main() -> ExitCode {
     init_logging();
 
     match cli.command {
-        Some(Command::Init) => init::run_wizard().await,
+        Some(Command::Init) => commands::init::execute(commands::init::InitArgs).await,
         Some(Command::Run {
             config_path,
             host,

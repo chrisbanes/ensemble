@@ -7,7 +7,11 @@ pub mod repos;
 pub mod tracker;
 pub mod validate;
 
-pub async fn run_wizard() -> ExitCode {
+#[derive(Debug, Clone)]
+pub struct InitArgs;
+
+/// Run the interactive initialization wizard
+pub async fn execute(_args: InitArgs) -> ExitCode {
     println!();
 
     if std::path::Path::new("ensemble.yaml").exists() {
