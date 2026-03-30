@@ -2,7 +2,7 @@
 
 Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects verdicts, and drives tracker state transitions. Configuration lives in `ensemble.yaml`.
 
-See `SPEC.md` for the full specification. See `docs/superpowers/plans/` for implementation plans.
+See `docs/SPEC.md` for the full specification. See `docs/superpowers/plans/` for implementation plans.
 
 ## Project structure
 
