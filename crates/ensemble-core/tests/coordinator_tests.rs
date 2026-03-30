@@ -33,6 +33,7 @@ fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
     let config = RepoConfig {
         path: dir.path().to_string_lossy().to_string(),
         branch: "main".to_string(),
+        git_remote: "origin".to_string(),
     };
 
     (dir, config)

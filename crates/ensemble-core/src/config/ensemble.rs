@@ -1,4 +1,5 @@
 use crate::error::PipelineError;
+use crate::workspace::push_strategy::PushStrategy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,6 +26,8 @@ pub struct EnsembleConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub agent: AgentRuntimeConfig,
+    #[serde(default)]
+    pub push_strategy: PushStrategy,
 }
 
 /// A repository to be managed by the workspace (path + branch).
@@ -32,6 +35,12 @@ pub struct EnsembleConfig {
 pub struct RepoConfig {
     pub path: String,
     pub branch: String,
+    #[serde(default = "default_git_remote")]
+    pub git_remote: String,
+}
+
+fn default_git_remote() -> String {
+    "origin".to_string()
 }
 
 fn default_max_cycles() -> u32 {
