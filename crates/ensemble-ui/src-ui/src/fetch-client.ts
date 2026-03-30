@@ -38,5 +38,6 @@ export const customFetch = async <T>(
   }
 
   const data = await res.json();
+  // Return value matches orval's expected response structure (includes data, status, headers)
   return { data, status: res.status, headers: res.headers } as T;
 };

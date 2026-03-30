@@ -63,7 +63,9 @@ async fn ask_github_tracker() -> Result<TrackerChoice, inquire::InquireError> {
         }
     };
 
-    // Check for $GITHUB_TOKEN in env
+    // Check for $GITHUB_TOKEN in env.
+    // `api_token` is only Some when the user enters the token interactively.
+    // When loaded from env, api_token is None and the token is not written to .env.
     let (token, api_token) = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         println!("GitHub token ($GITHUB_TOKEN detected ✓)");
         (t, None)
