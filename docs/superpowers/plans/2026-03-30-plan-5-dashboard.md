@@ -1,12 +1,12 @@
-# Plan 5: Dashboard — React Frontend + Tauri Desktop
+# Plan 5: Dashboard — React Frontend
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a React dashboard that consumes the ensemble backend API (from Plan 4) for inspecting and controlling agent runs, shipped as a Tauri desktop app and optionally served from the CLI.
+**Goal:** Build a React dashboard that consumes the ensemble backend API (from Plan 4) for inspecting and controlling agent runs, served as static assets from the CLI's axum server.
 
-**Architecture:** Vite + React 19 SPA that polls REST for dashboard overview data and opens a WebSocket for live issue detail. All backend endpoints (including event streaming, history, conversation, stop/retry, and static asset serving) are provided by Plan 4. Tauri wraps the same SPA in a native window.
+**Architecture:** Vite + React 19 SPA that polls REST for dashboard overview data and opens a WebSocket for live issue detail. All backend endpoints (including event streaming, history, conversation, stop/retry, and static asset serving) are provided by Plan 4.
 
-**Tech Stack:** React 19, TypeScript, Vite, Tailwind CSS, TanStack Query, React Router, Tauri 2
+**Tech Stack:** React 19, TypeScript, Vite, Tailwind CSS, TanStack Query, React Router
 
 **Depends on:** Plan 4 (API, Observability, CLI & Backend Extensions) must be implemented first. All REST and WebSocket endpoints are available.
 
@@ -20,16 +20,8 @@
 
 ```
 ensemble/
-├── Cargo.toml                                     # workspace root (ensemble-desktop member)
 ├── crates/
 │   └── ensemble-desktop/
-│       ├── Cargo.toml
-│       ├── tauri.conf.json
-│       ├── build.rs
-│       ├── icons/
-│       │   └── icon.png
-│       ├── src/
-│       │   └── main.rs
 │       └── src-ui/
 │           ├── package.json
 │           ├── tsconfig.json
@@ -64,7 +56,7 @@ ensemble/
 │                   └── ConfirmDialog.tsx
 ```
 
-NOTE: Backend tasks (event bus, history log, new API endpoints, WebSocket handler, static asset serving) have been folded into Plan 4 (Tasks 7-12). This plan covers only the frontend and Tauri desktop wrapper.
+NOTE: Backend tasks (event bus, history log, new API endpoints, WebSocket handler, static asset serving) have been folded into Plan 4 (Tasks 7-12). Tauri desktop wrapper is in Plan 6. This plan covers only the React frontend.
 
 ---
 
@@ -1312,137 +1304,4 @@ git commit -m "feat: notification panel with browser Notification API and state-
 
 ---
 
-## Phase 3: Tauri Desktop Wrapper
-
-### Task 12: Tauri Desktop App
-
-**Files:**
-- Create: `crates/ensemble-desktop/Cargo.toml`
-- Create: `crates/ensemble-desktop/tauri.conf.json`
-- Create: `crates/ensemble-desktop/build.rs`
-- Create: `crates/ensemble-desktop/src/main.rs`
-- Create: `crates/ensemble-desktop/icons/icon.png`
-- Modify: `Cargo.toml` (workspace root — add member)
-
-- [ ] **Step 1: Add ensemble-desktop to workspace**
-
-Update root `Cargo.toml` — the `members = ["crates/*"]` glob already covers it, so no change needed unless explicit members are listed.
-
-- [ ] **Step 2: Create Cargo.toml**
-
-`crates/ensemble-desktop/Cargo.toml`:
-```toml
-[package]
-name = "ensemble-desktop"
-version = "0.1.0"
-edition.workspace = true
-license.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-ensemble-core = { path = "../ensemble-core" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tauri = { version = "2", features = [] }
-
-[build-dependencies]
-tauri-build = { version = "2", features = [] }
-```
-
-- [ ] **Step 3: Create build.rs**
-
-`crates/ensemble-desktop/build.rs`:
-```rust
-fn main() {
-    tauri_build::build();
-}
-```
-
-- [ ] **Step 4: Create tauri.conf.json**
-
-`crates/ensemble-desktop/tauri.conf.json`:
-```json
-{
-  "$schema": "https://raw.githubusercontent.com/niclas-nicls/tauri-plugin-clipboard-manager-v2/v2/schemas/config.schema.json",
-  "productName": "Ensemble",
-  "version": "0.1.0",
-  "identifier": "com.ensemble.dashboard",
-  "build": {
-    "frontendDist": "src-ui/dist",
-    "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm --prefix src-ui run dev",
-    "beforeBuildCommand": "npm --prefix src-ui run build"
-  },
-  "app": {
-    "windows": [
-      {
-        "title": "Ensemble Dashboard",
-        "width": 1280,
-        "height": 800,
-        "resizable": true,
-        "fullscreen": false
-      }
-    ]
-  }
-}
-```
-
-- [ ] **Step 5: Create main.rs**
-
-`crates/ensemble-desktop/src/main.rs`:
-```rust
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-fn main() {
-    tauri::Builder::default()
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
-}
-```
-
-Note: In a production setup, `main.rs` would start the ensemble-core orchestrator and axum server before opening the WebView, so the dashboard has a backend to talk to. For now, the Tauri app points at the dev server (Vite proxy → ensemble backend) during development and serves the built assets in production.
-
-- [ ] **Step 6: Create placeholder icon**
-
-Create a placeholder `crates/ensemble-desktop/icons/icon.png` (can be any valid 512x512 PNG — the implementing agent should generate or copy a placeholder).
-
-- [ ] **Step 7: Verify Tauri builds**
-
-Run: `cd crates/ensemble-desktop && cargo tauri build --debug`
-Expected: Builds successfully (may require Tauri system dependencies — see Tauri docs).
-
-- [ ] **Step 8: Commit**
-
-```bash
-git add crates/ensemble-desktop/
-git commit -m "feat: Tauri desktop app wrapper for dashboard"
-```
-
----
-
-## Final Verification
-
-### Task 13: Full Build and Lint Check
-
-- [ ] **Step 1: Run Rust checks**
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
-```
-Expected: All pass.
-
-- [ ] **Step 2: Run frontend build**
-
-```bash
-npm --prefix crates/ensemble-desktop/src-ui run build
-```
-Expected: Build succeeds.
-
-- [ ] **Step 3: Verify git status is clean**
-
-```bash
-git status
-```
-Expected: Clean working tree.
+**Next:** Plan 6 adds the Tauri desktop wrapper and full build verification.

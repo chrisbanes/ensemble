@@ -2618,4 +2618,4 @@ After completing all 12 tasks, you will have:
 - **WebSocket handler** (`api/ws.rs`) — `/ws/events/{id}` with snapshot-on-connect, typed event streaming, auto-close on completion
 - **Static asset serving** — `tower-http::ServeDir` fallback for dashboard SPA
 
-**Next:** Plan 5 adds the React dashboard frontend and Tauri desktop wrapper.
+**Next:** Plan 5 adds the React dashboard frontend. Plan 6 adds the Tauri desktop wrapper.
