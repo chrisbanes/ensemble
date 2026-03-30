@@ -429,7 +429,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ensemble-desktop"
+name = "ensemble-ui"
 version = "0.1.0"
 
 [[package]]

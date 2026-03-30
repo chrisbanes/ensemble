@@ -2,4 +2,4 @@
 .superpowers/
 .DS_Store
 node_modules/
-crates/ensemble-desktop/src-ui/dist/
+crates/ensemble-ui/src-ui/dist/
