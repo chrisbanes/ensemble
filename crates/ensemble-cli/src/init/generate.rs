@@ -22,7 +22,10 @@ pub fn generate_yaml(
             yaml.push_str("    - Todo\n");
             yaml.push_str("    - In Progress\n");
             yaml.push_str("  terminal_states:\n");
-            yaml.push_str(&format!("    - {}\n", on_failure));
+            yaml.push_str(&format!("    - {}\n", on_success));
+            if on_failure != on_success {
+                yaml.push_str(&format!("    - {}\n", on_failure));
+            }
         }
         TrackerChoice::GitHub {
             repository,
@@ -174,6 +177,18 @@ pub fn write_files(
         ..
     } = tracker
     {
+        if std::path::Path::new(".env").exists() {
+            match inquire::Confirm::new(".env already exists. Overwrite?")
+                .with_default(false)
+                .prompt()
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    println!("  Skipping .env (token not saved)");
+                }
+                Err(_) => return Ok(()),
+            }
+        }
         std::fs::write(".env", format!("GITHUB_TOKEN={}\n", token))?;
         // Set restrictive permissions (user read/write only)
         #[cfg(unix)]

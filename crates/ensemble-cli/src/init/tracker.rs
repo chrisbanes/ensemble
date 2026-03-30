@@ -170,7 +170,10 @@ pub async fn fetch_board_statuses(
     // Try user first, then organization
     match fetch_board_statuses_as_user(owner, project_number, token).await {
         Ok(statuses) => Ok(statuses),
-        Err(_) => fetch_board_statuses_as_org(owner, project_number, token).await,
+        Err(e) => {
+            eprintln!("  User query failed (trying organization): {}", e);
+            fetch_board_statuses_as_org(owner, project_number, token).await
+        }
     }
 }
 
