@@ -29,7 +29,7 @@ fn setup_repo() -> TempDir {
 #[tokio::test]
 async fn test_sanitize_branch_name_basic() {
     use ensemble_core::workspace::worktree::sanitize_branch_name;
-    
+
     assert_eq!(sanitize_branch_name("issue-123"), "issue-123");
     assert_eq!(sanitize_branch_name("feature/test"), "feature-test");
     assert_eq!(sanitize_branch_name("bug: fix"), "bug--fix");
@@ -38,10 +38,10 @@ async fn test_sanitize_branch_name_basic() {
 #[tokio::test]
 async fn test_create_worktree_creates_directory() {
     use ensemble_core::workspace::worktree::create_worktree;
-    
+
     let repo = setup_repo();
     let worktree_path = repo.path().join("worktrees/test-branch");
-    
+
     create_worktree(
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
@@ -49,7 +49,7 @@ async fn test_create_worktree_creates_directory() {
     )
     .await
     .unwrap();
-    
+
     assert!(worktree_path.exists());
     assert!(worktree_path.join(".git").exists());
 }
@@ -57,10 +57,10 @@ async fn test_create_worktree_creates_directory() {
 #[tokio::test]
 async fn test_worktree_exists_returns_true_for_existing() {
     use ensemble_core::workspace::worktree::{create_worktree, worktree_exists};
-    
+
     let repo = setup_repo();
     let worktree_path = repo.path().join("worktrees/existing");
-    
+
     create_worktree(
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
@@ -68,36 +68,42 @@ async fn test_worktree_exists_returns_true_for_existing() {
     )
     .await
     .unwrap();
-    
-    let exists = worktree_exists(repo.path().to_str().unwrap(), worktree_path.to_str().unwrap())
-        .await
-        .unwrap();
-    
+
+    let exists = worktree_exists(
+        repo.path().to_str().unwrap(),
+        worktree_path.to_str().unwrap(),
+    )
+    .await
+    .unwrap();
+
     assert!(exists);
 }
 
 #[tokio::test]
 async fn test_worktree_exists_returns_false_for_nonexistent() {
     use ensemble_core::workspace::worktree::worktree_exists;
-    
+
     let repo = setup_repo();
     let worktree_path = repo.path().join("worktrees/nonexistent");
-    
-    let exists = worktree_exists(repo.path().to_str().unwrap(), worktree_path.to_str().unwrap())
-        .await
-        .unwrap();
-    
+
+    let exists = worktree_exists(
+        repo.path().to_str().unwrap(),
+        worktree_path.to_str().unwrap(),
+    )
+    .await
+    .unwrap();
+
     assert!(!exists);
 }
 
 #[tokio::test]
 async fn test_remove_worktree_deletes_directory() {
     use ensemble_core::workspace::worktree::{create_worktree, remove_worktree, worktree_exists};
-    
+
     let repo = setup_repo();
     let worktree_path = repo.path().join("worktrees/to-remove");
     let branch = "to-remove-branch";
-    
+
     create_worktree(
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
@@ -105,7 +111,7 @@ async fn test_remove_worktree_deletes_directory() {
     )
     .await
     .unwrap();
-    
+
     remove_worktree(
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
@@ -113,23 +119,26 @@ async fn test_remove_worktree_deletes_directory() {
     )
     .await
     .unwrap();
-    
+
     assert!(!worktree_path.exists());
-    let exists = worktree_exists(repo.path().to_str().unwrap(), worktree_path.to_str().unwrap())
-        .await
-        .unwrap();
+    let exists = worktree_exists(
+        repo.path().to_str().unwrap(),
+        worktree_path.to_str().unwrap(),
+    )
+    .await
+    .unwrap();
     assert!(!exists);
 }
 
 #[tokio::test]
 async fn test_create_worktree_fails_if_already_exists() {
-    use ensemble_core::workspace::worktree::create_worktree;
     use ensemble_core::error::WorktreeError;
-    
+    use ensemble_core::workspace::worktree::create_worktree;
+
     let repo = setup_repo();
     let worktree_path = repo.path().join("worktrees/duplicate");
     let branch = "duplicate-branch";
-    
+
     create_worktree(
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
@@ -137,13 +146,13 @@ async fn test_create_worktree_fails_if_already_exists() {
     )
     .await
     .unwrap();
-    
+
     let result = create_worktree(
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
         branch,
     )
     .await;
-    
+
     assert!(matches!(result, Err(WorktreeError::AlreadyExists { .. })));
 }

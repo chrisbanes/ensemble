@@ -13,7 +13,7 @@ ensemble/
 │   └── ensemble-core/            # core library (domain model, config, workspace)
 │       ├── src/
 │       │   ├── lib.rs
-│       │   ├── error.rs          # EnsembleError, ConfigError, WorkspaceError, PipelineError
+│       │   ├── error.rs          # EnsembleError, ConfigError, WorkspaceError, WorktreeError, PipelineError
 │       │   ├── tracker/
 │       │   │   ├── mod.rs        # IssueTracker trait (read + write), TrackerError
 │       │   │   └── model.rs      # Issue, RunningEntry, RetryEntry, AgentTotals
@@ -26,7 +26,10 @@ ensemble/
 │       │   │   ├── engine.rs     # PipelineRun per-issue execution
 │       │   │   └── verdict.rs    # Verdict parsing (ACP + file fallback)
 │       │   └── workspace/
-│       │       ├── manager.rs    # WorkspaceManager (create/reuse/cleanup directories)
+│       │       ├── manager.rs    # WorkspaceManager (create/reuse/cleanup directories + worktrees)
+│       │       ├── coordinator.rs # WorktreeCoordinator (multi-repo worktree lifecycle)
+│       │       ├── worktree.rs   # Core git worktree operations (create/remove/exists/pull)
+│       │       ├── push_strategy.rs # PushStrategy enum (ask/auto_push/manual/pr_only)
 │       │       └── hooks.rs      # Async hook runner with timeouts
 │       └── tests/
 │           └── workflow_to_workspace.rs  # integration test

@@ -61,8 +61,12 @@ impl WorktreeCoordinator {
                 true => {
                     info!(repo = repo_name, "reusing existing worktree");
 
-                    if let Err(e) =
-                        pull_worktree(&worktree_path_str, &repo_config.branch, &repo_config.git_remote).await
+                    if let Err(e) = pull_worktree(
+                        &worktree_path_str,
+                        &repo_config.branch,
+                        &repo_config.git_remote,
+                    )
+                    .await
                     {
                         warn!(repo = repo_name, error = %e, "failed to pull, continuing");
                     }
@@ -115,9 +119,7 @@ impl WorktreeCoordinator {
             let worktree_path = repo_path.join(".worktrees").join(&branch);
             let worktree_path_str = worktree_path.to_string_lossy().to_string();
 
-            if let Err(e) =
-                remove_worktree(&repo_config.path, &worktree_path_str, &branch).await
-            {
+            if let Err(e) = remove_worktree(&repo_config.path, &worktree_path_str, &branch).await {
                 warn!(repo = repo_name, error = %e, "failed to cleanup worktree (continuing)");
             }
         }

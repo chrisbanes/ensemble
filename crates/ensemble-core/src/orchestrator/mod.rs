@@ -374,7 +374,9 @@ impl Orchestrator {
 
         tokio::spawn(async move {
             // Prepare workspace
-            let workspace_result = workspace_mgr.prepare_workspace(&issue_clone.identifier).await;
+            let workspace_result = workspace_mgr
+                .prepare_workspace(&issue_clone.identifier)
+                .await;
             let workspace_path = match workspace_result {
                 Ok(ws) => {
                     // Run after_create hook if newly created

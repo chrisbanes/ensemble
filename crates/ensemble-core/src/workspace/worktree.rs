@@ -4,8 +4,7 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 pub fn sanitize_branch_name(identifier: &str) -> String {
-    identifier
-        .replace(['/', ':', ' ', '\t'], "-")
+    identifier.replace(['/', ':', ' ', '\t'], "-")
 }
 
 pub async fn create_worktree(
@@ -36,13 +35,7 @@ pub async fn create_worktree(
     );
 
     let output = Command::new("git")
-        .args([
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            worktree_path,
-        ])
+        .args(["worktree", "add", "-b", branch, worktree_path])
         .current_dir(repo_path)
         .output()
         .await
@@ -57,13 +50,13 @@ pub async fn create_worktree(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         error!(stderr = %stderr, "Git worktree add command failed");
-        
+
         if stderr.contains("already exists") {
             return Err(WorktreeError::AlreadyExists {
                 path: worktree_path.to_string(),
             });
         }
-        
+
         return Err(WorktreeError::CreationFailed {
             repo: repo_path.to_string(),
             reason: stderr.to_string(),
@@ -104,15 +97,17 @@ pub async fn worktree_exists(repo_path: &str, worktree_path: &str) -> Result<boo
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let worktree_path_normalized = Path::new(worktree_path).canonicalize()
+    let worktree_path_normalized = Path::new(worktree_path)
+        .canonicalize()
         .unwrap_or_else(|_| Path::new(worktree_path).to_path_buf());
-    
+
     for line in stdout.lines() {
         if line.starts_with("worktree ") {
             let listed_path = line.strip_prefix("worktree ").unwrap_or(line);
-            let listed_path_normalized = Path::new(listed_path).canonicalize()
+            let listed_path_normalized = Path::new(listed_path)
+                .canonicalize()
                 .unwrap_or_else(|_| Path::new(listed_path).to_path_buf());
-            
+
             if listed_path_normalized == worktree_path_normalized {
                 debug!(worktree_path = %worktree_path, "Worktree found in list");
                 return Ok(true);
@@ -259,7 +254,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_branch_name_no_change() {
-        assert_eq!(sanitize_branch_name("valid-branch-name"), "valid-branch-name");
+        assert_eq!(
+            sanitize_branch_name("valid-branch-name"),
+            "valid-branch-name"
+        );
         assert_eq!(sanitize_branch_name("issue_123"), "issue_123");
     }
 }

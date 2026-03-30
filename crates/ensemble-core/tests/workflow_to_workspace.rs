@@ -174,7 +174,10 @@ async fn test_workflow_with_worktrees() {
     assert!(ws.base_path.is_dir());
     assert!(!ws.worktrees.is_empty());
 
-    let worktree_info = ws.worktrees.get("test-repo").expect("worktree should exist");
+    let worktree_info = ws
+        .worktrees
+        .get("test-repo")
+        .expect("worktree should exist");
     assert!(worktree_info.path.exists());
     assert!(worktree_info.created_now);
     assert!(worktree_info.path.join("README.md").exists());

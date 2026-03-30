@@ -27,7 +27,10 @@ impl WorkspaceManager {
     /// Create a new WorkspaceManager with the given workspace root.
     /// The root is normalized to an absolute path.
     /// Pass `repos` to enable worktree-based workspace isolation.
-    pub fn new(root: &Path, repos: Option<HashMap<String, RepoConfig>>) -> Result<Self, WorkspaceError> {
+    pub fn new(
+        root: &Path,
+        repos: Option<HashMap<String, RepoConfig>>,
+    ) -> Result<Self, WorkspaceError> {
         let root = if root.is_absolute() {
             root.to_path_buf()
         } else {
