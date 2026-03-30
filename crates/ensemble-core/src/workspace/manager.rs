@@ -27,10 +27,8 @@ impl WorkspaceManager {
     /// Create a new WorkspaceManager with the given workspace root.
     /// The root is normalized to an absolute path.
     /// Pass `repos` to enable worktree-based workspace isolation.
-    pub fn new(
-        root: &Path,
-        repos: Option<HashMap<String, RepoConfig>>,
-    ) -> Result<Self, WorkspaceError> {
+    /// Repo names are derived from path basenames.
+    pub fn new(root: &Path, repos: Option<Vec<RepoConfig>>) -> Result<Self, WorkspaceError> {
         let root = if root.is_absolute() {
             root.to_path_buf()
         } else {
@@ -41,7 +39,16 @@ impl WorkspaceManager {
                 .join(root)
         };
 
-        let worktree_coordinator = repos.map(|repos_map| {
+        let worktree_coordinator = repos.filter(|r| !r.is_empty()).map(|repo_list| {
+            let mut repos_map = HashMap::new();
+            for (index, repo) in repo_list.into_iter().enumerate() {
+                let name = Path::new(&repo.path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("repo-{index}"));
+                repos_map.insert(name, repo);
+            }
             let today = chrono::Local::now().format("%Y-%m-%d").to_string();
             WorktreeCoordinator::new(repos_map, today)
         });

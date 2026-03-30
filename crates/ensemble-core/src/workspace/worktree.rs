@@ -28,10 +28,15 @@ pub fn sanitize_branch_name(identifier: &str) -> String {
     result
 }
 
+/// Create a worktree with a new branch, optionally based on a start point.
+///
+/// If `start_point` is provided (e.g. "main"), the new branch is created from
+/// that ref instead of HEAD.
 pub async fn create_worktree(
     repo_path: &str,
     worktree_path: &str,
     branch: &str,
+    start_point: Option<&str>,
 ) -> Result<(), WorktreeError> {
     let repo = Path::new(repo_path);
     if !repo.join(".git").exists() {
@@ -52,11 +57,17 @@ pub async fn create_worktree(
         repo_path = %repo_path,
         worktree_path = %worktree_path,
         branch = %branch,
+        start_point = ?start_point,
         "Creating worktree with new branch"
     );
 
+    let mut args = vec!["worktree", "add", "-b", branch, worktree_path];
+    if let Some(sp) = start_point {
+        args.push(sp);
+    }
+
     let output = Command::new("git")
-        .args(["worktree", "add", "-b", branch, worktree_path])
+        .args(&args)
         .current_dir(repo_path)
         .output()
         .await
@@ -85,6 +96,44 @@ pub async fn create_worktree(
     }
 
     debug!(worktree_path = %worktree_path, "Worktree created successfully");
+    Ok(())
+}
+
+/// Attach a worktree to an existing branch (no `-b`).
+///
+/// Use this when the branch already exists but the worktree directory is missing.
+pub async fn attach_worktree(
+    repo_path: &str,
+    worktree_path: &str,
+    branch: &str,
+) -> Result<(), WorktreeError> {
+    info!(
+        repo_path = %repo_path,
+        worktree_path = %worktree_path,
+        branch = %branch,
+        "Attaching worktree to existing branch"
+    );
+
+    let output = Command::new("git")
+        .args(["worktree", "add", worktree_path, branch])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .map_err(|e| WorktreeError::GitCommandFailed {
+            command: format!("git worktree add {} {}", worktree_path, branch),
+            reason: e.to_string(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!(stderr = %stderr, "Git worktree attach failed");
+        return Err(WorktreeError::CreationFailed {
+            repo: repo_path.to_string(),
+            reason: stderr.to_string(),
+        });
+    }
+
+    debug!(worktree_path = %worktree_path, "Worktree attached successfully");
     Ok(())
 }
 
@@ -211,7 +260,7 @@ pub async fn remove_worktree(
     }
 
     let output = Command::new("git")
-        .args(["worktree", "remove", worktree_path])
+        .args(["worktree", "remove", "--force", worktree_path])
         .current_dir(repo_path)
         .output()
         .await

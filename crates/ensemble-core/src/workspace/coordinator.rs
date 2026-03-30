@@ -1,8 +1,8 @@
 use crate::config::ensemble::RepoConfig;
 use crate::error::WorktreeError;
 use crate::workspace::worktree::{
-    branch_exists, create_worktree, pull_worktree, remove_orphaned_worktree, remove_worktree,
-    sanitize_branch_name, worktree_exists,
+    attach_worktree, branch_exists, create_worktree, pull_worktree, remove_orphaned_worktree,
+    remove_worktree, sanitize_branch_name, worktree_exists,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,7 +60,7 @@ impl WorktreeCoordinator {
 
             let wt_registered = worktree_exists(repo_path_str, &worktree_path_str).await?;
             let dir_exists = worktree_path.exists();
-            let br_exists = branch_exists(repo_path_str, &branch).await.unwrap_or(false);
+            let br_exists = branch_exists(repo_path_str, &branch).await?;
 
             if wt_registered && br_exists {
                 // Happy path: worktree registered and branch exists — reuse it
@@ -84,8 +84,43 @@ impl WorktreeCoordinator {
                         created_now: false,
                     },
                 );
+            } else if br_exists && !wt_registered {
+                // Branch exists but worktree is missing — attach without -b
+                if dir_exists {
+                    warn!(
+                        repo = repo_name,
+                        "orphaned directory for existing branch, removing"
+                    );
+                    if let Err(e) =
+                        remove_orphaned_worktree(repo_path_str, &worktree_path_str).await
+                    {
+                        error!(repo = repo_name, error = %e, "failed to remove orphaned dir");
+                        self.rollback(&created, &newly_created).await;
+                        return Err(WorktreeError::RollbackFailed {
+                            reason: format!("cannot remove orphaned worktree: {e}"),
+                        });
+                    }
+                }
+
+                info!(repo = repo_name, "attaching worktree to existing branch");
+
+                if let Err(e) = attach_worktree(repo_path_str, &worktree_path_str, &branch).await {
+                    error!(repo = repo_name, error = %e, "failed to attach worktree");
+                    self.rollback(&created, &newly_created).await;
+                    return Err(e);
+                }
+
+                newly_created.push(repo_name.clone());
+                created.insert(
+                    repo_name.clone(),
+                    WorktreeInfo {
+                        path: worktree_path,
+                        branch: branch.clone(),
+                        created_now: false, // branch existed, not truly new
+                    },
+                );
             } else {
-                // Stale worktree: directory exists but branch/registration is gone
+                // Clean up stale state before creating fresh
                 if dir_exists && !wt_registered {
                     warn!(
                         repo = repo_name,
@@ -110,7 +145,14 @@ impl WorktreeCoordinator {
 
                 info!(repo = repo_name, path = %worktree_path.display(), "creating new worktree");
 
-                if let Err(e) = create_worktree(repo_path_str, &worktree_path_str, &branch).await {
+                if let Err(e) = create_worktree(
+                    repo_path_str,
+                    &worktree_path_str,
+                    &branch,
+                    Some(&repo_config.branch),
+                )
+                .await
+                {
                     error!(repo = repo_name, error = %e, "failed to create worktree");
                     self.rollback(&created, &newly_created).await;
                     return Err(e);

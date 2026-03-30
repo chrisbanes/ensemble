@@ -46,6 +46,7 @@ async fn test_create_worktree_creates_directory() {
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
         "test-branch",
+        None,
     )
     .await
     .unwrap();
@@ -65,6 +66,7 @@ async fn test_worktree_exists_returns_true_for_existing() {
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
         "existing-branch",
+        None,
     )
     .await
     .unwrap();
@@ -108,6 +110,7 @@ async fn test_remove_worktree_deletes_directory() {
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
         branch,
+        None,
     )
     .await
     .unwrap();
@@ -143,6 +146,7 @@ async fn test_create_worktree_fails_if_already_exists() {
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
         branch,
+        None,
     )
     .await
     .unwrap();
@@ -151,6 +155,7 @@ async fn test_create_worktree_fails_if_already_exists() {
         repo.path().to_str().unwrap(),
         worktree_path.to_str().unwrap(),
         branch,
+        None,
     )
     .await;
 

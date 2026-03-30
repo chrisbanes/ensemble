@@ -5,7 +5,6 @@ use ensemble_core::config::template::render_prompt;
 use ensemble_core::tracker::model::{sanitize_workspace_key, Issue};
 use ensemble_core::workspace::hooks::run_hook;
 use ensemble_core::workspace::manager::WorkspaceManager;
-use std::collections::HashMap;
 use tempfile::TempDir;
 
 fn sample_issue() -> Issue {
@@ -156,14 +155,11 @@ async fn test_workflow_with_worktrees() {
     let ws_dir = TempDir::new().unwrap();
     let repo_dir = setup_git_repo("test-repo");
 
-    let repos = HashMap::from([(
-        "test-repo".to_string(),
-        RepoConfig {
-            path: repo_dir.path().to_string_lossy().to_string(),
-            branch: "main".to_string(),
-            git_remote: "origin".to_string(),
-        },
-    )]);
+    let repos = vec![RepoConfig {
+        path: repo_dir.path().to_string_lossy().to_string(),
+        branch: "main".to_string(),
+        git_remote: "origin".to_string(),
+    }];
 
     let mgr = WorkspaceManager::new(ws_dir.path(), Some(repos)).unwrap();
     let issue = sample_issue();
@@ -174,10 +170,8 @@ async fn test_workflow_with_worktrees() {
     assert!(ws.base_path.is_dir());
     assert!(!ws.worktrees.is_empty());
 
-    let worktree_info = ws
-        .worktrees
-        .get("test-repo")
-        .expect("worktree should exist");
+    assert_eq!(ws.worktrees.len(), 1);
+    let (repo_key, worktree_info) = ws.worktrees.iter().next().unwrap();
     assert!(worktree_info.path.exists());
     assert!(worktree_info.created_now);
     assert!(worktree_info.path.join("README.md").exists());
@@ -185,7 +179,7 @@ async fn test_workflow_with_worktrees() {
     // Reuse workspace
     let ws2 = mgr.prepare_workspace(&issue.identifier).await.unwrap();
     assert!(!ws2.created_now);
-    let worktree_info2 = ws2.worktrees.get("test-repo").unwrap();
+    let worktree_info2 = ws2.worktrees.get(repo_key).unwrap();
     assert!(!worktree_info2.created_now);
     assert_eq!(worktree_info.path, worktree_info2.path);
 
