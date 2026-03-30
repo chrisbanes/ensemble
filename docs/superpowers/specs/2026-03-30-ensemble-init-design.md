@@ -44,8 +44,24 @@ Where do your issues live?
 GitHub repository (owner/repo): acme/frontend
 GitHub Project board number (optional, press enter to skip): 42
 GitHub token ($GITHUB_TOKEN detected ✓)
+
+Fetching board statuses...
+  Found: Backlog, Todo, In Progress, Review, Done
+
+Which statuses should Ensemble pick up work from? (space to toggle)
+  [ ] Backlog
+  [x] Todo
+  [ ] In Progress
+  [ ] Review
+  [ ] Done
+
+Which status means work is complete?
+  ❯ Done
+
+Which status means work failed?
+  (enter a status name, or press enter to use "Failed"): Failed
 ```
-Validates the token and repo/project accessibility inline.
+Validates the token and repo/project accessibility inline. Pulls actual status field values from the board so the config matches what the user already has.
 
 **If TODO.md:**
 ```
@@ -72,7 +88,7 @@ Validates each path is a git repo and that the target branch exists.
 
 ### Step 4 — Agent Discovery
 
-acpx is used to discover and health-check available agents.
+acpx is used to discover and health-check available agents. Only healthy agents are shown.
 
 ```
 Checking acpx... ✓ v0.8.0
@@ -80,37 +96,34 @@ Checking acpx... ✓ v0.8.0
 Available agents:
   [x] claude      Claude Code v1.2.3
   [x] codex       Codex CLI v0.5.1
-  [ ] + Add custom agent...
 ```
 
-Only discovered (healthy) agents are shown. The "Add custom agent" option is always present:
+At least one agent is required to proceed. If no agents are discovered:
 
-```
-> a
-Custom agent name: my-linter
-acpx agent command: /usr/local/bin/custom-lint --check
-  ✓ my-linter    (healthy, exit 0)
-
-  [x] claude
-  [x] codex
-  [x] my-linter
-  [ ] + Add custom agent...
-```
-
-Users can add multiple custom agents. At least one agent total is required to proceed.
-
-**When no agents are discovered:**
 ```
 Checking acpx... ✓ v0.8.0
 
-Available agents:
-  No known agents found.
-  [ ] + Add custom agent...
+No agents found. Ensemble requires at least one coding agent.
+Configure agents in acpx first, then re-run `ensemble init`.
+See: https://github.com/openclaw/acpx
 ```
 
-The user must add at least one custom agent to continue.
+Agent discovery and custom agent configuration are acpx's responsibility. If a user wants to add a custom agent, they configure it in acpx first — then it appears in Ensemble's discovery list automatically.
 
-### Step 5 — Pipeline
+### Step 5 — Agent Roles
+
+Each selected agent gets a role name. The role is how the agent is referenced in the pipeline config — the underlying tool (claude, codex, etc.) is an implementation detail.
+
+```
+Name your agents by role:
+
+  claude → role name [builder]: builder
+  codex  → role name [reviewer]: reviewer
+```
+
+Defaults are `builder` for the first agent, `reviewer` for the second. If only one agent, defaults to `builder`.
+
+### Step 6 — Pipeline
 
 ```
 Pipeline steps define how agents process each issue.
@@ -120,17 +133,17 @@ Use default pipeline? (implement → review)
     No, let me customize
 ```
 
-**Default pipeline:** first selected agent implements, second reviews. If only one agent, single `implement` step with no review.
+**Default pipeline:** `builder` implements, `reviewer` reviews. If only one agent, single `implement` step with no review.
 
 **Custom pipeline:**
 ```
 Step 1:
   Name: implement
-  Agent: [claude ❯ codex]
+  Agent: [builder ❯ reviewer]
 
 Step 2:
   Name: review
-  Agent: [claude ❯ codex]
+  Agent: [builder ❯ reviewer]
   Depends on: [implement]
 
 Add another step? (y/N): n
@@ -138,7 +151,7 @@ Add another step? (y/N): n
 
 The wizard generates Liquid prompt templates in `templates/` for each step.
 
-### Step 6 — Dry-Run Validation
+### Step 7 — Dry-Run Validation
 
 After collecting all inputs, the wizard validates the entire configuration:
 
@@ -149,8 +162,8 @@ Validating configuration...
   ✓ Tracker          GitHub Projects #42 on acme/frontend (3 active issues)
   ✓ Repo             /Users/chris/code/acme-frontend (git, branch: main)
   ✓ Repo             /Users/chris/code/acme-api (git, branch: develop)
-  ✓ Agent: claude    healthy via acpx (v1.2.3)
-  ✓ Agent: codex     healthy via acpx (v0.5.1)
+  ✓ Agent: builder   claude, healthy via acpx (v1.2.3)
+  ✓ Agent: reviewer  codex, healthy via acpx (v0.5.1)
   ✓ Pipeline         2 steps, no cycles
   ✓ Config schema    valid
 
@@ -179,7 +192,7 @@ If the user declines to fix, they can write the config anyway:
   1 check failed. Write config anyway? (y/N):
 ```
 
-### Step 7 — Write Config
+### Step 8 — Write Config
 
 ```
 Writing configuration...
@@ -202,10 +215,8 @@ tracker:
   project_number: 42
   active_states:
     - Todo
-    - In Progress
   terminal_states:
     - Done
-    - Closed
 
 repos:
   - path: /Users/chris/code/acme-frontend
@@ -214,19 +225,19 @@ repos:
     branch: develop
 
 agents:
-  claude:
+  builder:
     acpx_agent: claude
     prompt_template: templates/implement.liquid
-  codex:
+  reviewer:
     acpx_agent: codex
     prompt_template: templates/review.liquid
 
 steps:
   - name: implement
-    agent: claude
+    agent: builder
     tracker_state: In Progress
   - name: review
-    agent: codex
+    agent: reviewer
     depends:
       - implement
     tracker_state: Review
@@ -234,6 +245,8 @@ steps:
 on_success: Done
 on_failure: Failed
 ```
+
+The `active_states` and `terminal_states` are populated from the actual board statuses selected during the wizard, not hardcoded defaults.
 
 ## Generated Prompt Templates
 
@@ -300,11 +313,11 @@ ensemble [PATH]  # Run orchestrator (existing behavior)
 | Scenario | Behavior |
 |---|---|
 | `acpx` not installed | Print install instructions, exit |
-| No agents discovered, user adds none | Error: "At least one agent required" |
+| No agents discovered | Print message to configure agents in acpx first, exit |
 | GitHub token invalid | Inline retry during validation |
 | Repo path doesn't exist | Inline retry during validation |
 | Target branch doesn't exist | Inline retry during validation |
 | `ensemble.yaml` already exists | "Config already exists. Overwrite? (y/N)" |
 | User Ctrl+C mid-wizard | Nothing written, clean exit |
-| Only one agent selected | Single-step pipeline (implement only) |
-| Custom agent health check fails | Show error, let user retry or skip |
+| Only one agent selected | Single-step pipeline (implement only), role defaults to `builder` |
+| GitHub project has no Status field | Fall back to default states (Todo, In Progress, Done) |
