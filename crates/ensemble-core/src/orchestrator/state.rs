@@ -7,7 +7,7 @@ use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
 /// Rate limit snapshot from agent events.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RateLimitSnapshot {
     pub limit: Option<u64>,
     pub remaining: Option<u64>,

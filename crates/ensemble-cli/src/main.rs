@@ -150,6 +150,8 @@ async fn run_orchestrator(
             workspace_root,
             history_path,
             event_bus: EventBus::new(),
+            config: Arc::new(config.clone()),
+            config_path: cli.config_path.display().to_string(),
         };
         let router = create_api_router_with_static(app_state, static_dir);
 

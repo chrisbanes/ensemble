@@ -1,3 +1,7 @@
 /target
 .superpowers/
 .DS_Store
+node_modules/
+crates/ensemble-ui/src-ui/dist/
+crates/ensemble-ui/src-ui/src/generated/
+crates/ensemble-ui/src-ui/openapi.json

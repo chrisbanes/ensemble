@@ -8,7 +8,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 /// Query parameters for conversation pagination.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct ConversationQuery {
     /// Cursor-based pagination: skip messages before this 0-based index.
     pub cursor: Option<usize>,
@@ -17,7 +17,7 @@ pub struct ConversationQuery {
 }
 
 /// A single conversation message.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ConversationMessage {
     pub index: u64,
     pub role: String,
@@ -29,7 +29,7 @@ pub struct ConversationMessage {
 }
 
 /// Response envelope for conversation queries.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ConversationResponse {
     pub messages: Vec<ConversationMessage>,
     pub total: usize,
@@ -39,6 +39,20 @@ pub struct ConversationResponse {
 /// GET /api/v1/{identifier}/conversation
 ///
 /// Returns paginated conversation messages from the workspace's conversation.jsonl file.
+#[utoipa::path(
+    get,
+    path = "/api/v1/{identifier}/conversation",
+    operation_id = "getConversation",
+    params(
+        ("identifier" = String, Path, description = "Issue identifier"),
+        ConversationQuery,
+    ),
+    responses(
+        (status = 200, description = "Conversation messages", body = ConversationResponse),
+        (status = 400, description = "Invalid identifier", body = ApiError)
+    ),
+    tag = "conversation"
+)]
 pub async fn get_conversation(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
@@ -132,6 +146,20 @@ pub async fn get_conversation(
 /// GET /api/v1/{identifier}/conversation/{index}
 ///
 /// Returns a single conversation message by its index.
+#[utoipa::path(
+    get,
+    path = "/api/v1/{identifier}/conversation/{index}",
+    operation_id = "getConversationMessage",
+    params(
+        ("identifier" = String, Path, description = "Issue identifier"),
+        ("index" = u64, Path, description = "Message index"),
+    ),
+    responses(
+        (status = 200, description = "Single message", body = ConversationMessage),
+        (status = 404, description = "Message not found", body = ApiError)
+    ),
+    tag = "conversation"
+)]
 pub async fn get_conversation_message(
     State(state): State<AppState>,
     Path((identifier, index)): Path<(String, u64)>,

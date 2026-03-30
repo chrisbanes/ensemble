@@ -1,5 +1,7 @@
 use crate::api::router::AppState;
-use crate::observability::snapshot::{build_issue_snapshot, build_state_snapshot, RuntimeSnapshot};
+use crate::observability::snapshot::{
+    build_issue_snapshot, build_state_snapshot, IssueDetailSnapshot, RuntimeSnapshot,
+};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -8,13 +10,13 @@ use chrono::Utc;
 use serde::Serialize;
 
 /// Standard JSON error envelope matching SPEC.md Section 13.7.2 error format.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ApiError {
     pub error: ApiErrorDetail,
 }
 
 /// Inner detail of the error envelope.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ApiErrorDetail {
     pub code: String,
     pub message: String,
@@ -35,6 +37,15 @@ impl ApiError {
 ///
 /// Acquires a read lock on the orchestrator state, builds a RuntimeSnapshot,
 /// and returns it as JSON.
+#[utoipa::path(
+    get,
+    path = "/api/v1/state",
+    operation_id = "getState",
+    responses(
+        (status = 200, description = "Runtime snapshot", body = RuntimeSnapshot)
+    ),
+    tag = "state"
+)]
 pub async fn get_state(State(state): State<AppState>) -> (StatusCode, Json<RuntimeSnapshot>) {
     let lock = state.orchestrator_state.read().await;
     let snapshot = build_state_snapshot(&lock);
@@ -47,6 +58,19 @@ pub async fn get_state(State(state): State<AppState>) -> (StatusCode, Json<Runti
 ///
 /// Looks up an issue by its identifier (e.g. "my-repo#42") in running and retry maps.
 /// Returns the issue detail or 404 with a JSON error envelope.
+#[utoipa::path(
+    get,
+    path = "/api/v1/{identifier}",
+    operation_id = "getIssueDetail",
+    params(
+        ("identifier" = String, Path, description = "Issue identifier")
+    ),
+    responses(
+        (status = 200, description = "Issue detail", body = IssueDetailSnapshot),
+        (status = 404, description = "Issue not found", body = ApiError)
+    ),
+    tag = "issues"
+)]
 pub async fn get_issue_detail(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
@@ -77,7 +101,7 @@ pub async fn get_issue_detail(
 }
 
 /// Response body for POST /api/v1/refresh.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RefreshResponse {
     pub queued: bool,
     pub coalesced: bool,
@@ -89,6 +113,15 @@ pub struct RefreshResponse {
 ///
 /// Signals the orchestrator to run an immediate tick (poll + reconcile).
 /// Returns 202 Accepted with a confirmation body.
+#[utoipa::path(
+    post,
+    path = "/api/v1/refresh",
+    operation_id = "postRefresh",
+    responses(
+        (status = 202, description = "Refresh queued", body = RefreshResponse)
+    ),
+    tag = "controls"
+)]
 pub async fn post_refresh(State(state): State<AppState>) -> (StatusCode, Json<RefreshResponse>) {
     state.refresh_requested.notify_one();
 
@@ -197,6 +230,8 @@ mod tests {
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
+            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            config_path: "ensemble.yaml".to_string(),
         }
     }
 
@@ -209,6 +244,8 @@ mod tests {
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
+            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            config_path: "ensemble.yaml".to_string(),
         }
     }
 
