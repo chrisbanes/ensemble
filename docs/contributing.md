@@ -51,5 +51,5 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 
 ## Further reading
 
-- [docs/SPEC.md](SPEC.md) — full service specification (language-agnostic)
-- [docs/superpowers/plans/](superpowers/plans/) — implementation plans used to build the codebase
+- [SPEC.md](SPEC.md) — full service specification (language-agnostic)
+- [superpowers/plans/](superpowers/plans/) — implementation plans used to build the codebase
