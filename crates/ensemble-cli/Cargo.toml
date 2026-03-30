@@ -15,3 +15,7 @@ tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 axum = { workspace = true }
+inquire = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+reqwest = { workspace = true }
