@@ -4,7 +4,7 @@ Date: 2026-03-30
 
 ## Goal
 
-Replace the empty README and organize documentation for users who want to install and use Ensemble, with some contributor context. Existing build artifacts (specs, plans, SPEC.md) move to an internal folder.
+Replace the empty README and organize documentation for users who want to install and use Ensemble, with some contributor context. SPEC.md moves to an internal folder. Superpowers plans and specs stay where they are.
 
 ## Audience
 
@@ -17,7 +17,8 @@ Replace the empty README and organize documentation for users who want to instal
 - **README-first with linked deep dives** — most users just read the README; deeper topics get their own files.
 - **Document what's implemented today** with a roadmap section for what's coming.
 - **Install story is Homebrew-first**, cargo build from source as secondary.
-- **Build artifacts move to `docs/internal/`** — specs, plans, and SPEC.md are internal reference, not user-facing docs. The `docs/superpowers/` path is an implementation detail of the build tooling and gets cleaned up.
+- **SPEC.md moves to `docs/internal/`** — the full service specification is internal reference, not user-facing docs.
+- **Superpowers plans and specs stay in place** — `docs/superpowers/plans/` and `docs/superpowers/specs/` remain where they are.
 
 ## File Structure
 
@@ -34,10 +35,11 @@ ensemble/
 │   ├── pipelines.md                  # Pipeline concepts and execution model
 │   ├── contributing.md               # Brief contributor guide
 │   ├── roadmap.md                    # Built / coming / not planned
-│   └── internal/                     # Build artifacts and reference specs
-│       ├── SPEC.md                   # Full service specification (moved from root)
-│       ├── specs/                    # Design specifications (3 files, moved from docs/superpowers/specs/)
-│       └── plans/                    # Implementation plans (7 files, moved from docs/superpowers/plans/)
+│   ├── internal/
+│   │   └── SPEC.md                   # Full service specification (moved from root)
+│   └── superpowers/                   # Stays in place
+│       ├── specs/                    # Design specifications
+│       └── plans/                    # Implementation plans
 ```
 
 ## README.md (~150 lines)
@@ -92,7 +94,7 @@ Brief — just enough to orient a contributor.
 2. **Project structure** — quick map of crates and what they do.
 3. **Code conventions** — highlights: thiserror for errors, tokio async, serde for serialization, tracing for logs.
 4. **CI** — what runs on PRs, everything must pass.
-5. **Where to learn more** — pointer to `docs/internal/SPEC.md` for the full service spec, and `docs/internal/plans/` for implementation history.
+5. **Where to learn more** — pointer to `docs/internal/SPEC.md` for the full service spec, and `docs/superpowers/plans/` for implementation history.
 
 Not duplicating CLAUDE.md — translating it for humans.
 
@@ -115,12 +117,9 @@ No dates or promises — just "built / coming / not planned."
 
 1. Create `docs/internal/` directory.
 2. Move `SPEC.md` to `docs/internal/SPEC.md`.
-3. Move `docs/superpowers/specs/` to `docs/internal/specs/`.
-4. Move `docs/superpowers/plans/` to `docs/internal/plans/`.
-5. Remove empty `docs/superpowers/` directory.
-6. Update any references to moved files (CLAUDE.md mentions SPEC.md and docs/superpowers/plans/).
-7. Write `README.md`.
-8. Write `docs/configuration.md`.
-9. Write `docs/pipelines.md`.
-10. Write `docs/contributing.md`.
-11. Write `docs/roadmap.md`.
+3. Update any references to moved SPEC.md (CLAUDE.md mentions SPEC.md).
+4. Write `README.md`.
+5. Write `docs/configuration.md`.
+6. Write `docs/pipelines.md`.
+7. Write `docs/contributing.md`.
+8. Write `docs/roadmap.md`.
