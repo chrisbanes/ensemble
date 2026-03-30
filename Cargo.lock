@@ -429,6 +429,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ensemble-desktop"
+version = "0.1.0"
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
