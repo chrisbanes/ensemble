@@ -92,9 +92,6 @@ async fn start_test_server(app_state: AppState) -> String {
         axum::serve(listener, router).await.unwrap();
     });
 
-    // Give the server a moment to start
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
     base_url
 }
 
