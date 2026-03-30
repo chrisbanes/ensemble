@@ -2,11 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add the HTTP REST API for runtime observability, structured logging initialization, runtime snapshot generation, and the `ensemble-cli` headless binary that wires everything together.
+**Goal:** Add the HTTP REST API for runtime observability, structured logging initialization, runtime snapshot generation, the `ensemble-cli` headless binary, and the backend extensions needed by the dashboard (event bus, history log, conversation/stop/retry endpoints, WebSocket streaming, static asset serving).
 
-**Architecture:** The observability layer reads from `Arc<RwLock<OrchestratorState>>` via read locks and produces JSON snapshots consumed by the axum API. The CLI binary is a thin entry point that parses arguments, initializes logging, loads config, creates all subsystems from Plans 1-3, optionally starts the HTTP server, and waits for shutdown. No new state mutation paths are introduced — the API is strictly read-only plus a refresh trigger.
+**Architecture:** The observability layer reads from `Arc<RwLock<OrchestratorState>>` via read locks and produces JSON snapshots consumed by the axum API. The CLI binary is a thin entry point that parses arguments, initializes logging, loads config, creates all subsystems from Plans 1-3, optionally starts the HTTP server, and waits for shutdown. The event bus uses a `tokio::sync::broadcast` channel for pipeline event fan-out to WebSocket subscribers. History is stored as an append-only JSONL file on disk.
 
-**Tech Stack:** Rust (2021 edition), axum, tokio, tracing, tracing-subscriber (json + env-filter), serde/serde_json, chrono, clap, tower-http (for method-not-allowed and future CORS), reqwest (test client)
+**Tech Stack:** Rust (2021 edition), axum (with ws feature), tokio, tracing, tracing-subscriber (json + env-filter), serde/serde_json, chrono, clap, tower-http (ServeDir, method-not-allowed), futures-util, reqwest (test client)
+
+**Design spec (for dashboard backend):** `docs/superpowers/specs/2026-03-30-dashboard-design.md`
 
 ---
 
@@ -14,19 +16,30 @@
 
 ```
 ensemble/
-├── Cargo.toml                                  # workspace root (update members)
+├── Cargo.toml                                  # workspace root (update members + deps)
 ├── crates/
 │   ├── ensemble-core/
+│   │   ├── Cargo.toml                          # add: axum (ws), tower-http, futures-util
 │   │   └── src/
-│   │       ├── lib.rs                          # add api + observability modules
+│   │       ├── lib.rs                          # add api + observability + history modules
 │   │       ├── observability/
 │   │       │   ├── mod.rs                      # re-exports
 │   │       │   ├── snapshot.rs                 # RuntimeSnapshot, build_state_snapshot()
-│   │       │   └── logging.rs                  # init_logging()
+│   │       │   ├── logging.rs                  # init_logging()
+│   │       │   └── events.rs                   # EventBus, PipelineEvent types
+│   │       ├── history/
+│   │       │   ├── mod.rs                      # re-exports
+│   │       │   ├── model.rs                    # HistoryRecord struct
+│   │       │   ├── writer.rs                   # append-only JSONL writer
+│   │       │   └── reader.rs                   # JSONL reader with filtering
 │   │       └── api/
 │   │           ├── mod.rs                      # re-exports
-│   │           ├── router.rs                   # create_api_router()
-│   │           └── handlers.rs                 # get_state, get_issue_detail, post_refresh
+│   │           ├── router.rs                   # create_api_router() + static serving
+│   │           ├── handlers.rs                 # get_state, get_issue_detail, post_refresh
+│   │           ├── conversation.rs             # paginated conversation handlers
+│   │           ├── controls.rs                 # stop + retry handlers
+│   │           ├── history_handler.rs          # history query handler
+│   │           └── ws.rs                       # WebSocket upgrade + event fan-out
 │   └── ensemble-cli/
 │       ├── Cargo.toml                          # binary crate
 │       └── src/
@@ -2083,21 +2096,526 @@ git commit -m "test: API endpoint integration tests verifying SPEC.md 13.7.2 JSO
 
 ---
 
+## Phase 2: Dashboard Backend Extensions
+
+The following tasks extend the API with event streaming, history, conversation, operator controls, and static asset serving — as defined in the dashboard design spec (`docs/superpowers/specs/2026-03-30-dashboard-design.md`).
+
+---
+
+### Task 7: Event Bus Types and Broadcast Channel
+
+**Files:**
+- Create: `crates/ensemble-core/src/observability/events.rs`
+- Modify: `crates/ensemble-core/src/observability/mod.rs`
+
+- [ ] **Step 1: Define PipelineEvent enum**
+
+`crates/ensemble-core/src/observability/events.rs`:
+```rust
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+
+/// A lightweight event emitted by the orchestrator at pipeline boundaries.
+/// These are broadcast to WebSocket subscribers and used for the event timeline.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum PipelineEvent {
+    SessionStarted {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        detail: String,
+    },
+    StepStarted {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        agent_name: String,
+        detail: String,
+    },
+    StepCompleted {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        verdict: Option<String>,
+        detail: String,
+    },
+    TurnCompleted {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        turn: u32,
+        detail: String,
+        conversation_index: Option<u64>,
+        tokens_delta: TokensDelta,
+    },
+    ToolCall {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        tool_name: String,
+        detail: String,
+    },
+    Error {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        detail: String,
+    },
+    RetryScheduled {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        attempt: u32,
+        detail: String,
+    },
+    Complete {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        outcome: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokensDelta {
+    pub input: u64,
+    pub output: u64,
+}
+
+impl PipelineEvent {
+    pub fn issue_identifier(&self) -> &str {
+        match self {
+            Self::SessionStarted { issue_identifier, .. }
+            | Self::StepStarted { issue_identifier, .. }
+            | Self::StepCompleted { issue_identifier, .. }
+            | Self::TurnCompleted { issue_identifier, .. }
+            | Self::ToolCall { issue_identifier, .. }
+            | Self::Error { issue_identifier, .. }
+            | Self::RetryScheduled { issue_identifier, .. }
+            | Self::Complete { issue_identifier, .. } => issue_identifier,
+        }
+    }
+
+    pub fn timestamp(&self) -> DateTime<Utc> {
+        match self {
+            Self::SessionStarted { timestamp, .. }
+            | Self::StepStarted { timestamp, .. }
+            | Self::StepCompleted { timestamp, .. }
+            | Self::TurnCompleted { timestamp, .. }
+            | Self::ToolCall { timestamp, .. }
+            | Self::Error { timestamp, .. }
+            | Self::RetryScheduled { timestamp, .. }
+            | Self::Complete { timestamp, .. } => *timestamp,
+        }
+    }
+}
+```
+
+- [ ] **Step 2: Define EventBus wrapper**
+
+Append to `crates/ensemble-core/src/observability/events.rs`:
+```rust
+use tokio::sync::broadcast;
+
+const EVENT_BUS_CAPACITY: usize = 1024;
+
+#[derive(Debug, Clone)]
+pub struct EventBus {
+    sender: broadcast::Sender<PipelineEvent>,
+}
+
+impl EventBus {
+    pub fn new() -> Self {
+        let (sender, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self { sender }
+    }
+
+    pub fn publish(&self, event: PipelineEvent) {
+        let _ = self.sender.send(event);
+    }
+
+    pub fn subscribe(&self) -> broadcast::Receiver<PipelineEvent> {
+        self.sender.subscribe()
+    }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+```
+
+- [ ] **Step 3: Add module declaration**
+
+Update `crates/ensemble-core/src/observability/mod.rs` — add:
+```rust
+pub mod events;
+```
+
+- [ ] **Step 4: Write tests**
+
+Append to `crates/ensemble-core/src/observability/events.rs`:
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_and_receive() {
+        let bus = EventBus::new();
+        let mut rx = bus.subscribe();
+        bus.publish(PipelineEvent::SessionStarted {
+            issue_identifier: "MT-1".into(),
+            timestamp: Utc::now(),
+            detail: "test".into(),
+        });
+        let event = rx.recv().await.unwrap();
+        assert_eq!(event.issue_identifier(), "MT-1");
+    }
+
+    #[tokio::test]
+    async fn publish_with_no_subscribers_does_not_panic() {
+        let bus = EventBus::new();
+        bus.publish(PipelineEvent::Complete {
+            issue_identifier: "MT-2".into(),
+            timestamp: Utc::now(),
+            outcome: "succeeded".into(),
+        });
+    }
+
+    #[test]
+    fn issue_identifier_extraction() {
+        let event = PipelineEvent::ToolCall {
+            issue_identifier: "MT-99".into(),
+            timestamp: Utc::now(),
+            tool_name: "bash".into(),
+            detail: "ls".into(),
+        };
+        assert_eq!(event.issue_identifier(), "MT-99");
+    }
+}
+```
+
+- [ ] **Step 5: Run tests**
+
+Run: `cargo test -p ensemble-core -- observability::events`
+Expected: 3 tests pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add crates/ensemble-core/src/observability/events.rs crates/ensemble-core/src/observability/mod.rs
+git commit -m "feat: event bus with broadcast channel for pipeline event streaming"
+```
+
+---
+
+### Task 8: History Log Model and Writer
+
+**Files:**
+- Create: `crates/ensemble-core/src/history/mod.rs`
+- Create: `crates/ensemble-core/src/history/model.rs`
+- Create: `crates/ensemble-core/src/history/writer.rs`
+- Modify: `crates/ensemble-core/src/lib.rs`
+
+- [ ] **Step 1: Create history module with model types**
+
+`crates/ensemble-core/src/history/mod.rs`:
+```rust
+pub mod model;
+pub mod reader;
+pub mod writer;
+```
+
+`crates/ensemble-core/src/history/model.rs`:
+```rust
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HistoryRecord {
+    pub issue_identifier: String,
+    pub issue_id: String,
+    pub outcome: String,
+    pub steps_traversed: Vec<String>,
+    pub attempts: u32,
+    pub tokens: TokenTotals,
+    pub duration_seconds: u64,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+    pub verdict: Option<String>,
+    pub workspace_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TokenTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+}
+```
+
+- [ ] **Step 2: Write the HistoryWriter**
+
+`crates/ensemble-core/src/history/writer.rs`:
+```rust
+use std::path::{Path, PathBuf};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+
+use super::model::HistoryRecord;
+
+#[derive(Debug, Clone)]
+pub struct HistoryWriter {
+    path: PathBuf,
+}
+
+impl HistoryWriter {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub async fn append(&self, record: &HistoryRecord) -> Result<(), std::io::Error> {
+        let mut line = serde_json::to_string(record)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        line.push('\n');
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await?;
+
+        file.write_all(line.as_bytes()).await?;
+        file.flush().await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::model::TokenTotals;
+    use chrono::Utc;
+    use tempfile::NamedTempFile;
+
+    fn sample_record() -> HistoryRecord {
+        HistoryRecord {
+            issue_identifier: "MT-648".into(),
+            issue_id: "abc123".into(),
+            outcome: "succeeded".into(),
+            steps_traversed: vec!["build".into(), "review".into()],
+            attempts: 1,
+            tokens: TokenTotals { input_tokens: 180_000, output_tokens: 104_000, total_tokens: 284_000 },
+            duration_seconds: 765,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            last_error: None,
+            verdict: Some("approved".into()),
+            workspace_path: "/tmp/ensemble_workspaces/MT-648".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn append_creates_file_and_writes_line() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+        let writer = HistoryWriter::new(path.clone());
+        writer.append(&sample_record()).await.unwrap();
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: HistoryRecord = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed.issue_identifier, "MT-648");
+    }
+
+    #[tokio::test]
+    async fn append_multiple_records() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+        let writer = HistoryWriter::new(path.clone());
+        writer.append(&sample_record()).await.unwrap();
+        let mut r2 = sample_record();
+        r2.issue_identifier = "MT-649".into();
+        writer.append(&r2).await.unwrap();
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(contents.lines().count(), 2);
+    }
+}
+```
+
+- [ ] **Step 3: Add module declaration to lib.rs**
+
+Add to `crates/ensemble-core/src/lib.rs`:
+```rust
+pub mod history;
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `cargo test -p ensemble-core -- history::writer`
+Expected: 2 tests pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add crates/ensemble-core/src/history/ crates/ensemble-core/src/lib.rs
+git commit -m "feat: history log model and append-only JSONL writer"
+```
+
+---
+
+### Task 9: History Log Reader with Filtering
+
+**Files:**
+- Create: `crates/ensemble-core/src/history/reader.rs`
+
+See Plan 5 (2026-03-30) Task 3 for the complete implementation including `HistoryQuery`, `HistoryResponse`, `read_history()`, and 5 tests (read_all, filter_by_outcome, filter_by_step, pagination, missing_file_returns_empty).
+
+- [ ] **Step 1: Implement reader with filtering and pagination** — See design spec for response shapes.
+- [ ] **Step 2: Write tests**
+- [ ] **Step 3: Run tests** — `cargo test -p ensemble-core -- history::reader` — Expected: 5 tests pass.
+- [ ] **Step 4: Commit**
+
+```bash
+git add crates/ensemble-core/src/history/reader.rs
+git commit -m "feat: history log reader with filtering and cursor-based pagination"
+```
+
+---
+
+### Task 10: History, Conversation, Stop, and Retry API Handlers
+
+**Files:**
+- Create: `crates/ensemble-core/src/api/history_handler.rs`
+- Create: `crates/ensemble-core/src/api/conversation.rs`
+- Create: `crates/ensemble-core/src/api/controls.rs`
+- Modify: `crates/ensemble-core/src/api/mod.rs`
+- Modify: `crates/ensemble-core/src/api/router.rs`
+
+See Plan 5 (2026-03-30) Tasks 4, 5, and 7 for the complete handler implementations. Key points:
+
+- `history_handler.rs`: Delegates to `history::reader::read_history()`.
+- `conversation.rs`: Reads `{workspace}/.ensemble/conversation.jsonl`, cursor-based pagination, plus a single-message endpoint for full tool output.
+- `controls.rs`: `post_stop` sends SIGTERM to agent process and removes from running state. `post_retry` removes from retry queue for immediate re-dispatch. Both return 404/409 for invalid states.
+- `ApiState` needs `history_path: PathBuf`, `workspace_root: PathBuf`, and `event_bus: EventBus` fields added.
+
+- [ ] **Step 1: Create history_handler.rs**
+- [ ] **Step 2: Create conversation.rs with paginated + single-message handlers**
+- [ ] **Step 3: Create controls.rs with stop + retry handlers**
+- [ ] **Step 4: Add module declarations to api/mod.rs**
+- [ ] **Step 5: Mount all new routes in router.rs**
+
+```rust
+.route("/api/v1/history", get(history_handler::get_history))
+.route("/api/v1/:identifier/conversation", get(conversation::get_conversation))
+.route("/api/v1/:identifier/conversation/:index", get(conversation::get_conversation_message))
+.route("/api/v1/:identifier/stop", post(controls::post_stop))
+.route("/api/v1/:identifier/retry", post(controls::post_retry))
+```
+
+- [ ] **Step 6: Run clippy and tests** — `cargo clippy -p ensemble-core -- -D warnings && cargo test -p ensemble-core`
+- [ ] **Step 7: Commit**
+
+```bash
+git add crates/ensemble-core/src/api/
+git commit -m "feat: history, conversation, stop, and retry API endpoints"
+```
+
+---
+
+### Task 11: WebSocket Event Handler
+
+**Files:**
+- Create: `crates/ensemble-core/src/api/ws.rs`
+- Modify: `crates/ensemble-core/src/api/mod.rs`
+- Modify: `crates/ensemble-core/src/api/router.rs`
+- Modify: `crates/ensemble-core/Cargo.toml`
+
+See Plan 5 (2026-03-30) Task 6 for the complete WebSocket handler implementation. Key points:
+
+- Uses axum's built-in WebSocket support (`axum::extract::ws`). Enable `ws` feature on axum.
+- Add `futures-util` to workspace dependencies.
+- On connect: build snapshot from `OrchestratorState`, send to client.
+- Subscribe to `EventBus`, filter by `issue_identifier`, forward matching events.
+- On `PipelineEvent::Complete`: send complete message and close connection.
+- Handle client disconnect and broadcast lag gracefully.
+
+- [ ] **Step 1: Add axum ws feature and futures-util dependency**
+- [ ] **Step 2: Create ws.rs with WebSocket handler**
+- [ ] **Step 3: Add module declaration and route** — `.route("/ws/events/:identifier", get(ws::ws_events))`
+- [ ] **Step 4: Run clippy and tests**
+- [ ] **Step 5: Commit**
+
+```bash
+git add Cargo.toml crates/ensemble-core/Cargo.toml crates/ensemble-core/src/api/ws.rs crates/ensemble-core/src/api/mod.rs crates/ensemble-core/src/api/router.rs
+git commit -m "feat: WebSocket handler for live event streaming per issue"
+```
+
+---
+
+### Task 12: Static Asset Serving
+
+**Files:**
+- Modify: `crates/ensemble-core/Cargo.toml`
+- Modify: `crates/ensemble-core/src/api/router.rs`
+
+- [ ] **Step 1: Add tower-http with fs feature**
+
+Workspace `Cargo.toml`:
+```toml
+tower-http = { version = "0.6", features = ["fs"] }
+```
+
+- [ ] **Step 2: Update create_api_router to accept optional static_dir**
+
+```rust
+use tower_http::services::{ServeDir, ServeFile};
+
+pub fn create_api_router(state: Arc<ApiState>, static_dir: Option<PathBuf>) -> Router {
+    let mut router = Router::new()
+        // ... existing routes ...
+        .with_state(state);
+
+    if let Some(dir) = static_dir {
+        let serve = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
+        router = router.fallback_service(serve);
+    }
+
+    router
+}
+```
+
+- [ ] **Step 3: Run clippy** — `cargo clippy -p ensemble-core -- -D warnings`
+- [ ] **Step 4: Commit**
+
+```bash
+git add Cargo.toml crates/ensemble-core/Cargo.toml crates/ensemble-core/src/api/router.rs
+git commit -m "feat: static asset serving for dashboard SPA via tower-http ServeDir"
+```
+
+---
+
 ## Summary
 
-After completing all 6 tasks, you will have:
+After completing all 12 tasks, you will have:
 
-- **Runtime snapshot types** (`observability/snapshot.rs`) — `RuntimeSnapshot`, `RunningSessionRow`, `RetryRow`, `AgentTotalsSnapshot`, `IssueDetailSnapshot` and the `build_state_snapshot()` / `build_issue_snapshot()` functions that produce JSON matching SPEC.md Section 13.7.2
-- **Structured logging** (`observability/logging.rs`) — `init_logging()` with JSON/human format auto-detection, `ENSEMBLE_LOG` / `RUST_LOG` env filter support, and terminal detection
-- **Axum HTTP router** (`api/router.rs`) — `create_api_router()` with `AppState` containing the shared orchestrator state, refresh notify, and workspace root
-- **API handlers** (`api/handlers.rs`) — `get_state` (200 + snapshot), `get_issue_detail` (200 or 404), `post_refresh` (202), `method_not_allowed` (405), all with the `{"error":{"code":"...","message":"..."}}` envelope format
-- **CLI binary** (`ensemble-cli/`) — `ensemble` binary with clap-derived arg parsing, `ensemble.yaml` config loading via `load_config()`, config + DAG validation, optional HTTP server startup, and clean shutdown on Ctrl+C
-- **Integration tests** verifying all API endpoints return correct status codes and JSON shapes against the SPEC
+**Phase 1 (Tasks 1-6):**
+- **Runtime snapshot types** (`observability/snapshot.rs`) — JSON snapshots matching SPEC.md Section 13.7.2
+- **Structured logging** (`observability/logging.rs`) — `init_logging()` with JSON/human format
+- **Axum HTTP router** (`api/router.rs`) — `create_api_router()` with shared state
+- **API handlers** (`api/handlers.rs`) — `get_state`, `get_issue_detail`, `post_refresh`, `method_not_allowed`
+- **CLI binary** (`ensemble-cli/`) — headless binary with arg parsing, config loading, optional HTTP server
+- **Integration tests** verifying API endpoint JSON shapes
 
-**Dependencies on earlier plans:**
-- Plan 1: `EnsembleError`, `ConfigError`, `WorkspaceError`, `WorkspaceManager`, `IssueTracker` trait, `TrackerError`, `sanitize_workspace_key()`
-- Plan 2A: `TodoFileTracker`, `GithubTracker`, `create_tracker()` factory (not directly used in Plan 4 but available for the CLI to wire up)
-- Plan 2B: `EnsembleConfig`, `TrackerConfig`, `AgentConfig`, `StepConfig`, `ConcurrencyConfig`, `PollingConfig`, `WorkspaceConfig`, `HooksConfig`, `AgentRuntimeConfig`, `load_config()`, `parse_config()`, `validate_config()` — all config types and loaders. `PipelineRun`, `StepState`, `PipelineAction`, `DispatchRequest` from the pipeline engine. `Issue`, `RunningEntry`, `RetryEntry`, `AgentTotals`, `BlockerRef` from the tracker model. `build_dag()` from the pipeline DAG module.
-- Plan 3: `AgentEvent`, `WorkerEvent`, `WorkerResult`, `TokenUsage`, `AgentError`, `AgentRunner` trait, `AcpAgentRunner`, `OrchestratorState`, `Orchestrator` (Plan 4 reads `OrchestratorState` for snapshots)
+**Phase 2 (Tasks 7-12):**
+- **Event bus** (`observability/events.rs`) — `PipelineEvent` enum + `EventBus` broadcast channel
+- **History log** (`history/`) — `HistoryRecord` model, append-only JSONL writer, reader with filtering + pagination
+- **New API endpoints** — `GET /history`, `GET /{id}/conversation`, `GET /{id}/conversation/{index}`, `POST /{id}/stop`, `POST /{id}/retry`
+- **WebSocket handler** (`api/ws.rs`) — `/ws/events/{id}` with snapshot-on-connect, typed event streaming, auto-close on completion
+- **Static asset serving** — `tower-http::ServeDir` fallback for dashboard SPA
 
-**Next:** Plan 5 will add the Tauri desktop binary and React dashboard frontend.
+**Next:** Plan 5 adds the React dashboard frontend and Tauri desktop wrapper.
