@@ -3,8 +3,29 @@ use std::path::Path;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
+/// Sanitize an issue identifier for use in git branch names.
+///
+/// Rules (per spec): all non-alphanumeric chars → `-`, collapse consecutive
+/// dashes, strip leading/trailing dashes, lowercase everything.
 pub fn sanitize_branch_name(identifier: &str) -> String {
-    identifier.replace(['/', ':', ' ', '\t'], "-")
+    let mut result = String::with_capacity(identifier.len());
+    let mut last_was_dash = true; // true to strip leading dashes
+
+    for c in identifier.chars() {
+        if c.is_alphanumeric() {
+            result.push(c.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash {
+            result.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    if result.ends_with('-') {
+        result.pop();
+    }
+
+    result
 }
 
 pub async fn create_worktree(
@@ -117,6 +138,57 @@ pub async fn worktree_exists(repo_path: &str, worktree_path: &str) -> Result<boo
 
     debug!(worktree_path = %worktree_path, "Worktree not found in list");
     Ok(false)
+}
+
+/// Check if a local branch exists in the repo.
+pub async fn branch_exists(repo_path: &str, branch: &str) -> Result<bool, WorktreeError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--verify", &format!("refs/heads/{branch}")])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .map_err(|e| WorktreeError::GitCommandFailed {
+            command: "git rev-parse".to_string(),
+            reason: e.to_string(),
+        })?;
+
+    Ok(output.status.success())
+}
+
+/// Remove an orphaned worktree directory that is not registered in git.
+///
+/// This handles the case where the directory exists but `git worktree list`
+/// doesn't know about it (e.g. branch was deleted, or previous cleanup was
+/// interrupted).
+pub async fn remove_orphaned_worktree(
+    repo_path: &str,
+    worktree_path: &str,
+) -> Result<(), WorktreeError> {
+    warn!(
+        repo_path = %repo_path,
+        worktree_path = %worktree_path,
+        "Removing orphaned worktree directory"
+    );
+
+    // Try git worktree prune first to clean stale entries
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_path)
+        .output()
+        .await;
+
+    // Remove the directory
+    let path = Path::new(worktree_path);
+    if path.exists() {
+        tokio::fs::remove_dir_all(path)
+            .await
+            .map_err(|e| WorktreeError::GitCommandFailed {
+                command: format!("remove orphaned dir {}", worktree_path),
+                reason: e.to_string(),
+            })?;
+    }
+
+    Ok(())
 }
 
 pub async fn remove_worktree(
@@ -239,7 +311,7 @@ mod tests {
     fn test_sanitize_branch_name_basic() {
         assert_eq!(sanitize_branch_name("issue-123"), "issue-123");
         assert_eq!(sanitize_branch_name("feature/test"), "feature-test");
-        assert_eq!(sanitize_branch_name("bug: fix"), "bug--fix");
+        assert_eq!(sanitize_branch_name("bug: fix"), "bug-fix");
         assert_eq!(sanitize_branch_name("with space"), "with-space");
         assert_eq!(sanitize_branch_name("with\ttab"), "with-tab");
     }
@@ -248,7 +320,7 @@ mod tests {
     fn test_sanitize_branch_name_multiple_special() {
         assert_eq!(
             sanitize_branch_name("feat/JIRA-123: add feature"),
-            "feat-JIRA-123--add-feature"
+            "feat-jira-123-add-feature"
         );
     }
 
@@ -258,6 +330,18 @@ mod tests {
             sanitize_branch_name("valid-branch-name"),
             "valid-branch-name"
         );
-        assert_eq!(sanitize_branch_name("issue_123"), "issue_123");
+        // underscores are non-alphanumeric, so they become dashes
+        assert_eq!(sanitize_branch_name("issue_123"), "issue-123");
+    }
+
+    #[test]
+    fn test_sanitize_branch_name_spec_examples() {
+        assert_eq!(sanitize_branch_name("my-repo#42"), "my-repo-42");
+        assert_eq!(sanitize_branch_name("acme/api#123"), "acme-api-123");
+        assert_eq!(
+            sanitize_branch_name("FEATURE_Add Dark Mode!!!"),
+            "feature-add-dark-mode"
+        );
+        assert_eq!(sanitize_branch_name("--test--"), "test");
     }
 }

@@ -1,7 +1,8 @@
 use crate::config::ensemble::RepoConfig;
 use crate::error::WorktreeError;
 use crate::workspace::worktree::{
-    create_worktree, pull_worktree, remove_worktree, sanitize_branch_name, worktree_exists,
+    branch_exists, create_worktree, pull_worktree, remove_orphaned_worktree, remove_worktree,
+    sanitize_branch_name, worktree_exists,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -57,50 +58,73 @@ impl WorktreeCoordinator {
             let worktree_path_str = worktree_path.to_string_lossy().to_string();
             let repo_path_str = &repo_config.path;
 
-            match worktree_exists(repo_path_str, &worktree_path_str).await? {
-                true => {
-                    info!(repo = repo_name, "reusing existing worktree");
+            let wt_registered = worktree_exists(repo_path_str, &worktree_path_str).await?;
+            let dir_exists = worktree_path.exists();
+            let br_exists = branch_exists(repo_path_str, &branch).await.unwrap_or(false);
 
-                    if let Err(e) = pull_worktree(
-                        &worktree_path_str,
-                        &repo_config.branch,
-                        &repo_config.git_remote,
-                    )
-                    .await
-                    {
-                        warn!(repo = repo_name, error = %e, "failed to pull, continuing");
-                    }
+            if wt_registered && br_exists {
+                // Happy path: worktree registered and branch exists — reuse it
+                info!(repo = repo_name, "reusing existing worktree");
 
-                    created.insert(
-                        repo_name.clone(),
-                        WorktreeInfo {
-                            path: worktree_path,
-                            branch: branch.clone(),
-                            created_now: false,
-                        },
-                    );
+                if let Err(e) = pull_worktree(
+                    &worktree_path_str,
+                    &repo_config.branch,
+                    &repo_config.git_remote,
+                )
+                .await
+                {
+                    warn!(repo = repo_name, error = %e, "failed to pull, continuing");
                 }
-                false => {
-                    info!(repo = repo_name, path = %worktree_path.display(), "creating new worktree");
 
+                created.insert(
+                    repo_name.clone(),
+                    WorktreeInfo {
+                        path: worktree_path,
+                        branch: branch.clone(),
+                        created_now: false,
+                    },
+                );
+            } else {
+                // Stale worktree: directory exists but branch/registration is gone
+                if dir_exists && !wt_registered {
+                    warn!(
+                        repo = repo_name,
+                        "stale worktree detected, cleaning up orphaned directory"
+                    );
                     if let Err(e) =
-                        create_worktree(repo_path_str, &worktree_path_str, &branch).await
+                        remove_orphaned_worktree(repo_path_str, &worktree_path_str).await
                     {
-                        error!(repo = repo_name, error = %e, "failed to create worktree");
+                        error!(repo = repo_name, error = %e, "failed to remove orphaned worktree");
                         self.rollback(&created, &newly_created).await;
-                        return Err(e);
+                        return Err(WorktreeError::RollbackFailed {
+                            reason: format!("cannot remove orphaned worktree: {e}"),
+                        });
                     }
-
-                    newly_created.push(repo_name.clone());
-                    created.insert(
-                        repo_name.clone(),
-                        WorktreeInfo {
-                            path: worktree_path,
-                            branch: branch.clone(),
-                            created_now: true,
-                        },
+                } else if wt_registered && !br_exists {
+                    warn!(
+                        repo = repo_name,
+                        "worktree registered but branch deleted, cleaning up"
                     );
+                    let _ = remove_worktree(repo_path_str, &worktree_path_str, &branch).await;
                 }
+
+                info!(repo = repo_name, path = %worktree_path.display(), "creating new worktree");
+
+                if let Err(e) = create_worktree(repo_path_str, &worktree_path_str, &branch).await {
+                    error!(repo = repo_name, error = %e, "failed to create worktree");
+                    self.rollback(&created, &newly_created).await;
+                    return Err(e);
+                }
+
+                newly_created.push(repo_name.clone());
+                created.insert(
+                    repo_name.clone(),
+                    WorktreeInfo {
+                        path: worktree_path,
+                        branch: branch.clone(),
+                        created_now: true,
+                    },
+                );
             }
         }
 
@@ -178,6 +202,6 @@ mod tests {
         let coordinator = WorktreeCoordinator::new(repos, "2026-03-30".to_string());
 
         let branch = coordinator.format_branch_name("my-repo#42");
-        assert_eq!(branch, "ensemble-2026-03-30-my-repo#42");
+        assert_eq!(branch, "ensemble-2026-03-30-my-repo-42");
     }
 }

@@ -32,7 +32,7 @@ async fn test_sanitize_branch_name_basic() {
 
     assert_eq!(sanitize_branch_name("issue-123"), "issue-123");
     assert_eq!(sanitize_branch_name("feature/test"), "feature-test");
-    assert_eq!(sanitize_branch_name("bug: fix"), "bug--fix");
+    assert_eq!(sanitize_branch_name("bug: fix"), "bug-fix");
 }
 
 #[tokio::test]
