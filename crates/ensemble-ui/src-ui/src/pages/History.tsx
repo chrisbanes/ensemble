@@ -48,7 +48,10 @@ export default function History() {
           onChange={(e) => { setFilters((f) => ({ ...f, issue: e.target.value })); setCursor(undefined); }}
           className="w-48"
         />
-        <Select value={filters.outcome} onValueChange={(v) => { setFilters((f) => ({ ...f, outcome: v === "all" ? "" : v })); setCursor(undefined); }}>
+        <Select
+          value={filters.outcome || "all"}
+          onValueChange={(v) => { setFilters((f) => ({ ...f, outcome: v === "all" ? "" : (v ?? "") })); setCursor(undefined); }}
+        >
           <SelectTrigger className="w-40">
             <SelectValue placeholder="All outcomes" />
           </SelectTrigger>
@@ -59,7 +62,10 @@ export default function History() {
             <SelectItem value="stopped">Stopped</SelectItem>
           </SelectContent>
         </Select>
-        <Select value={filters.since} onValueChange={(v) => { setFilters((f) => ({ ...f, since: v === "all" ? "" : v })); setCursor(undefined); }}>
+        <Select
+          value={filters.since || "all"}
+          onValueChange={(v) => { setFilters((f) => ({ ...f, since: v === "all" ? "" : (v ?? "") })); setCursor(undefined); }}
+        >
           <SelectTrigger className="w-36">
             <SelectValue placeholder="All time" />
           </SelectTrigger>
