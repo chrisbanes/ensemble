@@ -101,13 +101,11 @@ Not duplicating CLAUDE.md — translating it for humans.
 
 Keeps users informed about what's built and what's next.
 
-1. **What's working today** — bullet list of implemented capabilities (config loading, workspace management, pipeline DAG execution, verdict parsing, init wizard, dashboard, desktop app).
+1. **What's working today** — bullet list of implemented capabilities: config loading, workspace management, pipeline DAG execution, verdict parsing, GitHub Projects tracker (full GraphQL read/write), ACP agent client (stdio JSON-RPC), orchestrator with retry/backoff, REST API + WebSocket streaming, React dashboard, init wizard, Tauri desktop scaffold.
 2. **What's coming** — grouped by theme:
-   - GitHub Projects tracker integration (full read/write).
-   - ACP agent client (stdio JSON-RPC).
-   - Orchestrator loop (polling, dispatch, reconciliation).
-   - Retry with exponential backoff.
-   - Live dashboard streaming via WebSocket.
+   - Wiring the orchestrator poll loop into the CLI (code exists, not yet spawned in `ensemble run`).
+   - Tauri desktop integration with ensemble-core (currently a bare scaffold).
+   - Homebrew distribution.
 3. **Not planned** — things from the non-goals list (multi-tenant control plane, general-purpose workflow engine, etc.).
 
 No dates or promises — just "built / coming / not planned."
