@@ -242,6 +242,8 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures",
+ "libc",
  "liquid",
  "reqwest",
  "serde",

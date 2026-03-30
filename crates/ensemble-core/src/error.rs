@@ -10,6 +10,8 @@ pub enum EnsembleError {
     Tracker(#[from] crate::tracker::TrackerError),
     #[error(transparent)]
     Pipeline(#[from] PipelineError),
+    #[error(transparent)]
+    Agent(#[from] AgentError),
 }
 
 #[derive(Debug, Error)]
@@ -34,6 +36,36 @@ pub enum WorkspaceError {
     HookTimedOut { hook: String, timeout_ms: u64 },
     #[error("workspace path outside root: {path}")]
     PathOutsideRoot { path: String },
+}
+
+#[derive(Debug, Error)]
+pub enum AgentError {
+    #[error("agent not found: {command}")]
+    AgentNotFound { command: String },
+    #[error("invalid workspace cwd: {path}")]
+    InvalidWorkspaceCwd { path: String },
+    #[error("response timeout after {timeout_ms}ms")]
+    ResponseTimeout { timeout_ms: u64 },
+    #[error("turn timeout after {timeout_ms}ms")]
+    TurnTimeout { timeout_ms: u64 },
+    #[error("agent exited unexpectedly: {reason}")]
+    AgentExit { reason: String },
+    #[error("response error: {reason}")]
+    ResponseError { reason: String },
+    #[error("turn failed: {reason}")]
+    TurnFailed { reason: String },
+    #[error("turn cancelled")]
+    TurnCancelled,
+    #[error("turn requires user input")]
+    TurnInputRequired,
+    #[error("session startup failed: {reason}")]
+    SessionStartupFailed { reason: String },
+    #[error("io error: {reason}")]
+    IoError { reason: String },
+    #[error("hook failed: {reason}")]
+    HookFailed { reason: String },
+    #[error("prompt error: {reason}")]
+    PromptError { reason: String },
 }
 
 #[derive(Debug, Error)]
