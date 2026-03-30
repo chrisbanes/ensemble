@@ -4,7 +4,6 @@ import { cn } from "@/lib/utils";
 
 interface ConversationViewerProps {
   identifier: string;
-  initialCursor?: string;
 }
 
 function MessageBubble({ msg }: { msg: ConversationMessage }) {
@@ -64,8 +63,8 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
   );
 }
 
-export default function ConversationViewer({ identifier, initialCursor }: ConversationViewerProps) {
-  const { data, isLoading, isError } = useConversationQuery(identifier, initialCursor);
+export default function ConversationViewer({ identifier }: ConversationViewerProps) {
+  const { data, isLoading, isError } = useConversationQuery(identifier);
 
   if (isLoading) {
     return <div className="text-center py-8 text-muted-foreground">Loading conversation...</div>;

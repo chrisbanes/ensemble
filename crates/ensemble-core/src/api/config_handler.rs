@@ -31,10 +31,8 @@ pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<Conf
     let errors = collect_validation_errors(&config);
     let valid = errors.is_empty();
 
-    // Redact secrets before sending to the client.
-    if config.tracker.api_key.is_some() {
-        config.tracker.api_key = Some("••••••••".to_string());
-    }
+    // Strip secrets — don't include them at all.
+    config.tracker.api_key = None;
 
     let response = ConfigResponse {
         valid,
@@ -140,7 +138,7 @@ on_failure: Failed
     }
 
     #[tokio::test]
-    async fn test_get_config_redacts_api_key() {
+    async fn test_get_config_strips_api_key() {
         let config = parse_config(
             r#"
 tracker:
@@ -163,10 +161,7 @@ on_failure: Failed
         let state = build_app_state(config);
         let (status, Json(response)) = get_config(State(state)).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            response.config.tracker.api_key.as_deref(),
-            Some("••••••••")
-        );
+        assert_eq!(response.config.tracker.api_key, None);
     }
 
     #[tokio::test]
