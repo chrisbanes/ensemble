@@ -32,3 +32,35 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  frontend:
+    name: Frontend Test and Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/ensemble-ui/src-ui/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Generate frontend API client
+        run: npm run codegen
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Frontend unit tests
+        run: npm test
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Frontend build
+        run: npm run build
+        working-directory: crates/ensemble-ui/src-ui
