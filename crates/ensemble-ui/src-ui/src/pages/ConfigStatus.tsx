@@ -86,7 +86,7 @@ export default function ConfigStatus() {
           <div className="flex flex-wrap items-center gap-2">
             {data.pipeline.steps.map((step, idx) => (
               <div key={step.name} className="flex items-center gap-2">
-                <Badge variant="info" className="px-3 py-1.5">
+                <Badge variant="secondary" className="px-3 py-1.5">
                   <span className="font-medium">{step.name}</span>
                   <span className="ml-1 opacity-70">({step.agent})</span>
                   {step.depends.length > 0 && (
