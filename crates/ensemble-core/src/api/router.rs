@@ -1,4 +1,4 @@
-use crate::api::{controls, conversation, handlers, history_handler};
+use crate::api::{controls, conversation, handlers, history_handler, ws};
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use axum::routing::{get, post};
@@ -75,6 +75,10 @@ pub fn create_api_router(state: AppState) -> Router {
 
     Router::new()
         .nest("/api/v1", api_routes)
+        .route(
+            "/ws/events/{identifier}",
+            get(ws::ws_events),
+        )
         .with_state(state)
 }
 
