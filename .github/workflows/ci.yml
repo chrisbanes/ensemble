@@ -65,8 +65,8 @@ jobs:
         run: npm run build
         working-directory: crates/ensemble-ui/src-ui
 
-  tauri:
-    name: Build Tauri Desktop App
+  tauri-linux:
+    name: Build Tauri Desktop App (Linux)
     runs-on: ubuntu-latest
     needs: frontend
     steps:
