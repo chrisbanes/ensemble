@@ -312,8 +312,6 @@ mod tests {
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
-    use std::collections::HashMap;
-
     fn test_issue() -> Issue {
         Issue {
             id: "NODE_123".to_string(),

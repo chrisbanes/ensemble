@@ -53,8 +53,6 @@ pub fn create_api_router(state: AppState) -> Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracker::model::AgentTotals;
-
     fn test_app_state() -> AppState {
         let state = OrchestratorState::new(30000, 10);
         AppState {
