@@ -5,10 +5,7 @@ use tracing::{debug, error, info, warn};
 
 pub fn sanitize_branch_name(identifier: &str) -> String {
     identifier
-        .replace('/', "-")
-        .replace(':', "-")
-        .replace(' ', "-")
-        .replace('\t', "-")
+        .replace(['/', ':', ' ', '\t'], "-")
 }
 
 pub async fn create_worktree(
