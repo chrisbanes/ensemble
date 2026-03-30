@@ -62,7 +62,7 @@ impl WorktreeCoordinator {
                     info!(repo = repo_name, "reusing existing worktree");
 
                     if let Err(e) =
-                        pull_worktree(&worktree_path_str, &repo_config.branch).await
+                        pull_worktree(&worktree_path_str, &repo_config.branch, &repo_config.git_remote).await
                     {
                         warn!(repo = repo_name, error = %e, "failed to pull, continuing");
                     }

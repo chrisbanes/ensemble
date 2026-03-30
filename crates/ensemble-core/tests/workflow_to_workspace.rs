@@ -55,8 +55,8 @@ hooks:
     parse_config(&yaml).unwrap()
 }
 
-#[test]
-fn test_full_config_flow() {
+#[tokio::test]
+async fn test_full_config_flow() {
     let dir = TempDir::new().unwrap();
     let ws_root = dir.path().join("workspaces");
 
@@ -84,42 +84,42 @@ fn test_full_config_flow() {
     assert!(prompt.contains("Add dark mode"));
 
     // 3. Create workspace
-    let mgr = WorkspaceManager::new(&ws_root).unwrap();
-    let ws = mgr.prepare_workspace(&issue.identifier).unwrap();
+    let mgr = WorkspaceManager::new(&ws_root, None).unwrap();
+    let ws = mgr.prepare_workspace(&issue.identifier).await.unwrap();
     assert!(ws.created_now);
-    assert!(ws.path.is_dir());
+    assert!(ws.base_path.is_dir());
     assert_eq!(
         ws.workspace_key,
         sanitize_workspace_key(&issue.identifier).unwrap()
     );
 
     // 4. Reuse workspace
-    let ws2 = mgr.prepare_workspace(&issue.identifier).unwrap();
+    let ws2 = mgr.prepare_workspace(&issue.identifier).await.unwrap();
     assert!(!ws2.created_now);
-    assert_eq!(ws.path, ws2.path);
+    assert_eq!(ws.base_path, ws2.base_path);
 
     // 5. Cleanup
-    mgr.remove_workspace(&issue.identifier).unwrap();
-    assert!(!ws.path.exists());
+    mgr.remove_workspace(&issue.identifier).await.unwrap();
+    assert!(!ws.base_path.exists());
 }
 
 #[tokio::test]
 async fn test_hook_in_workspace() {
     let dir = TempDir::new().unwrap();
-    let mgr = WorkspaceManager::new(dir.path()).unwrap();
-    let ws = mgr.prepare_workspace("hook-test#1").unwrap();
+    let mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+    let ws = mgr.prepare_workspace("hook-test#1").await.unwrap();
 
     // Run a hook that creates a file
     run_hook(
         "after_create",
         "echo 'initialized' > .ensemble-init",
-        &ws.path,
+        &ws.base_path,
         5000,
     )
     .await
     .unwrap();
 
-    let marker = ws.path.join(".ensemble-init");
+    let marker = ws.base_path.join(".ensemble-init");
     assert!(marker.exists());
     let content = std::fs::read_to_string(&marker).unwrap();
     assert_eq!(content.trim(), "initialized");

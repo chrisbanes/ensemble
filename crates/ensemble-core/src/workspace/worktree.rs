@@ -190,10 +190,15 @@ pub async fn remove_worktree(
     Ok(())
 }
 
-pub async fn pull_worktree(worktree_path: &str, branch: &str) -> Result<(), WorktreeError> {
+pub async fn pull_worktree(
+    worktree_path: &str,
+    branch: &str,
+    remote: &str,
+) -> Result<(), WorktreeError> {
     info!(
         worktree_path = %worktree_path,
         branch = %branch,
+        remote = %remote,
         "Pulling latest changes"
     );
 
@@ -206,14 +211,14 @@ pub async fn pull_worktree(worktree_path: &str, branch: &str) -> Result<(), Work
     }
 
     let output = Command::new("git")
-        .args(["pull", "origin", branch])
+        .args(["pull", remote, branch])
         .current_dir(worktree_path)
         .output()
         .await
         .map_err(|e| {
             error!(error = %e, "Failed to spawn git pull command");
             WorktreeError::GitCommandFailed {
-                command: format!("git pull origin {}", branch),
+                command: format!("git pull {} {}", remote, branch),
                 reason: e.to_string(),
             }
         })?;
@@ -222,7 +227,7 @@ pub async fn pull_worktree(worktree_path: &str, branch: &str) -> Result<(), Work
         let stderr = String::from_utf8_lossy(&output.stderr);
         error!(stderr = %stderr, "Git pull command failed");
         return Err(WorktreeError::GitCommandFailed {
-            command: format!("git pull origin {}", branch),
+            command: format!("git pull {} {}", remote, branch),
             reason: stderr.to_string(),
         });
     }
