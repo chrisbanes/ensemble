@@ -37,6 +37,10 @@ pub struct AppState {
 /// - `POST /api/v1/{identifier}/retry` — retry a failed issue
 /// - `GET /ws/events/{identifier}` — WebSocket live event stream
 ///
+/// **Security:** The API is unauthenticated. The CLI binds to `127.0.0.1` only,
+/// so access is limited to the local machine. This is appropriate for an operator
+/// dashboard; do not expose on `0.0.0.0` without adding authentication.
+///
 /// If `static_dir` is provided, unmatched routes serve static files from that
 /// directory with SPA fallback to `index.html`.
 pub fn create_api_router(state: AppState) -> Router {
