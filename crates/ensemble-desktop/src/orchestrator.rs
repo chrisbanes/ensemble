@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::info;
 
 use ensemble_core::config::ensemble::{load_config, validate_config};
 use ensemble_core::observability::events::EventBus;
@@ -12,6 +12,7 @@ use ensemble_core::pipeline::dag::build_dag;
 #[derive(Clone)]
 pub struct DesktopOrchestrator {
     pub state: Arc<RwLock<OrchestratorState>>,
+    #[allow(dead_code)]
     pub event_bus: EventBus,
     pub config_path: String,
 }
@@ -54,6 +55,7 @@ impl DesktopOrchestrator {
     }
 
     /// Stop the orchestrator
+    #[allow(dead_code)]
     pub async fn stop(&self) {
         info!("Desktop orchestrator stopped");
     }
@@ -64,7 +66,7 @@ impl DesktopOrchestrator {
 pub async fn get_state(
     orchestrator: tauri::State<'_, DesktopOrchestrator>,
 ) -> Result<serde_json::Value, String> {
-    let state = orchestrator.state.read().await;
+    let _state = orchestrator.state.read().await;
 
     // Build state snapshot (simplified for now)
     let snapshot = serde_json::json!({
@@ -80,7 +82,7 @@ pub async fn get_state(
 /// Tauri command to trigger refresh
 #[tauri::command]
 pub async fn trigger_refresh(
-    orchestrator: tauri::State<'_, DesktopOrchestrator>,
+    _orchestrator: tauri::State<'_, DesktopOrchestrator>,
 ) -> Result<(), String> {
     info!("Refresh requested via desktop UI");
     // TODO: Implement actual refresh

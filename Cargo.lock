@@ -999,10 +999,17 @@ dependencies = [
 name = "ensemble-desktop"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "base64 0.22.1",
  "ensemble-core",
+ "mime_guess",
+ "rust-embed",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tokio",
+ "tower-http",
  "tracing",
 ]
 

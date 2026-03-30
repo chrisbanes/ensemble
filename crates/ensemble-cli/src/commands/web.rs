@@ -23,7 +23,7 @@ pub struct WebArgs {
 /// Run the orchestrator with web UI (SPA + API server)
 pub async fn execute(args: WebArgs) -> ExitCode {
     init_logging();
-    
+
     info!(
         config_path = %args.config_path.display(),
         host = %args.host,
@@ -36,7 +36,11 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         Ok(cfg) => cfg,
         Err(e) => {
             error!(error = %e, path = %args.config_path.display(), "failed to load config");
-            eprintln!("error: failed to load {}: {}", args.config_path.display(), e);
+            eprintln!(
+                "error: failed to load {}: {}",
+                args.config_path.display(),
+                e
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -94,13 +98,13 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     // Create combined router: API routes + SPA fallback
     let api_router = create_api_router(app_state);
     let spa_router = spa_router();
-    
+
     let router = api_router.merge(spa_router);
 
     // Determine port
     let port = args.port.unwrap_or(0); // 0 = let OS assign available port
     let bind_addr = format!("{}:{}", args.host, port);
-    
+
     info!(addr = %bind_addr, "starting HTTP server");
 
     let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
@@ -142,7 +146,7 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     // Clean shutdown
     server_handle.abort();
     info!("HTTP server stopped");
-    
+
     info!("ensemble shut down cleanly");
     ExitCode::SUCCESS
 }

@@ -10,14 +10,16 @@ use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RunArgs {
     pub config_path: PathBuf,
 }
 
 /// Run the orchestrator in headless mode (terminal output only)
+#[allow(dead_code)]
 pub async fn execute(args: RunArgs) -> ExitCode {
     init_logging();
-    
+
     info!(
         config_path = %args.config_path.display(),
         "starting ensemble in headless mode"
@@ -28,7 +30,11 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         Ok(cfg) => cfg,
         Err(e) => {
             error!(error = %e, path = %args.config_path.display(), "failed to load config");
-            eprintln!("error: failed to load {}: {}", args.config_path.display(), e);
+            eprintln!(
+                "error: failed to load {}: {}",
+                args.config_path.display(),
+                e
+            );
             return ExitCode::FAILURE;
         }
     };

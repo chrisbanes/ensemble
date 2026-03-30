@@ -1,6 +1,5 @@
 use axum::{
     body::Body,
-    extract::Path,
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
@@ -11,6 +10,7 @@ use rust_embed::RustEmbed;
 struct SpaAssets;
 
 /// Serve an embedded file by path, returning 404 if not found
+#[allow(dead_code)]
 pub fn serve_file(path: &str) -> impl IntoResponse {
     match SpaAssets::get(path) {
         Some(file) => {
@@ -30,7 +30,7 @@ pub fn serve_file(path: &str) -> impl IntoResponse {
 /// Serve the SPA with fallback to index.html for client-side routing
 pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
-    
+
     // Try exact path first
     if let Some(file) = SpaAssets::get(path) {
         let content_type = mime_guess::from_path(path).first_or_octet_stream();
@@ -39,7 +39,7 @@ pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
             .body(Body::from(file.data))
             .unwrap();
     }
-    
+
     // Try with .html extension
     let html_path = format!("{}.html", path);
     if let Some(file) = SpaAssets::get(&html_path) {
@@ -48,7 +48,7 @@ pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
             .body(Body::from(file.data))
             .unwrap();
     }
-    
+
     // Try index.html in directory
     let dir_index = format!("{}/index.html", path);
     if let Some(file) = SpaAssets::get(&dir_index) {
@@ -57,7 +57,7 @@ pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
             .body(Body::from(file.data))
             .unwrap();
     }
-    
+
     // Fallback to root index.html (SPA behavior)
     if let Some(file) = SpaAssets::get("index.html") {
         Response::builder()
@@ -73,12 +73,12 @@ pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
 }
 
 /// Check if the SPA is available (assets were embedded)
+#[allow(dead_code)]
 pub fn spa_available() -> bool {
     SpaAssets::get("index.html").is_some()
 }
 
 /// Router for serving embedded SPA
 pub fn spa_router() -> axum::Router {
-    axum::Router::new()
-        .fallback(serve_spa)
+    axum::Router::new().fallback(serve_spa)
 }

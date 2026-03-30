@@ -8,7 +8,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use ensemble_core::api::router::{create_api_router_with_static, AppState};
+use ensemble_core::api::router::{create_api_router, AppState};
 use ensemble_core::config::ensemble::{load_config, validate_config};
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::observability::logging::init_logging;
@@ -34,8 +34,8 @@ struct Cli {
     #[arg(long, env = "PORT", global = true)]
     port: Option<u16>,
 
-    /// Directory containing built dashboard assets to serve.
-    #[arg(long, global = true)]
+    /// Directory containing built dashboard assets to serve (legacy - use 'web' command instead).
+    #[arg(long)]
     static_dir: Option<PathBuf>,
 }
 
@@ -59,7 +59,21 @@ enum Command {
 
         /// Directory containing built dashboard assets to serve.
         #[arg(long)]
-        static_dir: Option<PathBuf>,
+        _static_dir: Option<PathBuf>,
+    },
+    /// Start the ensemble orchestrator with web UI.
+    Web {
+        /// Path to ensemble.yaml
+        #[arg(default_value = "ensemble.yaml")]
+        config_path: PathBuf,
+
+        /// HTTP server bind address.
+        #[arg(long, env = "HOST", default_value = "127.0.0.1")]
+        host: String,
+
+        /// HTTP server port (enables API + dashboard).
+        #[arg(long, env = "PORT")]
+        port: Option<u16>,
     },
 }
 
@@ -74,21 +88,28 @@ async fn main() -> ExitCode {
             config_path,
             host,
             port,
-            static_dir,
-        }) => run_orchestrator(config_path, host, port, static_dir).await,
+            _static_dir: _,
+        }) => run_orchestrator(config_path, host, port).await,
+        Some(Command::Web {
+            config_path,
+            host,
+            port,
+        }) => {
+            commands::web::execute(commands::web::WebArgs {
+                config_path,
+                host,
+                port,
+            })
+            .await
+        }
         None => {
             // No subcommand: default to running the orchestrator with top-level args.
-            run_orchestrator(cli.config_path, cli.host, cli.port, cli.static_dir).await
+            run_orchestrator(cli.config_path, cli.host, cli.port).await
         }
     }
 }
 
-async fn run_orchestrator(
-    config_path: PathBuf,
-    host: String,
-    port: Option<u16>,
-    static_dir: Option<PathBuf>,
-) -> ExitCode {
+async fn run_orchestrator(config_path: PathBuf, host: String, port: Option<u16>) -> ExitCode {
     info!(
         config_path = %config_path.display(),
         "starting ensemble"
@@ -154,7 +175,7 @@ async fn run_orchestrator(
             config: Arc::new(config.clone()),
             config_path: config_path.display().to_string(),
         };
-        let router = create_api_router_with_static(app_state, static_dir);
+        let router = create_api_router(app_state);
 
         let bind_addr = format!("{}:{}", host, port);
         info!(addr = %bind_addr, "starting HTTP server");
@@ -261,12 +282,12 @@ mod tests {
                 config_path,
                 host,
                 port,
-                static_dir,
+                _static_dir,
             }) => {
                 assert_eq!(config_path, PathBuf::from("ensemble.yaml"));
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, None);
-                assert_eq!(static_dir, None);
+                assert_eq!(_static_dir, None);
             }
             other => panic!("expected Run subcommand, got {:?}", other),
         }

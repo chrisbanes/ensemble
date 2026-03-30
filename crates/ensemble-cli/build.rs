@@ -43,7 +43,7 @@ fn main() {
     println!("cargo:warning=Building Ensemble UI...");
 
     let npm_ci = Command::new("npm")
-        .args(&["ci"])
+        .args(["ci"])
         .current_dir(&ui_dir)
         .output()
         .expect("Failed to run npm ci");
@@ -57,7 +57,7 @@ fn main() {
     }
 
     let npm_build = Command::new("npm")
-        .args(&["run", "build"])
+        .args(["run", "build"])
         .current_dir(&ui_dir)
         .output()
         .expect("Failed to run npm build");
