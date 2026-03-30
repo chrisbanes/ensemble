@@ -40,6 +40,7 @@ pub struct TrackerConfig {
     #[schema(value_type = Option<String>)]
     pub path: Option<PathBuf>,
     pub endpoint: Option<String>,
+    #[serde(skip_serializing)]
     pub api_key: Option<String>,
     pub repository: Option<String>,
     pub project_number: Option<i64>,

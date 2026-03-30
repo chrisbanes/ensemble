@@ -27,12 +27,11 @@ pub struct ConfigResponse {
     tag = "config"
 )]
 pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<ConfigResponse>) {
-    let mut config = state.config.as_ref().clone();
+    let config = state.config.as_ref().clone();
     let errors = collect_validation_errors(&config);
     let valid = errors.is_empty();
 
-    // Strip secrets — don't include them at all.
-    config.tracker.api_key = None;
+    // api_key is excluded from JSON by #[serde(skip_serializing)] on TrackerConfig.
 
     let response = ConfigResponse {
         valid,
@@ -44,39 +43,16 @@ pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<Conf
     (StatusCode::OK, Json(response))
 }
 
-/// Collect validation errors without failing. Returns empty vec if config is valid.
+/// Collect validation errors using canonical validation + DAG check.
 fn collect_validation_errors(config: &EnsembleConfig) -> Vec<String> {
     let mut errors = Vec::new();
 
-    for (name, agent) in &config.agents {
-        match (&agent.prompt, &agent.prompt_template) {
-            (Some(_), Some(_)) => {
-                errors.push(format!(
-                    "agent '{}' has both prompt and prompt_template (use one)",
-                    name
-                ));
-            }
-            (None, None) => {
-                errors.push(format!(
-                    "agent '{}' has neither prompt nor prompt_template",
-                    name
-                ));
-            }
-            _ => {}
-        }
+    if let Err(e) = crate::config::ensemble::validate_config(config) {
+        errors.push(e.to_string());
     }
 
-    let mut seen_names = std::collections::HashSet::new();
-    for step in &config.steps {
-        if !seen_names.insert(&step.name) {
-            errors.push(format!("duplicate step name '{}'", step.name));
-        }
-        if !config.agents.contains_key(&step.agent) {
-            errors.push(format!(
-                "step '{}' references unknown agent '{}'",
-                step.name, step.agent
-            ));
-        }
+    if let Err(e) = crate::pipeline::dag::build_dag(&config.steps) {
+        errors.push(e.to_string());
     }
 
     errors
@@ -138,7 +114,7 @@ on_failure: Failed
     }
 
     #[tokio::test]
-    async fn test_get_config_strips_api_key() {
+    async fn test_get_config_strips_api_key_from_json() {
         let config = parse_config(
             r#"
 tracker:
@@ -159,9 +135,11 @@ on_failure: Failed
         )
         .unwrap();
         let state = build_app_state(config);
-        let (status, Json(response)) = get_config(State(state)).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(response.config.tracker.api_key, None);
+        let (_status, Json(response)) = get_config(State(state)).await;
+        // api_key has skip_serializing, so it must not appear in JSON output.
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("ghp_secret_token_12345"));
+        assert!(!json.contains("api_key"));
     }
 
     #[tokio::test]

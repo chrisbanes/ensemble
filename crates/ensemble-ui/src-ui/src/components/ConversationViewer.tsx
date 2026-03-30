@@ -1,61 +1,35 @@
+import { useState } from "react";
 import { useConversationQuery } from "@/hooks";
 import type { ConversationMessage } from "@/generated/models";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface ConversationViewerProps {
   identifier: string;
+  scrollToIndex?: number;
 }
 
-function MessageBubble({ msg }: { msg: ConversationMessage }) {
-  if (msg.role === "system") {
-    return (
-      <div className="rounded-lg p-3 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800">
-        <div className="flex items-center gap-2 text-xs text-green-700 dark:text-green-300 mb-1">
-          <span className="font-medium">System</span>
-          <span className="text-green-500 dark:text-green-400">#{msg.index}</span>
-        </div>
-        <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-      </div>
-    );
-  }
-
-  if (msg.role === "assistant") {
-    return (
-      <div className={cn("rounded-lg p-3 border bg-card")}>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-          <span className="font-medium">Assistant</span>
-          <span>#{msg.index}</span>
-        </div>
-        <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-        {msg.tool_calls != null && (
-          <details className="mt-2">
-            <summary className="text-xs text-purple-600 dark:text-purple-400 cursor-pointer hover:underline">
-              Tool calls
-            </summary>
-            <pre className="mt-1 text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap">
-              {typeof msg.tool_calls === "string" ? msg.tool_calls : JSON.stringify(msg.tool_calls, null, 2)}
-            </pre>
-          </details>
-        )}
-      </div>
-    );
-  }
-
-  // tool / tool_call / other roles
+function MessageBubble({ msg, highlight }: { msg: ConversationMessage; highlight?: boolean }) {
   return (
-    <div className="rounded-lg p-3 bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-800">
-      <div className="flex items-center gap-2 text-xs text-purple-700 dark:text-purple-300 mb-1">
-        <span className="font-medium">{msg.role}</span>
+    <div
+      id={`msg-${msg.index}`}
+      className={cn(
+        "rounded-lg p-3 border bg-card",
+        highlight && "ring-2 ring-primary",
+      )}
+    >
+      <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+        <span className="font-medium capitalize">{msg.role}</span>
         <span>#{msg.index}</span>
       </div>
-      <p className="text-sm text-muted-foreground whitespace-pre-wrap">{msg.content}</p>
-      {msg.tool_output != null && (
+      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+      {msg.tool_calls != null && (
         <details className="mt-2">
-          <summary className="text-xs text-purple-600 dark:text-purple-400 cursor-pointer hover:underline">
-            Tool output
+          <summary className="text-xs text-muted-foreground cursor-pointer hover:underline">
+            Tool calls
           </summary>
           <pre className="mt-1 text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap">
-            {typeof msg.tool_output === "string" ? msg.tool_output : JSON.stringify(msg.tool_output, null, 2)}
+            {JSON.stringify(msg.tool_calls, null, 2)}
           </pre>
         </details>
       )}
@@ -63,8 +37,9 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
   );
 }
 
-export default function ConversationViewer({ identifier }: ConversationViewerProps) {
-  const { data, isLoading, isError } = useConversationQuery(identifier);
+export default function ConversationViewer({ identifier, scrollToIndex }: ConversationViewerProps) {
+  const [cursor, setCursor] = useState<string | undefined>();
+  const { data, isLoading, isError } = useConversationQuery(identifier, cursor);
 
   if (isLoading) {
     return <div className="text-center py-8 text-muted-foreground">Loading conversation...</div>;
@@ -81,14 +56,22 @@ export default function ConversationViewer({ identifier }: ConversationViewerPro
   return (
     <div className="space-y-3">
       {data.messages.map((msg) => (
-        <MessageBubble key={msg.index} msg={msg} />
+        <MessageBubble
+          key={msg.index}
+          msg={msg}
+          highlight={scrollToIndex === msg.index}
+        />
       ))}
 
       {data.next_cursor != null && (
-        <div className="flex justify-between items-center pt-4 border-t">
-          <span className="text-xs text-muted-foreground">
-            More messages available
-          </span>
+        <div className="flex justify-center pt-4 border-t">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setCursor(String(data.next_cursor))}
+          >
+            Load older messages
+          </Button>
         </div>
       )}
     </div>

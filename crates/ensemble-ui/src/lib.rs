@@ -1,1 +1,1 @@
-// Placeholder for ensemble-desktop crate (Plan 6: Tauri wrapper).
+// Placeholder for ensemble-ui crate. The React dashboard lives in src-ui/.

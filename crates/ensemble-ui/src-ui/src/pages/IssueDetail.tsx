@@ -4,13 +4,24 @@ import { ArrowLeft } from "lucide-react";
 import { useIssueDetailQuery, useStopMutation, useRetryMutation } from "@/hooks";
 import { connectWs } from "@/ws";
 import type { WsStatus } from "@/ws";
-import type { WsEventData } from "@/ws-types";
+import type { WsEventData, WsEventMessage } from "@/ws-types";
+import { addNotification, requestPermissionIfNeeded } from "@/notifications";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import EventTimeline from "@/components/EventTimeline";
 import ConversationViewer from "@/components/ConversationViewer";
+
+function triggerNotification(event: WsEventMessage, identifier: string) {
+  if (event.event_type === "error") {
+    addNotification("failure", "Agent error", event.detail, identifier);
+  } else if (event.event_type === "retry_scheduled") {
+    addNotification("warning", "Retry scheduled", event.detail, identifier);
+  } else if (event.event_type === "verdict" && event.verdict) {
+    addNotification("info", `Verdict: ${event.verdict}`, event.detail, identifier);
+  }
+}
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -27,10 +38,12 @@ export default function IssueDetail() {
   const [events, setEvents] = useState<WsEventData[]>([]);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
   const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [highlightIndex, setHighlightIndex] = useState<number | undefined>();
 
   const isLiveRun = data?.running != null;
 
   useEffect(() => {
+    requestPermissionIfNeeded();
     return connectWs({
       identifier,
       enabled: isLiveRun,
@@ -39,6 +52,10 @@ export default function IssueDetail() {
           setEvents(msg.events);
         } else if (msg.type === "event") {
           setEvents((prev) => [msg as unknown as WsEventData, ...prev]);
+          triggerNotification(msg, identifier);
+        } else if (msg.type === "complete") {
+          const severity = msg.outcome === "succeeded" ? "success" : "failure";
+          addNotification(severity, `Run ${msg.outcome}`, `${identifier} ${msg.outcome}`, identifier);
         }
       },
       onStatusChange: setWsStatus,
@@ -126,14 +143,14 @@ export default function IssueDetail() {
         <section>
           <h2 className="text-lg font-semibold mb-3">Event Timeline</h2>
           <Card className="p-4 max-h-[600px] overflow-y-auto">
-            <EventTimeline events={events} live={isLiveRun} />
+            <EventTimeline events={events} live={isLiveRun} onViewConversation={(idx) => setHighlightIndex(idx)} />
           </Card>
         </section>
 
         <section>
           <h2 className="text-lg font-semibold mb-3">Conversation</h2>
           <Card className="p-4 max-h-[600px] overflow-y-auto">
-            <ConversationViewer identifier={identifier} />
+            <ConversationViewer identifier={identifier} scrollToIndex={highlightIndex} />
           </Card>
         </section>
       </div>
