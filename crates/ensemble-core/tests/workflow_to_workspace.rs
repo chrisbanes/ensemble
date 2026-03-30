@@ -128,7 +128,7 @@ async fn test_hook_in_workspace() {
 fn setup_git_repo(name: &str) -> TempDir {
     let dir = TempDir::new().unwrap();
     std::process::Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(&dir)
         .output()
         .unwrap();

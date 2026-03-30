@@ -4,7 +4,7 @@ use tempfile::TempDir;
 fn setup_repo() -> TempDir {
     let dir = TempDir::new().unwrap();
     Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(&dir)
         .output()
         .unwrap();

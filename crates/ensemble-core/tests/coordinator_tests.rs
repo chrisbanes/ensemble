@@ -8,7 +8,7 @@ fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
 
     // Initialize git repo
     std::process::Command::new("git")
-        .args(["init"])
+        .args(["init", "-b", "main"])
         .current_dir(&dir)
         .output()
         .unwrap();
