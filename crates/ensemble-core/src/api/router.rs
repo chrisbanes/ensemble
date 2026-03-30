@@ -103,13 +103,7 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
             "/api/openapi.json",
             get(move || {
                 let json = openapi_json.clone();
-                async move {
-                    (
-                        StatusCode::OK,
-                        [("content-type", "application/json")],
-                        json,
-                    )
-                }
+                async move { (StatusCode::OK, [("content-type", "application/json")], json) }
             }),
         )
         .nest("/api/v1", api_routes)
