@@ -18,6 +18,11 @@ pub fn generate_yaml(
         TrackerChoice::TodoFile { path } => {
             yaml.push_str("  kind: todo_file\n");
             yaml.push_str(&format!("  path: {}\n", path.display()));
+            yaml.push_str("  active_states:\n");
+            yaml.push_str("    - Todo\n");
+            yaml.push_str("    - In Progress\n");
+            yaml.push_str("  terminal_states:\n");
+            yaml.push_str(&format!("    - {}\n", on_failure));
         }
         TrackerChoice::GitHub {
             repository,
@@ -163,6 +168,24 @@ pub fn write_files(
         println!("  ✓ TODO.md");
     }
 
+    // Write .env file with GitHub token if provided interactively
+    if let TrackerChoice::GitHub {
+        api_token: Some(token),
+        ..
+    } = tracker
+    {
+        std::fs::write(".env", format!("GITHUB_TOKEN={}\n", token))?;
+        // Set restrictive permissions (user read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(".env", perms)?;
+        }
+        println!("  ✓ .env");
+        println!("  Note: Run `source .env` or export GITHUB_TOKEN before `ensemble run`");
+    }
+
     println!("\nDone! Run `ensemble` to start processing issues.");
     Ok(())
 }
@@ -213,6 +236,7 @@ mod tests {
             repository: "acme/frontend".to_string(),
             project_number: Some(42),
             api_key_env: "GITHUB_TOKEN".to_string(),
+            api_token: None,
             active_states: vec!["Todo".to_string()],
             terminal_states: vec!["Done".to_string()],
             on_success: "Done".to_string(),

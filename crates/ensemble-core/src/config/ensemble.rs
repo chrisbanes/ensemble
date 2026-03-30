@@ -268,6 +268,7 @@ impl EnsembleConfig {
     /// - `tracker.path`
     /// - `workspace.root`
     /// - `agents.*.prompt_template`
+    /// - `repos[*].path`
     pub fn resolve_env(&mut self) {
         // tracker.api_key: $VAR resolution
         if let Some(ref raw) = self.tracker.api_key {
@@ -286,6 +287,12 @@ impl EnsembleConfig {
         // workspace.root: $VAR + ~ expansion
         if let Some(ref root) = self.workspace.root {
             self.workspace.root = resolve_path(root).map(|p| p.to_string_lossy().into_owned());
+        }
+
+        // repos[*].path: $VAR + ~ expansion
+        for repo in &mut self.repos {
+            let path_str = repo.path.to_string_lossy();
+            repo.path = resolve_path(&path_str).unwrap_or(repo.path.clone());
         }
 
         // agents.*.prompt_template: $VAR + ~ expansion
@@ -861,5 +868,59 @@ on_failure: Failed
             }
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_resolve_env_repos_path() {
+        std::env::set_var("ENSEMBLE_TEST_REPO", "/test/repo");
+        let yaml = r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: $ENSEMBLE_TEST_REPO
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        assert_eq!(config.repos[0].path, PathBuf::from("/test/repo"));
+        std::env::remove_var("ENSEMBLE_TEST_REPO");
+    }
+
+    #[test]
+    fn test_resolve_tilde_in_repos_path() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: ~/projects/myrepo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            config.repos[0].path,
+            PathBuf::from(home).join("projects/myrepo")
+        );
     }
 }

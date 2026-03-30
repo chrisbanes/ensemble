@@ -37,11 +37,34 @@ fn detect_default_branch(repo_path: &PathBuf) -> Option<String> {
     }
 }
 
-/// Check whether a branch exists in the given repository.
-fn branch_exists(repo_path: &PathBuf, branch: &str) -> bool {
-    let refspec = format!("refs/heads/{}", branch);
+/// Check whether a directory is a valid git repository (handles worktrees and submodules).
+fn is_git_repo(repo_path: &PathBuf) -> bool {
     Command::new("git")
-        .args(["rev-parse", "--verify", &refspec])
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
+/// Check whether a branch exists in the given repository (checks local and remote refs).
+fn branch_exists(repo_path: &PathBuf, branch: &str) -> bool {
+    // Check local refs first
+    let local_ref = format!("refs/heads/{}", branch);
+    if Command::new("git")
+        .args(["rev-parse", "--verify", &local_ref])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    // Check remote refs
+    let remote_ref = format!("refs/remotes/origin/{}", branch);
+    Command::new("git")
+        .args(["rev-parse", "--verify", &remote_ref])
         .current_dir(repo_path)
         .output()
         .map(|o| o.status.success())
@@ -120,9 +143,9 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
         };
 
         // Validate it is a git repository.
-        if !canonical.join(".git").exists() {
+        if !is_git_repo(&canonical) {
             println!(
-                "'{}' does not appear to be a git repository (no .git directory found). Please try again.",
+                "'{}' does not appear to be a git repository. Please try again.",
                 canonical.display()
             );
             continue;

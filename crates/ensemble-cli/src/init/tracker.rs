@@ -12,6 +12,7 @@ pub enum TrackerChoice {
         repository: String,
         project_number: Option<i64>,
         api_key_env: String,
+        api_token: Option<String>,
         active_states: Vec<String>,
         terminal_states: Vec<String>,
         on_success: String,
@@ -63,16 +64,14 @@ async fn ask_github_tracker() -> Result<TrackerChoice, inquire::InquireError> {
     };
 
     // Check for $GITHUB_TOKEN in env
-    let token = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+    let (token, api_token) = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         println!("GitHub token ($GITHUB_TOKEN detected ✓)");
-        t
+        (t, None)
     } else {
         let t = Password::new("GitHub token (not found in $GITHUB_TOKEN — enter now):")
-            .with_help_message(
-                "The token will be stored as $GITHUB_TOKEN reference in ensemble.yaml",
-            )
+            .with_help_message("The token will be stored in .env and exported as $GITHUB_TOKEN")
             .prompt()?;
-        t
+        (t.clone(), Some(t))
     };
 
     // api_key_env is used in the generated config to reference the env var
@@ -112,6 +111,7 @@ async fn ask_github_tracker() -> Result<TrackerChoice, inquire::InquireError> {
         repository,
         project_number,
         api_key_env,
+        api_token,
         active_states,
         terminal_states,
         on_success,
@@ -375,6 +375,7 @@ mod tests {
             repository: "acme/frontend".to_string(),
             project_number: Some(42),
             api_key_env: "GITHUB_TOKEN".to_string(),
+            api_token: None,
             active_states: vec!["Todo".to_string()],
             terminal_states: vec!["Done".to_string(), "Failed".to_string()],
             on_success: "Done".to_string(),
