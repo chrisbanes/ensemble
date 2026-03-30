@@ -28,9 +28,9 @@ pub struct EnsembleConfig {
 }
 
 /// A repository to be managed by the workspace (path + branch).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct RepoConfig {
-    pub path: PathBuf,
+    pub path: String,
     pub branch: String,
 }
 
@@ -294,8 +294,10 @@ impl EnsembleConfig {
 
         // repos[*].path: $VAR + ~ expansion
         for repo in &mut self.repos {
-            let path_str = repo.path.to_string_lossy();
-            repo.path = resolve_path(&path_str).unwrap_or(repo.path.clone());
+            let path_str = &repo.path;
+            if let Some(resolved) = resolve_path(path_str) {
+                repo.path = resolved.to_string_lossy().into_owned();
+            }
         }
 
         // agents.*.prompt_template: $VAR + ~ expansion
@@ -731,9 +733,9 @@ on_failure: Failed
 "#;
         let config = parse_config(yaml).unwrap();
         assert_eq!(config.repos.len(), 2);
-        assert_eq!(config.repos[0].path, PathBuf::from("/tmp/repo-a"));
+        assert_eq!(config.repos[0].path, "/tmp/repo-a");
         assert_eq!(config.repos[0].branch, "main");
-        assert_eq!(config.repos[1].path, PathBuf::from("/tmp/repo-b"));
+        assert_eq!(config.repos[1].path, "/tmp/repo-b");
         assert_eq!(config.repos[1].branch, "develop");
     }
 
@@ -895,7 +897,7 @@ on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
         config.resolve_env();
-        assert_eq!(config.repos[0].path, PathBuf::from("/test/repo"));
+        assert_eq!(config.repos[0].path, "/test/repo");
         std::env::remove_var("ENSEMBLE_TEST_REPO");
     }
 
@@ -921,9 +923,6 @@ on_failure: Failed
         let mut config = parse_config(yaml).unwrap();
         config.resolve_env();
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(
-            config.repos[0].path,
-            PathBuf::from(home).join("projects/myrepo")
-        );
+        assert_eq!(config.repos[0].path, format!("{}/projects/myrepo", home));
     }
 }
