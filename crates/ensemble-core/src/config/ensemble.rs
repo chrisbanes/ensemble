@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct EnsembleConfig {
     pub tracker: TrackerConfig,
+    #[serde(default)]
+    pub repos: Vec<RepoConfig>,
     pub agents: HashMap<String, AgentConfig>,
     pub steps: Vec<StepConfig>,
     pub on_success: String,
@@ -23,6 +25,13 @@ pub struct EnsembleConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub agent: AgentRuntimeConfig,
+}
+
+/// A repository to be managed by the workspace (path + branch).
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct RepoConfig {
+    pub path: String,
+    pub branch: String,
 }
 
 fn default_max_cycles() -> u32 {
@@ -59,8 +68,9 @@ fn default_terminal_states() -> Vec<String> {
 /// Per-agent definition: which executor to use and what prompt to send.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
-    pub executor: String,
-    pub model: String,
+    pub executor: Option<String>,
+    pub model: Option<String>,
+    pub acpx_agent: Option<String>,
     pub prompt: Option<String>,
     #[schema(value_type = Option<String>)]
     pub prompt_template: Option<PathBuf>,
@@ -261,6 +271,7 @@ impl EnsembleConfig {
     /// - `tracker.path`
     /// - `workspace.root`
     /// - `agents.*.prompt_template`
+    /// - `repos[*].path`
     pub fn resolve_env(&mut self) {
         // tracker.api_key: $VAR resolution
         if let Some(ref raw) = self.tracker.api_key {
@@ -279,6 +290,14 @@ impl EnsembleConfig {
         // workspace.root: $VAR + ~ expansion
         if let Some(ref root) = self.workspace.root {
             self.workspace.root = resolve_path(root).map(|p| p.to_string_lossy().into_owned());
+        }
+
+        // repos[*].path: $VAR + ~ expansion
+        for repo in &mut self.repos {
+            let path_str = &repo.path;
+            if let Some(resolved) = resolve_path(path_str) {
+                repo.path = resolved.to_string_lossy().into_owned();
+            }
         }
 
         // agents.*.prompt_template: $VAR + ~ expansion
@@ -314,7 +333,6 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
-    // Each agent must have exactly one of prompt or prompt_template
     for (name, agent) in &config.agents {
         match (&agent.prompt, &agent.prompt_template) {
             (Some(_), Some(_)) | (None, None) => {
@@ -323,6 +341,15 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 });
             }
             _ => {}
+        }
+
+        let has_acpx = agent.acpx_agent.is_some();
+        let has_executor = agent.executor.is_some();
+        let has_model = agent.model.is_some();
+        if !has_acpx && (!has_executor || !has_model) {
+            return Err(PipelineError::InvalidAgentConfig {
+                agent: name.clone(),
+            });
         }
     }
     // Step names must be unique
@@ -684,6 +711,95 @@ on_failure: Failed
     }
 
     #[test]
+    fn test_parse_config_with_repos() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo-a
+    branch: main
+  - path: /tmp/repo-b
+    branch: develop
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.repos.len(), 2);
+        assert_eq!(config.repos[0].path, "/tmp/repo-a");
+        assert_eq!(config.repos[0].branch, "main");
+        assert_eq!(config.repos[1].path, "/tmp/repo-b");
+        assert_eq!(config.repos[1].branch, "develop");
+    }
+
+    #[test]
+    fn test_parse_config_repos_defaults_to_empty() {
+        let config = parse_config(minimal_yaml()).unwrap();
+        assert!(config.repos.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_with_acpx_agent() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+  reviewer:
+    executor: custom-agent
+    model: gpt-4
+    prompt: "Review it."
+steps:
+  - name: build
+    agent: builder
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let builder = &config.agents["builder"];
+        assert_eq!(builder.acpx_agent.as_deref(), Some("claude"));
+        assert!(builder.executor.is_none());
+        assert!(builder.model.is_none());
+
+        let reviewer = &config.agents["reviewer"];
+        assert!(reviewer.acpx_agent.is_none());
+        assert_eq!(reviewer.executor.as_deref(), Some("custom-agent"));
+        assert_eq!(reviewer.model.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn test_validate_acpx_agent_with_prompt_template() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/implement.liquid
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
     fn test_resolve_tilde_in_workspace_root() {
         let yaml = r#"
 tracker:
@@ -706,5 +822,107 @@ workspace:
         let home = std::env::var("HOME").unwrap();
         let expected = format!("{}/workspaces", home);
         assert_eq!(config.workspace.root.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn test_validate_agent_requires_acpx_or_executor_model() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidAgentConfig { agent } => {
+                assert_eq!(agent, "build");
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_agent_with_only_executor() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidAgentConfig { agent } => {
+                assert_eq!(agent, "build");
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_resolve_env_repos_path() {
+        std::env::set_var("ENSEMBLE_TEST_REPO", "/test/repo");
+        let yaml = r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: $ENSEMBLE_TEST_REPO
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        assert_eq!(config.repos[0].path, "/test/repo");
+        std::env::remove_var("ENSEMBLE_TEST_REPO");
+    }
+
+    #[test]
+    fn test_resolve_tilde_in_repos_path() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: ~/projects/myrepo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env();
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(config.repos[0].path, format!("{}/projects/myrepo", home));
     }
 }

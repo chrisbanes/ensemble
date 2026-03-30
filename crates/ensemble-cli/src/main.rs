@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -12,51 +12,97 @@ use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
+mod init;
+
 /// Ensemble: orchestrate coding agents to work on project issues.
 #[derive(Parser, Debug)]
 #[command(name = "ensemble", about = "Orchestrate coding agents")]
 struct Cli {
-    /// Path to ensemble.yaml
-    #[arg(default_value = "ensemble.yaml")]
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    /// Path to ensemble.yaml (used when no subcommand is given)
+    #[arg(default_value = "ensemble.yaml", global = true)]
     config_path: PathBuf,
 
     /// HTTP server bind address.
-    #[arg(long, env = "HOST", default_value = "127.0.0.1")]
+    #[arg(long, env = "HOST", default_value = "127.0.0.1", global = true)]
     host: String,
 
     /// HTTP server port (enables API + dashboard).
-    #[arg(long, env = "PORT")]
+    #[arg(long, env = "PORT", global = true)]
     port: Option<u16>,
 
     /// Directory containing built dashboard assets to serve.
-    #[arg(long)]
+    #[arg(long, global = true)]
     static_dir: Option<PathBuf>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Interactively create an ensemble.yaml configuration file.
+    Init,
+    /// Start the ensemble orchestrator (default when no subcommand is given).
+    Run {
+        /// Path to ensemble.yaml
+        #[arg(default_value = "ensemble.yaml")]
+        config_path: PathBuf,
+
+        /// HTTP server bind address.
+        #[arg(long, env = "HOST", default_value = "127.0.0.1")]
+        host: String,
+
+        /// HTTP server port (enables API + dashboard).
+        #[arg(long, env = "PORT")]
+        port: Option<u16>,
+
+        /// Directory containing built dashboard assets to serve.
+        #[arg(long)]
+        static_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // 1. Parse CLI args
     let cli = Cli::parse();
-
-    // 2. Init logging
     init_logging();
 
+    match cli.command {
+        Some(Command::Init) => init::run_wizard().await,
+        Some(Command::Run {
+            config_path,
+            host,
+            port,
+            static_dir,
+        }) => run_orchestrator(config_path, host, port, static_dir).await,
+        None => {
+            // No subcommand: default to running the orchestrator with top-level args.
+            run_orchestrator(cli.config_path, cli.host, cli.port, cli.static_dir).await
+        }
+    }
+}
+
+async fn run_orchestrator(
+    config_path: PathBuf,
+    host: String,
+    port: Option<u16>,
+    static_dir: Option<PathBuf>,
+) -> ExitCode {
     info!(
-        config_path = %cli.config_path.display(),
+        config_path = %config_path.display(),
         "starting ensemble"
     );
 
-    // 3. Load and validate ensemble.yaml
-    let config = match load_config(&cli.config_path) {
+    // Load and validate ensemble.yaml
+    let config = match load_config(&config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
-            error!(error = %e, path = %cli.config_path.display(), "failed to load config");
-            eprintln!("error: failed to load {}: {}", cli.config_path.display(), e);
+            error!(error = %e, path = %config_path.display(), "failed to load config");
+            eprintln!("error: failed to load {}: {}", config_path.display(), e);
             return ExitCode::FAILURE;
         }
     };
 
-    // 4. Validate config and build step DAG
     if let Err(e) = validate_config(&config) {
         error!(error = %e, "config validation failed");
         eprintln!("error: config validation failed: {}", e);
@@ -76,7 +122,7 @@ async fn main() -> ExitCode {
         "config loaded successfully"
     );
 
-    // 5. Create orchestrator state
+    // Create orchestrator state
     let orchestrator_state = Arc::new(RwLock::new(OrchestratorState::new(
         config.polling.interval_ms,
         config.concurrency.max_concurrent_agents,
@@ -84,8 +130,8 @@ async fn main() -> ExitCode {
 
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
 
-    // 6. Optionally start HTTP server
-    let server_handle = if let Some(port) = cli.port {
+    // Optionally start HTTP server
+    let server_handle = if let Some(port) = port {
         let workspace_root = config
             .workspace
             .root
@@ -105,11 +151,11 @@ async fn main() -> ExitCode {
             history_path,
             event_bus: EventBus::new(),
             config: Arc::new(config.clone()),
-            config_path: cli.config_path.display().to_string(),
+            config_path: config_path.display().to_string(),
         };
-        let router = create_api_router_with_static(app_state, cli.static_dir.clone());
+        let router = create_api_router_with_static(app_state, static_dir);
 
-        let bind_addr = format!("{}:{}", cli.host, port);
+        let bind_addr = format!("{}:{}", host, port);
         info!(addr = %bind_addr, "starting HTTP server");
 
         let listener = match tokio::net::TcpListener::bind(&bind_addr).await {
@@ -134,11 +180,10 @@ async fn main() -> ExitCode {
         None
     };
 
-    // 7. TODO: Start orchestrator poll loop (Plan 3 wires this up).
-    //    For now the CLI starts, optionally serves the API, and waits for shutdown.
+    // TODO: Start orchestrator poll loop (Plan 3 wires this up).
     info!("ensemble is running (orchestrator loop placeholder, press Ctrl+C to stop)");
 
-    // 8. Wait for shutdown signal (ctrl-c)
+    // Wait for shutdown signal (ctrl-c)
     match tokio::signal::ctrl_c().await {
         Ok(()) => {
             info!("received shutdown signal");
@@ -148,7 +193,7 @@ async fn main() -> ExitCode {
         }
     }
 
-    // 9. Clean shutdown
+    // Clean shutdown
     if let Some(handle) = server_handle {
         handle.abort();
         info!("HTTP server stopped");
@@ -194,10 +239,74 @@ mod tests {
         }
     }
 
+    // ---- `ensemble init` subcommand ----
+
     #[test]
-    fn test_cli_parse_defaults() {
+    fn test_cli_parse_init_subcommand() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from(["ensemble", "init"]);
+        assert!(matches!(cli.command, Some(Command::Init)));
+        restore_env(host, port);
+    }
+
+    // ---- `ensemble run` subcommand ----
+
+    #[test]
+    fn test_cli_parse_run_defaults() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from(["ensemble", "run"]);
+        match cli.command {
+            Some(Command::Run {
+                config_path,
+                host,
+                port,
+                static_dir,
+            }) => {
+                assert_eq!(config_path, PathBuf::from("ensemble.yaml"));
+                assert_eq!(host, "127.0.0.1");
+                assert_eq!(port, None);
+                assert_eq!(static_dir, None);
+            }
+            other => panic!("expected Run subcommand, got {:?}", other),
+        }
+        restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_parse_run_custom_args() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from([
+            "ensemble",
+            "run",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "8080",
+            "custom/ensemble.yaml",
+        ]);
+        match cli.command {
+            Some(Command::Run {
+                config_path,
+                host,
+                port,
+                ..
+            }) => {
+                assert_eq!(config_path, PathBuf::from("custom/ensemble.yaml"));
+                assert_eq!(host, "0.0.0.0");
+                assert_eq!(port, Some(8080));
+            }
+            other => panic!("expected Run subcommand, got {:?}", other),
+        }
+        restore_env(host, port);
+    }
+
+    // ---- no subcommand (default to orchestrator) ----
+
+    #[test]
+    fn test_cli_no_subcommand_defaults() {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble"]);
+        assert!(cli.command.is_none());
         assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, None);
@@ -205,83 +314,65 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_custom_path() {
-        let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from(["ensemble", "custom/ensemble.yaml"]);
-        assert_eq!(cli.config_path, PathBuf::from("custom/ensemble.yaml"));
-        assert_eq!(cli.port, None);
-        restore_env(host, port);
-    }
-
-    #[test]
-    fn test_cli_parse_with_port() {
-        let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from(["ensemble", "--port", "8080"]);
-        assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
-        assert_eq!(cli.port, Some(8080));
-        restore_env(host, port);
-    }
-
-    #[test]
-    fn test_cli_parse_with_host() {
+    fn test_cli_no_subcommand_with_flags() {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "--host", "0.0.0.0", "--port", "3000"]);
+        assert!(cli.command.is_none());
         assert_eq!(cli.host, "0.0.0.0");
         assert_eq!(cli.port, Some(3000));
         restore_env(host, port);
     }
 
-    #[test]
-    fn test_cli_parse_all_options() {
-        let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from([
-            "ensemble",
-            "--host",
-            "0.0.0.0",
-            "--port",
-            "3000",
-            "my/ensemble.yaml",
-        ]);
-        assert_eq!(cli.config_path, PathBuf::from("my/ensemble.yaml"));
-        assert_eq!(cli.host, "0.0.0.0");
-        assert_eq!(cli.port, Some(3000));
-        restore_env(host, port);
-    }
+    // ---- env var tests (run subcommand) ----
 
     #[test]
-    fn test_cli_parse_ephemeral_port() {
-        let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from(["ensemble", "--port", "0"]);
-        assert_eq!(cli.port, Some(0));
-        restore_env(host, port);
-    }
-
-    #[test]
-    fn test_cli_env_host() {
+    fn test_cli_run_env_host() {
         let (_guard, host, port) = lock_and_clear_env();
         std::env::set_var("HOST", "10.0.0.1");
-        let cli = Cli::parse_from(["ensemble"]);
-        assert_eq!(cli.host, "10.0.0.1");
+        let cli = Cli::parse_from(["ensemble", "run"]);
+        match cli.command {
+            Some(Command::Run { host, .. }) => assert_eq!(host, "10.0.0.1"),
+            other => panic!("expected Run subcommand, got {:?}", other),
+        }
         restore_env(host, port);
     }
 
     #[test]
-    fn test_cli_env_port() {
+    fn test_cli_run_env_port() {
         let (_guard, host, port) = lock_and_clear_env();
         std::env::set_var("PORT", "9090");
-        let cli = Cli::parse_from(["ensemble"]);
-        assert_eq!(cli.port, Some(9090));
+        let cli = Cli::parse_from(["ensemble", "run"]);
+        match cli.command {
+            Some(Command::Run { port, .. }) => assert_eq!(port, Some(9090)),
+            other => panic!("expected Run subcommand, got {:?}", other),
+        }
         restore_env(host, port);
     }
 
     #[test]
-    fn test_cli_flag_overrides_env() {
+    fn test_cli_run_flag_overrides_env() {
         let (_guard, host, port) = lock_and_clear_env();
         std::env::set_var("HOST", "10.0.0.1");
         std::env::set_var("PORT", "9090");
-        let cli = Cli::parse_from(["ensemble", "--host", "0.0.0.0", "--port", "3000"]);
-        assert_eq!(cli.host, "0.0.0.0");
-        assert_eq!(cli.port, Some(3000));
+        let cli = Cli::parse_from(["ensemble", "run", "--host", "0.0.0.0", "--port", "3000"]);
+        match cli.command {
+            Some(Command::Run { host, port, .. }) => {
+                assert_eq!(host, "0.0.0.0");
+                assert_eq!(port, Some(3000));
+            }
+            other => panic!("expected Run subcommand, got {:?}", other),
+        }
+        restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_run_ephemeral_port() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from(["ensemble", "run", "--port", "0"]);
+        match cli.command {
+            Some(Command::Run { port, .. }) => assert_eq!(port, Some(0)),
+            other => panic!("expected Run subcommand, got {:?}", other),
+        }
         restore_env(host, port);
     }
 }
