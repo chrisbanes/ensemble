@@ -374,6 +374,7 @@ Parsing rules:
 Top-level keys:
 
 - `tracker`
+- `repos`
 - `agents`
 - `steps`
 - `on_success`
@@ -486,14 +487,43 @@ Fields:
   - When `project_number` is set, these match the project board's Status field values.
   - When `project_number` is omitted, these are matched against issue labels.
 
-#### 5.3.2 `agents` (map of string to object)
+#### 5.3.2 `repos` (list of objects, optional)
 
-Named agent definitions. Each key is the agent name, each value is an object:
+Repository definitions for multi-repo orchestration. Each entry defines a repository that agents
+can work in. When omitted, defaults to an empty list.
 
-- `executor` (string)
-  - Required. ACP-compatible agent executable identifier (for example `claude-code`, `amp`).
-- `model` (string)
-  - Required. Model identifier for the agent (for example `sonnet-4`, `opus-4`).
+Fields:
+
+- `path` (string)
+  - Required. Local filesystem path for the repository.
+  - Supports `~` and `$VAR` expansion.
+- `branch` (string)
+  - Required. Target branch for pull requests and upstream merges.
+
+Example:
+
+```yaml
+repos:
+  - path: /home/dev/frontend
+    branch: main
+  - path: /home/dev/api
+    branch: develop
+```
+
+#### 5.3.3 `agents` (map of string to object)
+
+Named agent definitions. Each key is the agent role name, each value is an object:
+
+- `acpx_agent` (string, optional)
+  - acpx agent identifier (for example `claude`, `codex`, `gemini`).
+  - When set, Ensemble delegates agent communication to acpx.
+  - Takes precedence over `executor` if both are specified.
+- `executor` (string, optional)
+  - ACP-compatible agent executable identifier (for example `claude-code`, `amp`).
+  - Required if `acpx_agent` is not set.
+- `model` (string, optional)
+  - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
+  - When omitted, the agent uses its default model.
 - `prompt` (string, optional)
   - Inline prompt text. Mutually exclusive with `prompt_template`.
 - `prompt_template` (path string, optional)
@@ -503,7 +533,7 @@ Named agent definitions. Each key is the agent name, each value is an object:
 
 Prompt templates support Liquid variables: `issue.*` and `attempt`.
 
-#### 5.3.3 `steps` (list of objects)
+#### 5.3.4 `steps` (list of objects)
 
 Pipeline step definitions forming a DAG. Each step is an object:
 
@@ -520,15 +550,15 @@ Pipeline step definitions forming a DAG. Each step is an object:
   - Tracker state to write when entering this step. If multiple parallel steps share the same
     `tracker_state`, it is written once.
 
-#### 5.3.4 `on_success` (string)
+#### 5.3.5 `on_success` (string)
 
 Terminal tracker state to write when all pipeline steps pass. Required.
 
-#### 5.3.5 `on_failure` (string)
+#### 5.3.6 `on_failure` (string)
 
 Terminal tracker state to write when any pipeline step fails or a review agent rejects. Required.
 
-#### 5.3.6 `concurrency` (object)
+#### 5.3.7 `concurrency` (object)
 
 Fields:
 
@@ -539,7 +569,7 @@ Fields:
   - Default: `2`
   - Per-issue cap on concurrent agents within a single pipeline run.
 
-#### 5.3.7 `max_cycles` (integer)
+#### 5.3.8 `max_cycles` (integer)
 
 - Default: `3`
 - Maximum number of times an issue can re-enter the pipeline. Re-entry happens when a tracker poll
@@ -547,7 +577,7 @@ Fields:
   human moved it from "Needs Rework" back to "Todo"). The orchestrator tracks cycle count per issue
   identifier.
 
-#### 5.3.8 `polling` (object)
+#### 5.3.9 `polling` (object)
 
 Fields:
 
@@ -555,7 +585,7 @@ Fields:
   - Default: `30000`
   - Changes should be re-applied at runtime and affect future tick scheduling without restart.
 
-#### 5.3.9 `workspace` (object)
+#### 5.3.10 `workspace` (object)
 
 Fields:
 
@@ -565,7 +595,7 @@ Fields:
   - Bare strings without path separators are preserved as-is (relative roots are allowed but
     discouraged).
 
-#### 5.3.10 `hooks` (object)
+#### 5.3.11 `hooks` (object)
 
 Fields:
 
@@ -589,9 +619,9 @@ Fields:
   - Non-positive values should be treated as invalid and fall back to the default.
   - Changes should be re-applied at runtime for future hook executions.
 
-#### 5.3.11 `agent` (object)
+#### 5.3.12 `agent` (object)
 
-Global agent runtime defaults. Per-agent `executor` and `model` are defined in `agents` (5.3.2).
+Global agent runtime defaults. Per-agent `executor` and `model` are defined in `agents` (5.3.3).
 
 Fields:
 
@@ -2339,6 +2369,26 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   changing orchestrator behavior
 
 ### 17.7 CLI and Host Lifecycle
+
+The `ensemble` binary supports the following subcommands:
+
+- `ensemble init` — Interactive setup wizard that scaffolds a ready-to-run Ensemble configuration
+  directory. Discovers available agents via acpx, collects tracker credentials, validates the
+  setup, and writes `ensemble.yaml` with prompt templates.
+- `ensemble run [PATH]` — Run the orchestrator. `PATH` defaults to `ensemble.yaml`.
+- `ensemble` (no subcommand) — Equivalent to `ensemble run`.
+
+`ensemble init` Requirements:
+
+- **acpx** must be installed and on PATH. If missing, the command prints install instructions and
+  exits.
+- At least one agent must be discoverable via acpx.
+- The wizard produces:
+  - `ensemble.yaml` — generated configuration
+  - `templates/*.liquid` — prompt templates for each pipeline step
+  - `TODO.md` — sample issues (only if `todo_file` tracker selected)
+
+CLI defaults:
 
 - CLI accepts an optional positional config path argument (`path-to-ensemble.yaml`)
 - CLI uses `./ensemble.yaml` when no config path argument is provided
