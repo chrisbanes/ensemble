@@ -3,5 +3,6 @@ pub mod controls;
 pub mod conversation;
 pub mod handlers;
 pub mod history_handler;
+pub mod openapi;
 pub mod router;
 pub mod ws;

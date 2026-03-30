@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::services::{ServeDir, ServeFile};
+use utoipa::OpenApi;
 
 /// Shared application state passed to all API handlers.
 #[derive(Clone)]
@@ -92,7 +93,25 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
         )
         .fallback(api_not_found);
 
+    // Generate OpenAPI spec once at startup.
+    let openapi_json = crate::api::openapi::ApiDoc::openapi()
+        .to_json()
+        .expect("OpenAPI spec serialization should not fail");
+
     let mut router = Router::new()
+        .route(
+            "/api/openapi.json",
+            get(move || {
+                let json = openapi_json.clone();
+                async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        json,
+                    )
+                }
+            }),
+        )
         .nest("/api/v1", api_routes)
         .route("/ws/events/{identifier}", get(ws::ws_events))
         .with_state(state);

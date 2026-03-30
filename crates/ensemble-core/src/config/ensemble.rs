@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Top-level configuration parsed from `ensemble.yaml`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct EnsembleConfig {
     pub tracker: TrackerConfig,
     pub agents: HashMap<String, AgentConfig>,
@@ -30,13 +30,14 @@ fn default_max_cycles() -> u32 {
 }
 
 /// Tracker configuration: which issue tracker to use and how to connect to it.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct TrackerConfig {
     pub kind: String,
     #[serde(default = "default_active_states")]
     pub active_states: Vec<String>,
     #[serde(default = "default_terminal_states")]
     pub terminal_states: Vec<String>,
+    #[schema(value_type = Option<String>)]
     pub path: Option<PathBuf>,
     pub endpoint: Option<String>,
     pub api_key: Option<String>,
@@ -55,16 +56,17 @@ fn default_terminal_states() -> Vec<String> {
 }
 
 /// Per-agent definition: which executor to use and what prompt to send.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
     pub executor: String,
     pub model: String,
     pub prompt: Option<String>,
+    #[schema(value_type = Option<String>)]
     pub prompt_template: Option<PathBuf>,
 }
 
 /// A single step in the pipeline DAG.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct StepConfig {
     pub name: String,
     pub agent: String,
@@ -75,7 +77,7 @@ pub struct StepConfig {
 }
 
 /// Concurrency limits for the pipeline orchestrator.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct ConcurrencyConfig {
     #[serde(default = "default_max_concurrent_agents")]
     pub max_concurrent_agents: u32,
@@ -101,7 +103,7 @@ impl Default for ConcurrencyConfig {
 }
 
 /// How often to poll the tracker for new issues.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PollingConfig {
     #[serde(default = "default_polling_interval_ms")]
     pub interval_ms: u64,
@@ -120,13 +122,13 @@ impl Default for PollingConfig {
 }
 
 /// Workspace directory configuration.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema, Default)]
 pub struct WorkspaceConfig {
     pub root: Option<String>,
 }
 
 /// Shell hooks run at lifecycle events in each workspace.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct HooksConfig {
     pub after_create: Option<String>,
     pub before_run: Option<String>,
@@ -153,7 +155,7 @@ impl Default for HooksConfig {
 }
 
 /// Runtime configuration for the agent executor.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentRuntimeConfig {
     #[serde(default = "default_agent_max_turns")]
     pub max_turns: u32,

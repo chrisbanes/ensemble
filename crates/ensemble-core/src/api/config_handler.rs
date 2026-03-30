@@ -6,7 +6,7 @@ use axum::Json;
 use serde::Serialize;
 
 /// Response for GET /api/v1/config.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ConfigResponse {
     pub valid: bool,
     pub errors: Vec<String>,
@@ -17,6 +17,15 @@ pub struct ConfigResponse {
 /// GET /api/v1/config
 ///
 /// Returns the effective ensemble configuration and validation state.
+#[utoipa::path(
+    get,
+    path = "/api/v1/config",
+    operation_id = "getConfig",
+    responses(
+        (status = 200, description = "Effective configuration", body = ConfigResponse)
+    ),
+    tag = "config"
+)]
 pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<ConfigResponse>) {
     let mut config = state.config.as_ref().clone();
     let errors = collect_validation_errors(&config);

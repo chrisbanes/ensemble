@@ -1,5 +1,5 @@
 use crate::api::router::AppState;
-use crate::history::reader::{read_history, HistoryQuery};
+use crate::history::reader::{read_history, HistoryQuery, HistoryResponse};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -8,6 +8,17 @@ use axum::Json;
 /// GET /api/v1/history
 ///
 /// Returns paginated history records with optional filtering by outcome or step.
+#[utoipa::path(
+    get,
+    path = "/api/v1/history",
+    operation_id = "getHistory",
+    params(HistoryQuery),
+    responses(
+        (status = 200, description = "History records", body = HistoryResponse),
+        (status = 500, description = "Read error", body = crate::api::handlers::ApiError)
+    ),
+    tag = "history"
+)]
 pub async fn get_history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,

@@ -7,7 +7,7 @@ use axum::Json;
 use serde::Serialize;
 
 /// Response for a successful stop operation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StopResponse {
     pub stopped: bool,
     pub issue_identifier: String,
@@ -15,7 +15,7 @@ pub struct StopResponse {
 }
 
 /// Response for a successful retry operation.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RetryResponse {
     pub retried: bool,
     pub issue_identifier: String,
@@ -26,6 +26,18 @@ pub struct RetryResponse {
 ///
 /// Stops a running agent for the specified issue. Sends SIGTERM to the agent process
 /// and removes it from the running state. Returns 404 if not found, 409 if not running.
+#[utoipa::path(
+    post,
+    path = "/api/v1/{identifier}/stop",
+    operation_id = "postStop",
+    params(("identifier" = String, Path, description = "Issue identifier")),
+    responses(
+        (status = 200, description = "Agent stopped", body = StopResponse),
+        (status = 404, description = "Not found", body = ApiError),
+        (status = 409, description = "Not running", body = ApiError)
+    ),
+    tag = "controls"
+)]
 pub async fn post_stop(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
@@ -128,6 +140,18 @@ pub async fn post_stop(
 ///
 /// Removes an issue from the retry queue, making it available for immediate re-dispatch.
 /// Returns 404 if not found, 409 if the issue is currently running (not retrying).
+#[utoipa::path(
+    post,
+    path = "/api/v1/{identifier}/retry",
+    operation_id = "postRetry",
+    params(("identifier" = String, Path, description = "Issue identifier")),
+    responses(
+        (status = 200, description = "Retry queued", body = RetryResponse),
+        (status = 404, description = "Not found", body = ApiError),
+        (status = 409, description = "Not retrying", body = ApiError)
+    ),
+    tag = "controls"
+)]
 pub async fn post_retry(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
