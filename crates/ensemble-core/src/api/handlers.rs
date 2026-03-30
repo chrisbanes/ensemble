@@ -125,9 +125,11 @@ pub async fn method_not_allowed() -> (StatusCode, Json<serde_json::Value>) {
 mod tests {
     use super::*;
     use crate::api::router::AppState;
+    use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -199,6 +201,8 @@ mod tests {
             orchestrator_state: Arc::new(RwLock::new(state)),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
             workspace_root: "/tmp/workspaces".to_string(),
+            history_path: PathBuf::from("/tmp/history.jsonl"),
+            event_bus: EventBus::new(),
         }
     }
 
@@ -209,6 +213,8 @@ mod tests {
             orchestrator_state: Arc::new(RwLock::new(state)),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
             workspace_root: "/tmp/workspaces".to_string(),
+            history_path: PathBuf::from("/tmp/history.jsonl"),
+            event_bus: EventBus::new(),
         }
     }
 

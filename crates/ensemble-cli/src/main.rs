@@ -7,6 +7,7 @@ use tracing::{error, info};
 
 use ensemble_core::api::router::{create_api_router, AppState};
 use ensemble_core::config::ensemble::{load_config, validate_config};
+use ensemble_core::observability::events::EventBus;
 use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
@@ -82,20 +83,25 @@ async fn main() -> ExitCode {
 
     // 6. Optionally start HTTP server
     let server_handle = if let Some(port) = cli.port {
+        let workspace_root = config
+            .workspace
+            .root
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("ensemble_workspaces")
+                    .display()
+                    .to_string()
+            });
+        let history_path =
+            std::path::PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
         let app_state = AppState {
             orchestrator_state: orchestrator_state.clone(),
             refresh_requested: refresh_notify.clone(),
-            workspace_root: config
-                .workspace
-                .root
-                .as_deref()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    std::env::temp_dir()
-                        .join("ensemble_workspaces")
-                        .display()
-                        .to_string()
-                }),
+            workspace_root,
+            history_path,
+            event_bus: EventBus::new(),
         };
         let router = create_api_router(app_state);
 

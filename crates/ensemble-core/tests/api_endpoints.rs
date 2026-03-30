@@ -3,8 +3,10 @@
 
 use chrono::Utc;
 use ensemble_core::api::router::{create_api_router, AppState};
+use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -76,6 +78,8 @@ fn build_populated_app_state() -> AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: "/tmp/ensemble_workspaces".to_string(),
+        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        event_bus: EventBus::new(),
     }
 }
 
@@ -311,6 +315,8 @@ async fn test_get_state_empty_system() {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: "/tmp/workspaces".to_string(),
+        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        event_bus: EventBus::new(),
     };
 
     let base_url = start_test_server(app_state).await;

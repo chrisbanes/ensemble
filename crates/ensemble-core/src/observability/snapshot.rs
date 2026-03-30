@@ -70,9 +70,7 @@ pub struct AgentTotalsSnapshot {
 ///
 /// NOTE: Plan 5 (Dashboard) expects additional fields `logs` and `recent_events`
 /// in the API response. When implementing the dashboard integration, extend this
-/// struct with:
-///   - `logs: IssueLogInfo` (containing `agent_session_logs: Vec<AgentSessionLog>`)
-///   - `recent_events: Vec<RecentEvent>`
+/// struct with `logs` and `recent_events` fields.
 /// These are omitted here because Plan 4 does not yet have the event/log collection
 /// infrastructure, but the JSON shape should be forward-compatible.
 #[derive(Debug, Serialize)]
@@ -206,10 +204,8 @@ pub fn build_issue_snapshot(
 
     let current_retry_attempt = if let Some(entry) = running_entry {
         entry.retry_attempt
-    } else if let Some(entry) = retry_entry {
-        Some(entry.attempt)
     } else {
-        None
+        retry_entry.map(|entry| entry.attempt)
     };
 
     let restart_count = current_retry_attempt.unwrap_or(0);
