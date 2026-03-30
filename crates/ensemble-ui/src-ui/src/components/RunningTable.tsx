@@ -1,10 +1,10 @@
 import { Link } from "react-router-dom";
-import type { RunningSession } from "@/types";
+import type { RunningSessionRow } from "@/generated/models";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import StatusBadge from "./StatusBadge";
 
 interface RunningTableProps {
-  sessions: RunningSession[];
+  sessions: RunningSessionRow[];
 }
 
 function formatDuration(startedAt: string): string {

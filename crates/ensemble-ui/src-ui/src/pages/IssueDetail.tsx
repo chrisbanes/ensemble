@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { useIssueDetailQuery, useStopMutation, useRetryMutation } from "@/api";
+import { useIssueDetailQuery, useStopMutation, useRetryMutation } from "@/hooks";
 import { connectWs } from "@/ws";
 import type { WsStatus } from "@/ws";
-import type { WsEventData } from "@/types";
+import type { WsEventData } from "@/ws-types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
@@ -52,7 +52,7 @@ export default function IssueDetail() {
   if (isError) {
     return (
       <div className="text-center py-12">
-        <p className="text-destructive">Failed to load issue: {error.message}</p>
+        <p className="text-destructive">Failed to load issue: {error instanceof Error ? error.message : "Unknown error"}</p>
       </div>
     );
   }
@@ -81,7 +81,7 @@ export default function IssueDetail() {
             </Button>
           )}
           {data.retry && (
-            <Button size="sm" onClick={() => retryMutation.mutate(identifier)} disabled={retryMutation.isPending}>
+            <Button size="sm" onClick={() => retryMutation.mutate({ identifier })} disabled={retryMutation.isPending}>
               Retry Now
             </Button>
           )}
@@ -150,7 +150,7 @@ export default function IssueDetail() {
         message={`Are you sure you want to stop the agent for ${identifier}? This action cannot be undone.`}
         confirmLabel="Stop"
         onConfirm={() => {
-          stopMutation.mutate(identifier);
+          stopMutation.mutate({ identifier });
           setShowStopConfirm(false);
         }}
         onCancel={() => setShowStopConfirm(false)}

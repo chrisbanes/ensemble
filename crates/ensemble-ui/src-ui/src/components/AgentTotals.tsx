@@ -1,8 +1,8 @@
-import type { AgentTotals as AgentTotalsType, RateLimitSnapshot } from "@/types";
+import type { AgentTotalsSnapshot, RateLimitSnapshot } from "@/generated/models";
 import { Card, CardContent } from "@/components/ui/card";
 
 interface AgentTotalsProps {
-  totals: AgentTotalsType;
+  totals: AgentTotalsSnapshot;
   rateLimits: RateLimitSnapshot | null;
 }
 

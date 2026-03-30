@@ -1,5 +1,5 @@
-import { useConversationQuery } from "@/api";
-import type { ConversationMessage } from "@/types";
+import { useConversationQuery } from "@/hooks";
+import type { ConversationMessage } from "@/generated/models";
 import { cn } from "@/lib/utils";
 
 interface ConversationViewerProps {
@@ -13,7 +13,7 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
       <div className="rounded-lg p-3 bg-green-50 dark:bg-green-900/30 border border-green-200 dark:border-green-800">
         <div className="flex items-center gap-2 text-xs text-green-700 dark:text-green-300 mb-1">
           <span className="font-medium">System</span>
-          <span className="text-green-500 dark:text-green-400">Turn {msg.turn}</span>
+          <span className="text-green-500 dark:text-green-400">#{msg.index}</span>
         </div>
         <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
       </div>
@@ -25,36 +25,38 @@ function MessageBubble({ msg }: { msg: ConversationMessage }) {
       <div className={cn("rounded-lg p-3 border bg-card")}>
         <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
           <span className="font-medium">Assistant</span>
-          <span>Turn {msg.turn}</span>
-          <span className="text-muted-foreground/70">
-            {msg.tokens.input}&darr; {msg.tokens.output}&uarr;
-          </span>
+          <span>#{msg.index}</span>
         </div>
         <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+        {msg.tool_calls != null && (
+          <details className="mt-2">
+            <summary className="text-xs text-purple-600 dark:text-purple-400 cursor-pointer hover:underline">
+              Tool calls
+            </summary>
+            <pre className="mt-1 text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap">
+              {typeof msg.tool_calls === "string" ? msg.tool_calls : JSON.stringify(msg.tool_calls, null, 2)}
+            </pre>
+          </details>
+        )}
       </div>
     );
   }
 
-  // tool_call
+  // tool / tool_call / other roles
   return (
     <div className="rounded-lg p-3 bg-purple-50 dark:bg-purple-900/30 border border-purple-200 dark:border-purple-800">
       <div className="flex items-center gap-2 text-xs text-purple-700 dark:text-purple-300 mb-1">
-        <span className="font-medium">{msg.tool_name}</span>
-        <span>Turn {msg.turn}</span>
-        {msg.status && (
-          <span className={msg.status === "success" ? "text-green-600" : "text-red-600"}>
-            {msg.status}
-          </span>
-        )}
+        <span className="font-medium">{msg.role}</span>
+        <span>#{msg.index}</span>
       </div>
-      <p className="text-sm text-muted-foreground">{msg.tool_input_summary}</p>
-      {msg.tool_result_summary && (
+      <p className="text-sm text-muted-foreground whitespace-pre-wrap">{msg.content}</p>
+      {msg.tool_output != null && (
         <details className="mt-2">
           <summary className="text-xs text-purple-600 dark:text-purple-400 cursor-pointer hover:underline">
-            Result ({msg.tool_result_lines ?? 0} lines)
+            Tool output
           </summary>
           <pre className="mt-1 text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap">
-            {msg.tool_result_summary}
+            {typeof msg.tool_output === "string" ? msg.tool_output : JSON.stringify(msg.tool_output, null, 2)}
           </pre>
         </details>
       )}
@@ -83,10 +85,10 @@ export default function ConversationViewer({ identifier, initialCursor }: Conver
         <MessageBubble key={msg.index} msg={msg} />
       ))}
 
-      {(data.pagination.prev_cursor || data.pagination.next_cursor) && (
+      {data.next_cursor != null && (
         <div className="flex justify-between items-center pt-4 border-t">
           <span className="text-xs text-muted-foreground">
-            {data.pagination.has_more ? "More messages available" : "End of conversation"}
+            More messages available
           </span>
         </div>
       )}

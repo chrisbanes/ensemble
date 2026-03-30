@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { getNotifications, markAllRead, subscribe } from "@/notifications";
-import type { AppNotification, NotificationSeverity } from "@/types";
+import type { AppNotification, NotificationSeverity } from "@/notification-types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 

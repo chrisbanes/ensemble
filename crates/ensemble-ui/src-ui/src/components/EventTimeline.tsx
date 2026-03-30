@@ -1,4 +1,4 @@
-import type { WsEventData } from "@/types";
+import type { WsEventData } from "@/ws-types";
 import { cn } from "@/lib/utils";
 
 interface EventTimelineProps {

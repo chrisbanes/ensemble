@@ -1,4 +1,4 @@
-import type { AppNotification, NotificationSeverity } from "./types";
+import type { AppNotification, NotificationSeverity } from "./notification-types";
 
 let notifications: AppNotification[] = [];
 let listeners: Array<() => void> = [];

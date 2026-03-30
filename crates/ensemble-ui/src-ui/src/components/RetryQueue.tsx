@@ -1,11 +1,11 @@
 import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import type { RetryEntry } from "@/types";
+import type { RetryRow } from "@/generated/models";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 
 interface RetryQueueProps {
-  entries: RetryEntry[];
+  entries: RetryRow[];
   onRetry: (identifier: string) => void;
 }
 

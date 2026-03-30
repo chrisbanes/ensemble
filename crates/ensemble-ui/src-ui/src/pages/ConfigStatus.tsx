@@ -1,4 +1,4 @@
-import { useConfigQuery } from "@/api";
+import { useConfigQuery } from "@/hooks";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
@@ -115,7 +115,7 @@ export default function ConfigStatus() {
           <dl className="grid grid-cols-2 sm:grid-cols-3 gap-4">
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Max Concurrent</dt>
-              <dd className="text-sm">{config.concurrency.max_concurrent_agents}</dd>
+              <dd className="text-sm">{config.concurrency?.max_concurrent_agents ?? "\u2014"}</dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Max Retries</dt>
@@ -123,11 +123,11 @@ export default function ConfigStatus() {
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Poll Interval</dt>
-              <dd className="text-sm">{config.polling.interval_ms / 1000}s</dd>
+              <dd className="text-sm">{config.polling?.interval_ms != null ? `${config.polling.interval_ms / 1000}s` : "\u2014"}</dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Workspace Root</dt>
-              <dd className="text-sm"><code className="bg-muted px-1 rounded">{config.workspace.root ?? "default"}</code></dd>
+              <dd className="text-sm"><code className="bg-muted px-1 rounded">{config.workspace?.root ?? "default"}</code></dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Tracker</dt>
@@ -135,7 +135,7 @@ export default function ConfigStatus() {
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Max Turns</dt>
-              <dd className="text-sm">{config.agent.max_turns}</dd>
+              <dd className="text-sm">{config.agent?.max_turns ?? "\u2014"}</dd>
             </div>
           </dl>
         </CardContent>
@@ -158,11 +158,11 @@ export default function ConfigStatus() {
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Active States</dt>
-              <dd className="text-sm">{config.tracker.active_states.join(", ")}</dd>
+              <dd className="text-sm">{config.tracker.active_states?.join(", ") ?? "\u2014"}</dd>
             </div>
             <div>
               <dt className="text-sm font-medium text-muted-foreground">Terminal States</dt>
-              <dd className="text-sm">{config.tracker.terminal_states.join(", ")}</dd>
+              <dd className="text-sm">{config.tracker.terminal_states?.join(", ") ?? "\u2014"}</dd>
             </div>
           </dl>
         </CardContent>

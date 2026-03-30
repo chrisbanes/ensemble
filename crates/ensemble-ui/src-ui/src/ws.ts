@@ -1,4 +1,4 @@
-import type { WsMessage } from "./types";
+import type { WsMessage } from "./ws-types";
 
 export type WsStatus = "connecting" | "connected" | "disconnected";
 

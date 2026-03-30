@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { useHistoryQuery } from "@/api";
-import { Input } from "@/components/ui/input";
+import { useHistoryQuery } from "@/hooks";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
@@ -23,16 +23,13 @@ function formatDuration(seconds: number): string {
 }
 
 export default function History() {
-  const [filters, setFilters] = useState({
-    issue: "",
-    outcome: "",
-    since: "",
-    step: "",
-  });
-  const [cursor, setCursor] = useState<string | undefined>();
+  const [outcome, setOutcome] = useState("");
+  const [step, setStep] = useState("");
+  const [cursor, setCursor] = useState<number | undefined>();
 
   const { data, isLoading, isError } = useHistoryQuery({
-    ...filters,
+    outcome: outcome || undefined,
+    step: step || undefined,
     cursor,
     limit: 20,
   });
@@ -42,15 +39,9 @@ export default function History() {
       <h1 className="text-2xl font-bold">History</h1>
 
       <div className="flex flex-wrap gap-3">
-        <Input
-          placeholder="Search by issue..."
-          value={filters.issue}
-          onChange={(e) => { setFilters((f) => ({ ...f, issue: e.target.value })); setCursor(undefined); }}
-          className="w-48"
-        />
         <Select
-          value={filters.outcome || "all"}
-          onValueChange={(v) => { setFilters((f) => ({ ...f, outcome: v === "all" ? "" : (v ?? "") })); setCursor(undefined); }}
+          value={outcome || "all"}
+          onValueChange={(v) => { setOutcome(v === "all" ? "" : (v ?? "")); setCursor(undefined); }}
         >
           <SelectTrigger className="w-40">
             <SelectValue placeholder="All outcomes" />
@@ -62,24 +53,10 @@ export default function History() {
             <SelectItem value="stopped">Stopped</SelectItem>
           </SelectContent>
         </Select>
-        <Select
-          value={filters.since || "all"}
-          onValueChange={(v) => { setFilters((f) => ({ ...f, since: v === "all" ? "" : (v ?? "") })); setCursor(undefined); }}
-        >
-          <SelectTrigger className="w-36">
-            <SelectValue placeholder="All time" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All time</SelectItem>
-            <SelectItem value="1h">Last hour</SelectItem>
-            <SelectItem value="24h">Last 24h</SelectItem>
-            <SelectItem value="7d">Last 7 days</SelectItem>
-          </SelectContent>
-        </Select>
         <Input
           placeholder="Filter by step..."
-          value={filters.step}
-          onChange={(e) => { setFilters((f) => ({ ...f, step: e.target.value })); setCursor(undefined); }}
+          value={step}
+          onChange={(e) => { setStep(e.target.value); setCursor(undefined); }}
           className="w-40"
         />
       </div>
@@ -127,7 +104,7 @@ export default function History() {
           )}
           {data.next_cursor != null && (
             <div className="flex justify-center">
-              <Button variant="outline" onClick={() => setCursor(String(data.next_cursor))}>
+              <Button variant="outline" onClick={() => setCursor(data.next_cursor!)}>
                 Load More
               </Button>
             </div>

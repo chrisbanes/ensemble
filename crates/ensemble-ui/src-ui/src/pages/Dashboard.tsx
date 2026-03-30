@@ -1,4 +1,4 @@
-import { useStateQuery, useRefreshMutation, useRetryMutation } from "@/api";
+import { useStateQuery, useRefreshMutation, useRetryMutation } from "@/hooks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import RunningTable from "@/components/RunningTable";
@@ -17,7 +17,7 @@ export default function Dashboard() {
   if (isError) {
     return (
       <div className="text-center py-12">
-        <p className="text-destructive">Failed to load state: {error.message}</p>
+        <p className="text-destructive">Failed to load state: {error instanceof Error ? error.message : "Unknown error"}</p>
       </div>
     );
   }
@@ -51,7 +51,7 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      <AgentTotals totals={data.agent_totals} rateLimits={data.rate_limits} />
+      <AgentTotals totals={data.agent_totals} rateLimits={data.rate_limits ?? null} />
 
       <section>
         <h2 className="text-lg font-semibold mb-3">Running Agents</h2>
@@ -63,7 +63,7 @@ export default function Dashboard() {
       <section>
         <h2 className="text-lg font-semibold mb-3">Retry Queue</h2>
         <Card>
-          <RetryQueue entries={data.retrying} onRetry={(id) => retryMutation.mutate(id)} />
+          <RetryQueue entries={data.retrying} onRetry={(id) => retryMutation.mutate({ identifier: id })} />
         </Card>
       </section>
     </div>
