@@ -7,6 +7,8 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnsembleConfig {
     pub tracker: TrackerConfig,
+    #[serde(default)]
+    pub repos: Vec<RepoConfig>,
     pub agents: HashMap<String, AgentConfig>,
     pub steps: Vec<StepConfig>,
     pub on_success: String,
@@ -23,6 +25,13 @@ pub struct EnsembleConfig {
     pub hooks: HooksConfig,
     #[serde(default)]
     pub agent: AgentRuntimeConfig,
+}
+
+/// A repository to be managed by the workspace (path + branch).
+#[derive(Debug, Clone, Deserialize)]
+pub struct RepoConfig {
+    pub path: PathBuf,
+    pub branch: String,
 }
 
 fn default_max_cycles() -> u32 {
@@ -57,8 +66,9 @@ fn default_terminal_states() -> Vec<String> {
 /// Per-agent definition: which executor to use and what prompt to send.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
-    pub executor: String,
-    pub model: String,
+    pub executor: Option<String>,
+    pub model: Option<String>,
+    pub acpx_agent: Option<String>,
     pub prompt: Option<String>,
     pub prompt_template: Option<PathBuf>,
 }
@@ -678,6 +688,95 @@ on_failure: Failed
             config.tracker.path.unwrap(),
             PathBuf::from(home).join("my_todos.md")
         );
+    }
+
+    #[test]
+    fn test_parse_config_with_repos() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo-a
+    branch: main
+  - path: /tmp/repo-b
+    branch: develop
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.repos.len(), 2);
+        assert_eq!(config.repos[0].path, PathBuf::from("/tmp/repo-a"));
+        assert_eq!(config.repos[0].branch, "main");
+        assert_eq!(config.repos[1].path, PathBuf::from("/tmp/repo-b"));
+        assert_eq!(config.repos[1].branch, "develop");
+    }
+
+    #[test]
+    fn test_parse_config_repos_defaults_to_empty() {
+        let config = parse_config(minimal_yaml()).unwrap();
+        assert!(config.repos.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_with_acpx_agent() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+  reviewer:
+    executor: custom-agent
+    model: gpt-4
+    prompt: "Review it."
+steps:
+  - name: build
+    agent: builder
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let builder = &config.agents["builder"];
+        assert_eq!(builder.acpx_agent.as_deref(), Some("claude"));
+        assert!(builder.executor.is_none());
+        assert!(builder.model.is_none());
+
+        let reviewer = &config.agents["reviewer"];
+        assert!(reviewer.acpx_agent.is_none());
+        assert_eq!(reviewer.executor.as_deref(), Some("custom-agent"));
+        assert_eq!(reviewer.model.as_deref(), Some("gpt-4"));
+    }
+
+    #[test]
+    fn test_validate_acpx_agent_with_prompt_template() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/implement.liquid
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]
