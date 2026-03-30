@@ -186,7 +186,7 @@ pub async fn startup_terminal_cleanup(
     match tracker.fetch_issues_by_states(terminal_states).await {
         Ok(terminal_issues) => {
             for issue in &terminal_issues {
-                match workspace_mgr.remove_workspace(&issue.identifier) {
+                match workspace_mgr.remove_workspace(&issue.identifier).await {
                     Ok(()) => {
                         debug!(
                             identifier = %issue.identifier,
@@ -487,10 +487,10 @@ mod tests {
     #[tokio::test]
     async fn test_startup_terminal_cleanup() {
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
 
         // Create a workspace
-        workspace_mgr.prepare_workspace("repo#42").unwrap();
+        workspace_mgr.prepare_workspace("repo#42").await.unwrap();
         assert!(dir.path().join("repo_42").exists());
 
         let tracker = MockTrackerForReconcile {
@@ -507,7 +507,7 @@ mod tests {
     #[tokio::test]
     async fn test_startup_terminal_cleanup_failure_continues() {
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
 
         let tracker = MockTrackerForReconcile {
             issues: vec![],

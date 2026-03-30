@@ -213,7 +213,7 @@ impl Orchestrator {
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
                     // Clean workspace
-                    if let Err(e) = self.workspace_mgr.remove_workspace(&entry.identifier) {
+                    if let Err(e) = self.workspace_mgr.remove_workspace(&entry.identifier).await {
                         warn!(
                             identifier = %entry.identifier,
                             error = %e,
@@ -374,7 +374,9 @@ impl Orchestrator {
 
         tokio::spawn(async move {
             // Prepare workspace
-            let workspace_result = workspace_mgr.prepare_workspace(&issue_clone.identifier);
+            let workspace_result = workspace_mgr
+                .prepare_workspace(&issue_clone.identifier)
+                .await;
             let workspace_path = match workspace_result {
                 Ok(ws) => {
                     // Run after_create hook if newly created
@@ -384,7 +386,7 @@ impl Orchestrator {
                             if let Err(e) = crate::workspace::hooks::run_hook(
                                 "after_create",
                                 script,
-                                &ws.path,
+                                &ws.base_path,
                                 cfg.hooks.timeout_ms,
                             )
                             .await
@@ -403,7 +405,7 @@ impl Orchestrator {
                             }
                         }
                     }
-                    ws.path
+                    ws.base_path
                 }
                 Err(e) => {
                     let _ = event_tx
@@ -942,7 +944,7 @@ agent:
         });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 10 });
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
@@ -967,7 +969,7 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator =
@@ -1009,7 +1011,7 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator =
@@ -1058,7 +1060,7 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
@@ -1122,7 +1124,7 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(config, tracker, runner, workspace_mgr, shutdown_rx);
@@ -1166,7 +1168,7 @@ agent:
         });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 10 });
         let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path()).unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator =

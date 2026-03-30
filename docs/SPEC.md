@@ -97,8 +97,14 @@ Important boundary:
 6. `Workspace Manager`
    - Maps issue identifiers to workspace paths.
    - Ensures per-issue workspace directories exist.
+   - Optionally creates git worktrees for configured repositories via `WorktreeCoordinator`.
+   - All-or-nothing worktree creation with rollback on partial failure.
+   - Worktrees stored in `.worktrees/<branch>` within each repo, with branch naming
+     `ensemble-YYYY-MM-DD-<sanitized-issue-id>`.
+   - Reuses existing worktrees on retry cycles (pulls latest changes).
    - Runs workspace lifecycle hooks.
-   - Cleans workspaces for terminal issues.
+   - Cleans workspaces and worktrees for terminal issues.
+   - Push strategy (ask, auto_push, manual, pr_only) controls branch handling after success.
 
 7. `Agent Runner`
    - Creates workspace.

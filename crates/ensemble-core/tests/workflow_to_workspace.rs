@@ -1,6 +1,6 @@
 //! Integration test: load ensemble.yaml -> parse config -> create workspace -> run hooks
 
-use ensemble_core::config::ensemble::{parse_config, EnsembleConfig};
+use ensemble_core::config::ensemble::{parse_config, EnsembleConfig, RepoConfig};
 use ensemble_core::config::template::render_prompt;
 use ensemble_core::tracker::model::{sanitize_workspace_key, Issue};
 use ensemble_core::workspace::hooks::run_hook;
@@ -55,8 +55,8 @@ hooks:
     parse_config(&yaml).unwrap()
 }
 
-#[test]
-fn test_full_config_flow() {
+#[tokio::test]
+async fn test_full_config_flow() {
     let dir = TempDir::new().unwrap();
     let ws_root = dir.path().join("workspaces");
 
@@ -84,43 +84,108 @@ fn test_full_config_flow() {
     assert!(prompt.contains("Add dark mode"));
 
     // 3. Create workspace
-    let mgr = WorkspaceManager::new(&ws_root).unwrap();
-    let ws = mgr.prepare_workspace(&issue.identifier).unwrap();
+    let mgr = WorkspaceManager::new(&ws_root, None).unwrap();
+    let ws = mgr.prepare_workspace(&issue.identifier).await.unwrap();
     assert!(ws.created_now);
-    assert!(ws.path.is_dir());
+    assert!(ws.base_path.is_dir());
     assert_eq!(
         ws.workspace_key,
         sanitize_workspace_key(&issue.identifier).unwrap()
     );
 
     // 4. Reuse workspace
-    let ws2 = mgr.prepare_workspace(&issue.identifier).unwrap();
+    let ws2 = mgr.prepare_workspace(&issue.identifier).await.unwrap();
     assert!(!ws2.created_now);
-    assert_eq!(ws.path, ws2.path);
+    assert_eq!(ws.base_path, ws2.base_path);
 
     // 5. Cleanup
-    mgr.remove_workspace(&issue.identifier).unwrap();
-    assert!(!ws.path.exists());
+    mgr.remove_workspace(&issue.identifier).await.unwrap();
+    assert!(!ws.base_path.exists());
 }
 
 #[tokio::test]
 async fn test_hook_in_workspace() {
     let dir = TempDir::new().unwrap();
-    let mgr = WorkspaceManager::new(dir.path()).unwrap();
-    let ws = mgr.prepare_workspace("hook-test#1").unwrap();
+    let mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+    let ws = mgr.prepare_workspace("hook-test#1").await.unwrap();
 
     // Run a hook that creates a file
     run_hook(
         "after_create",
         "echo 'initialized' > .ensemble-init",
-        &ws.path,
+        &ws.base_path,
         5000,
     )
     .await
     .unwrap();
 
-    let marker = ws.path.join(".ensemble-init");
+    let marker = ws.base_path.join(".ensemble-init");
     assert!(marker.exists());
     let content = std::fs::read_to_string(&marker).unwrap();
     assert_eq!(content.trim(), "initialized");
+}
+
+fn setup_git_repo(name: &str) -> TempDir {
+    let dir = TempDir::new().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    std::fs::write(dir.path().join("README.md"), format!("# {}", name)).unwrap();
+    std::process::Command::new("git")
+        .args(["add", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .args(["commit", "-m", "initial"])
+        .current_dir(&dir)
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .output()
+        .unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn test_workflow_with_worktrees() {
+    let ws_dir = TempDir::new().unwrap();
+    let repo_dir = setup_git_repo("test-repo");
+
+    let repos = vec![RepoConfig {
+        path: repo_dir.path().to_string_lossy().to_string(),
+        branch: "main".to_string(),
+        git_remote: "origin".to_string(),
+    }];
+
+    let mgr = WorkspaceManager::new(ws_dir.path(), Some(repos)).unwrap();
+    let issue = sample_issue();
+
+    // Create workspace with worktrees
+    let ws = mgr.prepare_workspace(&issue.identifier).await.unwrap();
+    assert!(ws.created_now);
+    assert!(ws.base_path.is_dir());
+    assert!(!ws.worktrees.is_empty());
+
+    assert_eq!(ws.worktrees.len(), 1);
+    let (repo_key, worktree_info) = ws.worktrees.iter().next().unwrap();
+    assert!(worktree_info.path.exists());
+    assert!(worktree_info.created_now);
+    assert!(worktree_info.path.join("README.md").exists());
+
+    // Reuse workspace
+    let ws2 = mgr.prepare_workspace(&issue.identifier).await.unwrap();
+    assert!(!ws2.created_now);
+    let worktree_info2 = ws2.worktrees.get(repo_key).unwrap();
+    assert!(!worktree_info2.created_now);
+    assert_eq!(worktree_info.path, worktree_info2.path);
+
+    // Cleanup
+    let wt_path = worktree_info.path.clone();
+    mgr.remove_workspace(&issue.identifier).await.unwrap();
+    assert!(!ws.base_path.exists());
+    assert!(!wt_path.exists());
 }
