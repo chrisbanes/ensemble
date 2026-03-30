@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use ensemble_core::api::router::{create_api_router, AppState};
+use ensemble_core::api::router::{create_api_router_with_static, AppState};
 use ensemble_core::config::ensemble::{load_config, validate_config};
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::observability::logging::init_logging;
@@ -27,6 +27,10 @@ struct Cli {
     /// HTTP server port (enables API + dashboard).
     #[arg(long, env = "PORT")]
     port: Option<u16>,
+
+    /// Directory containing built dashboard assets to serve.
+    #[arg(long)]
+    static_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -101,7 +105,7 @@ async fn main() -> ExitCode {
             history_path,
             event_bus: EventBus::new(),
         };
-        let router = create_api_router(app_state);
+        let router = create_api_router_with_static(app_state, cli.static_dir.clone());
 
         let bind_addr = format!("{}:{}", cli.host, port);
         info!(addr = %bind_addr, "starting HTTP server");
@@ -156,22 +160,33 @@ async fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    /// Helper: clear HOST/PORT env vars for test isolation, returning saved values.
-    fn clear_env() -> (Option<String>, Option<String>) {
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that manipulate HOST/PORT env vars.
+    // Env vars are process-global, so parallel tests would race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Helper: lock env, clear HOST/PORT, return saved values + guard.
+    fn lock_and_clear_env() -> (
+        std::sync::MutexGuard<'static, ()>,
+        Option<String>,
+        Option<String>,
+    ) {
+        let guard = ENV_LOCK.lock().unwrap();
         let host = std::env::var("HOST").ok();
         let port = std::env::var("PORT").ok();
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
-        (host, port)
+        (guard, host, port)
     }
 
     /// Helper: restore previously saved HOST/PORT env vars.
-    fn restore_env(saved: (Option<String>, Option<String>)) {
-        match saved.0 {
+    fn restore_env(host: Option<String>, port: Option<String>) {
+        match host {
             Some(v) => std::env::set_var("HOST", v),
             None => std::env::remove_var("HOST"),
         }
-        match saved.1 {
+        match port {
             Some(v) => std::env::set_var("PORT", v),
             None => std::env::remove_var("PORT"),
         }
@@ -179,44 +194,44 @@ mod tests {
 
     #[test]
     fn test_cli_parse_defaults() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble"]);
         assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         assert_eq!(cli.host, "127.0.0.1");
         assert_eq!(cli.port, None);
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_parse_custom_path() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "custom/ensemble.yaml"]);
         assert_eq!(cli.config_path, PathBuf::from("custom/ensemble.yaml"));
         assert_eq!(cli.port, None);
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_parse_with_port() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "--port", "8080"]);
         assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         assert_eq!(cli.port, Some(8080));
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_parse_with_host() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "--host", "0.0.0.0", "--port", "3000"]);
         assert_eq!(cli.host, "0.0.0.0");
         assert_eq!(cli.port, Some(3000));
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_parse_all_options() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from([
             "ensemble",
             "--host",
@@ -228,43 +243,43 @@ mod tests {
         assert_eq!(cli.config_path, PathBuf::from("my/ensemble.yaml"));
         assert_eq!(cli.host, "0.0.0.0");
         assert_eq!(cli.port, Some(3000));
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_parse_ephemeral_port() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "--port", "0"]);
         assert_eq!(cli.port, Some(0));
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_env_host() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         std::env::set_var("HOST", "10.0.0.1");
         let cli = Cli::parse_from(["ensemble"]);
         assert_eq!(cli.host, "10.0.0.1");
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_env_port() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         std::env::set_var("PORT", "9090");
         let cli = Cli::parse_from(["ensemble"]);
         assert_eq!(cli.port, Some(9090));
-        restore_env(saved);
+        restore_env(host, port);
     }
 
     #[test]
     fn test_cli_flag_overrides_env() {
-        let saved = clear_env();
+        let (_guard, host, port) = lock_and_clear_env();
         std::env::set_var("HOST", "10.0.0.1");
         std::env::set_var("PORT", "9090");
         let cli = Cli::parse_from(["ensemble", "--host", "0.0.0.0", "--port", "3000"]);
         assert_eq!(cli.host, "0.0.0.0");
         assert_eq!(cli.port, Some(3000));
-        restore_env(saved);
+        restore_env(host, port);
     }
 }

@@ -1,8 +1,10 @@
 use crate::api::{controls, conversation, handlers, history_handler, ws};
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -41,14 +43,17 @@ pub struct AppState {
 /// so access is limited to the local machine. This is appropriate for an operator
 /// dashboard; do not expose on `0.0.0.0` without adding authentication.
 ///
-/// If `static_dir` is provided, unmatched routes serve static files from that
-/// directory with SPA fallback to `index.html`.
+/// If `static_dir` is provided, unmatched non-API, non-WS routes serve static
+/// files from that directory with SPA fallback to `index.html`. API and WS
+/// routes have their own 404 fallbacks so they never leak `index.html`.
 pub fn create_api_router(state: AppState) -> Router {
     create_api_router_with_static(state, None)
 }
 
 /// Create the API router with optional static file serving for the dashboard SPA.
 pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Router {
+    // API routes get a JSON 404 fallback so unmatched /api/v1/* paths never
+    // fall through to the static file handler.
     let api_routes = Router::new()
         .route("/state", get(handlers::get_state))
         .route(
@@ -77,7 +82,8 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
                 .put(handlers::method_not_allowed)
                 .delete(handlers::method_not_allowed)
                 .patch(handlers::method_not_allowed),
-        );
+        )
+        .fallback(api_not_found);
 
     let mut router = Router::new()
         .nest("/api/v1", api_routes)
@@ -90,6 +96,16 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
     }
 
     router
+}
+
+/// Fallback handler for unmatched API routes. Returns a JSON 404 instead of
+/// falling through to the static file handler.
+async fn api_not_found() -> impl IntoResponse {
+    let error = handlers::ApiError::new("not_found", "API endpoint not found");
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::to_value(error).unwrap()),
+    )
 }
 
 #[cfg(test)]

@@ -2,7 +2,7 @@
 //! hit endpoints with reqwest, verify JSON shapes match SPEC.md Section 13.7.2.
 
 use chrono::Utc;
-use ensemble_core::api::router::{create_api_router, AppState};
+use ensemble_core::api::router::{create_api_router, create_api_router_with_static, AppState};
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
@@ -330,4 +330,121 @@ async fn test_get_state_empty_system() {
     assert_eq!(json["agent_totals"]["total_tokens"], 0);
     assert_eq!(json["agent_totals"]["seconds_running"], 0.0);
     assert!(json["rate_limits"].is_null());
+}
+
+// --- Static serving and API 404 fallback tests ---
+
+fn build_empty_app_state() -> AppState {
+    let state = OrchestratorState::new(30000, 10);
+    AppState {
+        orchestrator_state: Arc::new(RwLock::new(state)),
+        refresh_requested: Arc::new(tokio::sync::Notify::new()),
+        workspace_root: "/tmp/workspaces".to_string(),
+        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        event_bus: EventBus::new(),
+    }
+}
+
+async fn start_test_server_with_static(app_state: AppState, static_dir: Option<PathBuf>) -> String {
+    let router = create_api_router_with_static(app_state, static_dir);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    base_url
+}
+
+#[tokio::test]
+async fn test_api_unknown_route_returns_json_404() {
+    let base_url = start_test_server(build_empty_app_state()).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/api/v1/nonexistent/route", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 404);
+
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert!(json.get("error").is_some(), "expected JSON error envelope");
+    assert_eq!(json["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn test_api_404_not_index_html_with_static_dir() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(tmp_dir.path().join("index.html"), "<html>SPA</html>").unwrap();
+
+    let base_url =
+        start_test_server_with_static(build_empty_app_state(), Some(tmp_dir.path().to_path_buf()))
+            .await;
+    let client = reqwest::Client::new();
+
+    // API 404 should be JSON, not index.html
+    let response = client
+        .get(format!("{}/api/v1/nonexistent/route", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 404);
+    let body = response.text().await.unwrap();
+    assert!(
+        !body.contains("<html>"),
+        "API 404 should return JSON, not index.html; got: {}",
+        body
+    );
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(json["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn test_static_file_served() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(tmp_dir.path().join("index.html"), "<html>SPA</html>").unwrap();
+    std::fs::write(tmp_dir.path().join("app.js"), "console.log('hi')").unwrap();
+
+    let base_url =
+        start_test_server_with_static(build_empty_app_state(), Some(tmp_dir.path().to_path_buf()))
+            .await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(format!("{}/app.js", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert_eq!(body, "console.log('hi')");
+}
+
+#[tokio::test]
+async fn test_spa_fallback_returns_index_html() {
+    let tmp_dir = tempfile::tempdir().unwrap();
+    std::fs::write(tmp_dir.path().join("index.html"), "<html>SPA</html>").unwrap();
+
+    let base_url =
+        start_test_server_with_static(build_empty_app_state(), Some(tmp_dir.path().to_path_buf()))
+            .await;
+    let client = reqwest::Client::new();
+
+    // Unknown non-API path should get index.html (SPA routing)
+    let response = client
+        .get(format!("{}/dashboard/some/route", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let body = response.text().await.unwrap();
+    assert_eq!(body, "<html>SPA</html>");
 }
