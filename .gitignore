@@ -6,3 +6,5 @@ crates/ensemble-ui/src-ui/dist/
 crates/ensemble-ui/src-ui/src/generated/
 crates/ensemble-ui/src-ui/openapi.json
 crates/ensemble-desktop/gen/
+crates/ensemble-cli/assets/spa/
+crates/ensemble-desktop/assets/spa/

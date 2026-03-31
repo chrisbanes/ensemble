@@ -3,8 +3,8 @@ use std::process::Command;
 
 fn main() {
     // Only rebuild if UI source changes
-    println!("cargo:rerun-if-changed=../../ensemble-ui/src-ui/src");
-    println!("cargo:rerun-if-changed=../../ensemble-ui/src-ui/package.json");
+    println!("cargo:rerun-if-changed=../ensemble-ui/src-ui/src");
+    println!("cargo:rerun-if-changed=../ensemble-ui/src-ui/package.json");
 
     // Check if we're in CI or should skip UI build
     if std::env::var("SKIP_UI_BUILD").is_ok() {
@@ -16,7 +16,7 @@ fn main() {
     }
 
     // Get paths
-    let ui_dir = Path::new("../../ensemble-ui/src-ui");
+    let ui_dir = Path::new("../ensemble-ui/src-ui");
     let dist_dir = ui_dir.join("dist");
     let assets_dir = Path::new("assets/spa");
 
