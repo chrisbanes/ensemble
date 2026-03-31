@@ -147,7 +147,7 @@ jobs:
           node-version: 22
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v5
         with:
           version: 10
 
@@ -301,8 +301,8 @@ jobs:
   # Build Tauri Desktop App (macOS)
   build-tauri:
     name: Build Tauri Desktop (macOS aarch64)
-    needs: [plan]
-    if: ${{ !fromJson(needs.plan.outputs.val).announcement_is_prerelease || fromJson(needs.plan.outputs.val).publish_prereleases }}
+    needs: [plan, host]
+    if: ${{ always() && needs.plan.result == 'success' && needs.host.result == 'success' }}
     runs-on: macos-latest
     permissions:
       contents: write
@@ -318,7 +318,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v5
         with:
           package_json_file: crates/ensemble-ui/src-ui/package.json
 
@@ -389,7 +389,7 @@ jobs:
         run: |
           DMG_FILE=$(ls ./artifacts/*.dmg | head -1)
           DMG_NAME=$(basename "$DMG_FILE")
-          SHA=$(shasum -a 256 "$DMG_FILE" | awk '{print $1}')
+          SHA=$(sha256sum "$DMG_FILE" | awk '{print $1}')
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "dmg_name=$DMG_NAME" >> "$GITHUB_OUTPUT"
 
@@ -404,20 +404,20 @@ jobs:
           TAG="${{ github.ref_name }}"
 
           cat > ensemble-desktop.rb << CASK
-          cask "ensemble-desktop" do
-            version "${VERSION}"
-            sha256 "${SHA256}"
+cask "ensemble-desktop" do
+  version "${VERSION}"
+  sha256 "${SHA256}"
 
-            url "https://github.com/${REPO}/releases/download/${TAG}/${DMG_NAME}"
-            name "Ensemble"
-            desc "Multi-agent pipeline orchestrator"
-            homepage "https://github.com/${REPO}"
+  url "https://github.com/${REPO}/releases/download/${TAG}/${DMG_NAME}"
+  name "Ensemble"
+  desc "Multi-agent pipeline orchestrator"
+  homepage "https://github.com/${REPO}"
 
-            depends_on arch: :arm64
+  depends_on arch: :arm64
 
-            app "Ensemble.app"
-          end
-          CASK
+  app "Ensemble.app"
+end
+CASK
 
           git clone "https://x-access-token:${TAP_TOKEN}@github.com/chrisbanes/homebrew-tap.git" tap
           mkdir -p tap/Casks
@@ -429,21 +429,3 @@ jobs:
           git commit -m "Update ensemble-desktop cask to ${VERSION}"
           git push
 
-  announce:
-    needs:
-      - plan
-      - host
-      - build-tauri
-      - update-homebrew-cask
-    # use "always() && ..." to allow us to wait for all publish jobs while
-    # still allowing individual publish jobs to skip themselves (for prereleases).
-    # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' && needs.build-tauri.result == 'success' && needs.update-homebrew-cask.result == 'success' }}
-    runs-on: "ubuntu-22.04"
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          submodules: recursive
