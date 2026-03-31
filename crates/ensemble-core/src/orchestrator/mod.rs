@@ -156,6 +156,12 @@ impl Orchestrator {
 
     /// Handle a poll tick: reconcile, validate, fetch, dispatch.
     async fn handle_tick(&self) {
+        // Record tick timestamp for poll countdown
+        {
+            let mut state = self.state.write().await;
+            state.last_tick_at = Some(Utc::now());
+        }
+
         // 1. Reconcile stalled runs
         let stall_timeout_ms = {
             let config = self.config.read().await;
