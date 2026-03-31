@@ -45,28 +45,22 @@ fn main() {
     let pnpm_install = Command::new("pnpm")
         .args(["install", "--frozen-lockfile"])
         .current_dir(ui_dir)
-        .output()
+        .status()
         .expect("Failed to run pnpm install");
 
-    if !pnpm_install.status.success() {
-        println!(
-            "cargo:warning=pnpm install failed: {}",
-            String::from_utf8_lossy(&pnpm_install.stderr)
-        );
+    if !pnpm_install.success() {
+        println!("cargo:warning=pnpm install failed");
         std::process::exit(1);
     }
 
     let pnpm_build = Command::new("pnpm")
         .args(["run", "build"])
         .current_dir(ui_dir)
-        .output()
+        .status()
         .expect("Failed to run pnpm build");
 
-    if !pnpm_build.status.success() {
-        println!(
-            "cargo:warning=pnpm run build failed: {}",
-            String::from_utf8_lossy(&pnpm_build.stderr)
-        );
+    if !pnpm_build.success() {
+        println!("cargo:warning=pnpm run build failed");
         std::process::exit(1);
     }
 
