@@ -11,6 +11,18 @@ set -euo pipefail
 
 VERSION="${TAG#v}"
 
+# Verify artifacts exist
+if ! ls ${ARTIFACTS_DIR}/ensemble-${TAG}-*.tar.gz 1>/dev/null 2>&1; then
+  echo "ERROR: No CLI tarballs found in ${ARTIFACTS_DIR}"
+  echo "Looking for: ensemble-${TAG}-*.tar.gz"
+  exit 1
+fi
+
+if ! ls ${ARTIFACTS_DIR}/*.dmg 1>/dev/null 2>&1; then
+  echo "ERROR: No .dmg file found in ${ARTIFACTS_DIR}"
+  exit 1
+fi
+
 # Compute checksums for CLI tarballs
 echo "==> Computing checksums"
 declare -A CHECKSUMS
