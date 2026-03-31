@@ -1,4 +1,4 @@
-import { useStateQuery, useRefreshMutation, useRetryMutation } from "@/hooks";
+import { useStateQuery, useRefreshMutation, useRetryMutation, useNextPollCountdown } from "@/hooks";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import RunningTable from "@/components/RunningTable";
@@ -9,6 +9,7 @@ export default function Dashboard() {
   const { data, isLoading, isError, error } = useStateQuery();
   const refreshMutation = useRefreshMutation();
   const retryMutation = useRetryMutation();
+  const pollCountdown = useNextPollCountdown(data?.last_tick_at ?? null, data?.poll_interval_ms);
 
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
@@ -28,12 +29,21 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">Dashboard</h1>
-        <Button
-          onClick={() => refreshMutation.mutate()}
-          disabled={refreshMutation.isPending}
-        >
-          {refreshMutation.isPending ? "Refreshing..." : "Force Refresh"}
-        </Button>
+        <div className="flex items-center gap-3">
+          <span className="text-sm text-muted-foreground">
+            {pollCountdown === null
+              ? "Waiting for first poll..."
+              : pollCountdown === 0
+                ? "Polling now..."
+                : `Next poll in ${pollCountdown}s`}
+          </span>
+          <Button
+            onClick={() => refreshMutation.mutate()}
+            disabled={refreshMutation.isPending}
+          >
+            {refreshMutation.isPending ? "Refreshing..." : "Force Refresh"}
+          </Button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">

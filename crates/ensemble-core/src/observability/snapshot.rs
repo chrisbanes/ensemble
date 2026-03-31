@@ -14,6 +14,8 @@ pub struct RuntimeSnapshot {
     pub retrying: Vec<RetryRow>,
     pub agent_totals: AgentTotalsSnapshot,
     pub rate_limits: Option<RateLimitSnapshot>,
+    pub poll_interval_ms: u64,
+    pub last_tick_at: Option<DateTime<Utc>>,
 }
 
 /// Summary counts of running and retrying sessions.
@@ -158,6 +160,8 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
             seconds_running: total_seconds,
         },
         rate_limits: state.agent_rate_limits.clone(),
+        poll_interval_ms: state.poll_interval_ms,
+        last_tick_at: state.last_tick_at,
     }
 }
 
@@ -449,6 +453,8 @@ mod tests {
         assert!(json.get("retrying").is_some());
         assert!(json.get("agent_totals").is_some());
         assert!(json.get("rate_limits").is_some());
+        assert!(json.get("poll_interval_ms").is_some());
+        assert!(json.get("last_tick_at").is_some());
 
         // Verify counts sub-keys
         let counts = json.get("counts").unwrap();
@@ -494,6 +500,8 @@ mod tests {
         assert!(snapshot.running.is_empty());
         assert!(snapshot.retrying.is_empty());
         assert_eq!(snapshot.agent_totals.seconds_running, 0.0);
+        assert_eq!(snapshot.poll_interval_ms, 30000);
+        assert!(snapshot.last_tick_at.is_none());
     }
 
     #[test]
@@ -561,6 +569,22 @@ mod tests {
         let attempts = json.get("attempts").unwrap();
         assert!(attempts.get("restart_count").is_some());
         assert!(attempts.get("current_retry_attempt").is_some());
+    }
+
+    #[test]
+    fn test_build_snapshot_poll_fields() {
+        let mut state = OrchestratorState::new(30000, 10);
+        // No tick yet
+        let snapshot = build_state_snapshot(&state);
+        assert_eq!(snapshot.poll_interval_ms, 30000);
+        assert!(snapshot.last_tick_at.is_none());
+
+        // After a tick
+        let tick_time = Utc::now();
+        state.last_tick_at = Some(tick_time);
+        let snapshot = build_state_snapshot(&state);
+        assert_eq!(snapshot.poll_interval_ms, 30000);
+        assert_eq!(snapshot.last_tick_at, Some(tick_time));
     }
 
     #[test]

@@ -36,6 +36,8 @@ pub struct OrchestratorState {
     pub agent_rate_limits: Option<RateLimitSnapshot>,
     /// Active pipeline runs: issue_id -> PipelineRun.
     pub pipeline_runs: HashMap<String, PipelineRun>,
+    /// Timestamp of the last orchestrator poll tick.
+    pub last_tick_at: Option<DateTime<Utc>>,
 }
 
 impl OrchestratorState {
@@ -51,6 +53,7 @@ impl OrchestratorState {
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
+            last_tick_at: None,
         }
     }
 
@@ -281,6 +284,7 @@ mod tests {
         assert!(state.completed.is_empty());
         assert_eq!(state.agent_totals.total_tokens, 0);
         assert!(state.pipeline_runs.is_empty());
+        assert!(state.last_tick_at.is_none());
     }
 
     #[test]
