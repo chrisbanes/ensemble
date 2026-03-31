@@ -67,7 +67,7 @@ jobs:
         working-directory: crates/ensemble-ui/src-ui
 
       - name: Frontend build
-        run: pnpm run build
+        run: pnpm run build:embed
         working-directory: crates/ensemble-ui/src-ui
 
       - name: Upload frontend dist

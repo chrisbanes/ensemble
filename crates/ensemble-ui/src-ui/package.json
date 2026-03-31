@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "pnpm run codegen && vite",
     "build": "pnpm run codegen && tsc && vite build",
+    "build:embed": "pnpm run codegen:client && tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview",
     "codegen:spec": "cd ../../../ && cargo test -p ensemble-core --test openapi_spec write_openapi_spec -- --ignored",
