@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
+  SKIP_UI_BUILD: 1
 
 jobs:
   ci:
@@ -65,6 +66,13 @@ jobs:
         run: npm run build
         working-directory: crates/ensemble-ui/src-ui
 
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/ensemble-ui/src-ui/dist/
+          retention-days: 1
+
   tauri-linux:
     name: Build Tauri Desktop App (Linux)
     runs-on: ubuntu-latest
@@ -72,27 +80,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: crates/ensemble-ui/src-ui/package-lock.json
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Generate frontend API client
-        run: npm run codegen
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Build frontend
-        run: npm run build
-        working-directory: crates/ensemble-ui/src-ui
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/ensemble-ui/src-ui/dist/
 
       - name: Install Tauri dependencies
         run: |
@@ -109,27 +105,15 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: crates/ensemble-ui/src-ui/package-lock.json
-
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Generate frontend API client
-        run: npm run codegen
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Build frontend
-        run: npm run build
-        working-directory: crates/ensemble-ui/src-ui
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/ensemble-ui/src-ui/dist/
 
       - name: Build Tauri app
         run: cargo build -p ensemble-desktop
