@@ -6,7 +6,7 @@
     "frontendDist": "../ensemble-ui/src-ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm --prefix ../ensemble-ui/src-ui run dev",
-    "beforeBuildCommand": "pnpm --prefix ../ensemble-ui/src-ui run build"
+    "beforeBuildCommand": ""
   },
   "app": {
     "windows": [

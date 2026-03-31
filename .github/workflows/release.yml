@@ -108,7 +108,7 @@ jobs:
         run: pnpm install -g @tauri-apps/cli
 
       - name: Build Tauri app
-        run: tauri build --config '{"build":{"beforeBuildCommand":""}}'
+        run: tauri build
         working-directory: crates/ensemble-desktop
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
