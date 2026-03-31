@@ -11,6 +11,7 @@ use ensemble_core::observability::logging::init_logging;
 #[derive(Parser, Debug)]
 #[command(name = "ensemble", about = "Orchestrate coding agents")]
 struct Cli {
+    /// Subcommand is optional: bare `ensemble` defaults to headless `run`.
     #[command(subcommand)]
     command: Option<Command>,
 

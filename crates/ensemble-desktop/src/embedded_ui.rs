@@ -32,8 +32,21 @@ pub struct EmbeddedFile {
     pub content_type: String,
 }
 
+/// Normalize a request path for embedded asset lookup.
+/// Strips leading/trailing slashes and treats empty paths as "index.html".
+fn normalize_path(path: &str) -> &str {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        "index.html"
+    } else {
+        trimmed
+    }
+}
+
 /// Resolve a path to an embedded file or fallback to index.html
 pub fn resolve_path(path: &str) -> Option<EmbeddedFile> {
+    let path = normalize_path(path);
+
     // Try exact path
     if let Some(file) = get_file(path) {
         return Some(file);

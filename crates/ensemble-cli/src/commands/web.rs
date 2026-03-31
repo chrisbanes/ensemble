@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use ensemble_core::api::router::{create_api_router, AppState};
 use ensemble_core::config::ensemble::{load_config, validate_config};
@@ -97,6 +97,19 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     let spa_router = spa_router();
 
     let router = api_router.merge(spa_router);
+
+    // Warn if binding to a non-loopback address (exposes unauthenticated API)
+    let is_loopback = args.host == "127.0.0.1" || args.host == "::1" || args.host == "localhost";
+    if !is_loopback {
+        warn!(
+            host = %args.host,
+            "binding to a non-loopback address exposes the API without authentication"
+        );
+        eprintln!(
+            "warning: binding to {} exposes the ensemble API to the network without authentication",
+            args.host
+        );
+    }
 
     // Determine port
     let port = args.port.unwrap_or(0); // 0 = let OS assign available port
