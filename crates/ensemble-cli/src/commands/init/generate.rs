@@ -64,6 +64,12 @@ pub fn generate_yaml(
     for agent in agents {
         yaml.push_str(&format!("  {}:\n", agent.role));
         yaml.push_str(&format!("    acpx_agent: {}\n", agent.acpx_agent));
+        if let Some(ref model) = agent.model {
+            yaml.push_str(&format!("    model: {model}\n"));
+        }
+        if let Some(ref level) = agent.reasoning_level {
+            yaml.push_str(&format!("    reasoning_level: {level}\n"));
+        }
         yaml.push_str(&format!(
             "    prompt_template: templates/{}.liquid\n",
             find_step_for_agent(&agent.role, steps)
@@ -327,5 +333,56 @@ mod tests {
         assert!(md.contains("## Todo"));
         assert!(md.contains("[SAMPLE-1]"));
         assert!(md.contains("## Done"));
+    }
+
+    #[test]
+    fn test_generate_yaml_with_model_and_reasoning() {
+        let tracker = TrackerChoice::TodoFile {
+            path: PathBuf::from("TODO.md"),
+        };
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+            reasoning_level: Some("high".to_string()),
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: Some("In Progress".to_string()),
+        }];
+
+        let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
+
+        assert!(yaml.contains("acpx_agent: claude"));
+        assert!(yaml.contains("model: sonnet"));
+        assert!(yaml.contains("reasoning_level: high"));
+        assert!(yaml.contains("prompt_template: templates/implement.liquid"));
+    }
+
+    #[test]
+    fn test_generate_yaml_omits_none_model() {
+        let tracker = TrackerChoice::TodoFile {
+            path: PathBuf::from("TODO.md"),
+        };
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: None,
+            reasoning_level: None,
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: Some("In Progress".to_string()),
+        }];
+
+        let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
+
+        assert!(yaml.contains("acpx_agent: claude"));
+        assert!(!yaml.contains("model:"));
+        assert!(!yaml.contains("reasoning_level:"));
     }
 }
