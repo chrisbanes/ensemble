@@ -6,10 +6,12 @@ set -euo pipefail
 #
 # Usage:
 #   ./scripts/dev.sh build              # full build with UI
-#   ./scripts/dev.sh build --skip-ui    # Rust-only build
 #   ./scripts/dev.sh run                # run with no args
 #   ./scripts/dev.sh run -- --help      # pass --help to ensemble
-#   ./scripts/dev.sh run --skip-ui -- run  # skip UI build, run 'ensemble run'
+#
+# To skip UI build, set SKIP_UI_BUILD=1:
+#   SKIP_UI_BUILD=1 ./scripts/dev.sh build
+#   SKIP_UI_BUILD=1 ./scripts/dev.sh run -- --help
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -18,34 +20,32 @@ UI_DIR="$REPO_ROOT/crates/ensemble-ui/src-ui"
 # Show usage
 usage() {
   cat << 'EOF'
-Usage: ./scripts/dev.sh <command> [options] [-- [args]]
+Usage: ./scripts/dev.sh <command> [-- [args]]
 
 Commands:
   build                Build the workspace
   run                  Build and run the ensemble CLI
 
-Options:
-  --skip-ui            Skip UI build (Rust-only)
+Environment Variables:
+  SKIP_UI_BUILD=1      Skip UI build (Rust-only)
 
 For 'run' command, use -- to pass arguments to ensemble:
   ./scripts/dev.sh run -- --help
-  ./scripts/dev.sh run --skip-ui -- run
+  ./scripts/dev.sh run -- run
 
 Examples:
-  ./scripts/dev.sh build              # Full build
-  ./scripts/dev.sh build --skip-ui    # Rust-only build
-  ./scripts/dev.sh run                # Run ensemble with no args
-  ./scripts/dev.sh run -- --help      # Show ensemble help
+  ./scripts/dev.sh build                    # Full build
+  SKIP_UI_BUILD=1 ./scripts/dev.sh build    # Rust-only build
+  ./scripts/dev.sh run                      # Run ensemble with no args
+  ./scripts/dev.sh run -- --help            # Show ensemble help
+  SKIP_UI_BUILD=1 ./scripts/dev.sh run -- help  # Skip UI, run help
 EOF
 }
 
 # Common build logic
 run_build() {
-  local skip_ui=$1
-
-  if [ "$skip_ui" = true ]; then
-    echo "==> Skipping UI build (--skip-ui)"
-    export SKIP_UI_BUILD=1
+  if [ -n "${SKIP_UI_BUILD:-}" ]; then
+    echo "==> Skipping UI build (SKIP_UI_BUILD=1)"
     cargo build --workspace --exclude ensemble-desktop
     return 0
   fi
@@ -65,13 +65,10 @@ run_build() {
 
 # Run command logic
 run_dev() {
-  local skip_ui=$1
-  shift
   local passthrough_args=("$@")
 
-  if [ "$skip_ui" = true ]; then
-    echo "==> Skipping UI build (--skip-ui)"
-    export SKIP_UI_BUILD=1
+  if [ -n "${SKIP_UI_BUILD:-}" ]; then
+    echo "==> Skipping UI build (SKIP_UI_BUILD=1)"
     echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- ${passthrough_args[*]}"
     cargo run --workspace --exclude ensemble-desktop -- "${passthrough_args[@]}"
     return 0
@@ -100,16 +97,11 @@ fi
 command="$1"
 shift
 
-skip_ui=false
 passthrough_args=()
 
-# Parse options
+# Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip-ui)
-      skip_ui=true
-      shift
-      ;;
     --)
       # Everything after -- goes to cargo
       shift
@@ -132,11 +124,11 @@ done
 
 case "$command" in
   build)
-    run_build "$skip_ui"
+    run_build
     echo "==> Done"
     ;;
   run)
-    run_dev "$skip_ui" "${passthrough_args[@]}"
+    run_dev "${passthrough_args[@]}"
     ;;
   --help|-h|help)
     usage
