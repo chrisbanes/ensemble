@@ -225,17 +225,31 @@ mod tests {
         assert_eq!(expand_tilde("~otheruser/foo"), "~otheruser/foo");
     }
 
+    /// Configure git user in a repo so commits work on CI runners without global config.
+    fn git_config_user(dir: &std::path::Path) {
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
     #[test]
     fn branch_exists_local_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
 
-        // Init a repo with a commit so HEAD and main exist.
         Command::new("git")
             .args(["init"])
             .current_dir(repo)
             .output()
             .unwrap();
+        git_config_user(repo);
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(repo)
@@ -243,7 +257,6 @@ mod tests {
             .unwrap();
 
         let repo_path = PathBuf::from(repo);
-        // Default branch should exist (could be main or master depending on config).
         let default = Command::new("git")
             .args(["branch", "--show-current"])
             .current_dir(repo)
@@ -259,7 +272,6 @@ mod tests {
     fn branch_exists_remote_qualified() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Create a bare "remote" and clone it so we get origin refs.
         let bare = tmp.path().join("bare.git");
         Command::new("git")
             .args(["init", "--bare"])
@@ -275,7 +287,7 @@ mod tests {
             .output()
             .unwrap();
 
-        // Create initial commit and push so origin/main exists.
+        git_config_user(&clone);
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(&clone)
