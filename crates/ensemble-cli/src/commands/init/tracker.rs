@@ -1,3 +1,4 @@
+use ensemble_core::config::ensemble::EnsembleConfig;
 use std::path::PathBuf;
 
 use inquire::{MultiSelect, Password, Select, Text};
@@ -21,31 +22,61 @@ pub enum TrackerChoice {
 }
 
 /// Ask the user where their issues live, then collect the relevant credentials.
-pub async fn ask_tracker() -> Result<TrackerChoice, inquire::InquireError> {
+pub async fn ask_tracker(
+    existing: Option<&EnsembleConfig>,
+) -> Result<TrackerChoice, inquire::InquireError> {
     let options = vec!["GitHub Projects", "TODO.md (great for trying things out)"];
 
-    let choice = Select::new("Where do your issues live?", options).prompt()?;
+    // Default to the existing tracker kind
+    let default_index = existing
+        .map(|c| if c.tracker.kind == "github" { 0 } else { 1 })
+        .unwrap_or(1);
+
+    let choice = Select::new("Where do your issues live?", options)
+        .with_starting_cursor(default_index)
+        .prompt()?;
 
     match choice {
-        "GitHub Projects" => ask_github_tracker().await,
+        "GitHub Projects" => ask_github_tracker(existing).await,
         _ => {
+            let default_path = existing
+                .and_then(|c| c.tracker.path.as_ref())
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "TODO.md".to_string());
+
+            let path_str = Text::new("TODO file path:")
+                .with_default(&default_path)
+                .prompt()?;
+
             println!("Creating TODO.md with a sample issue...");
             Ok(TrackerChoice::TodoFile {
-                path: PathBuf::from("TODO.md"),
+                path: PathBuf::from(path_str),
             })
         }
     }
 }
 
 /// Collect GitHub-specific tracker config interactively.
-async fn ask_github_tracker() -> Result<TrackerChoice, inquire::InquireError> {
+async fn ask_github_tracker(
+    existing: Option<&EnsembleConfig>,
+) -> Result<TrackerChoice, inquire::InquireError> {
+    let default_repo = existing
+        .and_then(|c| c.tracker.repository.as_deref())
+        .unwrap_or("");
+
     let repository = Text::new("GitHub repository (owner/repo):")
         .with_help_message("e.g. acme/frontend")
+        .with_default(default_repo)
         .prompt()?;
+
+    let default_proj = existing
+        .and_then(|c| c.tracker.project_number)
+        .map(|n| n.to_string())
+        .unwrap_or_default();
 
     let project_number_str =
         Text::new("GitHub Project board number (optional, press enter to skip):")
-            .with_default("")
+            .with_default(&default_proj)
             .prompt()?;
 
     let project_number: Option<i64> = if project_number_str.trim().is_empty() {
