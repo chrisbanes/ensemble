@@ -132,6 +132,7 @@ All probe failures are non-fatal. The agent is still usable; it just won't have 
 
 ## Files changed
 
+- `crates/ensemble-core/src/config/ensemble.rs` — add `reasoning_level: Option<String>` to `AgentConfig`
 - `crates/ensemble-cli/src/commands/init.rs` — load existing config, pass to wizard steps
 - `crates/ensemble-cli/src/commands/init/agents.rs` — add model/reasoning fields, probe logic, prompts
 - `crates/ensemble-cli/src/commands/init/tracker.rs` — accept existing config defaults
