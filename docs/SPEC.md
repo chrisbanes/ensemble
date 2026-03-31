@@ -533,7 +533,7 @@ Named agent definitions. Each key is the agent role name, each value is an objec
 - `reasoning_level` (string, optional)
   - Reasoning/thinking level for agents that support it (for example `high`, `low`).
   - When omitted, the agent uses its default reasoning level.
-  - Discovered automatically during `ensemble init` by probing acpx agent capabilities.
+  - Currently set manually in `ensemble.yaml`; reserved for future tooling that may auto-detect supported reasoning levels.
 - `prompt` (string, optional)
   - Inline prompt text. Mutually exclusive with `prompt_template`.
 - `prompt_template` (path string, optional)

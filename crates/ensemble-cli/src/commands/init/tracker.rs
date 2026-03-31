@@ -48,7 +48,7 @@ pub async fn ask_tracker(
                 .with_default(&default_path)
                 .prompt()?;
 
-            println!("Creating TODO.md with a sample issue...");
+            println!("Creating {} with a sample issue...", path_str);
             Ok(TrackerChoice::TodoFile {
                 path: PathBuf::from(path_str),
             })
@@ -132,7 +132,8 @@ async fn ask_github_tracker(
         default_statuses()
     };
 
-    let (active_states, on_success, on_failure) = ask_status_mapping(&available_statuses)?;
+    let (active_states, on_success, on_failure) =
+        ask_status_mapping(&available_statuses, existing)?;
 
     // terminal_states = the success state (and failure if present on the board)
     let mut terminal_states = vec![on_success.clone()];
@@ -163,29 +164,58 @@ fn default_statuses() -> Vec<String> {
 
 /// Prompt the user to select active states and map success/failure statuses.
 ///
+/// When `existing` config is provided, defaults are seeded from the existing
+/// tracker's `active_states`, `on_success`, and `on_failure` values.
+///
 /// Returns `(active_states, on_success, on_failure)`.
 pub fn ask_status_mapping(
     available_statuses: &[String],
+    existing: Option<&EnsembleConfig>,
 ) -> Result<(Vec<String>, String, String), inquire::InquireError> {
+    // Compute default indices for active states from existing config
+    let default_active_indices: Vec<usize> = existing
+        .map(|c| {
+            c.tracker
+                .active_states
+                .iter()
+                .filter_map(|s| available_statuses.iter().position(|a| a == s))
+                .collect()
+        })
+        .unwrap_or_default();
+    let default_active_indices = if default_active_indices.is_empty() {
+        vec![0]
+    } else {
+        default_active_indices
+    };
+
     // Multi-select active states
     let active_states: Vec<String> = MultiSelect::new(
         "Which statuses should Ensemble pick up work from? (space to toggle)",
         available_statuses.to_vec(),
     )
-    .with_default(&[0]) // default: first item selected
+    .with_default(&default_active_indices)
     .prompt()?;
+
+    // Compute default cursor for success state from existing config
+    let success_default_idx = existing
+        .and_then(|c| available_statuses.iter().position(|s| s == &c.on_success))
+        .unwrap_or(0);
 
     // Select success state
     let on_success = Select::new(
         "Which status means work is complete?",
         available_statuses.to_vec(),
     )
+    .with_starting_cursor(success_default_idx)
     .prompt()?
     .to_string();
 
-    // Free-text failure state (with default "Failed")
+    // Default failure state from existing config
+    let default_failure = existing.map(|c| c.on_failure.as_str()).unwrap_or("Failed");
+
+    // Free-text failure state
     let on_failure = Text::new("Which status means work failed? (press enter to use \"Failed\")")
-        .with_default("Failed")
+        .with_default(default_failure)
         .prompt()?;
 
     Ok((active_states, on_success, on_failure))

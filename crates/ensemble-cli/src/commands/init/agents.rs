@@ -71,19 +71,26 @@ pub fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEnt
 
     println!();
 
-    // Compute default selection indices from existing config
+    // Compute default selection indices from existing config.
+    // If existing config exists but none of its agents match the available set,
+    // fall back to selecting all available agents (same as fresh-init behavior).
     let default_indices: Vec<usize> = if let Some(config) = existing {
         let existing_agents: Vec<&str> = config
             .agents
             .values()
             .filter_map(|a| a.acpx_agent.as_deref())
             .collect();
-        available
+        let indices: Vec<usize> = available
             .iter()
             .enumerate()
             .filter(|(_, name)| existing_agents.contains(&name.as_str()))
             .map(|(i, _)| i)
-            .collect()
+            .collect();
+        if indices.is_empty() {
+            (0..available.len()).collect()
+        } else {
+            indices
+        }
     } else {
         (0..available.len()).collect()
     };
@@ -336,6 +343,10 @@ fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
 }
 
 /// Read capabilities from a session JSON file.
+///
+/// Returns as soon as the session JSON is parseable and contains an `acpx`
+/// object (with or without models), rather than always blocking for the full
+/// timeout when an agent never populates `available_models`.
 fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
     let acpx_dir = dirs::home_dir()
         .map(|h| h.join(".acpx").join("sessions"))
@@ -343,13 +354,15 @@ fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
 
     let session_file = acpx_dir.join(format!("{session_id}.json"));
 
-    // Wait briefly for the session file to be populated with capabilities
+    // Wait for the session file to appear and become parseable
     for _ in 0..20 {
         if let Ok(content) = std::fs::read_to_string(&session_file) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                let caps = AgentCapabilities::from_session_json(&json);
-                if !caps.available_models.is_empty() {
-                    return caps;
+                // Once the acpx object is present, return whatever we have.
+                // Agents that never populate available_models will have an
+                // empty list rather than blocking for the full 10s timeout.
+                if json.get("acpx").is_some() {
+                    return AgentCapabilities::from_session_json(&json);
                 }
             }
         }
