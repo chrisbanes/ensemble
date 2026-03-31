@@ -1,4 +1,5 @@
 use crate::commands::init::agents::AgentEntry;
+use ensemble_core::config::ensemble::EnsembleConfig;
 
 #[derive(Debug)]
 pub struct PipelineStep {
@@ -8,20 +9,71 @@ pub struct PipelineStep {
     pub tracker_state: Option<String>,
 }
 
-pub fn ask_pipeline(agents: &[AgentEntry]) -> Result<Vec<PipelineStep>, inquire::InquireError> {
+pub fn ask_pipeline(
+    agents: &[AgentEntry],
+    existing: Option<&EnsembleConfig>,
+) -> Result<Vec<PipelineStep>, inquire::InquireError> {
     let role_names: Vec<&str> = agents.iter().map(|a| a.role.as_str()).collect();
 
     if agents.len() == 1 {
+        // Check if existing config has steps for this single agent
+        let step_name = existing
+            .and_then(|c| c.steps.first())
+            .map(|s| s.name.as_str())
+            .unwrap_or("implement");
+
+        let tracker_state = existing
+            .and_then(|c| c.steps.first())
+            .and_then(|s| s.tracker_state.as_deref())
+            .unwrap_or("In Progress");
+
         println!(
-            "\nPipeline: single step (implement) using {}",
-            role_names[0]
+            "\nPipeline: single step ({}) using {}",
+            step_name, role_names[0]
         );
         return Ok(vec![PipelineStep {
-            name: "implement".to_string(),
+            name: step_name.to_string(),
             agent_role: role_names[0].to_string(),
             depends: vec![],
-            tracker_state: Some("In Progress".to_string()),
+            tracker_state: Some(tracker_state.to_string()),
         }]);
+    }
+
+    // Check if existing pipeline matches current agent roles
+    let existing_matches = existing.map_or(false, |config| {
+        config
+            .steps
+            .iter()
+            .all(|step| role_names.contains(&step.agent.as_str()))
+    });
+
+    if existing_matches {
+        let existing_steps = &existing.unwrap().steps;
+        let step_summary: Vec<String> = existing_steps.iter().map(|s| s.name.clone()).collect();
+        let summary = step_summary.join(" → ");
+
+        let options = vec![
+            format!("Yes, use existing ({summary})"),
+            "Yes, use defaults (implement → review)".to_string(),
+            "No, let me customize".to_string(),
+        ];
+        let choice = inquire::Select::new("Use existing pipeline?", options).prompt()?;
+
+        if choice.starts_with("Yes, use existing") {
+            return Ok(existing_steps
+                .iter()
+                .map(|s| PipelineStep {
+                    name: s.name.clone(),
+                    agent_role: s.agent.clone(),
+                    depends: s.depends.clone().unwrap_or_default(),
+                    tracker_state: s.tracker_state.clone(),
+                })
+                .collect());
+        } else if choice.starts_with("Yes, use defaults") {
+            return Ok(default_pipeline(&role_names));
+        }
+        // else: fall through to custom
+        return custom_pipeline(&role_names);
     }
 
     let options = vec![
