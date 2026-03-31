@@ -98,20 +98,39 @@ impl AcpAgentRunner {
     }
 }
 
+/// POSIX-compatible single-quote escaping for shell arguments.
+///
+/// Wraps the argument in single quotes and escapes any embedded single-quote
+/// characters. This prevents shell metacharacter injection when arguments are
+/// interpolated into commands executed via `bash -lc`.
+fn shell_escape(arg: &str) -> String {
+    let mut escaped = String::with_capacity(arg.len() + 2);
+    escaped.push('\'');
+    for ch in arg.chars() {
+        if ch == '\'' {
+            escaped.push_str("'\\''");
+        } else {
+            escaped.push(ch);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
 /// Build the ACP spawn command for an agent.
 ///
 /// When `acpx_agent` is set, uses `acpx --agent <name>` with `--model` if
-/// configured. acpx speaks ACP over stdin/stdout and handles model selection
-/// natively. Falls back to `executor` if set, then to the global default.
+/// configured. Arguments are shell-escaped because the command is executed
+/// via `bash -lc`. Falls back to `executor` if set, then to the global default.
 fn resolve_agent_command(
     agent_config: Option<&crate::config::ensemble::AgentConfig>,
     default_command: &str,
 ) -> String {
     if let Some(ac) = agent_config {
         if let Some(ref acpx_name) = ac.acpx_agent {
-            let mut cmd = format!("acpx --agent {acpx_name}");
+            let mut cmd = format!("acpx --agent {}", shell_escape(acpx_name));
             if let Some(ref model) = ac.model {
-                cmd.push_str(&format!(" --model {model}"));
+                cmd.push_str(&format!(" --model {}", shell_escape(model)));
             }
             return cmd;
         }
@@ -407,5 +426,54 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result, Err(AgentError::TurnFailed { .. })));
+    }
+
+    #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("claude"), "'claude'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_shell_escape_with_metacharacters() {
+        assert_eq!(shell_escape("a; rm -rf /"), "'a; rm -rf /'");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_escapes_acpx_name() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        assert_eq!(cmd, "acpx --agent 'claude' --model 'sonnet'");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_no_model() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("claude".to_string()),
+            model: None,
+            executor: None,
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        assert_eq!(cmd, "acpx --agent 'claude'");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_falls_back_to_default() {
+        let cmd = resolve_agent_command(None, "default-cmd");
+        assert_eq!(cmd, "default-cmd");
     }
 }

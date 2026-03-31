@@ -4,7 +4,7 @@
 
 Two improvements to `ensemble init`:
 1. Load an existing `ensemble.yaml` and use its values as defaults throughout the wizard
-2. After selecting acpx agents, probe each for available models and reasoning levels, then ask the user to configure them
+2. After selecting acpx agents, probe each for available models, then ask the user to configure them (reasoning-level discovery/prompting is future work)
 
 ## Change 1: Existing Config as Defaults
 
@@ -76,11 +76,7 @@ During the role-naming loop, after naming each agent's role:
    - Default: existing config value, or `"default"` if no existing config
    - If user picks `"default"`, store `None` (omit from YAML)
 
-2. **Reasoning level** (if `config_options` includes a `thought_level` select):
-   - `Select` prompt: "Reasoning level for <agent>?"
-   - Options: extracted from the config option's selectable values, plus a "default" option
-   - Default: existing config value, or `"default"`
-   - If user picks `"default"`, store `None` (omit from YAML)
+2. **Reasoning level** — *future work*. The `reasoning_level` field exists in `AgentConfig` for forward compatibility, but discovery/prompting is not yet implemented. When acpx exposes `config_options` with a `thought_level` category, this section can be revisited.
 
 ### Data model changes
 

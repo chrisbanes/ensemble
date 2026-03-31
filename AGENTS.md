@@ -90,7 +90,7 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 
 - **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core` with read methods and optional write methods (default no-ops). Tracker implementations (GitHub, todo_file) live in `ensemble-core` as sub-modules of `tracker/`.
 - **Config from ensemble.yaml**: All runtime config lives in `ensemble.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. Agent definitions, step DAG, and prompt references are all defined here.
-- **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models and reasoning levels. These are stored as `model` and `reasoning_level` in `AgentConfig` and emitted in `ensemble.yaml`.
+- **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `ensemble.yaml`.
 - **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects verdicts from review agents.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
 - **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.
