@@ -187,24 +187,6 @@ impl AcpSession {
         self.send_json_rpc(&msg).await
     }
 
-    /// Send session/set_model to change the agent's model.
-    pub async fn set_model(&mut self, session_id: &str, model_id: &str) -> Result<(), AgentError> {
-        let id = self.next_id();
-        let msg = json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "method": "session/set_model",
-            "params": {
-                "sessionId": session_id,
-                "modelId": model_id
-            }
-        });
-        self.send_json_rpc(&msg).await?;
-        // Read and discard the response (best-effort — agent may not support it)
-        let _ = self.read_response(id, 5_000).await;
-        Ok(())
-    }
-
     /// Send session/set_config_option to set a configuration option (e.g. reasoning level).
     pub async fn set_config_option(
         &mut self,

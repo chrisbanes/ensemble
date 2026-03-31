@@ -978,7 +978,6 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
- "dirs",
  "futures",
  "futures-util",
  "libc",
