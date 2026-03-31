@@ -4,13 +4,13 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "npm run codegen && vite",
-    "build": "npm run codegen && tsc && vite build",
+    "dev": "pnpm run codegen && vite",
+    "build": "pnpm run codegen && tsc && vite build",
     "test": "vitest run",
     "preview": "vite preview",
     "codegen:spec": "cd ../../../ && cargo test -p ensemble-core --test openapi_spec write_openapi_spec -- --ignored",
     "codegen:client": "orval",
-    "codegen": "npm run codegen:spec && npm run codegen:client"
+    "codegen": "pnpm run codegen:spec && npm run codegen:client"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",
