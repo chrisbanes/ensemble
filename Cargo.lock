@@ -966,7 +966,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
- "tower-http",
  "tracing",
 ]
 
@@ -999,7 +998,6 @@ dependencies = [
 name = "ensemble-desktop"
 version = "0.1.0"
 dependencies = [
- "axum",
  "base64 0.22.1",
  "ensemble-core",
  "mime_guess",
@@ -1009,7 +1007,6 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tokio",
- "tower-http",
  "tracing",
 ]
 
