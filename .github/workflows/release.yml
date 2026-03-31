@@ -344,14 +344,82 @@ jobs:
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
 
+  # Update Homebrew Cask for Desktop App
+  update-homebrew-cask:
+    name: Update Homebrew Cask
+    needs: [host]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Get release version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download .dmg from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.dmg" \
+            --dir ./artifacts
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          DMG_FILE=$(ls ./artifacts/*.dmg | head -1)
+          DMG_NAME=$(basename "$DMG_FILE")
+          SHA=$(shasum -a 256 "$DMG_FILE" | awk '{print $1}')
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "dmg_name=$DMG_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Update cask in tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SHA256="${{ steps.sha.outputs.sha256 }}"
+          DMG_NAME="${{ steps.sha.outputs.dmg_name }}"
+          REPO="${{ github.repository }}"
+          TAG="${{ github.ref_name }}"
+
+          cat > ensemble-desktop.rb << CASK
+          cask "ensemble-desktop" do
+            version "${VERSION}"
+            sha256 "${SHA256}"
+
+            url "https://github.com/${REPO}/releases/download/${TAG}/${DMG_NAME}"
+            name "Ensemble"
+            desc "Multi-agent pipeline orchestrator"
+            homepage "https://github.com/${REPO}"
+
+            depends_on arch: :arm64
+
+            app "Ensemble.app"
+          end
+          CASK
+
+          # Clone the tap, update the cask, push
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/chrisbanes/homebrew-tap.git" tap
+          mkdir -p tap/Casks
+          cp ensemble-desktop.rb tap/Casks/ensemble-desktop.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Casks/ensemble-desktop.rb
+          git commit -m "Update ensemble-desktop cask to ${VERSION}"
+          git push
+
   announce:
     needs:
       - plan
       - host
+      - update-homebrew-cask
     # use "always() && ..." to allow us to wait for all publish jobs while
     # still allowing individual publish jobs to skip themselves (for prereleases).
     # "host" however must run to completion, no skipping allowed!
-    if: ${{ always() && needs.host.result == 'success' }}
+    if: ${{ always() && needs.host.result == 'success' && needs.update-homebrew-cask.result == 'success' }}
     runs-on: "ubuntu-22.04"
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
