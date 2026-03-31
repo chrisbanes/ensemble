@@ -1,6 +1,15 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Strip a leading `origin/` (or `<remote>/`) prefix from a branch name so
+/// that user input like `origin/main` is normalised to `main`.
+fn strip_remote_prefix(branch: &str) -> String {
+    branch
+        .strip_prefix("origin/")
+        .unwrap_or(branch)
+        .to_string()
+}
+
 /// Expand a leading `~` or `~/` to the user's home directory.
 fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
@@ -94,7 +103,7 @@ fn ask_branch_with_retry(repo_path: &PathBuf, initial_branch: &str) -> Option<St
 
     let retry_prompt = format!("Retry branch for '{}'", repo_path.display());
     let retry_input = inquire::Text::new(&retry_prompt).prompt().ok()?;
-    let retry_branch = retry_input.trim().to_string();
+    let retry_branch = strip_remote_prefix(retry_input.trim());
 
     if retry_branch.is_empty() {
         return None;
@@ -171,7 +180,7 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
         let branch_input = inquire::Text::new(&branch_prompt)
             .with_default(&branch_default_text)
             .prompt()?;
-        let branch = branch_input.trim().to_string();
+        let branch = strip_remote_prefix(branch_input.trim());
 
         // Validate the branch exists. Offer one retry on failure.
         match ask_branch_with_retry(&canonical, &branch) {
