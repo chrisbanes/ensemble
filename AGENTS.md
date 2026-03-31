@@ -72,7 +72,7 @@ GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, te
 
 **One-time setup:**
 ```sh
-cargo install cargo-release cargo-dist
+cargo install cargo-release
 ```
 
 **Cutting a release:**
@@ -81,7 +81,7 @@ cargo release <version> --execute   # e.g. cargo release 0.2.0 --execute
 ```
 
 This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and pushes. The tag push triggers `.github/workflows/release.yml` which:
-1. Builds CLI binaries (macOS aarch64, Linux x86_64, Linux aarch64) via cargo-dist
+1. Builds CLI binaries (macOS aarch64, Linux x86_64, Linux aarch64)
 2. Builds macOS desktop `.dmg` (aarch64, signed + notarized) via Tauri Action
 3. Creates a GitHub Release with all artifacts
 4. Updates `chrisbanes/homebrew-tap` (formula for CLI, cask for desktop)

@@ -23,6 +23,3 @@ tauri-build = { version = "2", features = [] }
 pre-release-replacements = [
   { file = "tauri.conf.json", search = '"version": "[^"]*"', replace = '"version": "{{version}}"', exactly = 1 },
 ]
-
-[package.metadata.dist]
-dist = false
