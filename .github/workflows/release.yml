@@ -129,12 +129,14 @@ jobs:
           name: desktop-dmg
           path: ${{ steps.dmg.outputs.path }}
 
-  # Create GitHub Release with all artifacts
+  # Create GitHub Release and update Homebrew tap
   release:
-    name: GitHub Release
+    name: Release & Homebrew
     needs: [build-cli, build-tauri]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -145,18 +147,10 @@ jobs:
           files: artifacts/*
           generate_release_notes: true
 
-  # Update Homebrew tap (formula + cask)
-  update-homebrew:
-    name: Update Homebrew Tap
-    needs: [release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
       - name: Update Homebrew tap
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          ARTIFACTS_DIR: artifacts
         run: .github/update-homebrew.sh

@@ -4,28 +4,24 @@ set -euo pipefail
 # Update Homebrew tap with new release artifacts.
 #
 # Required environment variables:
-#   TAG         - Git tag (e.g. v0.2.0)
-#   REPO        - GitHub repository (e.g. chrisbanes/ensemble)
-#   GH_TOKEN    - GitHub token for downloading release artifacts
-#   TAP_TOKEN   - GitHub PAT for pushing to the tap repo
+#   TAG            - Git tag (e.g. v0.2.0)
+#   REPO           - GitHub repository (e.g. chrisbanes/ensemble)
+#   TAP_TOKEN      - GitHub PAT for pushing to the tap repo
+#   ARTIFACTS_DIR  - Path to directory containing release artifacts
 
 VERSION="${TAG#v}"
-
-# Download release artifacts
-echo "==> Downloading release artifacts for ${TAG}"
-gh release download "$TAG" --repo "$REPO" --dir ./artifacts
 
 # Compute checksums for CLI tarballs
 echo "==> Computing checksums"
 declare -A CHECKSUMS
-for f in artifacts/ensemble-${TAG}-*.tar.gz; do
+for f in ${ARTIFACTS_DIR}/ensemble-${TAG}-*.tar.gz; do
   TARGET=$(basename "$f" | sed "s/ensemble-${TAG}-//" | sed 's/\.tar\.gz//')
   CHECKSUMS[$TARGET]=$(sha256sum "$f" | awk '{print $1}')
   echo "  ${TARGET}: ${CHECKSUMS[$TARGET]}"
 done
 
 # Compute checksum for desktop .dmg
-DMG=$(ls artifacts/*.dmg | head -1)
+DMG=$(ls ${ARTIFACTS_DIR}/*.dmg | head -1)
 DMG_NAME=$(basename "$DMG")
 DMG_SHA256=$(sha256sum "$DMG" | awk '{print $1}')
 echo "  dmg: ${DMG_SHA256}"
