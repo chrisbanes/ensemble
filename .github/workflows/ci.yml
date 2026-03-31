@@ -101,6 +101,7 @@ jobs:
           name: frontend-dist
           path: crates/ensemble-ui/src-ui/dist/
 
+      # pnpm + node needed for tauri CLI install
       - uses: pnpm/action-setup@v5
         with:
           package_json_file: crates/ensemble-ui/src-ui/package.json
@@ -121,5 +122,5 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Build Tauri app
-        run: tauri build
+        run: tauri build --config '{"build":{"beforeBuildCommand":""}}'
         working-directory: crates/ensemble-desktop
