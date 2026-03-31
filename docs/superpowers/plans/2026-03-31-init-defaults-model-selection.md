@@ -21,6 +21,8 @@
 | `crates/ensemble-cli/src/commands/init/repos.rs` | Modify | Accept `Option<&EnsembleConfig>` for defaults |
 | `crates/ensemble-cli/src/commands/init/pipeline.rs` | Modify | Accept `Option<&EnsembleConfig>` for defaults |
 | `crates/ensemble-cli/src/commands/init/generate.rs` | Modify | Emit `model` and `reasoning_level` in YAML |
+| `docs/SPEC.md` | Modify | Add `reasoning_level` to agents section |
+| `ensemble/CLAUDE.md` | Modify | Add `reasoning_level` to `AgentConfig` description |
 
 ---
 
@@ -1205,10 +1207,57 @@ git commit -m "Add existing config defaults to pipeline wizard"
 
 ---
 
-### Task 9: Final integration — verify full build and tests
+### Task 9: Update docs (SPEC.md and CLAUDE.md)
 
 **Files:**
-- All modified files from tasks 1-8
+- Modify: `docs/SPEC.md:530-538`
+- Modify: `ensemble/CLAUDE.md`
+
+- [ ] **Step 1: Add `reasoning_level` to SPEC.md agents section**
+
+In `docs/SPEC.md`, in section 5.3.3 (agents), add a new bullet after the `model` entry (after line 532):
+
+```markdown
+- `reasoning_level` (string, optional)
+  - Reasoning/thinking level for agents that support it (for example `high`, `low`).
+  - When omitted, the agent uses its default reasoning level.
+  - Discovered automatically during `ensemble init` by probing acpx agent capabilities.
+```
+
+- [ ] **Step 2: Update CLAUDE.md project structure**
+
+In `ensemble/CLAUDE.md`, update the `AgentConfig` description in the config section. Find the line:
+
+```
+│   │   │   ├── config/
+│   │   │   │   ├── ensemble.rs   # ensemble.yaml loader (EnsembleConfig)
+```
+
+No structural change needed — the file list is already correct. But update the comment in the error.rs line to reflect the new field isn't an error type.
+
+Actually, `CLAUDE.md` describes `AgentConfig` only implicitly via the project structure tree. No change needed there since `ensemble.rs` is already listed.
+
+However, update the "Key design decisions" section to mention model/reasoning discovery:
+
+Find the bullet starting with `- **Config from ensemble.yaml**:` and add after it:
+
+```markdown
+- **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models and reasoning levels. These are stored as `model` and `reasoning_level` in `AgentConfig` and emitted in `ensemble.yaml`.
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add docs/SPEC.md ensemble/CLAUDE.md
+git commit -m "Document reasoning_level field and model discovery in SPEC and CLAUDE.md"
+```
+
+---
+
+### Task 10: Final integration — verify full build and tests
+
+**Files:**
+- All modified files from tasks 1-9
 
 - [ ] **Step 1: Run the full workspace build**
 
