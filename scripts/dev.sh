@@ -83,8 +83,8 @@ run_dev() {
 
   # 3. Build and run the workspace
   echo "==> Building and running workspace"
-  echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- $*"
-  cargo run --workspace --exclude ensemble-desktop -- "$@"
+  echo "==> Running: cargo run -p ensemble-cli -- $*"
+  cargo run -p ensemble-cli -- "$@"
 }
 
 # Main
