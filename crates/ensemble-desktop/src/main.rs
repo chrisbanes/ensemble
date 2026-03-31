@@ -48,6 +48,10 @@ fn main() {
                 }
             });
 
+            // Store runtime in app state to prevent it from being dropped.
+            // Dropping a tokio Runtime cancels all spawned tasks.
+            app.manage(rt);
+
             info!("Ensemble Desktop initialized successfully");
             Ok(())
         })

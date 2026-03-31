@@ -7,7 +7,6 @@ use tracing::{error, info};
 use ensemble_core::api::router::{create_api_router, AppState};
 use ensemble_core::config::ensemble::{load_config, validate_config};
 use ensemble_core::observability::events::EventBus;
-use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
@@ -22,8 +21,6 @@ pub struct WebArgs {
 
 /// Run the orchestrator with web UI (SPA + API server)
 pub async fn execute(args: WebArgs) -> ExitCode {
-    init_logging();
-
     info!(
         config_path = %args.config_path.display(),
         host = %args.host,

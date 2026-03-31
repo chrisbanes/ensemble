@@ -5,21 +5,16 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 
 use ensemble_core::config::ensemble::{load_config, validate_config};
-use ensemble_core::observability::logging::init_logging;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct RunArgs {
     pub config_path: PathBuf,
 }
 
 /// Run the orchestrator in headless mode (terminal output only)
-#[allow(dead_code)]
 pub async fn execute(args: RunArgs) -> ExitCode {
-    init_logging();
-
     info!(
         config_path = %args.config_path.display(),
         "starting ensemble in headless mode"

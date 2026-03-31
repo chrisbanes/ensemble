@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
 fn main() {
@@ -12,21 +12,21 @@ fn main() {
     // Check if we're in CI or should skip UI build
     if std::env::var("SKIP_UI_BUILD").is_ok() {
         println!("cargo:warning=Skipping UI build (SKIP_UI_BUILD set)");
-        let assets_dir = PathBuf::from("assets/spa");
-        std::fs::create_dir_all(&assets_dir).ok();
+        let assets_dir = Path::new("assets/spa");
+        std::fs::create_dir_all(assets_dir).ok();
         return;
     }
 
     // Get paths
-    let ui_dir = PathBuf::from("../../ensemble-ui/src-ui");
+    let ui_dir = Path::new("../../ensemble-ui/src-ui");
     let dist_dir = ui_dir.join("dist");
-    let assets_dir = PathBuf::from("assets/spa");
+    let assets_dir = Path::new("assets/spa");
 
     // Check if npm/node is available
     if !command_exists("npm") {
         println!("cargo:warning=npm not found in PATH. UI will not be built.");
         println!("cargo:warning=Install Node.js or set SKIP_UI_BUILD=1 to skip.");
-        std::fs::create_dir_all(&assets_dir).ok();
+        std::fs::create_dir_all(assets_dir).ok();
         return;
     }
 
@@ -35,7 +35,7 @@ fn main() {
 
     let npm_ci = Command::new("npm")
         .args(["ci"])
-        .current_dir(&ui_dir)
+        .current_dir(ui_dir)
         .output()
         .expect("Failed to run npm ci");
 
@@ -49,7 +49,7 @@ fn main() {
 
     let npm_build = Command::new("npm")
         .args(["run", "build"])
-        .current_dir(&ui_dir)
+        .current_dir(ui_dir)
         .output()
         .expect("Failed to run npm build");
 
@@ -62,23 +62,25 @@ fn main() {
     }
 
     // Copy dist to assets
-    std::fs::remove_dir_all(&assets_dir).ok();
-    std::fs::create_dir_all(&assets_dir).unwrap();
+    std::fs::remove_dir_all(assets_dir).ok();
+    std::fs::create_dir_all(assets_dir).unwrap();
 
-    copy_dir_all(&dist_dir, &assets_dir).expect("Failed to copy dist to assets");
+    copy_dir_all(&dist_dir, assets_dir).expect("Failed to copy dist to assets");
 
     println!("cargo:warning=Ensemble Desktop UI built and embedded successfully");
 }
 
 fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|output| output.status.success())
+    Command::new(cmd)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
         .unwrap_or(false)
 }
 
-fn copy_dir_all(src: &PathBuf, dst: &PathBuf) -> std::io::Result<()> {
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
 
     for entry in std::fs::read_dir(src)? {
