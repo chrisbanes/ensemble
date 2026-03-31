@@ -1,6 +1,16 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Expand a leading `~` or `~/` to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return path.replacen('~', &home, 1);
+        }
+    }
+    path.to_string()
+}
+
 #[derive(Debug)]
 pub struct RepoEntry {
     pub path: PathBuf,
@@ -128,7 +138,8 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
             break;
         }
 
-        let input_path = PathBuf::from(&trimmed);
+        let expanded = expand_tilde(&trimmed);
+        let input_path = PathBuf::from(&expanded);
 
         // Canonicalize the path so we store an absolute, normalized path.
         let canonical = match std::fs::canonicalize(&input_path) {
