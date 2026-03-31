@@ -12,9 +12,53 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Build frontend once, share via artifact
+  frontend:
+    name: Frontend Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: crates/ensemble-ui/src-ui/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/ensemble-ui/src-ui/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Generate OpenAPI spec
+        run: cargo test -p ensemble-core --test openapi_spec write_openapi_spec -- --ignored
+
+      - name: Generate frontend API client
+        run: pnpm run codegen:client
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Build frontend
+        run: pnpm run build:embed
+        working-directory: crates/ensemble-ui/src-ui
+
+      - name: Upload frontend dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/ensemble-ui/src-ui/dist/
+          retention-days: 1
+
   # Build CLI binaries for all targets
   build-cli:
     name: CLI (${{ matrix.target }})
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -37,25 +81,16 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - uses: pnpm/action-setup@v5
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
         with:
-          package_json_file: crates/ensemble-ui/src-ui/package.json
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/ensemble-ui/src-ui/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Generate OpenAPI spec
-        run: cargo test -p ensemble-core --test openapi_spec write_openapi_spec -- --ignored
+          name: frontend-dist
+          path: crates/ensemble-cli/assets/spa/
 
       - name: Build CLI
         run: cargo build --release -p ensemble-cli --target ${{ matrix.target }}
+        env:
+          SKIP_UI_BUILD: 1
 
       - name: Package binary
         run: |
@@ -71,6 +106,7 @@ jobs:
   # Build Tauri desktop app (macOS aarch64)
   build-tauri:
     name: Desktop (Mac aarch64)
+    needs: frontend
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -79,6 +115,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Download frontend dist
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: crates/ensemble-ui/src-ui/dist/
+
+      - name: Copy dist to desktop assets for rust-embed
+        run: |
+          mkdir -p crates/ensemble-desktop/assets/spa
+          cp -r crates/ensemble-ui/src-ui/dist/* crates/ensemble-desktop/assets/spa/
+
       - uses: pnpm/action-setup@v5
         with:
           package_json_file: crates/ensemble-ui/src-ui/package.json
@@ -86,23 +133,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: pnpm
-          cache-dependency-path: crates/ensemble-ui/src-ui/pnpm-lock.yaml
-
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Generate OpenAPI spec
-        run: cargo test -p ensemble-core --test openapi_spec write_openapi_spec -- --ignored
-
-      - name: Generate frontend API client
-        run: pnpm run codegen:client
-        working-directory: crates/ensemble-ui/src-ui
-
-      - name: Build frontend
-        run: pnpm run build
-        working-directory: crates/ensemble-ui/src-ui
 
       - name: Install Tauri CLI
         run: pnpm install -g @tauri-apps/cli
@@ -111,6 +141,7 @@ jobs:
         run: tauri build
         working-directory: crates/ensemble-desktop
         env:
+          SKIP_UI_BUILD: 1
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
