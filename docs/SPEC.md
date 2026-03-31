@@ -820,7 +820,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.read_timeout_ms`: integer, default `5000`
 - `agent.stall_timeout_ms`: integer, default `300000`
 - `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
-  for ephemeral local bind, and CLI `--port` overrides it
+  for ephemeral local bind, and the `ensemble web --port` flag overrides it
 
 ## 7. Orchestration State Machine
 
@@ -1696,11 +1696,12 @@ If implemented:
 
 Enablement (extension):
 
-- Start the HTTP server when a CLI `--port` argument is provided.
+- Start the HTTP server when the `ensemble web` subcommand is used. The `--port` flag controls
+  the bind port; if omitted, an ephemeral port is assigned.
 - Start the HTTP server when `server.port` is present in `ensemble.yaml`.
 - `server.port` is extension configuration and is intentionally not part of the core front-matter
   schema in Section 5.3.
-- Precedence: CLI `--port` overrides `server.port` when both are present.
+- Precedence: `ensemble web --port` overrides `server.port` when both are present.
 - `server.port` must be an integer. Positive values bind that port. `0` may be used to request an
   ephemeral port for local development and tests.
 - Implementations should bind loopback by default (`127.0.0.1` or host equivalent) unless explicitly

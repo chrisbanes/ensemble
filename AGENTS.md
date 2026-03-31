@@ -10,33 +10,50 @@ See `docs/SPEC.md` for the full specification. See `docs/superpowers/plans/` for
 ensemble/
 ├── Cargo.toml                    # workspace root
 ├── crates/
-│   └── ensemble-core/            # core library (domain model, config, workspace)
-│       ├── src/
-│       │   ├── lib.rs
-│       │   ├── error.rs          # EnsembleError, ConfigError, WorkspaceError, WorktreeError, PipelineError
-│       │   ├── tracker/
-│       │   │   ├── mod.rs        # IssueTracker trait (read + write), TrackerError
-│       │   │   └── model.rs      # Issue, RunningEntry, RetryEntry, AgentTotals
-│       │   ├── config/
-│       │   │   ├── ensemble.rs   # ensemble.yaml loader (EnsembleConfig)
-│       │   │   └── template.rs   # Liquid prompt template renderer
-│       │   ├── pipeline/
-│       │   │   ├── mod.rs        # re-exports
-│       │   │   ├── dag.rs        # DAG construction + validation
-│       │   │   ├── engine.rs     # PipelineRun per-issue execution
-│       │   │   └── verdict.rs    # Verdict parsing (ACP + file fallback)
-│       │   └── workspace/
-│       │       ├── manager.rs    # WorkspaceManager (create/reuse/cleanup directories + worktrees)
-│       │       ├── coordinator.rs # WorktreeCoordinator (multi-repo worktree lifecycle)
-│       │       ├── worktree.rs   # Core git worktree operations (create/remove/exists/pull)
-│       │       ├── push_strategy.rs # PushStrategy enum (ask/auto_push/manual/pr_only)
-│       │       └── hooks.rs      # Async hook runner with timeouts
-│       └── tests/
-│           └── workflow_to_workspace.rs  # integration test
+│   ├── ensemble-core/            # core library (domain model, config, workspace)
+│   │   ├── src/
+│   │   │   ├── lib.rs
+│   │   │   ├── error.rs          # EnsembleError, ConfigError, WorkspaceError, WorktreeError, PipelineError
+│   │   │   ├── tracker/
+│   │   │   │   ├── mod.rs        # IssueTracker trait (read + write), TrackerError
+│   │   │   │   └── model.rs      # Issue, RunningEntry, RetryEntry, AgentTotals
+│   │   │   ├── config/
+│   │   │   │   ├── ensemble.rs   # ensemble.yaml loader (EnsembleConfig)
+│   │   │   │   └── template.rs   # Liquid prompt template renderer
+│   │   │   ├── pipeline/
+│   │   │   │   ├── mod.rs        # re-exports
+│   │   │   │   ├── dag.rs        # DAG construction + validation
+│   │   │   │   ├── engine.rs     # PipelineRun per-issue execution
+│   │   │   │   └── verdict.rs    # Verdict parsing (ACP + file fallback)
+│   │   │   └── workspace/
+│   │   │       ├── manager.rs    # WorkspaceManager (create/reuse/cleanup directories + worktrees)
+│   │   │       ├── coordinator.rs # WorktreeCoordinator (multi-repo worktree lifecycle)
+│   │   │       ├── worktree.rs   # Core git worktree operations (create/remove/exists/pull)
+│   │   │       ├── push_strategy.rs # PushStrategy enum (ask/auto_push/manual/pr_only)
+│   │   │       └── hooks.rs      # Async hook runner with timeouts
+│   │   └── tests/
+│   │       └── workflow_to_workspace.rs  # integration test
+│   ├── ensemble-cli/             # CLI binary
+│   │   ├── build.rs              # SPA build + embed script
+│   │   ├── src/
+│   │   │   ├── main.rs           # CLI entry point, subcommand dispatch
+│   │   │   ├── embedded_ui.rs    # rust-embed SPA serving
+│   │   │   └── commands/
+│   │   │       ├── mod.rs        # re-exports
+│   │   │       ├── init.rs       # `ensemble init` interactive config wizard
+│   │   │       ├── run.rs        # `ensemble run` headless orchestrator
+│   │   │       └── web.rs        # `ensemble web` orchestrator + SPA + API
+│   │   └── tests/
+│   └── ensemble-desktop/         # Tauri desktop app
+│       ├── build.rs              # tauri-build + SPA embed script
+│       └── src/
+│           ├── main.rs           # Tauri entry point, runtime management
+│           ├── embedded_ui.rs    # rust-embed SPA serving for Tauri
+│           └── orchestrator.rs   # Desktop orchestrator integration
 └── .github/workflows/ci.yml     # CI: check, test, clippy, fmt
 ```
 
-Future crates (not yet implemented): `ensemble-agent`, `ensemble-server`, `ensemble-cli`, `ensemble-desktop`.
+Future crates (not yet implemented): `ensemble-agent`, `ensemble-server`.
 
 ## Build and test
 

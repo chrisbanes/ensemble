@@ -60,10 +60,10 @@ ensemble run
 
 Ensemble polls the tracker, picks up eligible issues, and runs them through the pipeline.
 
-To also start the dashboard:
+To also start the web dashboard:
 
 ```sh
-ensemble run --port 3000
+ensemble web --port 3000
 ```
 
 Then open `http://localhost:3000` in your browser.
