@@ -40,7 +40,7 @@ pub fn ask_pipeline(
     }
 
     // Check if existing pipeline matches current agent roles
-    let existing_matches = existing.map_or(false, |config| {
+    let existing_matches = existing.is_some_and(|config| {
         config
             .steps
             .iter()
