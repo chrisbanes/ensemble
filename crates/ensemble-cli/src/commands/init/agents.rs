@@ -122,7 +122,11 @@ fn try_acpx_version() -> Option<String> {
 
     if output.status.success() {
         let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if v.is_empty() { None } else { Some(v) }
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
     } else {
         None
     }

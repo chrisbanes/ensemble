@@ -197,7 +197,10 @@ mod tests {
     #[test]
     fn expand_tilde_with_slash() {
         let home = std::env::var("HOME").unwrap();
-        assert_eq!(expand_tilde("~/dev/ensemble"), format!("{home}/dev/ensemble"));
+        assert_eq!(
+            expand_tilde("~/dev/ensemble"),
+            format!("{home}/dev/ensemble")
+        );
     }
 
     #[test]
@@ -228,7 +231,11 @@ mod tests {
         let repo = tmp.path();
 
         // Init a repo with a commit so HEAD and main exist.
-        Command::new("git").args(["init"]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
         Command::new("git")
             .args(["commit", "--allow-empty", "-m", "init"])
             .current_dir(repo)
