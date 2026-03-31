@@ -96,13 +96,19 @@ fn check_acpx() -> Result<String, String> {
         return Err("acpx is required to continue".to_string());
     }
 
-    let cmd = format!("{choice} install -g acpx@latest");
+    let (program, args): (&str, Vec<&str>) = if choice == "yarn" {
+        ("yarn", vec!["global", "add", "acpx@latest"])
+    } else {
+        (choice, vec!["install", "-g", "acpx@latest"])
+    };
+
+    let cmd = format!("{program} {}", args.join(" "));
     println!("\nRunning: {cmd}\n");
 
-    let status = std::process::Command::new(choice)
-        .args(["install", "-g", "acpx@latest"])
+    let status = std::process::Command::new(program)
+        .args(&args)
         .status()
-        .map_err(|e| format!("{choice} failed: {e}"))?;
+        .map_err(|e| format!("{program} failed: {e}"))?;
 
     if !status.success() {
         return Err(format!("{cmd} exited with {status}"));
