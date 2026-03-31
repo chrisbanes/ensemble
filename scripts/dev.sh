@@ -7,20 +7,20 @@ set -euo pipefail
 # Usage:
 #   ./scripts/dev.sh build              # full build with UI
 #   ./scripts/dev.sh run                # run with no args
-#   ./scripts/dev.sh run -- --help      # pass --help to ensemble
+#   ./scripts/dev.sh run --help         # pass --help to ensemble
 #
 # To skip UI build, set SKIP_UI_BUILD=1:
 #   SKIP_UI_BUILD=1 ./scripts/dev.sh build
-#   SKIP_UI_BUILD=1 ./scripts/dev.sh run -- --help
+#   SKIP_UI_BUILD=1 ./scripts/dev.sh run --help
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 UI_DIR="$REPO_ROOT/crates/ensemble-ui/src-ui"
 
-# Show usage
-usage() {
+# Show usage for this script (not ensemble)
+show_usage() {
   cat << 'EOF'
-Usage: ./scripts/dev.sh <command> [-- [args]]
+Usage: ./scripts/dev.sh <command> [args]
 
 Commands:
   build                Build the workspace
@@ -29,16 +29,17 @@ Commands:
 Environment Variables:
   SKIP_UI_BUILD=1      Skip UI build (Rust-only)
 
-For 'run' command, use -- to pass arguments to ensemble:
-  ./scripts/dev.sh run -- --help
-  ./scripts/dev.sh run -- run
+Arguments after the command are passed to ensemble:
+  ./scripts/dev.sh run --help
+  ./scripts/dev.sh run help
+  ./scripts/dev.sh run web
 
 Examples:
   ./scripts/dev.sh build                    # Full build
   SKIP_UI_BUILD=1 ./scripts/dev.sh build    # Rust-only build
   ./scripts/dev.sh run                      # Run ensemble with no args
-  ./scripts/dev.sh run -- --help            # Show ensemble help
-  SKIP_UI_BUILD=1 ./scripts/dev.sh run -- help  # Skip UI, run help
+  ./scripts/dev.sh run --help               # Show ensemble help
+  SKIP_UI_BUILD=1 ./scripts/dev.sh run web  # Skip UI, run web command
 EOF
 }
 
@@ -65,12 +66,10 @@ run_build() {
 
 # Run command logic
 run_dev() {
-  local passthrough_args=("$@")
-
   if [ -n "${SKIP_UI_BUILD:-}" ]; then
     echo "==> Skipping UI build (SKIP_UI_BUILD=1)"
-    echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- ${passthrough_args[*]}"
-    cargo run --workspace --exclude ensemble-desktop -- "${passthrough_args[@]}"
+    echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- $*"
+    cargo run --workspace --exclude ensemble-desktop -- "$@"
     return 0
   fi
 
@@ -84,43 +83,24 @@ run_dev() {
 
   # 3. Build and run the workspace
   echo "==> Building and running workspace"
-  echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- ${passthrough_args[*]}"
-  cargo run --workspace --exclude ensemble-desktop -- "${passthrough_args[@]}"
+  echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- $*"
+  cargo run --workspace --exclude ensemble-desktop -- "$@"
 }
 
 # Main
 if [[ $# -eq 0 ]]; then
-  usage
+  show_usage
   exit 1
 fi
 
 command="$1"
 shift
 
-passthrough_args=()
-
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --)
-      # Everything after -- goes to cargo
-      shift
-      passthrough_args=("$@")
-      break
-      ;;
-    -*)
-      echo "Unknown option: $1"
-      echo "Use -- to separate script options from cargo arguments"
-      exit 1
-      ;;
-    *)
-      # Non-option argument before --
-      echo "Unexpected argument: $1"
-      echo "Use -- to pass arguments to cargo run"
-      exit 1
-      ;;
-  esac
-done
+# Handle script-level help
+if [[ "$command" == "--help" || "$command" == "-h" || "$command" == "help" ]]; then
+  show_usage
+  exit 0
+fi
 
 case "$command" in
   build)
@@ -128,15 +108,11 @@ case "$command" in
     echo "==> Done"
     ;;
   run)
-    run_dev "${passthrough_args[@]}"
-    ;;
-  --help|-h|help)
-    usage
-    exit 0
+    run_dev "$@"
     ;;
   *)
     echo "Unknown command: $command"
-    usage
+    show_usage
     exit 1
     ;;
 esac
