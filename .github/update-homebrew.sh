@@ -40,7 +40,7 @@ echo "  dmg: ${DMG_SHA256}"
 
 # Clone tap
 echo "==> Cloning homebrew-tap"
-git clone "https://x-access-token:${TAP_TOKEN}@github.com/chrisbanes/homebrew-tap.git" tap
+git clone "https://chrisbanes:${TAP_TOKEN}@github.com/chrisbanes/homebrew-tap.git" tap
 cd tap
 git config user.name "github-actions[bot]"
 git config user.email "github-actions[bot]@users.noreply.github.com"
