@@ -191,22 +191,8 @@ impl AgentRunner for AcpAgentRunner {
         }
 
         // Model is passed via --model flag in the spawn command (handled by
-        // resolve_agent_command), so no ACP set_model call needed here.
-
-        // Set reasoning level if configured in per-agent config
-        if let Some(level) = agent_config.and_then(|ac| ac.reasoning_level.as_deref()) {
-            info!(
-                agent = agent_name,
-                reasoning_level = level,
-                "setting reasoning level"
-            );
-            if let Err(e) = session
-                .set_config_option(&session_id, "thought_level", level)
-                .await
-            {
-                warn!(agent = agent_name, reasoning_level = level, error = %e, "failed to set reasoning level (agent may not support it)");
-            }
-        }
+        // resolve_agent_command). Reasoning level is stored in config but not
+        // yet passable at runtime — acpx doesn't support it on exec/spawn yet.
 
         // 3. Turn loop
         let max_turns = config.agent.max_turns;

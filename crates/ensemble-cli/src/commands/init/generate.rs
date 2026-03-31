@@ -67,9 +67,6 @@ pub fn generate_yaml(
         if let Some(ref model) = agent.model {
             yaml.push_str(&format!("    model: {model}\n"));
         }
-        if let Some(ref level) = agent.reasoning_level {
-            yaml.push_str(&format!("    reasoning_level: {level}\n"));
-        }
         yaml.push_str(&format!(
             "    prompt_template: templates/{}.liquid\n",
             find_step_for_agent(&agent.role, steps)
@@ -231,7 +228,6 @@ mod tests {
             role: "builder".to_string(),
             acpx_agent: "claude".to_string(),
             model: None,
-            reasoning_level: None,
         }];
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
@@ -273,13 +269,11 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
-                reasoning_level: None,
             },
             AgentEntry {
                 role: "reviewer".to_string(),
                 acpx_agent: "codex".to_string(),
                 model: None,
-                reasoning_level: None,
             },
         ];
         let steps = vec![
@@ -336,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_yaml_with_model_and_reasoning() {
+    fn test_generate_yaml_with_model() {
         let tracker = TrackerChoice::TodoFile {
             path: PathBuf::from("TODO.md"),
         };
@@ -344,7 +338,6 @@ mod tests {
             role: "builder".to_string(),
             acpx_agent: "claude".to_string(),
             model: Some("sonnet".to_string()),
-            reasoning_level: Some("high".to_string()),
         }];
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
@@ -357,7 +350,6 @@ mod tests {
 
         assert!(yaml.contains("acpx_agent: claude"));
         assert!(yaml.contains("model: sonnet"));
-        assert!(yaml.contains("reasoning_level: high"));
         assert!(yaml.contains("prompt_template: templates/implement.liquid"));
     }
 
@@ -368,8 +360,7 @@ mod tests {
         let agents = vec![AgentEntry {
             role: "builder".to_string(),
             acpx_agent: "claude".to_string(),
-            model: None,           // "default" selection becomes None
-            reasoning_level: None, // "default" selection becomes None
+            model: None, // "default" selection becomes None
         }];
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
@@ -385,10 +376,6 @@ mod tests {
             !yaml.contains("model:"),
             "None model should not appear in YAML"
         );
-        assert!(
-            !yaml.contains("reasoning_level:"),
-            "None reasoning_level should not appear in YAML"
-        );
     }
 
     #[test]
@@ -400,7 +387,6 @@ mod tests {
             role: "builder".to_string(),
             acpx_agent: "claude".to_string(),
             model: None,
-            reasoning_level: None,
         }];
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
@@ -413,6 +399,5 @@ mod tests {
 
         assert!(yaml.contains("acpx_agent: claude"));
         assert!(!yaml.contains("model:"));
-        assert!(!yaml.contains("reasoning_level:"));
     }
 }

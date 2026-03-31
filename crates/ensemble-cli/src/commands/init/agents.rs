@@ -20,7 +20,6 @@ pub struct AgentEntry {
     pub role: String,
     pub acpx_agent: String,
     pub model: Option<String>,
-    pub reasoning_level: Option<String>,
 }
 
 /// Capabilities discovered by probing an acpx agent session.
@@ -148,22 +147,17 @@ fn ask_roles(
 
     let default_roles = ["builder", "reviewer", "verifier", "planner"];
 
-    // Build a list of (acpx_agent, role, model, reasoning_level) from existing config.
+    // Build a list of (acpx_agent, role, model) from existing config.
     // Using a Vec instead of HashMap so multiple roles with the same acpx_agent are preserved.
-    let existing_agents: Vec<(&str, &str, Option<&str>, Option<&str>)> = existing
+    let existing_agents: Vec<(&str, &str, Option<&str>)> = existing
         .map(|config| {
             config
                 .agents
                 .iter()
                 .filter_map(|(role, ac)| {
-                    ac.acpx_agent.as_deref().map(|name| {
-                        (
-                            name,
-                            role.as_str(),
-                            ac.model.as_deref(),
-                            ac.reasoning_level.as_deref(),
-                        )
-                    })
+                    ac.acpx_agent
+                        .as_deref()
+                        .map(|name| (name, role.as_str(), ac.model.as_deref()))
                 })
                 .collect()
         })
@@ -179,13 +173,13 @@ fn ask_roles(
         // Find the n-th existing config entry matching this acpx_agent
         let existing_entry = existing_agents
             .iter()
-            .filter(|(name, _, _, _)| *name == agent_name.as_str())
+            .filter(|(name, _, _)| *name == agent_name.as_str())
             .nth(*seen);
         *seen += 1;
 
         // Default role: existing config role, or positional default
         let default_role = existing_entry
-            .map(|(_, role, _, _)| *role)
+            .map(|(_, role, _)| *role)
             .unwrap_or_else(|| default_roles.get(i).copied().unwrap_or("agent"));
 
         let role = inquire::Text::new(&format!("  {agent_name} → role name"))
@@ -198,9 +192,7 @@ fn ask_roles(
             .cloned()
             .unwrap_or_default();
 
-        let existing_model = existing_entry.and_then(|(_, _, model, _)| *model);
-
-        let existing_reasoning = existing_entry.and_then(|(_, _, _, reasoning)| *reasoning);
+        let existing_model = existing_entry.and_then(|(_, _, model)| *model);
 
         // Ask for model if capabilities show >1 model available
         let model = if caps.available_models.len() > 1 {
@@ -228,53 +220,10 @@ fn ask_roles(
             None
         };
 
-        // Ask for reasoning level. Use discovered thought_levels if available,
-        // otherwise fall back to a free-text prompt (agents may support reasoning
-        // levels even when not discoverable via ACP config_options yet).
-        let reasoning_level = if caps.thought_levels.len() > 1 {
-            // Agent reported thought_level options — use a Select
-            let reasoning_default = existing_reasoning.unwrap_or("default");
-            let default_idx = caps
-                .thought_levels
-                .iter()
-                .position(|l| l == reasoning_default)
-                .unwrap_or(0);
-
-            let chosen = inquire::Select::new(
-                &format!("  {agent_name} → reasoning level"),
-                caps.thought_levels.clone(),
-            )
-            .with_starting_cursor(default_idx)
-            .prompt()
-            .map_err(|e| e.to_string())?;
-
-            if chosen == "default" {
-                None
-            } else {
-                Some(chosen)
-            }
-        } else {
-            // No discoverable levels — ask as optional free-text
-            let default_val = existing_reasoning.unwrap_or("");
-            let input = inquire::Text::new(&format!("  {agent_name} → reasoning level (optional)"))
-                .with_help_message("e.g. low, medium, high, max — press enter to skip")
-                .with_default(default_val)
-                .prompt()
-                .map_err(|e| e.to_string())?;
-
-            let trimmed = input.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        };
-
         agents.push(AgentEntry {
             role,
             acpx_agent: agent_name.clone(),
             model,
-            reasoning_level,
         });
     }
 
