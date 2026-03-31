@@ -22,6 +22,17 @@ fn main() {
     let dist_dir = ui_dir.join("dist");
     let assets_dir = Path::new("assets/spa");
 
+    // Check if UI source directory exists
+    if !ui_dir.exists() {
+        println!(
+            "cargo:warning=UI source directory not found at {}",
+            ui_dir.display()
+        );
+        println!("cargo:warning=Creating empty assets directory. UI will not be embedded.");
+        std::fs::create_dir_all(assets_dir).ok();
+        return;
+    }
+
     // Check if npm/node is available
     if !command_exists("npm") {
         println!("cargo:warning=npm not found in PATH. UI will not be built.");
