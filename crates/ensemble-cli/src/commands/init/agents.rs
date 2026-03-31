@@ -96,11 +96,7 @@ fn check_acpx() -> Result<String, String> {
         return Err("acpx is required to continue".to_string());
     }
 
-    let (program, args): (&str, Vec<&str>) = if choice == "yarn" {
-        ("yarn", vec!["global", "add", "acpx@latest"])
-    } else {
-        (choice, vec!["install", "-g", "acpx@latest"])
-    };
+    let (program, args) = install_command(choice);
 
     let cmd = format!("{program} {}", args.join(" "));
     println!("\nRunning: {cmd}\n");
@@ -158,5 +154,48 @@ fn get_agent_version(name: &str) -> String {
             }
         }
         _ => String::new(),
+    }
+}
+
+/// Build the (program, args) pair for installing acpx globally with the
+/// given package manager. Yarn uses `global add` instead of `install -g`.
+fn install_command(manager: &str) -> (&str, Vec<&str>) {
+    if manager == "yarn" {
+        ("yarn", vec!["global", "add", "acpx@latest"])
+    } else {
+        (manager, vec!["install", "-g", "acpx@latest"])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_command_npm() {
+        let (prog, args) = install_command("npm");
+        assert_eq!(prog, "npm");
+        assert_eq!(args, &["install", "-g", "acpx@latest"]);
+    }
+
+    #[test]
+    fn install_command_pnpm() {
+        let (prog, args) = install_command("pnpm");
+        assert_eq!(prog, "pnpm");
+        assert_eq!(args, &["install", "-g", "acpx@latest"]);
+    }
+
+    #[test]
+    fn install_command_bun() {
+        let (prog, args) = install_command("bun");
+        assert_eq!(prog, "bun");
+        assert_eq!(args, &["install", "-g", "acpx@latest"]);
+    }
+
+    #[test]
+    fn install_command_yarn() {
+        let (prog, args) = install_command("yarn");
+        assert_eq!(prog, "yarn");
+        assert_eq!(args, &["global", "add", "acpx@latest"]);
     }
 }

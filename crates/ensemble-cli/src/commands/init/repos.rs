@@ -189,3 +189,110 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
 
     Ok(repos)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_tilde_with_slash() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~/dev/ensemble"), format!("{home}/dev/ensemble"));
+    }
+
+    #[test]
+    fn expand_tilde_bare() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/usr/local/bin"), "/usr/local/bin");
+    }
+
+    #[test]
+    fn expand_tilde_mid_path_unchanged() {
+        assert_eq!(expand_tilde("/home/~user/foo"), "/home/~user/foo");
+    }
+
+    #[test]
+    fn expand_tilde_tilde_user_unchanged() {
+        // ~otheruser should NOT be expanded (we only handle ~/...)
+        assert_eq!(expand_tilde("~otheruser/foo"), "~otheruser/foo");
+    }
+
+    #[test]
+    fn branch_exists_local_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+
+        // Init a repo with a commit so HEAD and main exist.
+        Command::new("git").args(["init"]).current_dir(repo).output().unwrap();
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        let repo_path = PathBuf::from(repo);
+        // Default branch should exist (could be main or master depending on config).
+        let default = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let branch_name = String::from_utf8_lossy(&default.stdout).trim().to_string();
+
+        assert!(branch_exists(&repo_path, &branch_name));
+        assert!(!branch_exists(&repo_path, "nonexistent-branch-xyz"));
+    }
+
+    #[test]
+    fn branch_exists_remote_qualified() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Create a bare "remote" and clone it so we get origin refs.
+        let bare = tmp.path().join("bare.git");
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+
+        let clone = tmp.path().join("clone");
+        Command::new("git")
+            .args(["clone"])
+            .arg(&bare)
+            .arg(&clone)
+            .output()
+            .unwrap();
+
+        // Create initial commit and push so origin/main exists.
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "origin", "HEAD"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+
+        let clone_path = PathBuf::from(&clone);
+        let default = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        let branch_name = String::from_utf8_lossy(&default.stdout).trim().to_string();
+
+        // "origin/main" should resolve via refs/remotes/origin/main
+        let remote_qualified = format!("origin/{branch_name}");
+        assert!(branch_exists(&clone_path, &remote_qualified));
+
+        // Bare name should also work
+        assert!(branch_exists(&clone_path, &branch_name));
+    }
+}
