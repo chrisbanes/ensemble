@@ -17,7 +17,7 @@ brew install ensemble
 Or build from source:
 
 ```sh
-git clone https://github.com/anthropics/ensemble.git
+git clone https://github.com/chrisbanes/ensemble.git
 cd ensemble
 cargo install --path crates/ensemble-cli
 ```
