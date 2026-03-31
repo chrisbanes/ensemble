@@ -26,7 +26,6 @@ pub struct AgentEntry {
 #[derive(Debug, Default, Clone)]
 pub struct AgentCapabilities {
     pub available_models: Vec<String>,
-    pub thought_levels: Vec<String>,
 }
 
 impl AgentCapabilities {
@@ -34,35 +33,15 @@ impl AgentCapabilities {
     pub fn from_session_json(json: &serde_json::Value) -> Self {
         let mut caps = Self::default();
 
-        let acpx = match json.get("acpx") {
-            Some(v) => v,
-            None => return caps,
-        };
-
-        // Extract available_models
-        if let Some(models) = acpx.get("available_models").and_then(|m| m.as_array()) {
+        if let Some(models) = json
+            .get("acpx")
+            .and_then(|a| a.get("available_models"))
+            .and_then(|m| m.as_array())
+        {
             caps.available_models = models
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_owned))
                 .collect();
-        }
-
-        // Extract thought_level options from config_options
-        if let Some(options) = acpx.get("config_options").and_then(|o| o.as_array()) {
-            for opt in options {
-                let category = opt.get("category").and_then(|c| c.as_str());
-                let opt_type = opt.get("type").and_then(|t| t.as_str());
-                if category == Some("thought_level") && opt_type == Some("select") {
-                    if let Some(values) = opt.get("options").and_then(|o| o.as_array()) {
-                        caps.thought_levels = values
-                            .iter()
-                            .filter_map(|v| {
-                                v.get("id").and_then(|id| id.as_str()).map(str::to_owned)
-                            })
-                            .collect();
-                    }
-                }
-            }
         }
 
         caps
@@ -442,31 +421,5 @@ mod tests {
         let json = serde_json::json!({"schema": "acpx.session.v1"});
         let caps = AgentCapabilities::from_session_json(&json);
         assert!(caps.available_models.is_empty());
-        assert!(caps.thought_levels.is_empty());
-    }
-
-    #[test]
-    fn parse_session_json_with_config_options() {
-        let json = serde_json::json!({
-            "acpx": {
-                "available_models": ["default"],
-                "config_options": [
-                    {
-                        "type": "select",
-                        "id": "thought_level",
-                        "label": "Thinking",
-                        "category": "thought_level",
-                        "currentValue": "default",
-                        "options": [
-                            {"id": "default", "label": "Default"},
-                            {"id": "high", "label": "High"},
-                            {"id": "low", "label": "Low"}
-                        ]
-                    }
-                ]
-            }
-        });
-        let caps = AgentCapabilities::from_session_json(&json);
-        assert_eq!(caps.thought_levels, vec!["default", "high", "low"]);
     }
 }
