@@ -1,6 +1,16 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// Expand a leading `~` or `~/` to the user's home directory.
+fn expand_tilde(path: &str) -> String {
+    if path == "~" || path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return path.replacen('~', &home, 1);
+        }
+    }
+    path.to_string()
+}
+
 #[derive(Debug)]
 pub struct RepoEntry {
     pub path: PathBuf,
@@ -47,28 +57,27 @@ fn is_git_repo(repo_path: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
-/// Check whether a branch exists in the given repository (checks local and remote refs).
+/// Check whether a branch exists in the given repository.
+///
+/// Accepts bare names (`main`), remote-qualified names (`origin/main`), or
+/// full refnames (`refs/heads/main`). Checks local refs, remote refs under
+/// `origin/`, and `refs/remotes/` directly so that `origin/main` resolves
+/// to `refs/remotes/origin/main`.
 fn branch_exists(repo_path: &PathBuf, branch: &str) -> bool {
-    // Check local refs first
-    let local_ref = format!("refs/heads/{}", branch);
-    if Command::new("git")
-        .args(["rev-parse", "--verify", &local_ref])
-        .current_dir(repo_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        return true;
-    }
+    let candidates = [
+        format!("refs/heads/{}", branch),
+        format!("refs/remotes/origin/{}", branch),
+        format!("refs/remotes/{}", branch),
+    ];
 
-    // Check remote refs
-    let remote_ref = format!("refs/remotes/origin/{}", branch);
-    Command::new("git")
-        .args(["rev-parse", "--verify", &remote_ref])
-        .current_dir(repo_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    candidates.iter().any(|r| {
+        Command::new("git")
+            .args(["rev-parse", "--verify", r])
+            .current_dir(repo_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 fn ask_branch_with_retry(repo_path: &PathBuf, initial_branch: &str) -> Option<String> {
@@ -128,7 +137,8 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
             break;
         }
 
-        let input_path = PathBuf::from(&trimmed);
+        let expanded = expand_tilde(&trimmed);
+        let input_path = PathBuf::from(&expanded);
 
         // Canonicalize the path so we store an absolute, normalized path.
         let canonical = match std::fs::canonicalize(&input_path) {
@@ -178,4 +188,130 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
     }
 
     Ok(repos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_tilde_with_slash() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(
+            expand_tilde("~/dev/ensemble"),
+            format!("{home}/dev/ensemble")
+        );
+    }
+
+    #[test]
+    fn expand_tilde_bare() {
+        let home = std::env::var("HOME").unwrap();
+        assert_eq!(expand_tilde("~"), home);
+    }
+
+    #[test]
+    fn expand_tilde_no_tilde() {
+        assert_eq!(expand_tilde("/usr/local/bin"), "/usr/local/bin");
+    }
+
+    #[test]
+    fn expand_tilde_mid_path_unchanged() {
+        assert_eq!(expand_tilde("/home/~user/foo"), "/home/~user/foo");
+    }
+
+    #[test]
+    fn expand_tilde_tilde_user_unchanged() {
+        // ~otheruser should NOT be expanded (we only handle ~/...)
+        assert_eq!(expand_tilde("~otheruser/foo"), "~otheruser/foo");
+    }
+
+    /// Configure git user in a repo so commits work on CI runners without global config.
+    fn git_config_user(dir: &std::path::Path) {
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+    }
+
+    #[test]
+    fn branch_exists_local_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+
+        Command::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        git_config_user(repo);
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+
+        let repo_path = PathBuf::from(repo);
+        let default = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        let branch_name = String::from_utf8_lossy(&default.stdout).trim().to_string();
+
+        assert!(branch_exists(&repo_path, &branch_name));
+        assert!(!branch_exists(&repo_path, "nonexistent-branch-xyz"));
+    }
+
+    #[test]
+    fn branch_exists_remote_qualified() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let bare = tmp.path().join("bare.git");
+        Command::new("git")
+            .args(["init", "--bare"])
+            .arg(&bare)
+            .output()
+            .unwrap();
+
+        let clone = tmp.path().join("clone");
+        Command::new("git")
+            .args(["clone"])
+            .arg(&bare)
+            .arg(&clone)
+            .output()
+            .unwrap();
+
+        git_config_user(&clone);
+        Command::new("git")
+            .args(["commit", "--allow-empty", "-m", "init"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["push", "origin", "HEAD"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+
+        let clone_path = PathBuf::from(&clone);
+        let default = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        let branch_name = String::from_utf8_lossy(&default.stdout).trim().to_string();
+
+        // "origin/main" should resolve via refs/remotes/origin/main
+        let remote_qualified = format!("origin/{branch_name}");
+        assert!(branch_exists(&clone_path, &remote_qualified));
+
+        // Bare name should also work
+        assert!(branch_exists(&clone_path, &branch_name));
+    }
 }
