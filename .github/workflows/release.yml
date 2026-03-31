@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - "v[0-9]*.[0-9]*.[0-9]*"
 
 permissions:
   contents: write
@@ -70,14 +70,12 @@ jobs:
 
   # Build Tauri desktop app (macOS aarch64)
   build-tauri:
-    name: Desktop (macOS aarch64)
+    name: Desktop (Mac aarch64)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2
 
@@ -106,19 +104,19 @@ jobs:
         run: pnpm run build
         working-directory: crates/ensemble-ui/src-ui
 
-      - uses: tauri-apps/tauri-action@v1
+      - name: Install Tauri CLI
+        run: pnpm install -g @tauri-apps/cli
+
+      - name: Build Tauri app
+        run: tauri build
+        working-directory: crates/ensemble-desktop
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-        with:
-          tauriScript: cargo
-          args: --target aarch64-apple-darwin
-          projectPath: crates/ensemble-desktop
 
       - name: Find .dmg
         id: dmg

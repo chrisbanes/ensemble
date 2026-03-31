@@ -77,9 +77,16 @@ jobs:
           path: crates/ensemble-ui/src-ui/dist/
           retention-days: 1
 
-  tauri-linux:
-    name: Build Tauri Desktop App (Linux)
-    runs-on: ubuntu-latest
+  tauri:
+    name: Build Desktop App (${{ matrix.name }})
+    strategy:
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-latest
+          - name: Mac
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
     needs: frontend
     steps:
       - uses: actions/checkout@v5
@@ -94,30 +101,25 @@ jobs:
           name: frontend-dist
           path: crates/ensemble-ui/src-ui/dist/
 
-      - name: Install Tauri dependencies
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: crates/ensemble-ui/src-ui/package.json
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: crates/ensemble-ui/src-ui/pnpm-lock.yaml
+
+      - name: Install Tauri CLI
+        run: pnpm install -g @tauri-apps/cli
+
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.runner == 'ubuntu-latest'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Build Tauri app
-        run: cargo build -p ensemble-desktop
-
-  tauri-macos:
-    name: Build Tauri Desktop App (macOS)
-    runs-on: macos-latest
-    needs: frontend
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Download frontend dist
-        uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: crates/ensemble-ui/src-ui/dist/
-
-      - name: Build Tauri app
-        run: cargo build -p ensemble-desktop
+        run: tauri build
+        working-directory: crates/ensemble-desktop
