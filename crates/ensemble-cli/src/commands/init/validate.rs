@@ -1,7 +1,7 @@
-use crate::init::agents::AgentEntry;
-use crate::init::pipeline::PipelineStep;
-use crate::init::repos::RepoEntry;
-use crate::init::tracker::TrackerChoice;
+use crate::commands::init::agents::AgentEntry;
+use crate::commands::init::pipeline::PipelineStep;
+use crate::commands::init::repos::RepoEntry;
+use crate::commands::init::tracker::TrackerChoice;
 
 #[derive(Debug)]
 struct CheckResult {

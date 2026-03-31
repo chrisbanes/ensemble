@@ -1,4 +1,4 @@
-use crate::init::agents::AgentEntry;
+use crate::commands::init::agents::AgentEntry;
 
 #[derive(Debug)]
 pub struct PipelineStep {

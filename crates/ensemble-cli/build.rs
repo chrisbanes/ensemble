@@ -2,9 +2,6 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
-    // Run tauri-build
-    tauri_build::build();
-
     // Only rebuild if UI source changes
     println!("cargo:rerun-if-changed=../../ensemble-ui/src-ui/src");
     println!("cargo:rerun-if-changed=../../ensemble-ui/src-ui/package.json");
@@ -12,6 +9,7 @@ fn main() {
     // Check if we're in CI or should skip UI build
     if std::env::var("SKIP_UI_BUILD").is_ok() {
         println!("cargo:warning=Skipping UI build (SKIP_UI_BUILD set)");
+        // Create empty assets directory if it doesn't exist
         let assets_dir = Path::new("assets/spa");
         std::fs::create_dir_all(assets_dir).ok();
         return;
@@ -42,7 +40,7 @@ fn main() {
     }
 
     // Build the SPA
-    println!("cargo:warning=Building Ensemble UI for Desktop...");
+    println!("cargo:warning=Building Ensemble UI...");
 
     let npm_ci = Command::new("npm")
         .args(["ci"])
@@ -78,7 +76,7 @@ fn main() {
 
     copy_dir_all(&dist_dir, assets_dir).expect("Failed to copy dist to assets");
 
-    println!("cargo:warning=Ensemble Desktop UI built and embedded successfully");
+    println!("cargo:warning=Ensemble UI built and embedded successfully");
 }
 
 fn command_exists(cmd: &str) -> bool {

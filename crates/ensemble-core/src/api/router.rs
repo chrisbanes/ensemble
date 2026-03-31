@@ -9,7 +9,6 @@ use axum::{Json, Router};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tower_http::services::{ServeDir, ServeFile};
 use utoipa::OpenApi;
 
 /// Shared application state passed to all API handlers.
@@ -45,22 +44,14 @@ pub struct AppState {
 /// - `POST /api/v1/{identifier}/retry` — retry a failed issue
 /// - `GET /ws/events/{identifier}` — WebSocket live event stream
 ///
-/// **Security:** The API is unauthenticated. The CLI binds to `127.0.0.1` by
-/// default, but callers can override the listen address via `--host` / `HOST`.
-/// Binding to a non-loopback address exposes this unauthenticated API to the
+/// **Security:** The API is unauthenticated. Bind to `127.0.0.1` by
+/// default. Binding to a non-loopback address exposes this unauthenticated API to the
 /// network — only do so in trusted environments or behind a reverse proxy.
 ///
-/// If `static_dir` is provided, unmatched non-API, non-WS routes serve static
-/// files from that directory with SPA fallback to `index.html`. API and WS
-/// routes have their own 404 fallbacks so they never leak `index.html`.
+/// Note: This router provides API routes only. UI/SPA serving is handled separately
+/// by the CLI's embedded_ui module.
 pub fn create_api_router(state: AppState) -> Router {
-    create_api_router_with_static(state, None)
-}
-
-/// Create the API router with optional static file serving for the dashboard SPA.
-pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf>) -> Router {
-    // API routes get a JSON 404 fallback so unmatched /api/v1/* paths never
-    // fall through to the static file handler.
+    // API routes get a JSON 404 fallback
     let api_routes = Router::new()
         .route("/state", get(handlers::get_state))
         .route(
@@ -98,7 +89,7 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
         .to_json()
         .expect("OpenAPI spec serialization should not fail");
 
-    let mut router = Router::new()
+    Router::new()
         .route(
             "/api/openapi.json",
             get(move || {
@@ -108,18 +99,10 @@ pub fn create_api_router_with_static(state: AppState, static_dir: Option<PathBuf
         )
         .nest("/api/v1", api_routes)
         .route("/ws/events/{identifier}", get(ws::ws_events))
-        .with_state(state);
-
-    if let Some(dir) = static_dir {
-        let serve = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
-        router = router.fallback_service(serve);
-    }
-
-    router
+        .with_state(state)
 }
 
-/// Fallback handler for unmatched API routes. Returns a JSON 404 instead of
-/// falling through to the static file handler.
+/// Fallback handler for unmatched API routes. Returns a JSON 404.
 async fn api_not_found() -> impl IntoResponse {
     let error = handlers::ApiError::new("not_found", "API endpoint not found");
     (
@@ -149,11 +132,5 @@ mod tests {
     fn test_router_creation_does_not_panic() {
         let state = test_app_state();
         let _router = create_api_router(state);
-    }
-
-    #[test]
-    fn test_router_with_static_dir_does_not_panic() {
-        let state = test_app_state();
-        let _router = create_api_router_with_static(state, Some(PathBuf::from("/tmp/dashboard")));
     }
 }
