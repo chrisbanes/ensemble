@@ -13,3 +13,5 @@ installers = ["shell", "homebrew"]
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 # A Homebrew tap to push the formula to
 tap = "chrisbanes/homebrew-tap"
+# Pre-build script for CI (installs Node/pnpm, generates openapi.json)
+github-build-setup = ".github/build-setup.sh"
