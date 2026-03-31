@@ -45,6 +45,7 @@ EOF
 
 # Common build logic
 run_build() {
+  cd "$REPO_ROOT"
   if [ -n "${SKIP_UI_BUILD:-}" ]; then
     echo "==> Skipping UI build (SKIP_UI_BUILD=1)"
     cargo build --workspace --exclude ensemble-desktop
@@ -66,6 +67,7 @@ run_build() {
 
 # Run command logic
 run_dev() {
+  cd "$REPO_ROOT"
   if [ -n "${SKIP_UI_BUILD:-}" ]; then
     echo "==> Skipping UI build (SKIP_UI_BUILD=1)"
     echo "==> Running: cargo run --workspace --exclude ensemble-desktop -- $*"
