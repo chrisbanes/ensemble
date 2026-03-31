@@ -79,22 +79,50 @@ fn ask_roles(selected: Vec<String>) -> Result<Vec<AgentEntry>, String> {
 }
 
 fn check_acpx() -> Result<String, String> {
+    if let Some(version) = try_acpx_version() {
+        return Ok(version);
+    }
+
+    println!("acpx is not installed.\n");
+    println!("Ensemble requires acpx for agent communication.");
+    println!("See: https://github.com/openclaw/acpx\n");
+
+    let options = vec!["npm", "pnpm", "bun", "yarn", "Skip (exit)"];
+    let choice = inquire::Select::new("Install acpx with:", options)
+        .prompt()
+        .map_err(|e| e.to_string())?;
+
+    if choice == "Skip (exit)" {
+        return Err("acpx is required to continue".to_string());
+    }
+
+    let cmd = format!("{choice} install -g acpx@latest");
+    println!("\nRunning: {cmd}\n");
+
+    let status = std::process::Command::new(choice)
+        .args(["install", "-g", "acpx@latest"])
+        .status()
+        .map_err(|e| format!("{choice} failed: {e}"))?;
+
+    if !status.success() {
+        return Err(format!("{cmd} exited with {status}"));
+    }
+
+    // Verify it's now available
+    try_acpx_version().ok_or_else(|| "acpx installed but not found on PATH".to_string())
+}
+
+fn try_acpx_version() -> Option<String> {
     let output = std::process::Command::new("acpx")
         .arg("--version")
         .output()
-        .map_err(|_| {
-            "acpx is not installed.\n\n\
-             Ensemble requires acpx for agent communication.\n\
-             Install: npm install -g acpx@latest\n\
-             See: https://github.com/openclaw/acpx"
-                .to_string()
-        })?;
+        .ok()?;
 
     if output.status.success() {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(version)
+        let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if v.is_empty() { None } else { Some(v) }
     } else {
-        Err("acpx --version failed".to_string())
+        None
     }
 }
 
