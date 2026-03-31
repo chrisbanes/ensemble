@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetState, getGetStateQueryKey } from "./generated/api/state/state";
 import { useGetIssueDetail } from "./generated/api/issues/issues";
@@ -32,6 +33,37 @@ export function useStateQuery() {
       select: (resp) => resp.data as RuntimeSnapshot,
     },
   });
+}
+
+/**
+ * Computes a countdown (in seconds) until the next backend orchestrator poll.
+ * Returns null if the orchestrator hasn't ticked yet.
+ */
+export function useNextPollCountdown(
+  lastTickAt: string | null | undefined,
+  pollIntervalMs: number | undefined,
+): number | null {
+  const [secondsRemaining, setSecondsRemaining] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!lastTickAt || !pollIntervalMs) {
+      setSecondsRemaining(null);
+      return;
+    }
+
+    const lastTickMs = new Date(lastTickAt).getTime();
+    const compute = () => {
+      const nextPollMs = lastTickMs + pollIntervalMs;
+      const remaining = Math.max(0, Math.ceil((nextPollMs - Date.now()) / 1000));
+      setSecondsRemaining(remaining);
+    };
+
+    compute();
+    const id = setInterval(compute, 1000);
+    return () => clearInterval(id);
+  }, [lastTickAt, pollIntervalMs]);
+
+  return secondsRemaining;
 }
 
 export function useIssueDetailQuery(identifier: string) {
