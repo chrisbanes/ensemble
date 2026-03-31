@@ -3,9 +3,11 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
+version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
+repository = "https://github.com/chrisbanes/ensemble"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
