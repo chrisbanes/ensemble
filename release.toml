@@ -1,0 +1,7 @@
+shared-version = true
+consolidate-commits = true
+tag-name = "v{{version}}"
+pre-release-commit-message = "release: v{{version}}"
+publish = false
+push = true
+tag = true
