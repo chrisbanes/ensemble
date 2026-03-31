@@ -20,7 +20,7 @@ fn main() {
     // Check SPA availability
     if !spa_available() {
         eprintln!("Warning: SPA assets not found. UI may not display correctly.");
-        eprintln!("Build with: cd ../ensemble-ui/src-ui && npm run build");
+        eprintln!("Build with: cd ../ensemble-ui/src-ui && pnpm run build");
     }
 
     tauri::Builder::default()

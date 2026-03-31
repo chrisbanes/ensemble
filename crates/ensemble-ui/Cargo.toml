@@ -6,4 +6,4 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
-# React dashboard SPA, built with npm/Vite. Source lives in src-ui/.
+# React dashboard SPA, built with pnpm/Vite. Source lives in src-ui/.

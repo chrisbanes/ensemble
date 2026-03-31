@@ -92,7 +92,7 @@ workspace:
 
 hooks:
   after_create: "git checkout -b ensemble/$ISSUE_ID"
-  before_run: "npm install"
+  before_run: "pnpm install"
   timeout_ms: 120000
 
 polling:

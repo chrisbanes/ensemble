@@ -33,10 +33,10 @@ fn main() {
         return;
     }
 
-    // Check if npm/node is available
-    if !command_exists("npm") {
-        println!("cargo:warning=npm not found in PATH. UI will not be built.");
-        println!("cargo:warning=Install Node.js or set SKIP_UI_BUILD=1 to skip.");
+    // Check if pnpm/node is available
+    if !command_exists("pnpm") {
+        println!("cargo:warning=pnpm not found in PATH. UI will not be built.");
+        println!("cargo:warning=Install pnpm (https://pnpm.io) or set SKIP_UI_BUILD=1 to skip.");
         std::fs::create_dir_all(assets_dir).ok();
         return;
     }
@@ -44,31 +44,25 @@ fn main() {
     // Build the SPA
     println!("cargo:warning=Building Ensemble UI for Desktop...");
 
-    let npm_ci = Command::new("npm")
-        .args(["ci"])
+    let pnpm_install = Command::new("pnpm")
+        .args(["install", "--frozen-lockfile"])
         .current_dir(ui_dir)
-        .output()
-        .expect("Failed to run npm ci");
+        .status()
+        .expect("Failed to run pnpm install");
 
-    if !npm_ci.status.success() {
-        println!(
-            "cargo:warning=npm ci failed: {}",
-            String::from_utf8_lossy(&npm_ci.stderr)
-        );
+    if !pnpm_install.success() {
+        println!("cargo:warning=pnpm install failed");
         std::process::exit(1);
     }
 
-    let npm_build = Command::new("npm")
+    let pnpm_build = Command::new("pnpm")
         .args(["run", "build"])
         .current_dir(ui_dir)
-        .output()
-        .expect("Failed to run npm build");
+        .status()
+        .expect("Failed to run pnpm build");
 
-    if !npm_build.status.success() {
-        println!(
-            "cargo:warning=npm run build failed: {}",
-            String::from_utf8_lossy(&npm_build.stderr)
-        );
+    if !pnpm_build.success() {
+        println!("cargo:warning=pnpm run build failed");
         std::process::exit(1);
     }
 
