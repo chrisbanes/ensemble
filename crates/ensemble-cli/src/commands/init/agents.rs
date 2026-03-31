@@ -228,8 +228,11 @@ fn ask_roles(
             None
         };
 
-        // Ask for reasoning level if capabilities include thought_levels
+        // Ask for reasoning level. Use discovered thought_levels if available,
+        // otherwise fall back to a free-text prompt (agents may support reasoning
+        // levels even when not discoverable via ACP config_options yet).
         let reasoning_level = if caps.thought_levels.len() > 1 {
+            // Agent reported thought_level options — use a Select
             let reasoning_default = existing_reasoning.unwrap_or("default");
             let default_idx = caps
                 .thought_levels
@@ -251,7 +254,20 @@ fn ask_roles(
                 Some(chosen)
             }
         } else {
-            None
+            // No discoverable levels — ask as optional free-text
+            let default_val = existing_reasoning.unwrap_or("");
+            let input = inquire::Text::new(&format!("  {agent_name} → reasoning level (optional)"))
+                .with_help_message("e.g. low, medium, high, max — press enter to skip")
+                .with_default(default_val)
+                .prompt()
+                .map_err(|e| e.to_string())?;
+
+            let trimmed = input.trim().to_string();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         };
 
         agents.push(AgentEntry {
