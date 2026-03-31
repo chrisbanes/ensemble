@@ -957,6 +957,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "dirs",
  "ensemble-core",
  "inquire",
  "mime_guess",

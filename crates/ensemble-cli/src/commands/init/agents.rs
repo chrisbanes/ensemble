@@ -1,3 +1,6 @@
+use ensemble_core::config::ensemble::EnsembleConfig;
+use std::collections::HashMap;
+
 const KNOWN_AGENTS: &[(&str, &str)] = &[
     ("claude", "Claude Code"),
     ("codex", "Codex CLI"),
@@ -16,9 +19,36 @@ const KNOWN_AGENTS: &[(&str, &str)] = &[
 pub struct AgentEntry {
     pub role: String,
     pub acpx_agent: String,
+    pub model: Option<String>,
 }
 
-pub fn discover_agents() -> Result<Vec<AgentEntry>, String> {
+/// Capabilities discovered by probing an acpx agent session.
+#[derive(Debug, Default, Clone)]
+pub struct AgentCapabilities {
+    pub available_models: Vec<String>,
+}
+
+impl AgentCapabilities {
+    /// Extract capabilities from a parsed session JSON file.
+    pub fn from_session_json(json: &serde_json::Value) -> Self {
+        let mut caps = Self::default();
+
+        if let Some(models) = json
+            .get("acpx")
+            .and_then(|a| a.get("available_models"))
+            .and_then(|m| m.as_array())
+        {
+            caps.available_models = models
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+        }
+
+        caps
+    }
+}
+
+pub fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEntry>, String> {
     let acpx_version = check_acpx()?;
     println!("Checking acpx... ✓ {acpx_version}\n");
 
@@ -41,9 +71,26 @@ pub fn discover_agents() -> Result<Vec<AgentEntry>, String> {
 
     println!();
 
+    // Compute default selection indices from existing config
+    let default_indices: Vec<usize> = if let Some(config) = existing {
+        let existing_agents: Vec<&str> = config
+            .agents
+            .values()
+            .filter_map(|a| a.acpx_agent.as_deref())
+            .collect();
+        available
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| existing_agents.contains(&name.as_str()))
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        (0..available.len()).collect()
+    };
+
     let selected =
         inquire::MultiSelect::new("Which agents should be available?", available.clone())
-            .with_default(&(0..available.len()).collect::<Vec<_>>())
+            .with_default(&default_indices)
             .prompt()
             .map_err(|e| e.to_string())?;
 
@@ -51,27 +98,111 @@ pub fn discover_agents() -> Result<Vec<AgentEntry>, String> {
         return Err("at least one agent is required".to_string());
     }
 
-    let agents = ask_roles(selected)?;
+    // Probe capabilities for selected agents
+    println!("\nProbing agent capabilities...");
+    let mut capabilities: HashMap<String, AgentCapabilities> = HashMap::new();
+    for agent_name in &selected {
+        print!("  {agent_name}...");
+        let caps = probe_agent_capabilities(agent_name);
+        if !caps.available_models.is_empty() {
+            println!(" {} model(s)", caps.available_models.len());
+        } else {
+            println!(" (no model info)");
+        }
+        capabilities.insert(agent_name.clone(), caps);
+    }
+
+    let agents = ask_roles(selected, &capabilities, existing)?;
 
     Ok(agents)
 }
 
-fn ask_roles(selected: Vec<String>) -> Result<Vec<AgentEntry>, String> {
+fn ask_roles(
+    selected: Vec<String>,
+    capabilities: &HashMap<String, AgentCapabilities>,
+    existing: Option<&EnsembleConfig>,
+) -> Result<Vec<AgentEntry>, String> {
     println!("\nName your agents by role:\n");
 
     let default_roles = ["builder", "reviewer", "verifier", "planner"];
+
+    // Build a list of (acpx_agent, role, model) from existing config.
+    // Using a Vec instead of HashMap so multiple roles with the same acpx_agent are preserved.
+    let existing_agents: Vec<(&str, &str, Option<&str>)> = existing
+        .map(|config| {
+            config
+                .agents
+                .iter()
+                .filter_map(|(role, ac)| {
+                    ac.acpx_agent
+                        .as_deref()
+                        .map(|name| (name, role.as_str(), ac.model.as_deref()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Track how many times we've seen each agent name so we can match the
+    // n-th occurrence to the n-th existing config entry for the same agent.
+    let mut agent_seen_count: HashMap<&str, usize> = HashMap::new();
     let mut agents = Vec::new();
 
     for (i, agent_name) in selected.iter().enumerate() {
-        let default_role = default_roles.get(i).unwrap_or(&"agent");
+        let seen = agent_seen_count.entry(agent_name.as_str()).or_insert(0);
+        // Find the n-th existing config entry matching this acpx_agent
+        let existing_entry = existing_agents
+            .iter()
+            .filter(|(name, _, _)| *name == agent_name.as_str())
+            .nth(*seen);
+        *seen += 1;
+
+        // Default role: existing config role, or positional default
+        let default_role = existing_entry
+            .map(|(_, role, _)| *role)
+            .unwrap_or_else(|| default_roles.get(i).copied().unwrap_or("agent"));
+
         let role = inquire::Text::new(&format!("  {agent_name} → role name"))
             .with_default(default_role)
             .prompt()
             .map_err(|e| e.to_string())?;
 
+        let caps = capabilities
+            .get(agent_name.as_str())
+            .cloned()
+            .unwrap_or_default();
+
+        let existing_model = existing_entry.and_then(|(_, _, model)| *model);
+
+        // Ask for model if capabilities show >1 model available
+        let model = if caps.available_models.len() > 1 {
+            let model_default = existing_model.unwrap_or("default");
+            let default_idx = caps
+                .available_models
+                .iter()
+                .position(|m| m == model_default)
+                .unwrap_or(0);
+
+            let chosen = inquire::Select::new(
+                &format!("  {agent_name} → model"),
+                caps.available_models.clone(),
+            )
+            .with_starting_cursor(default_idx)
+            .prompt()
+            .map_err(|e| e.to_string())?;
+
+            if chosen == "default" {
+                None
+            } else {
+                Some(chosen)
+            }
+        } else {
+            None
+        };
+
         agents.push(AgentEntry {
             role,
             acpx_agent: agent_name.clone(),
+            model,
         });
     }
 
@@ -161,6 +292,73 @@ fn get_agent_version(name: &str) -> String {
     }
 }
 
+/// Probe an acpx agent for model and reasoning capabilities.
+///
+/// Creates a short-lived session, reads the session JSON to extract
+/// capabilities, then closes the session. Returns empty capabilities
+/// on any failure.
+///
+/// NOTE: This uses blocking I/O (`thread::sleep`, `fs::read_to_string`)
+/// and may block the current thread for up to 10 seconds per agent while
+/// waiting for the session file to be populated. This is acceptable in the
+/// interactive init wizard context but should not be called from async
+/// hot paths.
+fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
+    let session_name = "ensemble-probe";
+
+    // Create session
+    let output = std::process::Command::new("acpx")
+        .args([agent_name, "sessions", "ensure", "--name", session_name])
+        .output();
+
+    let session_id = match output {
+        Ok(ref o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            // Output format: "<uuid>\t(created)" or just "<uuid>"
+            stdout.trim().split('\t').next().unwrap_or("").to_string()
+        }
+        _ => return AgentCapabilities::default(),
+    };
+
+    if session_id.is_empty() {
+        return AgentCapabilities::default();
+    }
+
+    // Read session JSON from ~/.acpx/sessions/<id>.json
+    let caps = read_session_capabilities(&session_id);
+
+    // Close session (best-effort)
+    let _ = std::process::Command::new("acpx")
+        .args([agent_name, "sessions", "close", session_name])
+        .output();
+
+    caps
+}
+
+/// Read capabilities from a session JSON file.
+fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
+    let acpx_dir = dirs::home_dir()
+        .map(|h| h.join(".acpx").join("sessions"))
+        .unwrap_or_default();
+
+    let session_file = acpx_dir.join(format!("{session_id}.json"));
+
+    // Wait briefly for the session file to be populated with capabilities
+    for _ in 0..20 {
+        if let Ok(content) = std::fs::read_to_string(&session_file) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                let caps = AgentCapabilities::from_session_json(&json);
+                if !caps.available_models.is_empty() {
+                    return caps;
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    AgentCapabilities::default()
+}
+
 /// Build the (program, args) pair for installing acpx globally with the
 /// given package manager. Yarn uses `global add` instead of `install -g`.
 fn install_command(manager: &str) -> (&str, Vec<&str>) {
@@ -201,5 +399,27 @@ mod tests {
         let (prog, args) = install_command("yarn");
         assert_eq!(prog, "yarn");
         assert_eq!(args, &["global", "add", "acpx@latest"]);
+    }
+
+    #[test]
+    fn parse_session_json_extracts_models() {
+        let json = serde_json::json!({
+            "acpx": {
+                "current_model_id": "default",
+                "available_models": ["default", "sonnet", "sonnet[1m]", "haiku"]
+            }
+        });
+        let caps = AgentCapabilities::from_session_json(&json);
+        assert_eq!(
+            caps.available_models,
+            vec!["default", "sonnet", "sonnet[1m]", "haiku"]
+        );
+    }
+
+    #[test]
+    fn parse_session_json_no_acpx_field() {
+        let json = serde_json::json!({"schema": "acpx.session.v1"});
+        let caps = AgentCapabilities::from_session_json(&json);
+        assert!(caps.available_models.is_empty());
     }
 }

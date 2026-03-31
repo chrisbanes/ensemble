@@ -64,6 +64,9 @@ pub fn generate_yaml(
     for agent in agents {
         yaml.push_str(&format!("  {}:\n", agent.role));
         yaml.push_str(&format!("    acpx_agent: {}\n", agent.acpx_agent));
+        if let Some(ref model) = agent.model {
+            yaml.push_str(&format!("    model: {model}\n"));
+        }
         yaml.push_str(&format!(
             "    prompt_template: templates/{}.liquid\n",
             find_step_for_agent(&agent.role, steps)
@@ -224,6 +227,7 @@ mod tests {
         let agents = vec![AgentEntry {
             role: "builder".to_string(),
             acpx_agent: "claude".to_string(),
+            model: None,
         }];
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
@@ -264,10 +268,12 @@ mod tests {
             AgentEntry {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
+                model: None,
             },
             AgentEntry {
                 role: "reviewer".to_string(),
                 acpx_agent: "codex".to_string(),
+                model: None,
             },
         ];
         let steps = vec![
@@ -321,5 +327,77 @@ mod tests {
         assert!(md.contains("## Todo"));
         assert!(md.contains("[SAMPLE-1]"));
         assert!(md.contains("## Done"));
+    }
+
+    #[test]
+    fn test_generate_yaml_with_model() {
+        let tracker = TrackerChoice::TodoFile {
+            path: PathBuf::from("TODO.md"),
+        };
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: Some("In Progress".to_string()),
+        }];
+
+        let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
+
+        assert!(yaml.contains("acpx_agent: claude"));
+        assert!(yaml.contains("model: sonnet"));
+        assert!(yaml.contains("prompt_template: templates/implement.liquid"));
+    }
+
+    #[test]
+    fn test_generate_yaml_default_model_treated_as_none() {
+        // When users pick "default" in the model selector, agents.rs stores None.
+        // This test documents that None means "omit from YAML" (agent uses its default).
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: None, // "default" selection becomes None
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: None,
+        }];
+        let tracker = TrackerChoice::TodoFile {
+            path: PathBuf::from("TODO.md"),
+        };
+        let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
+        assert!(
+            !yaml.contains("model:"),
+            "None model should not appear in YAML"
+        );
+    }
+
+    #[test]
+    fn test_generate_yaml_omits_none_model() {
+        let tracker = TrackerChoice::TodoFile {
+            path: PathBuf::from("TODO.md"),
+        };
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: None,
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: Some("In Progress".to_string()),
+        }];
+
+        let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
+
+        assert!(yaml.contains("acpx_agent: claude"));
+        assert!(!yaml.contains("model:"));
     }
 }

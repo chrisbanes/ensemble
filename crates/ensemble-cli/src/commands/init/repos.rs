@@ -1,3 +1,4 @@
+use ensemble_core::config::ensemble::EnsembleConfig;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -118,11 +119,36 @@ fn ask_branch_with_retry(repo_path: &PathBuf, initial_branch: &str) -> Option<St
 /// validated as a git repo, a default branch is detected, and the user is
 /// asked to confirm or override the target branch. If a branch does not
 /// exist the user gets one retry before the repo is skipped.
-pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
+pub fn ask_repos(
+    existing: Option<&EnsembleConfig>,
+) -> Result<Vec<RepoEntry>, inquire::InquireError> {
     println!("Which repos should agents work in?");
 
     let mut repos: Vec<RepoEntry> = Vec::new();
-    let mut index = 1usize;
+
+    // Pre-populate from existing config
+    if let Some(config) = existing {
+        for repo_config in &config.repos {
+            let path = PathBuf::from(&repo_config.path);
+            if path.exists() && is_git_repo(&path) {
+                println!("  (existing) {} [{}]", path.display(), repo_config.branch);
+                repos.push(RepoEntry {
+                    path,
+                    branch: repo_config.branch.clone(),
+                });
+            }
+        }
+        if !repos.is_empty() {
+            let keep = inquire::Confirm::new(&format!("Keep {} existing repo(s)?", repos.len()))
+                .with_default(true)
+                .prompt()?;
+            if !keep {
+                repos.clear();
+            }
+        }
+    }
+
+    let mut index = repos.len() + 1;
 
     loop {
         let prompt = format!("Repo {} path (blank to finish)", index);

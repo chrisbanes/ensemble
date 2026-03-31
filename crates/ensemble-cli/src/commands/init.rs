@@ -1,3 +1,4 @@
+use ensemble_core::config::ensemble::{load_config, EnsembleConfig};
 use std::process::ExitCode;
 
 pub mod agents;
@@ -14,7 +15,8 @@ pub struct InitArgs;
 pub async fn execute(_args: InitArgs) -> ExitCode {
     println!();
 
-    if std::path::Path::new("ensemble.yaml").exists() {
+    // Try to load existing config for defaults
+    let existing: Option<EnsembleConfig> = if std::path::Path::new("ensemble.yaml").exists() {
         let overwrite = match inquire::Confirm::new("ensemble.yaml already exists. Overwrite?")
             .with_default(false)
             .prompt()
@@ -26,9 +28,24 @@ pub async fn execute(_args: InitArgs) -> ExitCode {
             println!("Aborted.");
             return ExitCode::SUCCESS;
         }
-    }
+        match load_config(std::path::Path::new("ensemble.yaml")) {
+            Ok(config) => {
+                println!("  (using existing values as defaults)\n");
+                Some(config)
+            }
+            Err(e) => {
+                eprintln!("  Warning: could not parse existing config: {e}");
+                eprintln!("  Proceeding without defaults.\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
-    let tracker_result = match tracker::ask_tracker().await {
+    let existing_ref = existing.as_ref();
+
+    let tracker_result = match tracker::ask_tracker(existing_ref).await {
         Ok(t) => t,
         Err(e) => {
             eprintln!("error: {e}");
@@ -36,7 +53,7 @@ pub async fn execute(_args: InitArgs) -> ExitCode {
         }
     };
 
-    let repos = match repos::ask_repos() {
+    let repos = match repos::ask_repos(existing_ref) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e}");
@@ -44,7 +61,7 @@ pub async fn execute(_args: InitArgs) -> ExitCode {
         }
     };
 
-    let discovered_agents = match agents::discover_agents() {
+    let discovered_agents = match agents::discover_agents(existing_ref) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");
@@ -52,7 +69,7 @@ pub async fn execute(_args: InitArgs) -> ExitCode {
         }
     };
 
-    let steps = match pipeline::ask_pipeline(&discovered_agents) {
+    let steps = match pipeline::ask_pipeline(&discovered_agents, existing_ref) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");

@@ -22,6 +22,7 @@ serde_json = { workspace = true }
 rust-embed = { workspace = true }
 mime_guess = "2"
 reqwest = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

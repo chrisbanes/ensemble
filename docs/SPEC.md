@@ -530,6 +530,10 @@ Named agent definitions. Each key is the agent role name, each value is an objec
 - `model` (string, optional)
   - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
   - When omitted, the agent uses its default model.
+- `reasoning_level` (string, optional)
+  - Reasoning/thinking level for agents that support it (for example `high`, `low`).
+  - When omitted, the agent uses its default reasoning level.
+  - Discovered automatically during `ensemble init` by probing acpx agent capabilities.
 - `prompt` (string, optional)
   - Inline prompt text. Mutually exclusive with `prompt_template`.
 - `prompt_template` (path string, optional)

@@ -77,12 +77,19 @@ fn default_terminal_states() -> Vec<String> {
 /// Per-agent definition: which executor to use and what prompt to send.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acpx_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub prompt_template: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_level: Option<String>,
 }
 
 /// A single step in the pipeline DAG.
@@ -746,6 +753,28 @@ on_failure: Failed
         assert_eq!(config.repos[0].branch, "main");
         assert_eq!(config.repos[1].path, "/tmp/repo-b");
         assert_eq!(config.repos[1].branch, "develop");
+    }
+
+    #[test]
+    fn test_parse_config_with_reasoning_level() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    model: sonnet
+    reasoning_level: high
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let builder = &config.agents["builder"];
+        assert_eq!(builder.reasoning_level.as_deref(), Some("high"));
     }
 
     #[test]

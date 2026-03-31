@@ -98,6 +98,30 @@ impl AcpAgentRunner {
     }
 }
 
+/// Build the ACP spawn command for an agent.
+///
+/// When `acpx_agent` is set, uses `acpx --agent <name>` with `--model` if
+/// configured. acpx speaks ACP over stdin/stdout and handles model selection
+/// natively. Falls back to `executor` if set, then to the global default.
+fn resolve_agent_command(
+    agent_config: Option<&crate::config::ensemble::AgentConfig>,
+    default_command: &str,
+) -> String {
+    if let Some(ac) = agent_config {
+        if let Some(ref acpx_name) = ac.acpx_agent {
+            let mut cmd = format!("acpx --agent {acpx_name}");
+            if let Some(ref model) = ac.model {
+                cmd.push_str(&format!(" --model {model}"));
+            }
+            return cmd;
+        }
+        if let Some(ref executor) = ac.executor {
+            return executor.clone();
+        }
+    }
+    default_command.to_string()
+}
+
 #[async_trait]
 impl AgentRunner for AcpAgentRunner {
     async fn run(
@@ -125,8 +149,12 @@ impl AgentRunner for AcpAgentRunner {
             })?;
         }
 
-        // 2. Spawn ACP agent and do handshake
-        let mut session = AcpSession::spawn(&config.agent.command, workspace_path).await?;
+        // 2. Resolve spawn command from per-agent config
+        let agent_config = config.agents.get(agent_name);
+        let spawn_command = resolve_agent_command(agent_config, &config.agent.command);
+
+        // Spawn ACP agent and do handshake
+        let mut session = AcpSession::spawn(&spawn_command, workspace_path).await?;
 
         let cwd_str = workspace_path
             .to_str()
@@ -161,6 +189,10 @@ impl AgentRunner for AcpAgentRunner {
                 .set_mode(&session_id, &config.agent.session_mode)
                 .await?;
         }
+
+        // Model is passed via --model flag in the spawn command (handled by
+        // resolve_agent_command). Reasoning level is stored in config but not
+        // yet passable at runtime — acpx doesn't support it on exec/spawn yet.
 
         // 3. Turn loop
         let max_turns = config.agent.max_turns;
