@@ -1,15 +1,6 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Strip a leading `origin/` (or `<remote>/`) prefix from a branch name so
-/// that user input like `origin/main` is normalised to `main`.
-fn strip_remote_prefix(branch: &str) -> String {
-    branch
-        .strip_prefix("origin/")
-        .unwrap_or(branch)
-        .to_string()
-}
-
 /// Expand a leading `~` or `~/` to the user's home directory.
 fn expand_tilde(path: &str) -> String {
     if path == "~" || path.starts_with("~/") {
@@ -66,28 +57,27 @@ fn is_git_repo(repo_path: &PathBuf) -> bool {
         .unwrap_or(false)
 }
 
-/// Check whether a branch exists in the given repository (checks local and remote refs).
+/// Check whether a branch exists in the given repository.
+///
+/// Accepts bare names (`main`), remote-qualified names (`origin/main`), or
+/// full refnames (`refs/heads/main`). Checks local refs, remote refs under
+/// `origin/`, and `refs/remotes/` directly so that `origin/main` resolves
+/// to `refs/remotes/origin/main`.
 fn branch_exists(repo_path: &PathBuf, branch: &str) -> bool {
-    // Check local refs first
-    let local_ref = format!("refs/heads/{}", branch);
-    if Command::new("git")
-        .args(["rev-parse", "--verify", &local_ref])
-        .current_dir(repo_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        return true;
-    }
+    let candidates = [
+        format!("refs/heads/{}", branch),
+        format!("refs/remotes/origin/{}", branch),
+        format!("refs/remotes/{}", branch),
+    ];
 
-    // Check remote refs
-    let remote_ref = format!("refs/remotes/origin/{}", branch);
-    Command::new("git")
-        .args(["rev-parse", "--verify", &remote_ref])
-        .current_dir(repo_path)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    candidates.iter().any(|r| {
+        Command::new("git")
+            .args(["rev-parse", "--verify", r])
+            .current_dir(repo_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
 }
 
 fn ask_branch_with_retry(repo_path: &PathBuf, initial_branch: &str) -> Option<String> {
@@ -103,7 +93,7 @@ fn ask_branch_with_retry(repo_path: &PathBuf, initial_branch: &str) -> Option<St
 
     let retry_prompt = format!("Retry branch for '{}'", repo_path.display());
     let retry_input = inquire::Text::new(&retry_prompt).prompt().ok()?;
-    let retry_branch = strip_remote_prefix(retry_input.trim());
+    let retry_branch = retry_input.trim().to_string();
 
     if retry_branch.is_empty() {
         return None;
@@ -180,7 +170,7 @@ pub fn ask_repos() -> Result<Vec<RepoEntry>, inquire::InquireError> {
         let branch_input = inquire::Text::new(&branch_prompt)
             .with_default(&branch_default_text)
             .prompt()?;
-        let branch = strip_remote_prefix(branch_input.trim());
+        let branch = branch_input.trim().to_string();
 
         // Validate the branch exists. Offer one retry on failure.
         match ask_branch_with_retry(&canonical, &branch) {
