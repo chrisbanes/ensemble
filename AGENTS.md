@@ -68,6 +68,26 @@ cargo fmt --all -- --check
 
 GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, test, clippy, fmt. All must pass. `RUSTFLAGS=-Dwarnings` is set globally — treat warnings as errors.
 
+## Release
+
+**One-time setup:**
+```sh
+cargo install cargo-release cargo-dist
+```
+
+**Cutting a release:**
+```sh
+cargo release <version> --execute   # e.g. cargo release 0.2.0 --execute
+```
+
+This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and pushes. The tag push triggers `.github/workflows/release.yml` which:
+1. Builds CLI binaries (macOS aarch64, Linux x86_64, Linux aarch64) via cargo-dist
+2. Builds macOS desktop `.dmg` (aarch64, signed + notarized) via Tauri Action
+3. Creates a GitHub Release with all artifacts
+4. Updates `chrisbanes/homebrew-tap` (formula for CLI, cask for desktop)
+
+**Required GitHub secrets:** `HOMEBREW_TAP_TOKEN`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_PASSWORD`
+
 ## Code conventions
 
 - **Rust 2021 edition**, minimum rust-version 1.80
