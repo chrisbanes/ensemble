@@ -47,10 +47,11 @@ fn main() {
     // which would deadlock (cargo already holds the build lock).
     let openapi_json = ui_dir.join("openapi.json");
     if !openapi_json.exists() {
-        println!("cargo:warning=openapi.json not found. Run `pnpm run codegen:spec` in crates/ensemble-ui/src-ui/ first.");
-        println!("cargo:warning=UI will not be embedded.");
-        std::fs::create_dir_all(assets_dir).ok();
-        return;
+        panic!(
+            "openapi.json not found at {}. Run `pnpm run codegen:spec` in crates/ensemble-ui/src-ui/ first, \
+             or set SKIP_UI_BUILD=1 to skip the UI embed.",
+            openapi_json.display()
+        );
     }
 
     // Build the SPA (using build:embed which skips codegen:spec to avoid circular cargo dep)
