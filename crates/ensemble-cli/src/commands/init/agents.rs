@@ -16,6 +16,8 @@ const KNOWN_AGENTS: &[(&str, &str)] = &[
 pub struct AgentEntry {
     pub role: String,
     pub acpx_agent: String,
+    pub model: Option<String>,
+    pub reasoning_level: Option<String>,
 }
 
 pub fn discover_agents() -> Result<Vec<AgentEntry>, String> {
@@ -72,6 +74,8 @@ fn ask_roles(selected: Vec<String>) -> Result<Vec<AgentEntry>, String> {
         agents.push(AgentEntry {
             role,
             acpx_agent: agent_name.clone(),
+            model: None,
+            reasoning_level: None,
         });
     }
 

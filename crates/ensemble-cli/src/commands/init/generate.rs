@@ -224,6 +224,8 @@ mod tests {
         let agents = vec![AgentEntry {
             role: "builder".to_string(),
             acpx_agent: "claude".to_string(),
+            model: None,
+            reasoning_level: None,
         }];
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
@@ -264,10 +266,14 @@ mod tests {
             AgentEntry {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
+                model: None,
+                reasoning_level: None,
             },
             AgentEntry {
                 role: "reviewer".to_string(),
                 acpx_agent: "codex".to_string(),
+                model: None,
+                reasoning_level: None,
             },
         ];
         let steps = vec![
