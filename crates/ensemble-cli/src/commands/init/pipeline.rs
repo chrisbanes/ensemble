@@ -16,14 +16,15 @@ pub fn ask_pipeline(
     let role_names: Vec<&str> = agents.iter().map(|a| a.role.as_str()).collect();
 
     if agents.len() == 1 {
-        // Check if existing config has steps for this single agent
-        let step_name = existing
-            .and_then(|c| c.steps.first())
+        // Use existing config's first step only if its agent matches the current role
+        let matching_step =
+            existing.and_then(|c| c.steps.first().filter(|s| s.agent == role_names[0]));
+
+        let step_name = matching_step
             .map(|s| s.name.as_str())
             .unwrap_or("implement");
 
-        let tracker_state = existing
-            .and_then(|c| c.steps.first())
+        let tracker_state = matching_step
             .and_then(|s| s.tracker_state.as_deref())
             .unwrap_or("In Progress");
 

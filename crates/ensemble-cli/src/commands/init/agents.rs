@@ -148,8 +148,9 @@ fn ask_roles(
 
     let default_roles = ["builder", "reviewer", "verifier", "planner"];
 
-    // Build a lookup from acpx_agent -> (role, model, reasoning_level) from existing config
-    let existing_agents: HashMap<&str, (&str, Option<&str>, Option<&str>)> = existing
+    // Build a list of (acpx_agent, role, model, reasoning_level) from existing config.
+    // Using a Vec instead of HashMap so multiple roles with the same acpx_agent are preserved.
+    let existing_agents: Vec<(&str, &str, Option<&str>, Option<&str>)> = existing
         .map(|config| {
             config
                 .agents
@@ -158,11 +159,9 @@ fn ask_roles(
                     ac.acpx_agent.as_deref().map(|name| {
                         (
                             name,
-                            (
-                                role.as_str(),
-                                ac.model.as_deref(),
-                                ac.reasoning_level.as_deref(),
-                            ),
+                            role.as_str(),
+                            ac.model.as_deref(),
+                            ac.reasoning_level.as_deref(),
                         )
                     })
                 })
@@ -170,13 +169,23 @@ fn ask_roles(
         })
         .unwrap_or_default();
 
+    // Track how many times we've seen each agent name so we can match the
+    // n-th occurrence to the n-th existing config entry for the same agent.
+    let mut agent_seen_count: HashMap<&str, usize> = HashMap::new();
     let mut agents = Vec::new();
 
     for (i, agent_name) in selected.iter().enumerate() {
+        let seen = agent_seen_count.entry(agent_name.as_str()).or_insert(0);
+        // Find the n-th existing config entry matching this acpx_agent
+        let existing_entry = existing_agents
+            .iter()
+            .filter(|(name, _, _, _)| *name == agent_name.as_str())
+            .nth(*seen);
+        *seen += 1;
+
         // Default role: existing config role, or positional default
-        let default_role = existing_agents
-            .get(agent_name.as_str())
-            .map(|(role, _, _)| *role)
+        let default_role = existing_entry
+            .map(|(_, role, _, _)| *role)
             .unwrap_or_else(|| default_roles.get(i).copied().unwrap_or("agent"));
 
         let role = inquire::Text::new(&format!("  {agent_name} → role name"))
@@ -189,13 +198,9 @@ fn ask_roles(
             .cloned()
             .unwrap_or_default();
 
-        let existing_model = existing_agents
-            .get(agent_name.as_str())
-            .and_then(|(_, model, _)| *model);
+        let existing_model = existing_entry.and_then(|(_, _, model, _)| *model);
 
-        let existing_reasoning = existing_agents
-            .get(agent_name.as_str())
-            .and_then(|(_, _, reasoning)| *reasoning);
+        let existing_reasoning = existing_entry.and_then(|(_, _, _, reasoning)| *reasoning);
 
         // Ask for model if capabilities show >1 model available
         let model = if caps.available_models.len() > 1 {
@@ -348,6 +353,12 @@ fn get_agent_version(name: &str) -> String {
 /// Creates a short-lived session, reads the session JSON to extract
 /// capabilities, then closes the session. Returns empty capabilities
 /// on any failure.
+///
+/// NOTE: This uses blocking I/O (`thread::sleep`, `fs::read_to_string`)
+/// and may block the current thread for up to 10 seconds per agent while
+/// waiting for the session file to be populated. This is acceptable in the
+/// interactive init wizard context but should not be called from async
+/// hot paths.
 fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let session_name = "ensemble-probe";
 

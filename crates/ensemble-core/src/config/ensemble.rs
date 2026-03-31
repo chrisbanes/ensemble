@@ -77,10 +77,15 @@ fn default_terminal_states() -> Vec<String> {
 /// Per-agent definition: which executor to use and what prompt to send.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acpx_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]
     pub prompt_template: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

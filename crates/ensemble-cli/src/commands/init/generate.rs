@@ -362,6 +362,36 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_yaml_default_model_treated_as_none() {
+        // When users pick "default" in the model selector, agents.rs stores None.
+        // This test documents that None means "omit from YAML" (agent uses its default).
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: None,           // "default" selection becomes None
+            reasoning_level: None, // "default" selection becomes None
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: None,
+        }];
+        let tracker = TrackerChoice::TodoFile {
+            path: PathBuf::from("TODO.md"),
+        };
+        let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
+        assert!(
+            !yaml.contains("model:"),
+            "None model should not appear in YAML"
+        );
+        assert!(
+            !yaml.contains("reasoning_level:"),
+            "None reasoning_level should not appear in YAML"
+        );
+    }
+
+    #[test]
     fn test_generate_yaml_omits_none_model() {
         let tracker = TrackerChoice::TodoFile {
             path: PathBuf::from("TODO.md"),
