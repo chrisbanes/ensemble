@@ -105,7 +105,11 @@ CASK
 # Push to tap
 echo "==> Pushing to tap"
 git add Formula/ensemble.rb Casks/ensemble-desktop.rb
-git commit -m "Update ensemble to ${VERSION}"
-git push
+if ! git diff --cached --quiet; then
+  git commit -m "Update ensemble to ${VERSION}"
+  git push
+else
+  echo "No changes to commit; skipping push"
+fi
 
 echo "==> Done"
