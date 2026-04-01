@@ -18,7 +18,8 @@ if ! ls ${ARTIFACTS_DIR}/ensemble-${TAG}-*.tar.gz 1>/dev/null 2>&1; then
   exit 1
 fi
 
-if ! ls ${ARTIFACTS_DIR}/*.dmg 1>/dev/null 2>&1; then
+DMG=$(find ${ARTIFACTS_DIR} -name '*.dmg' -type f | head -1)
+if [ -z "$DMG" ]; then
   echo "ERROR: No .dmg file found in ${ARTIFACTS_DIR}"
   exit 1
 fi
@@ -33,7 +34,6 @@ for f in ${ARTIFACTS_DIR}/ensemble-${TAG}-*.tar.gz; do
 done
 
 # Compute checksum for desktop .dmg
-DMG=$(ls ${ARTIFACTS_DIR}/*.dmg | head -1)
 DMG_NAME=$(basename "$DMG")
 DMG_SHA256=$(sha256sum "$DMG" | awk '{print $1}')
 echo "  dmg: ${DMG_SHA256}"

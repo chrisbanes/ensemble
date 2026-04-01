@@ -126,6 +126,12 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Build Tauri app
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: tauri build
+        working-directory: crates/ensemble-desktop
+
+      - name: Build Tauri app (signed)
+        if: startsWith(github.ref, 'refs/tags/v')
         run: tauri build
         working-directory: crates/ensemble-desktop
         env:
