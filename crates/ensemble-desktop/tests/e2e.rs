@@ -10,8 +10,72 @@
 //! Note: The app must be built first for these tests to work.
 
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+
+#[test]
+fn resolve_binary_path_prefers_explicit_env_override() {
+    let _guard = env_lock().lock().unwrap();
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let binary_name = binary_name();
+    let env_binary = temp_dir.path().join(binary_name);
+    std::fs::write(&env_binary, b"test-binary").expect("Failed to write binary fixture");
+
+    let previous = std::env::var_os("ENSEMBLE_DESKTOP_BIN");
+    std::env::set_var("ENSEMBLE_DESKTOP_BIN", &env_binary);
+
+    let resolved = resolve_binary_path(&[PathBuf::from("missing-binary")])
+        .expect("Expected env override to resolve");
+
+    restore_env("ENSEMBLE_DESKTOP_BIN", previous);
+    assert_eq!(resolved, env_binary);
+}
+
+#[test]
+fn resolve_binary_path_prefers_first_existing_candidate() {
+    let _guard = env_lock().lock().unwrap();
+    let previous = std::env::var_os("ENSEMBLE_DESKTOP_BIN");
+    std::env::remove_var("ENSEMBLE_DESKTOP_BIN");
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let binary_name = binary_name();
+    let debug_binary = temp_dir.path().join("debug").join(binary_name);
+    let release_binary = temp_dir.path().join("release").join(binary_name);
+
+    std::fs::create_dir_all(debug_binary.parent().expect("debug dir")).expect("create debug dir");
+    std::fs::write(&debug_binary, b"debug").expect("write debug fixture");
+    std::fs::create_dir_all(release_binary.parent().expect("release dir"))
+        .expect("create release dir");
+    std::fs::write(&release_binary, b"release").expect("write release fixture");
+
+    let resolved = resolve_binary_path(&[debug_binary.clone(), release_binary])
+        .expect("Expected first existing candidate to resolve");
+
+    restore_env("ENSEMBLE_DESKTOP_BIN", previous);
+    assert_eq!(resolved, debug_binary);
+}
+
+#[test]
+fn resolve_binary_path_rejects_missing_explicit_override() {
+    let _guard = env_lock().lock().unwrap();
+    let previous = std::env::var_os("ENSEMBLE_DESKTOP_BIN");
+
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let missing_override = temp_dir.path().join("does-not-exist").join(binary_name());
+    let fallback_binary = temp_dir.path().join("debug").join(binary_name());
+    std::fs::create_dir_all(fallback_binary.parent().expect("debug dir"))
+        .expect("create debug dir");
+    std::fs::write(&fallback_binary, b"debug").expect("write debug fixture");
+
+    std::env::set_var("ENSEMBLE_DESKTOP_BIN", &missing_override);
+
+    let resolved = resolve_binary_path(&[fallback_binary]);
+
+    restore_env("ENSEMBLE_DESKTOP_BIN", previous);
+    assert_eq!(resolved, None);
+}
 
 /// Launch the app and verify it doesn't immediately crash.
 ///
@@ -20,47 +84,10 @@ use std::time::Duration;
 #[test]
 #[ignore = "Requires compiled app binary - run with: cargo build --release -p ensemble-desktop first"]
 fn app_launches_without_crash() {
-    // Find the compiled binary - look in multiple locations
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-
-    // Try multiple possible locations for the binary
-    let possible_paths = vec![
-        // From crate directory
-        manifest_dir
-            .join("target")
-            .join(profile)
-            .join("ensemble-desktop"),
-        // From workspace root
-        workspace_root
-            .join("target")
-            .join(profile)
-            .join("ensemble-desktop"),
-        // From CARGO_TARGET_DIR if set
-        std::env::var("CARGO_TARGET_DIR")
-            .map(|d| {
-                std::path::PathBuf::from(d)
-                    .join(profile)
-                    .join("ensemble-desktop")
-            })
-            .unwrap_or_default(),
-    ];
-
-    #[cfg(target_os = "windows")]
-    let binary_path = possible_paths
-        .iter()
-        .map(|p| p.with_extension("exe"))
-        .find(|p| p.exists());
-
-    #[cfg(not(target_os = "windows"))]
-    let binary_path = possible_paths.iter().find(|p| p.exists());
-
-    let binary_path = binary_path.cloned().unwrap_or_else(|| {
+    let possible_paths = candidate_binary_paths(manifest_dir, workspace_root);
+    let binary_path = resolve_binary_path(&possible_paths).unwrap_or_else(|| {
         panic!(
             "App binary not found. Tried: {:?}\nBuild with: cargo build -p ensemble-desktop",
             possible_paths
@@ -92,14 +119,10 @@ on_failure: "Failed"
         .and_then(|mut f| f.write_all(minimal_config.as_bytes()))
         .expect("Failed to write test config file");
 
-    // Copy the config to workspace root so the app can find it
-    let workspace_config = workspace_root.join("ensemble.yaml");
-    std::fs::copy(&config_path, &workspace_config).ok();
-
-    // Launch the app with a short timeout to see if it crashes on startup
     let mut child = Command::new(&binary_path)
-        .current_dir(workspace_root) // Run from workspace root
-        .env("TAURI_WEBVIEW_AUTOMATION", "1") // Enable automation mode
+        .current_dir(workspace_root)
+        .env("ENSEMBLE_CONFIG", &config_path)
+        .env("TAURI_WEBVIEW_AUTOMATION", "1")
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -141,9 +164,6 @@ on_failure: "Failed"
         Err(e) => Err(format!("Failed to check app status: {}", e)),
     };
 
-    // Clean up the temp config file
-    let _ = std::fs::remove_file(&workspace_config);
-
     if let Err(msg) = result {
         panic!("{}", msg);
     }
@@ -153,56 +173,16 @@ on_failure: "Failed"
 #[test]
 #[ignore = "Requires compiled app binary - run with: cargo build --release -p ensemble-desktop first"]
 fn app_shows_error_when_config_missing() {
-    // Find the compiled binary
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
+    let possible_paths = candidate_binary_paths(manifest_dir, workspace_root);
+    let binary_path = resolve_binary_path(&possible_paths).expect("App binary not found");
+    let missing_config_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let missing_config = missing_config_dir.path().join("missing-ensemble.yaml");
 
-    let possible_paths = vec![
-        manifest_dir
-            .join("target")
-            .join(profile)
-            .join("ensemble-desktop"),
-        workspace_root
-            .join("target")
-            .join(profile)
-            .join("ensemble-desktop"),
-        std::env::var("CARGO_TARGET_DIR")
-            .map(|d| {
-                std::path::PathBuf::from(d)
-                    .join(profile)
-                    .join("ensemble-desktop")
-            })
-            .unwrap_or_default(),
-    ];
-
-    #[cfg(target_os = "windows")]
-    let binary_path = possible_paths
-        .iter()
-        .map(|p| p.with_extension("exe"))
-        .find(|p| p.exists());
-
-    #[cfg(not(target_os = "windows"))]
-    let binary_path = possible_paths.iter().find(|p| p.exists());
-
-    let binary_path = binary_path.cloned().expect("App binary not found");
-
-    // Ensure no ensemble.yaml exists in workspace
-    let workspace_config = workspace_root.join("ensemble.yaml");
-    let config_existed = workspace_config.exists();
-    if config_existed {
-        // Temporarily rename it
-        let backup = workspace_root.join("ensemble.yaml.bak");
-        std::fs::rename(&workspace_config, &backup).expect("Failed to backup config");
-    }
-
-    // Launch the app without config
     let mut child = Command::new(&binary_path)
         .current_dir(workspace_root)
+        .env("ENSEMBLE_CONFIG", &missing_config)
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -223,13 +203,6 @@ fn app_shows_error_when_config_missing() {
         err.read_to_string(&mut stderr).ok();
     }
 
-    // Restore config if it existed
-    if config_existed {
-        let backup = workspace_root.join("ensemble.yaml.bak");
-        std::fs::rename(&backup, &workspace_config).ok();
-    }
-
-    // Verify the app exited with error code 1 and showed helpful message
     assert!(
         !status.success(),
         "App should exit with error when config is missing"
@@ -244,4 +217,70 @@ fn app_shows_error_when_config_missing() {
     );
 
     println!("✓ App correctly exits with error when config is missing");
+}
+
+fn candidate_binary_paths(manifest_dir: &Path, workspace_root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Some(target_dir) = std::env::var_os("CARGO_TARGET_DIR") {
+        let target_dir = PathBuf::from(target_dir);
+        paths.push(target_dir.join("debug").join(binary_name()));
+        paths.push(target_dir.join("release").join(binary_name()));
+    }
+
+    paths.push(
+        workspace_root
+            .join("target")
+            .join("debug")
+            .join(binary_name()),
+    );
+    paths.push(
+        manifest_dir
+            .join("target")
+            .join("debug")
+            .join(binary_name()),
+    );
+    paths.push(
+        workspace_root
+            .join("target")
+            .join("release")
+            .join(binary_name()),
+    );
+    paths.push(
+        manifest_dir
+            .join("target")
+            .join("release")
+            .join(binary_name()),
+    );
+
+    paths
+}
+
+fn resolve_binary_path(candidates: &[PathBuf]) -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ENSEMBLE_DESKTOP_BIN") {
+        let path = PathBuf::from(path);
+        return path.exists().then_some(path);
+    }
+
+    candidates.iter().find(|path| path.exists()).cloned()
+}
+
+fn binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "ensemble-desktop.exe"
+    } else {
+        "ensemble-desktop"
+    }
+}
+
+fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
+    match value {
+        Some(value) => std::env::set_var(key, value),
+        None => std::env::remove_var(key),
+    }
+}
+
+fn env_lock() -> &'static Mutex<()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(()))
 }
