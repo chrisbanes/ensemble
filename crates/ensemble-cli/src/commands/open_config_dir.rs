@@ -34,7 +34,10 @@ pub async fn execute(args: OpenConfigDirArgs) -> ExitCode {
     };
 
     if !resolved.config_dir.exists() {
-        eprintln!("error: config directory does not exist: {}", resolved.config_dir.display());
+        eprintln!(
+            "error: config directory does not exist: {}",
+            resolved.config_dir.display()
+        );
         eprintln!("run `ensemble init` to create it");
         return ExitCode::FAILURE;
     }
@@ -55,16 +58,19 @@ pub async fn execute(args: OpenConfigDirArgs) -> ExitCode {
 #[cfg(target_os = "macos")]
 fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
     use std::process::Command;
-    
+
     let status = Command::new("open")
         .arg(path)
         .status()
         .map_err(|e| format!("failed to execute open command: {}", e))?;
-    
+
     if status.success() {
         Ok(())
     } else {
-        Err(format!("open command failed with status: {:?}", status.code()))
+        Err(format!(
+            "open command failed with status: {:?}",
+            status.code()
+        ))
     }
 }
 
@@ -72,16 +78,19 @@ fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
     use std::process::Command;
-    
+
     let status = Command::new("explorer")
         .arg(path)
         .status()
         .map_err(|e| format!("failed to execute explorer command: {}", e))?;
-    
+
     if status.success() {
         Ok(())
     } else {
-        Err(format!("explorer command failed with status: {:?}", status.code()))
+        Err(format!(
+            "explorer command failed with status: {:?}",
+            status.code()
+        ))
     }
 }
 
@@ -89,17 +98,15 @@ fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
     use std::process::Command;
-    
+
     // Try xdg-open first, then fallback to common file managers
-    let result = Command::new("xdg-open")
-        .arg(path)
-        .status();
-    
+    let result = Command::new("xdg-open").arg(path).status();
+
     match result {
         Ok(status) if status.success() => return Ok(()),
         _ => {}
     }
-    
+
     // Fallback to nautilus (GNOME) or dolphin (KDE)
     for cmd in ["nautilus", "dolphin", "thunar", "nemo"] {
         if let Ok(status) = Command::new(cmd).arg(path).status() {
@@ -108,7 +115,7 @@ fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
             }
         }
     }
-    
+
     Err("failed to open file manager. Please install xdg-open or a file manager (nautilus, dolphin, thunar, or nemo)".to_string())
 }
 

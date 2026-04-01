@@ -43,14 +43,20 @@ pub async fn execute(args: InitArgs) -> ExitCode {
     // Check for legacy ensemble.yaml and warn
     let legacy_path = resolved.config_dir.join("ensemble.yaml");
     if legacy_path.exists() && !resolved.config_path.exists() {
-        eprintln!("found legacy ensemble.yaml at {} - rename it to config.yaml", legacy_path.display());
+        eprintln!(
+            "found legacy ensemble.yaml at {} - rename it to config.yaml",
+            legacy_path.display()
+        );
     }
 
     // Try to load existing config for defaults
     let existing: Option<EnsembleConfig> = if resolved.config_path.exists() {
-        let overwrite = match inquire::Confirm::new(&format!("{} already exists. Overwrite?", resolved.config_path.display()))
-            .with_default(false)
-            .prompt()
+        let overwrite = match inquire::Confirm::new(&format!(
+            "{} already exists. Overwrite?",
+            resolved.config_path.display()
+        ))
+        .with_default(false)
+        .prompt()
         {
             Ok(v) => v,
             Err(_) => return ExitCode::FAILURE,
@@ -144,7 +150,10 @@ pub async fn execute(args: InitArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    println!("\n✓ Configuration written to {}", resolved.config_dir.display());
+    println!(
+        "\n✓ Configuration written to {}",
+        resolved.config_dir.display()
+    );
     println!("  - config.yaml: main configuration file");
     println!("  - .env: environment variables (auto-loaded)");
     println!("  - templates/: prompt templates");

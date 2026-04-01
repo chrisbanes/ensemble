@@ -63,7 +63,7 @@ enum Command {
 /// Check for legacy config override arguments and print migration error.
 fn reject_legacy_config_overrides(args: impl Iterator<Item = OsString>) -> Result<(), String> {
     let args_vec: Vec<_> = args.collect();
-    
+
     // Check for deprecated --config flag
     if args_vec.iter().any(|a| a == "--config" || a == "-c") {
         return Err(
@@ -72,15 +72,16 @@ fn reject_legacy_config_overrides(args: impl Iterator<Item = OsString>) -> Resul
              example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble run".to_string()
         );
     }
-    
+
     // Check for ENSEMBLE_CONFIG (old env var)
     if std::env::var_os("ENSEMBLE_CONFIG").is_some() {
         return Err(
             "error: ENSEMBLE_CONFIG is no longer supported. Use ENSEMBLE_CONFIG_DIR instead.\n\
-             example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble run".to_string()
+             example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble run"
+                .to_string(),
         );
     }
-    
+
     Ok(())
 }
 
@@ -91,20 +92,24 @@ async fn main() -> ExitCode {
         eprintln!("{}", msg);
         return ExitCode::FAILURE;
     }
-    
+
     let cli = Cli::parse();
     init_logging();
 
     match cli.command {
-        Some(Command::Init { config }) => commands::init::execute(commands::init::InitArgs { config_dir: config.config_dir }).await,
-        Some(Command::Run { config }) => {
-            commands::run::execute(commands::run::RunArgs { config_dir: config.config_dir }).await
+        Some(Command::Init { config }) => {
+            commands::init::execute(commands::init::InitArgs {
+                config_dir: config.config_dir,
+            })
+            .await
         }
-        Some(Command::Web {
-            config,
-            host,
-            port,
-        }) => {
+        Some(Command::Run { config }) => {
+            commands::run::execute(commands::run::RunArgs {
+                config_dir: config.config_dir,
+            })
+            .await
+        }
+        Some(Command::Web { config, host, port }) => {
             commands::web::execute(commands::web::WebArgs {
                 config_dir: config.config_dir,
                 host,
@@ -317,7 +322,12 @@ mod tests {
     #[test]
     fn test_cli_parse_open_config_dir_with_config_dir() {
         let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from(["ensemble", "open-config-dir", "--config-dir", "/tmp/ensemble"]);
+        let cli = Cli::parse_from([
+            "ensemble",
+            "open-config-dir",
+            "--config-dir",
+            "/tmp/ensemble",
+        ]);
         match cli.command {
             Some(Command::OpenConfigDir { config }) => {
                 assert_eq!(config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
@@ -331,24 +341,30 @@ mod tests {
 
     #[test]
     fn test_cli_rejects_legacy_config_flag() {
-        let result = reject_legacy_config_overrides([
-            OsString::from("ensemble"),
-            OsString::from("run"),
-            OsString::from("--config"),
-            OsString::from("old.yaml"),
-        ].into_iter());
+        let result = reject_legacy_config_overrides(
+            [
+                OsString::from("ensemble"),
+                OsString::from("run"),
+                OsString::from("--config"),
+                OsString::from("old.yaml"),
+            ]
+            .into_iter(),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("--config-dir"));
     }
 
     #[test]
     fn test_cli_rejects_legacy_short_config_flag() {
-        let result = reject_legacy_config_overrides([
-            OsString::from("ensemble"),
-            OsString::from("run"),
-            OsString::from("-c"),
-            OsString::from("old.yaml"),
-        ].into_iter());
+        let result = reject_legacy_config_overrides(
+            [
+                OsString::from("ensemble"),
+                OsString::from("run"),
+                OsString::from("-c"),
+                OsString::from("old.yaml"),
+            ]
+            .into_iter(),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("--config-dir"));
     }

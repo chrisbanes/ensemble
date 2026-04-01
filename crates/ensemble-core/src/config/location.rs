@@ -49,8 +49,7 @@ pub fn resolve_config_dir_for_desktop(
                 path: env_path.display().to_string(),
             });
         }
-        let expanded = expand_override_path(&env_path)?;
-        expanded
+        expand_override_path(&env_path)?
     } else {
         default_config_dir()?
     };

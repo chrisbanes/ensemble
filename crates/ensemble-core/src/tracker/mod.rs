@@ -5,7 +5,6 @@ pub mod todo_file;
 use crate::config::ensemble::TrackerConfig;
 use async_trait::async_trait;
 use model::Issue;
-use std::path::PathBuf;
 
 /// Error type for tracker operations.
 #[derive(Debug, thiserror::Error)]
@@ -86,7 +85,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
                 .as_ref()
                 .ok_or(TrackerError::MissingPath)?
                 .clone();
-            
+
             // Validate parent directory exists for runtime safety
             if let Some(parent) = path.parent() {
                 if !parent.exists() {
@@ -95,11 +94,8 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
                     });
                 }
             }
-            
-            let tracker = todo_file::TodoFileTracker::new(
-                path,
-                config.active_states.clone(),
-            );
+
+            let tracker = todo_file::TodoFileTracker::new(path, config.active_states.clone());
             Ok(Box::new(tracker))
         }
         "github" => {
@@ -133,6 +129,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
 mod tests {
     use super::*;
     use crate::config::ensemble::TrackerConfig;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn todo_file_config(path: PathBuf) -> TrackerConfig {
@@ -179,7 +176,10 @@ mod tests {
         let missing_parent = PathBuf::from("/definitely/missing/dir/TODO.md");
         let config = todo_file_config(missing_parent);
         let result = create_tracker(&config);
-        assert!(matches!(result, Err(TrackerError::MissingParentDirectory { .. })));
+        assert!(matches!(
+            result,
+            Err(TrackerError::MissingParentDirectory { .. })
+        ));
     }
 
     #[test]

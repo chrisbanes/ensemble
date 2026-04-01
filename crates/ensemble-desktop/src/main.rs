@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::path::PathBuf;
 use tauri::Manager;
 use tracing::{error, info};
 
@@ -23,7 +22,9 @@ fn main() {
 
     // Reject legacy ENSEMBLE_CONFIG env var
     if std::env::var_os("ENSEMBLE_CONFIG").is_some() {
-        eprintln!("Error: ENSEMBLE_CONFIG is no longer supported. Use ENSEMBLE_CONFIG_DIR instead.");
+        eprintln!(
+            "Error: ENSEMBLE_CONFIG is no longer supported. Use ENSEMBLE_CONFIG_DIR instead."
+        );
         eprintln!("example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble-desktop");
         std::process::exit(1);
     }
@@ -127,11 +128,7 @@ fn show_config_missing_dialog(message: &str) {
                     .args(["--error", message, "--title=Ensemble"])
                     .output()
             })
-            .or_else(|_| {
-                Command::new("xmessage")
-                    .args(["-center", message])
-                    .output()
-            });
+            .or_else(|_| Command::new("xmessage").args(["-center", message]).output());
     }
 
     #[cfg(target_os = "windows")]
