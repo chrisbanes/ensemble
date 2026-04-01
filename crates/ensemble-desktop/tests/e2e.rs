@@ -149,30 +149,99 @@ on_failure: "Failed"
     }
 }
 
-/// Verify the app binary exists in the expected location.
+/// Verify the app shows a helpful error and exits gracefully when config is missing.
 #[test]
-fn app_binary_exists_in_target() {
-    // This test runs without --ignored flag
-    // It just verifies the binary structure exists
-    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
+#[ignore = "Requires compiled app binary - run with: cargo build --release -p ensemble-desktop first"]
+fn app_shows_error_when_config_missing() {
+    // Find the compiled binary
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
 
-    // In CI, we verify the structure is set up correctly
-    // The actual launch test is ignored and runs separately
-    let debug_binary = std::path::Path::new(&target_dir)
-        .join("debug")
-        .join("ensemble-desktop");
-    let release_binary = std::path::Path::new(&target_dir)
-        .join("release")
-        .join("ensemble-desktop");
+    let possible_paths = vec![
+        manifest_dir
+            .join("target")
+            .join(profile)
+            .join("ensemble-desktop"),
+        workspace_root
+            .join("target")
+            .join(profile)
+            .join("ensemble-desktop"),
+        std::env::var("CARGO_TARGET_DIR")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join(profile)
+                    .join("ensemble-desktop")
+            })
+            .unwrap_or_default(),
+    ];
 
-    // At least one should exist (or be buildable)
-    let exists = debug_binary.exists() || release_binary.exists();
+    #[cfg(target_os = "windows")]
+    let binary_path = possible_paths
+        .iter()
+        .map(|p| p.with_extension("exe"))
+        .find(|p| p.exists());
 
-    if !exists {
-        // Don't fail in normal test runs - this is just informational
-        println!("Note: App binary not found. Build with: cargo build -p ensemble-desktop");
+    #[cfg(not(target_os = "windows"))]
+    let binary_path = possible_paths.iter().find(|p| p.exists());
+
+    let binary_path = binary_path.cloned().expect("App binary not found");
+
+    // Ensure no ensemble.yaml exists in workspace
+    let workspace_config = workspace_root.join("ensemble.yaml");
+    let config_existed = workspace_config.exists();
+    if config_existed {
+        // Temporarily rename it
+        let backup = workspace_root.join("ensemble.yaml.bak");
+        std::fs::rename(&workspace_config, &backup).expect("Failed to backup config");
     }
 
-    // Always pass - this is a smoke check
-    assert!(true);
+    // Launch the app without config
+    let mut child = Command::new(&binary_path)
+        .current_dir(workspace_root)
+        .env("RUST_BACKTRACE", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to launch app binary");
+
+    // Wait for it to exit
+    let status = child.wait().expect("Failed to wait for app");
+
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        use std::io::Read;
+        out.read_to_string(&mut stdout).ok();
+    }
+    if let Some(mut err) = child.stderr.take() {
+        use std::io::Read;
+        err.read_to_string(&mut stderr).ok();
+    }
+
+    // Restore config if it existed
+    if config_existed {
+        let backup = workspace_root.join("ensemble.yaml.bak");
+        std::fs::rename(&backup, &workspace_config).ok();
+    }
+
+    // Verify the app exited with error code 1 and showed helpful message
+    assert!(
+        !status.success(),
+        "App should exit with error when config is missing"
+    );
+
+    let combined_output = format!("{} {}", stdout, stderr);
+    assert!(
+        combined_output.contains("Config file not found")
+            || combined_output.contains("ensemble.yaml"),
+        "App should show helpful error message about missing config. Got:\n{}",
+        combined_output
+    );
+
+    println!("✓ App correctly exits with error when config is missing");
 }
