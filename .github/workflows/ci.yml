@@ -147,7 +147,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
-          path: target/release/bundle/**/*
+          path: |
+            target/**/*.dmg
+            target/**/*.deb
+            target/**/*.AppImage
           retention-days: 7
 
   # --- Release-only jobs (tag pushes) ---
@@ -222,7 +225,7 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: artifacts/**
           generate_release_notes: true
 
       - name: Update Homebrew tap
