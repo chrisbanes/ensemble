@@ -4,7 +4,7 @@ A pipeline is a directed acyclic graph (DAG) of steps that Ensemble runs for eac
 
 ## Steps and agents
 
-Each step references an agent defined in `ensemble.yaml`:
+Each step references an agent defined in `config.yaml`:
 
 ```yaml
 agents:
@@ -16,6 +16,8 @@ steps:
   - name: build
     agent: builder
 ```
+
+The `templates/` directory is relative to your configuration directory. See [Configuration Reference](configuration.md) for details on config directory resolution.
 
 When a step runs, Ensemble:
 1. Renders the agent's prompt template with the issue context
