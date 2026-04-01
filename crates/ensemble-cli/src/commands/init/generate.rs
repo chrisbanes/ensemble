@@ -137,6 +137,7 @@ pub fn generate_todo_md() -> String {
 }
 
 pub fn write_files(
+    config_dir: &std::path::Path,
     tracker: &TrackerChoice,
     repos: &[RepoEntry],
     agents: &[AgentEntry],
@@ -146,64 +147,83 @@ pub fn write_files(
 ) -> Result<(), std::io::Error> {
     println!("Writing configuration...");
 
-    let yaml = generate_yaml(tracker, repos, agents, steps, on_success, on_failure);
-    std::fs::write("ensemble.yaml", &yaml)?;
-    println!("  ✓ ensemble.yaml");
+    // Create config directory if it doesn't exist
+    std::fs::create_dir_all(config_dir)?;
 
-    std::fs::create_dir_all("templates")?;
+    let yaml = generate_yaml(tracker, repos, agents, steps, on_success, on_failure);
+    let config_path = config_dir.join("config.yaml");
+    std::fs::write(&config_path, &yaml)?;
+    println!("  ✓ {}", config_path.display());
+
+    let templates_dir = config_dir.join("templates");
+    std::fs::create_dir_all(&templates_dir)?;
     for step in steps {
         let template = generate_template(&step.name);
-        let path = format!("templates/{}.liquid", step.name);
-        if std::path::Path::new(&path).exists() {
-            match inquire::Confirm::new(&format!("Template '{}' already exists. Overwrite?", path))
-                .with_default(true)
-                .prompt()
+        let path = templates_dir.join(format!("{}.liquid", step.name));
+        if path.exists() {
+            match inquire::Confirm::new(&format!(
+                "Template '{}' already exists. Overwrite?",
+                path.display()
+            ))
+            .with_default(true)
+            .prompt()
             {
                 Ok(true) => {}
                 Ok(false) => {
-                    println!("  Skipping {path}");
+                    println!("  Skipping {}", path.display());
                     continue;
                 }
                 Err(_) => return Ok(()),
             }
         }
         std::fs::write(&path, &template)?;
-        println!("  ✓ {path}");
+        println!("  ✓ {}", path.display());
     }
 
-    if let TrackerChoice::TodoFile { .. } = tracker {
-        std::fs::write("TODO.md", generate_todo_md())?;
-        println!("  ✓ TODO.md");
+    if let TrackerChoice::TodoFile { path } = tracker {
+        // Create parent directories for TODO file if needed
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, generate_todo_md())?;
+        println!("  ✓ {}", path.display());
     }
 
     // Write .env file with GitHub token if provided interactively
     if let TrackerChoice::GitHub {
         api_token: Some(token),
+        api_key_env,
         ..
     } = tracker
     {
-        if std::path::Path::new(".env").exists() {
-            match inquire::Confirm::new(".env already exists. Overwrite?")
-                .with_default(false)
-                .prompt()
+        let env_path = config_dir.join(".env");
+        if env_path.exists() {
+            match inquire::Confirm::new(&format!(
+                "{} already exists. Overwrite?",
+                env_path.display()
+            ))
+            .with_default(false)
+            .prompt()
             {
                 Ok(true) => {}
                 Ok(false) => {
-                    println!("  Skipping .env (token not saved)");
+                    println!("  Skipping {} (token not saved)", env_path.display());
                 }
                 Err(_) => return Ok(()),
             }
         }
-        std::fs::write(".env", format!("GITHUB_TOKEN={}\n", token))?;
+        std::fs::write(&env_path, format!("{}={}\n", api_key_env, token))?;
         // Set restrictive permissions (user read/write only)
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(".env", perms)?;
+            std::fs::set_permissions(&env_path, perms)?;
         }
-        println!("  ✓ .env");
-        println!("  Note: Run `source .env` or export GITHUB_TOKEN before `ensemble run`");
+        println!(
+            "  ✓ {} (auto-loaded from config directory)",
+            env_path.display()
+        );
     }
 
     println!("\nDone! Run `ensemble` to start processing issues.");
