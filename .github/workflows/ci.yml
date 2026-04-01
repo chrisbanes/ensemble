@@ -126,7 +126,9 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Run desktop unit tests
-        run: SKIP_UI_BUILD=1 cargo test -p ensemble-desktop --bin ensemble-desktop -- --nocapture
+        run: cargo test -p ensemble-desktop --bin ensemble-desktop -- --nocapture
+        env:
+          SKIP_UI_BUILD: 1
 
       - name: Build Tauri app
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}

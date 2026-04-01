@@ -183,6 +183,7 @@ fn app_shows_error_when_config_missing() {
     let mut child = Command::new(&binary_path)
         .current_dir(workspace_root)
         .env("ENSEMBLE_CONFIG", &missing_config)
+        .env("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", "1")
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

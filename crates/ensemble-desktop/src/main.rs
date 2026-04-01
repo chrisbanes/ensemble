@@ -25,8 +25,10 @@ fn main() {
         eprintln!("Error: Config file not found: {}", config_path.display());
         eprintln!("Please create an ensemble.yaml file or run ensemble init to generate one.");
 
-        #[cfg(not(test))]
-        show_config_missing_dialog(&config_path);
+        if should_show_config_missing_dialog() {
+            #[cfg(not(test))]
+            show_config_missing_dialog(&config_path);
+        }
 
         std::process::exit(1);
     }
@@ -84,6 +86,13 @@ fn change_to_config_directory(config_path: &std::path::Path) -> std::io::Result<
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."));
     std::env::set_current_dir(config_dir)
+}
+
+fn should_show_config_missing_dialog() -> bool {
+    !matches!(
+        std::env::var("ENSEMBLE_SUPPRESS_CONFIG_DIALOG").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE")
+    )
 }
 
 #[cfg(not(test))]
@@ -148,7 +157,7 @@ fn serve_ui_file(path: String) -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::resolve_config_path;
+    use crate::{resolve_config_path, should_show_config_missing_dialog};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
@@ -242,6 +251,18 @@ mod tests {
 
         restore_env("ENSEMBLE_CONFIG", env_value);
         assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn suppresses_config_missing_dialog_for_automation() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os("ENSEMBLE_SUPPRESS_CONFIG_DIALOG");
+        std::env::set_var("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", "1");
+
+        let should_show = should_show_config_missing_dialog();
+
+        restore_env("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", previous);
+        assert!(!should_show);
     }
 
     fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
