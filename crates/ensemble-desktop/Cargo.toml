@@ -16,6 +16,10 @@ serde_json = { workspace = true }
 base64 = "0.22"
 mime_guess = "2"
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+tempfile = { workspace = true }
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
