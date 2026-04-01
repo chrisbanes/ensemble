@@ -148,9 +148,9 @@ jobs:
         with:
           name: desktop-${{ matrix.name }}
           path: |
-            target/release/bundle/dmg/*.dmg
-            target/release/bundle/deb/*.deb
-            target/release/bundle/appimage/*.AppImage
+            target/**/*.dmg
+            target/**/*.deb
+            target/**/*.AppImage
           retention-days: 7
 
   # --- Release-only jobs (tag pushes) ---
