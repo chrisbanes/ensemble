@@ -9,6 +9,7 @@
 //!
 //! Note: The app must be built first for these tests to work.
 
+use std::io::Write;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -19,41 +20,85 @@ use std::time::Duration;
 #[test]
 #[ignore = "Requires compiled app binary - run with: cargo build --release -p ensemble-desktop first"]
 fn app_launches_without_crash() {
-    // Find the compiled binary
-    let target_dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_string());
+    // Find the compiled binary - look in multiple locations
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
         "release"
     };
 
-    #[cfg(target_os = "macos")]
-    let binary_path = format!("{}/{}/ensemble-desktop", target_dir, profile);
-
-    #[cfg(target_os = "linux")]
-    let binary_path = format!("{}/{}/ensemble-desktop", target_dir, profile);
+    // Try multiple possible locations for the binary
+    let possible_paths = vec![
+        // From crate directory
+        manifest_dir
+            .join("target")
+            .join(profile)
+            .join("ensemble-desktop"),
+        // From workspace root
+        workspace_root
+            .join("target")
+            .join(profile)
+            .join("ensemble-desktop"),
+        // From CARGO_TARGET_DIR if set
+        std::env::var("CARGO_TARGET_DIR")
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join(profile)
+                    .join("ensemble-desktop")
+            })
+            .unwrap_or_default(),
+    ];
 
     #[cfg(target_os = "windows")]
-    let binary_path = format!("{}/{}/ensemble-desktop.exe", target_dir, profile);
+    let binary_path = possible_paths
+        .iter()
+        .map(|p| p.with_extension("exe"))
+        .find(|p| p.exists());
 
-    let binary_path = std::path::Path::new(&binary_path);
+    #[cfg(not(target_os = "windows"))]
+    let binary_path = possible_paths.iter().find(|p| p.exists());
 
-    if !binary_path.exists() {
-        // Try to find it in the workspace root
-        let workspace_binary = std::path::Path::new(&target_dir)
-            .join(profile)
-            .join("ensemble-desktop");
+    let binary_path = binary_path.cloned().unwrap_or_else(|| {
+        panic!(
+            "App binary not found. Tried: {:?}\nBuild with: cargo build -p ensemble-desktop",
+            possible_paths
+        )
+    });
 
-        if !workspace_binary.exists() {
-            panic!(
-                "App binary not found at {}. Build with: cargo build --release -p ensemble-desktop",
-                binary_path.display()
-            );
-        }
-    }
+    println!("Launching app binary: {}", binary_path.display());
+
+    // Create a minimal ensemble.yaml config file in a temp directory
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("ensemble.yaml");
+    let minimal_config = r#"
+tracker:
+  kind: todo_file
+  file: issues.json
+agents:
+  coder:
+    model: claude-sonnet-4-20250514
+    prompt: "You are a helpful coding assistant."
+    executor: local
+steps:
+  - name: build
+    agent: coder
+    prompt: "Build the code"
+on_success: "Done"
+on_failure: "Failed"
+"#;
+    std::fs::File::create(&config_path)
+        .and_then(|mut f| f.write_all(minimal_config.as_bytes()))
+        .expect("Failed to write test config file");
+
+    // Copy the config to workspace root so the app can find it
+    let workspace_config = workspace_root.join("ensemble.yaml");
+    std::fs::copy(&config_path, &workspace_config).ok();
 
     // Launch the app with a short timeout to see if it crashes on startup
     let mut child = Command::new(&binary_path)
+        .current_dir(workspace_root) // Run from workspace root
         .env("TAURI_WEBVIEW_AUTOMATION", "1") // Enable automation mode
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
@@ -65,7 +110,7 @@ fn app_launches_without_crash() {
     std::thread::sleep(Duration::from_secs(3));
 
     // Check if the process is still running
-    match child.try_wait() {
+    let result = match child.try_wait() {
         Ok(Some(status)) => {
             // Process exited - this is a failure
             let mut stdout = String::new();
@@ -80,20 +125,27 @@ fn app_launches_without_crash() {
                 err.read_to_string(&mut stderr).ok();
             }
 
-            panic!(
+            Err(format!(
                 "App crashed on startup!\nExit status: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
                 status, stdout, stderr
-            );
+            ))
         }
         Ok(None) => {
             // Process is still running - success!
+            println!("App launched successfully and is still running after 3 seconds");
             // Kill it gracefully
             let _ = child.kill();
             let _ = child.wait();
+            Ok(())
         }
-        Err(e) => {
-            panic!("Failed to check app status: {}", e);
-        }
+        Err(e) => Err(format!("Failed to check app status: {}", e)),
+    };
+
+    // Clean up the temp config file
+    let _ = std::fs::remove_file(&workspace_config);
+
+    if let Err(msg) = result {
+        panic!("{}", msg);
     }
 }
 
