@@ -136,19 +136,13 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
 
-      - name: Find .dmg
-        if: startsWith(github.ref, 'refs/tags/v') && matrix.runner == 'macos-latest'
-        id: dmg
-        run: |
-          DMG=$(find target -name '*.dmg' -type f | head -1)
-          echo "path=$DMG" >> "$GITHUB_OUTPUT"
-
-      - name: Upload .dmg
-        if: startsWith(github.ref, 'refs/tags/v') && matrix.runner == 'macos-latest'
+      - name: Upload desktop artifacts
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-dmg
-          path: ${{ steps.dmg.outputs.path }}
+          name: desktop-${{ matrix.name }}
+          path: target/release/bundle/**/*
+          retention-days: 7
 
   # --- Release-only jobs (tag pushes) ---
 

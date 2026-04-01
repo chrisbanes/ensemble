@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "ensemble-cli"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "axum",
  "clap",
@@ -973,7 +973,7 @@ dependencies = [
 
 [[package]]
 name = "ensemble-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "async-trait",
  "axum",
@@ -998,7 +998,7 @@ dependencies = [
 
 [[package]]
 name = "ensemble-desktop"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "base64 0.22.1",
  "ensemble-core",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "ensemble-ui"
-version = "0.1.0"
+version = "0.0.1"
 
 [[package]]
 name = "equivalent"

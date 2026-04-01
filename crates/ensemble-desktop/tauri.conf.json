@@ -1,12 +1,16 @@
 {
   "productName": "Ensemble",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "identifier": "com.ensemble.dashboard",
   "build": {
     "frontendDist": "../ensemble-ui/src-ui/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm --prefix ../ensemble-ui/src-ui run dev",
     "beforeBuildCommand": ""
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["dmg", "app"]
   },
   "app": {
     "windows": [
