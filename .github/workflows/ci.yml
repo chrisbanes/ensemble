@@ -147,7 +147,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.name }}
-          path: target/release/bundle/**/*
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
           retention-days: 7
 
   # --- Release-only jobs (tag pushes) ---
