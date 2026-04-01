@@ -1,4 +1,5 @@
 use ensemble_core::config::ensemble::EnsembleConfig;
+use ensemble_core::config::location::default_todo_state_path;
 use std::path::PathBuf;
 
 use inquire::{MultiSelect, Password, Select, Text};
@@ -42,7 +43,11 @@ pub async fn ask_tracker(
             let default_path = existing
                 .and_then(|c| c.tracker.path.as_ref())
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "TODO.md".to_string());
+                .unwrap_or_else(|| {
+                    default_todo_state_path()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| "~/ensemble/TODO.md".to_string())
+                });
 
             let path_str = Text::new("TODO file path:")
                 .with_default(&default_path)

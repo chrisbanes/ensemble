@@ -1,6 +1,6 @@
 # Ensemble
 
-Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects verdicts, and drives tracker state transitions. Configuration lives in `ensemble.yaml`.
+Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects verdicts, and drives tracker state transitions. Configuration lives in a configuration directory containing `config.yaml`.
 
 See `docs/SPEC.md` for the full specification. See `docs/superpowers/plans/` for implementation plans.
 
@@ -18,7 +18,8 @@ ensemble/
 │   │   │   │   ├── mod.rs        # IssueTracker trait (read + write), TrackerError
 │   │   │   │   └── model.rs      # Issue, RunningEntry, RetryEntry, AgentTotals
 │   │   │   ├── config/
-│   │   │   │   ├── ensemble.rs   # ensemble.yaml loader (EnsembleConfig)
+│   │   │   │   ├── ensemble.rs   # config.yaml loader (EnsembleConfig)
+│   │   │   │   ├── location.rs   # config directory resolution
 │   │   │   │   └── template.rs   # Liquid prompt template renderer
 │   │   │   ├── pipeline/
 │   │   │   │   ├── mod.rs        # re-exports
@@ -93,7 +94,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 - **Rust 2021 edition**, minimum rust-version 1.80
 - **Error handling**: `thiserror` enums (`EnsembleError`, `ConfigError`, `WorkspaceError`, `TrackerError`). Use `?` propagation, not `.unwrap()` in library code. Tests may unwrap.
 - **Async runtime**: `tokio` with `features = ["full"]`. Async tests use `#[tokio::test]`.
-- **Serialization**: `serde` + `serde_json` for domain types, `serde_yaml` for `ensemble.yaml`.
+- **Serialization**: `serde` + `serde_json` for domain types, `serde_yaml` for `config.yaml`.
 - **Templates**: `liquid` crate for prompt rendering. Variables available: `issue.*` and optionally `attempt`.
 - **Logging**: `tracing` crate. Use `info!`/`warn!`/`error!` with structured fields.
 - **Tests**: Unit tests in `#[cfg(test)] mod tests` within each file. Integration tests in `crates/*/tests/`. Use `tempfile` for filesystem tests.
@@ -109,7 +110,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 ## Key design decisions
 
 - **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core` with read methods and optional write methods (default no-ops). Tracker implementations (GitHub, todo_file) live in `ensemble-core` as sub-modules of `tracker/`.
-- **Config from ensemble.yaml**: All runtime config lives in `ensemble.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. Agent definitions, step DAG, and prompt references are all defined here.
+- **Config directory based**: All runtime config lives in a configuration directory containing `config.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. The config directory is resolved via `--config-dir`, `ENSEMBLE_CONFIG_DIR`, or platform defaults. Agent definitions, step DAG, and prompt references are all defined in `config.yaml`. Relative paths are resolved from the config directory.
 - **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `ensemble.yaml`.
 - **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects verdicts from review agents.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.

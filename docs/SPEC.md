@@ -344,31 +344,39 @@ Fields:
 - `Session ID`
   - Use the `sessionId` returned by the ACP `session/new` response.
 
-## 5. Configuration Specification (Repository Contract)
+## 5. Configuration Specification (Config-Directory Contract)
 
-### 5.1 File Discovery and Path Resolution
+### 5.1 Config Directory Discovery and Resolution
 
-Config file path precedence:
+Config directory path precedence:
 
-1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `ensemble.yaml` in the current process working directory.
+1. `--config-dir` CLI flag (highest priority).
+2. `ENSEMBLE_CONFIG_DIR` environment variable.
+3. Default: platform-specific config directory:
+   - Linux: `~/.config/ensemble/`
+   - macOS: `~/Library/Application Support/ensemble/`
+   - Windows: `%APPDATA%\ensemble\`
 
 Loader behavior:
 
-- If the file cannot be read, return `missing_config_file` error.
-- The config file is expected to be repository-owned and version-controlled.
+- The configuration file is always named `config.yaml` and lives in the resolved config directory.
+- If the directory or `config.yaml` cannot be read, return `missing_config_file` error.
+- Relative paths in `config.yaml` are resolved relative to the config directory.
+- A `.env` file in the config directory is auto-loaded before `$VAR` expansion.
+
+**Legacy note:** The old `ENSEMBLE_CONFIG` environment variable is no longer supported. Use `ENSEMBLE_CONFIG_DIR` instead.
 
 ### 5.2 File Format
 
-`ensemble.yaml` is a YAML file containing all pipeline configuration: tracker settings, agent
+`config.yaml` is a YAML file containing all pipeline configuration: tracker settings, agent
 definitions, step DAG, concurrency limits, and prompt references.
 
 Design note:
 
-- `ensemble.yaml` should be self-contained enough to describe and run different workflows (agent
+- `config.yaml` should be self-contained enough to describe and run different workflows (agent
   definitions, step pipeline, runtime settings, hooks, and tracker selection/config) without
   requiring out-of-band service-specific configuration.
-- Prompt templates are referenced by file path or defined inline within agent definitions.
+- Prompt templates are referenced by file path relative to the config directory or defined inline within agent definitions.
 
 Parsing rules:
 
@@ -427,7 +435,7 @@ Fields:
 
 - `path` (string, optional)
   - Path to the todo file.
-  - Default: `TODO.md` in the current process working directory.
+  - Default: `~/ensemble/TODO.md` (in the `ensemble` directory in the user's home folder).
   - Supports `~` and `$VAR` expansion.
 - `active_states` / `terminal_states`
   - Headings in the todo file are matched against these state lists (case-insensitive).
@@ -503,6 +511,7 @@ Fields:
 - `path` (string)
   - Required. Local filesystem path for the repository.
   - Supports `~` and `$VAR` expansion.
+  - Relative paths are resolved from the configuration directory.
 - `branch` (string)
   - Required. Target branch for pull requests and upstream merges.
 
@@ -510,9 +519,9 @@ Example:
 
 ```yaml
 repos:
-  - path: /home/dev/frontend
+  - path: repos/frontend     # Relative to config directory
     branch: main
-  - path: /home/dev/api
+  - path: /home/dev/api       # Absolute path
     branch: develop
 ```
 
@@ -533,11 +542,12 @@ Named agent definitions. Each key is the agent role name, each value is an objec
 - `reasoning_level` (string, optional)
   - Reasoning/thinking level for agents that support it (for example `high`, `low`).
   - When omitted, the agent uses its default reasoning level.
-  - Currently set manually in `ensemble.yaml`; reserved for future tooling that may auto-detect supported reasoning levels.
+  - Currently set manually in `config.yaml`; reserved for future tooling that may auto-detect supported reasoning levels.
 - `prompt` (string, optional)
   - Inline prompt text. Mutually exclusive with `prompt_template`.
 - `prompt_template` (path string, optional)
-  - Path to a Markdown prompt template file. Supports `~` and `$VAR` expansion.
+  - Path to a Markdown prompt template file, relative to the configuration directory.
+  - Supports `~` and `$VAR` expansion.
   - Mutually exclusive with `prompt`.
 - Exactly one of `prompt` or `prompt_template` must be set.
 
@@ -711,30 +721,43 @@ Dispatch gating behavior:
 - DAG validation errors block dispatch at startup.
 - Template errors fail only the affected run attempt.
 
-## 6. Configuration Specification
+## 6. Configuration Loading and Resolution Semantics
 
 ### 6.1 Source Precedence and Resolution Semantics
 
-Configuration precedence:
+Config directory precedence:
 
-1. Config file path selection (runtime setting -> cwd default `ensemble.yaml`).
-2. YAML config values.
-3. Environment indirection via `$VAR_NAME` inside selected YAML values.
-4. Built-in defaults.
+1. `--config-dir <path>` CLI flag (highest priority).
+2. `ENSEMBLE_CONFIG_DIR` environment variable.
+3. Platform-specific default config directory (lowest priority).
+
+The configuration file is always `<config_dir>/config.yaml`.
 
 Value coercion semantics:
 
 - Path/command fields support:
   - `~` home expansion
   - `$VAR` expansion for env-backed path values
+  - Relative paths are resolved from the config directory
   - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
     arbitrary shell command strings.
 
-### 6.2 Dynamic Reload Semantics
+**Legacy migration:** The old `ENSEMBLE_CONFIG` environment variable and `--config` flag are no longer supported. Use `ENSEMBLE_CONFIG_DIR` and `--config-dir` instead.
+
+### 6.2 Environment Variable Loading
+
+Before expanding `$VAR` references in the configuration, Ensemble loads environment variables from:
+
+1. The process environment (highest priority)
+2. A `.env` file in the config directory (if present)
+
+This means variables in the process environment take precedence over those in `.env`. The `.env` file is loaded automatically—no manual `source .env` is required.
+
+### 6.3 Dynamic Reload Semantics
 
 Dynamic reload is required:
 
-- The software should watch `ensemble.yaml` for changes.
+- The software should watch `config.yaml` for changes.
 - On change, it should re-read and re-apply config and prompt templates without restart.
 - The software should attempt to adjust live behavior to the new config (for example polling
   cadence, concurrency limits, active/terminal states, agent settings, workspace paths/hooks, and
@@ -750,7 +773,7 @@ Dynamic reload is required:
 - Invalid reloads should not crash the service; keep operating with the last known good effective
   configuration and emit an operator-visible error.
 
-### 6.3 Dispatch Preflight Validation
+### 6.4 Dispatch Preflight Validation
 
 This validation is a scheduler preflight run before attempting to dispatch new work. It validates
 the config needed to poll and launch workers, not a full audit of all possible runtime behavior.
@@ -768,7 +791,8 @@ Per-tick dispatch validation:
 
 Validation checks:
 
-- Config file can be loaded and parsed.
+- Config directory and `config.yaml` can be resolved and read.
+- YAML can be parsed.
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution (when required by the selected tracker kind).
 - `tracker.repository` is present when required by the selected tracker kind.
@@ -778,12 +802,14 @@ Validation checks:
   writes (`supports_writes()` returns true).
 - `on_success` and `on_failure` are present.
 
-### 6.4 Config Fields Summary (Cheat Sheet)
+### 6.5 Config Fields Summary (Cheat Sheet)
 
 This section is intentionally redundant so a coding agent can implement the config layer quickly.
 
+- Config directory resolution: `--config-dir` > `ENSEMBLE_CONFIG_DIR` > platform default
+- Config file: `<config_dir>/config.yaml`
 - `tracker.kind`: string, required; supported values: `todo_file`, `github`
-- `tracker.path`: string, default `TODO.md`; path to todo file when `tracker.kind=todo_file`
+- `tracker.path`: string, default `~/ensemble/TODO.md`; path to todo file when `tracker.kind=todo_file`
 - `tracker.endpoint`: string, default `https://api.github.com/graphql` when `tracker.kind=github`
 - `tracker.api_key`: string or `$VAR`, canonical env `GITHUB_TOKEN` when `tracker.kind=github`
 - `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`
@@ -794,7 +820,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agents.<name>.executor`: string, required; ACP-compatible agent executable identifier
 - `agents.<name>.model`: string, required; model identifier
 - `agents.<name>.prompt`: string, optional; inline prompt (mutually exclusive with prompt_template)
-- `agents.<name>.prompt_template`: path, optional; file reference to prompt template
+- `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier
 - `steps[].agent`: string, required; references a key in `agents`
 - `steps[].depends`: list of strings, optional; step dependencies for DAG
@@ -805,7 +831,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `concurrency.max_step_parallelism`: integer, default `2`; per-issue cap
 - `max_cycles`: integer, default `3`; max pipeline re-entries per issue
 - `polling.interval_ms`: integer, default `30000`
-- `workspace.root`: path, default `<system-temp>/ensemble_workspaces`
+- `workspace.root`: path, default `<system-temp>/ensemble_workspaces` (config-relative if not absolute)
 - `worker.ssh_hosts` (extension): list of SSH host strings, optional; when omitted, work runs
   locally
 - `worker.max_concurrent_agents_per_host` (extension): positive integer, optional; shared per-host

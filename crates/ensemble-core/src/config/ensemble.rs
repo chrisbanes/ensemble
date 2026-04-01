@@ -1,8 +1,9 @@
+use crate::config::location::default_todo_state_path;
 use crate::error::PipelineError;
 use crate::workspace::push_strategy::PushStrategy;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Top-level configuration parsed from `ensemble.yaml`.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -289,6 +290,17 @@ impl EnsembleConfig {
     /// - `agents.*.prompt_template`
     /// - `repos[*].path`
     pub fn resolve_env(&mut self) {
+        self.resolve_env_from(Path::new("."))
+            .expect("CWD should always be available");
+    }
+
+    /// Resolve environment variables and rebase relative paths from the config directory.
+    ///
+    /// This method:
+    /// 1. Resolves `$VAR` and `~` in all path fields
+    /// 2. Rebase relative paths to be relative to the config directory
+    /// 3. Sets default TODO path for todo_file tracker if not specified
+    pub fn resolve_env_from(&mut self, config_dir: &Path) -> Result<(), crate::error::ConfigError> {
         // tracker.api_key: $VAR resolution
         if let Some(ref raw) = self.tracker.api_key {
             self.tracker.api_key = resolve_env_var(raw);
@@ -297,44 +309,90 @@ impl EnsembleConfig {
             self.tracker.api_key = resolve_env_var("$GITHUB_TOKEN");
         }
 
-        // tracker.path: $VAR + ~ expansion
+        // tracker.path: $VAR + ~ expansion, with default for todo_file
+        if self.tracker.kind == "todo_file" && self.tracker.path.is_none() {
+            self.tracker.path = Some(default_todo_state_path()?);
+        }
+
         if let Some(ref path) = self.tracker.path {
             let path_str = path.to_string_lossy();
-            self.tracker.path = resolve_path(&path_str);
+            let resolved = resolve_path(&path_str);
+            self.tracker.path = resolved.map(|p| {
+                if p.is_absolute() {
+                    p
+                } else {
+                    config_dir.join(p)
+                }
+            });
         }
 
-        // workspace.root: $VAR + ~ expansion
+        // workspace.root: $VAR + ~ expansion + rebase
         if let Some(ref root) = self.workspace.root {
-            self.workspace.root = resolve_path(root).map(|p| p.to_string_lossy().into_owned());
+            let resolved = resolve_path(root);
+            self.workspace.root = resolved.map(|p| {
+                let final_path = if p.is_absolute() {
+                    p
+                } else {
+                    config_dir.join(p)
+                };
+                final_path.to_string_lossy().into_owned()
+            });
         }
 
-        // repos[*].path: $VAR + ~ expansion
+        // repos[*].path: $VAR + ~ expansion + rebase
         for repo in &mut self.repos {
             let path_str = &repo.path;
             if let Some(resolved) = resolve_path(path_str) {
-                repo.path = resolved.to_string_lossy().into_owned();
+                let final_path = if resolved.is_absolute() {
+                    resolved
+                } else {
+                    config_dir.join(resolved)
+                };
+                repo.path = final_path.to_string_lossy().into_owned();
             }
         }
 
-        // agents.*.prompt_template: $VAR + ~ expansion
+        // agents.*.prompt_template: $VAR + ~ expansion + rebase
         for agent in self.agents.values_mut() {
             if let Some(ref path) = agent.prompt_template {
                 let path_str = path.to_string_lossy();
-                agent.prompt_template = resolve_path(&path_str);
+                let resolved = resolve_path(&path_str);
+                agent.prompt_template = resolved.map(|p| {
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        config_dir.join(p)
+                    }
+                });
             }
         }
+
+        Ok(())
     }
 }
 
-/// Load and parse an `ensemble.yaml` file from the given path.
+/// Load and parse a `config.yaml` file from the given path.
+///
+/// This function:
+/// 1. Loads `.env` from the config directory (if present) before expanding variables
+/// 2. Reads and parses the YAML file
+/// 3. Resolves environment variables and rebases relative paths from the config directory
 pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::error::ConfigError> {
+    let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    // Load .env from config directory (best-effort, don't fail if missing)
+    let env_path = config_dir.join(".env");
+    if env_path.exists() {
+        let _ = dotenvy::from_path(&env_path);
+    }
+
     let content = std::fs::read_to_string(path).map_err(|_| {
         crate::error::ConfigError::MissingConfigFile {
             path: path.display().to_string(),
         }
     })?;
     let mut config = parse_config(&content)?;
-    config.resolve_env();
+    config.resolve_env_from(config_dir)?;
     Ok(config)
 }
 
@@ -962,5 +1020,112 @@ on_failure: Failed
         config.resolve_env();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(config.repos[0].path, format!("{}/projects/myrepo", home));
+    }
+
+    #[test]
+    fn test_load_config_rebases_relative_paths_from_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("templates")).unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: repos/app
+    branch: main
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/implement.liquid
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+workspace:
+  root: workspaces
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(&dir.path().join("config.yaml")).unwrap();
+        assert_eq!(
+            config.agents["builder"].prompt_template.as_deref(),
+            Some(dir.path().join("templates/implement.liquid").as_path())
+        );
+        assert_eq!(
+            config.repos[0].path,
+            dir.path().join("repos/app").display().to_string()
+        );
+        assert_eq!(
+            config.workspace.root.as_deref(),
+            Some(dir.path().join("workspaces").display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn test_load_config_defaults_todo_tracker_path_to_home_state_path() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write a minimal config without tracker.path
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(&dir.path().join("config.yaml")).unwrap();
+        assert!(config
+            .tracker
+            .path
+            .as_ref()
+            .unwrap()
+            .to_string_lossy()
+            .contains("ensemble/TODO.md"));
+    }
+
+    #[test]
+    fn test_load_config_loads_sibling_dotenv_without_overriding_existing_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "GITHUB_TOKEN=from-dotenv\n").unwrap();
+        std::env::set_var("GITHUB_TOKEN", "from-process");
+
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: $GITHUB_TOKEN
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(&dir.path().join("config.yaml")).unwrap();
+        // Process env var should take precedence over .env
+        assert_eq!(config.tracker.api_key.as_deref(), Some("from-process"));
+
+        std::env::remove_var("GITHUB_TOKEN");
     }
 }

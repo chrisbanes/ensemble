@@ -27,7 +27,7 @@ pub struct AppState {
     pub event_bus: EventBus,
     /// The loaded ensemble configuration.
     pub config: Arc<EnsembleConfig>,
-    /// Path to the ensemble.yaml config file.
+    /// Path to the config.yaml file.
     pub config_path: String,
 }
 

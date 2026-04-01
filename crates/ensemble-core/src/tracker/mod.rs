@@ -5,7 +5,6 @@ pub mod todo_file;
 use crate::config::ensemble::TrackerConfig;
 use async_trait::async_trait;
 use model::Issue;
-use std::path::PathBuf;
 
 /// Error type for tracker operations.
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +15,10 @@ pub enum TrackerError {
     MissingApiKey,
     #[error("missing tracker repository")]
     MissingRepository,
+    #[error("missing tracker path for todo_file kind")]
+    MissingPath,
+    #[error("TODO file parent directory does not exist: {path}")]
+    MissingParentDirectory { path: String },
     #[error("I/O error: {reason}")]
     IoError { reason: String },
     #[error("GitHub API request failed: {reason}")]
@@ -77,13 +80,22 @@ pub trait IssueTracker: Send + Sync {
 pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, TrackerError> {
     match config.kind.as_str() {
         "todo_file" => {
-            let tracker = todo_file::TodoFileTracker::new(
-                config
-                    .path
-                    .clone()
-                    .unwrap_or_else(|| PathBuf::from("TODO.md")),
-                config.active_states.clone(),
-            );
+            let path = config
+                .path
+                .as_ref()
+                .ok_or(TrackerError::MissingPath)?
+                .clone();
+
+            // Validate parent directory exists for runtime safety
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    return Err(TrackerError::MissingParentDirectory {
+                        path: parent.display().to_string(),
+                    });
+                }
+            }
+
+            let tracker = todo_file::TodoFileTracker::new(path, config.active_states.clone());
             Ok(Box::new(tracker))
         }
         "github" => {
@@ -117,6 +129,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
 mod tests {
     use super::*;
     use crate::config::ensemble::TrackerConfig;
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     fn todo_file_config(path: PathBuf) -> TrackerConfig {
@@ -150,10 +163,40 @@ mod tests {
     #[test]
     fn test_create_todo_file_tracker() {
         let dir = TempDir::new().unwrap();
-        let config = todo_file_config(dir.path().join("TODO.md"));
+        let todo_path = dir.path().join("TODO.md");
+        // Ensure parent exists
+        let config = todo_file_config(todo_path.clone());
 
         let tracker = create_tracker(&config);
         assert!(tracker.is_ok());
+    }
+
+    #[test]
+    fn test_create_todo_file_tracker_missing_parent_directory() {
+        let missing_parent = PathBuf::from("/definitely/missing/dir/TODO.md");
+        let config = todo_file_config(missing_parent);
+        let result = create_tracker(&config);
+        assert!(matches!(
+            result,
+            Err(TrackerError::MissingParentDirectory { .. })
+        ));
+    }
+
+    #[test]
+    fn test_create_todo_file_tracker_missing_path() {
+        let config = TrackerConfig {
+            kind: "todo_file".to_string(),
+            active_states: vec!["Todo".to_string()],
+            terminal_states: vec!["Done".to_string()],
+            path: None,
+            endpoint: None,
+            api_key: None,
+            repository: None,
+            project_number: None,
+            labels_filter: vec![],
+        };
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::MissingPath)));
     }
 
     #[test]

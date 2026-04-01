@@ -6,7 +6,7 @@ Ensemble is a service that orchestrates coding agents against your issue tracker
 
 Ensemble reads issues from a tracker (GitHub Projects or a local TODO file), creates a workspace directory for each one, and runs a pipeline of named agents against it. Each agent gets a prompt rendered from the issue context. Agents report verdicts (approve/reject), and Ensemble transitions the issue state accordingly. Failed issues retry with exponential backoff.
 
-All behavior is configured in a single `ensemble.yaml` file that lives in your repository.
+All behavior is configured in a `config.yaml` file that lives in a configuration directory (default: `~/.config/ensemble/` on Linux, `~/Library/Application Support/ensemble/` on macOS).
 
 ## Install
 
@@ -24,20 +24,26 @@ cargo install --path crates/ensemble-cli
 
 ## Quick start
 
-**1. Create a config file:**
+**1. Create a configuration directory:**
 
 ```sh
 ensemble init
 ```
 
-This walks you through setting up your tracker, agents, and pipeline. It generates an `ensemble.yaml` and any prompt templates you need.
+This walks you through setting up your tracker, agents, and pipeline. It creates a configuration directory containing:
+- `config.yaml` — main configuration file
+- `templates/` — prompt templates
+- `.env` — environment variables (auto-loaded)
+- `~/ensemble/TODO.md` — default TODO tracker state (if using todo_file)
 
 **2. Or write one by hand:**
+
+Create a directory for your config (e.g., `~/.config/ensemble/`) and add a `config.yaml`:
 
 ```yaml
 tracker:
   kind: todo_file
-  path: TODO.md
+  # path defaults to ~/ensemble/TODO.md if not specified
 
 agents:
   builder:
@@ -68,9 +74,30 @@ ensemble web --port 3000
 
 Then open `http://localhost:3000` in your browser.
 
+## Configuration location
+
+By default, Ensemble looks for configuration in your system's config directory:
+- **Linux:** `~/.config/ensemble/`
+- **macOS:** `~/Library/Application Support/ensemble/`
+- **Windows:** `%APPDATA%\ensemble\`
+
+You can override this with:
+- `--config-dir <path>` flag
+- `ENSEMBLE_CONFIG_DIR` environment variable
+
+**Open the config directory:**
+
+```sh
+ensemble open-config-dir
+```
+
+This opens the resolved configuration directory in your system's file manager. If the directory doesn't exist, it will suggest running `ensemble init`.
+
+**Legacy note:** The old `ENSEMBLE_CONFIG` environment variable and `--config` flag are no longer supported. Use `ENSEMBLE_CONFIG_DIR` and `--config-dir` instead.
+
 ## Core concepts
 
-**Trackers** connect Ensemble to your issue source. Supported: GitHub Projects (`github`) and local TODO files (`todo_file`). The tracker defines which states are active (pollable) and terminal (done).
+**Trackers** connect Ensemble to your issue source. Supported: GitHub Projects (`github`) and local TODO files (`todo_file`). The tracker defines which states are active (pollable) and terminal (done). For `todo_file`, the default path is `~/ensemble/TODO.md`.
 
 **Agents** are named definitions that pair an executor (like `claude-code`) with a prompt. Prompts can be inline strings or [Liquid](https://shopify.github.io/liquid/) template files with access to issue context.
 
@@ -82,7 +109,7 @@ Then open `http://localhost:3000` in your browser.
 
 ## Documentation
 
-- [Configuration Reference](docs/configuration.md) — every `ensemble.yaml` field
+- [Configuration Reference](docs/configuration.md) — every `config.yaml` field
 - [Pipeline Guide](docs/pipelines.md) — steps, DAGs, verdicts, retries
 - [Contributing](docs/contributing.md) — building, testing, project structure
 - [Roadmap](docs/roadmap.md) — what's built, what's coming

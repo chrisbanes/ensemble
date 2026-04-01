@@ -23,6 +23,9 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 futures-util = { workspace = true }
 utoipa = { workspace = true }
+dirs = { workspace = true }
+dotenvy = { workspace = true }
+shellexpand = "3"
 
 [dev-dependencies]
 tempfile = { workspace = true }

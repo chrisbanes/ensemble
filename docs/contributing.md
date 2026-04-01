@@ -29,7 +29,7 @@ ensemble/
 
 | Module | Purpose |
 |--------|---------|
-| `config/` | `ensemble.yaml` parsing, prompt template rendering |
+| `config/` | `config.yaml` parsing, prompt template rendering, config directory resolution |
 | `tracker/` | `IssueTracker` trait + GitHub and todo_file backends |
 | `pipeline/` | DAG construction, step execution, verdict parsing |
 | `orchestrator/` | Poll loop, dispatch, retry, reconciliation |

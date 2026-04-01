@@ -26,6 +26,16 @@ pub enum ConfigError {
     TemplateParseError { reason: String },
     #[error("template render error: {reason}")]
     TemplateRenderError { reason: String },
+    #[error("config directory unavailable")]
+    ConfigDirUnavailable,
+    #[error("home directory unavailable")]
+    HomeDirUnavailable,
+    #[error("relative path not allowed for desktop ENSEMBLE_CONFIG_DIR: {path}")]
+    RelativeDesktopOverride { path: String },
+    #[error("config directory path must be a directory, not a file: {path}")]
+    NotADirectory { path: String },
+    #[error("path expansion failed for '{path}': {reason}")]
+    PathExpansionError { path: String, reason: String },
 }
 
 #[derive(Debug, Error)]

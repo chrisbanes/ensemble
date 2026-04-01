@@ -1,17 +1,56 @@
 # Configuration Reference
 
-Ensemble is configured through a single `ensemble.yaml` file, typically at the root of your repository.
+Ensemble is configured through a `config.yaml` file located in a configuration directory. The default config directory is determined by your platform:
 
-## Environment variables
+- **Linux:** `~/.config/ensemble/`
+- **macOS:** `~/Library/Application Support/ensemble/`
+- **Windows:** `%APPDATA%\ensemble\`
 
-Any string value can reference an environment variable with `$VAR_NAME` syntax. Ensemble resolves these at load time. Path values (`~`, `$HOME`) are also expanded.
+## Config directory resolution
 
-```yaml
-tracker:
-  api_key: $GITHUB_TOKEN
-workspace:
-  root: ~/ensemble-workspaces
+Ensemble resolves the configuration directory using this precedence:
+
+1. `--config-dir <path>` CLI flag (highest priority)
+2. `ENSEMBLE_CONFIG_DIR` environment variable
+3. Platform-specific default config directory (lowest priority)
+
+Both the CLI flag and environment variable support shell expansion (`~` for home directory, `$ENV_VAR` for environment variables).
+
+**Example:**
+```sh
+# Using the --config-dir flag
+ensemble run --config-dir ~/my-ensemble-config
+
+# Using environment variable
+ENSEMBLE_CONFIG_DIR=~/my-ensemble-config ensemble run
+
+# With environment variable expansion
+ENSEMBLE_CONFIG_DIR=$HOME/projects/ensemble ensemble run
 ```
+
+**Open the config directory:**
+
+```sh
+ensemble open-config-dir
+```
+
+This opens the resolved configuration directory in your system's file manager. If the directory doesn't exist, it will prompt you to run `ensemble init` to create it.
+
+**Legacy note:** The old `ENSEMBLE_CONFIG` environment variable and `--config` flag are no longer supported. Use `ENSEMBLE_CONFIG_DIR` and `--config-dir` instead.
+
+## Auto-loading .env
+
+If a `.env` file exists in the configuration directory, Ensemble automatically loads it before expanding `$VAR` references in the configuration. This means you don't need to manually source `.env` files—environment variables defined there are automatically available for config expansion.
+
+## Config-relative paths
+
+All relative paths in `config.yaml` are resolved relative to the configuration directory:
+
+- `workspace.root` — resolved from config directory
+- `repos[*].path` — resolved from config directory  
+- `agents.*.prompt_template` — resolved from config directory
+
+This makes configurations portable and self-contained.
 
 ## Minimal example
 
@@ -20,7 +59,7 @@ The smallest working config uses a local TODO file and a single agent:
 ```yaml
 tracker:
   kind: todo_file
-  path: TODO.md
+  # path defaults to ~/ensemble/TODO.md if not specified
 
 agents:
   build:
@@ -56,13 +95,13 @@ tracker:
     - ensemble
 
 repos:
-  - path: /home/dev/my-repo
+  - path: repos/my-repo    # Relative to config directory
     branch: main
 
 agents:
   builder:
     acpx_agent: claude
-    prompt_template: templates/implement.liquid
+    prompt_template: templates/implement.liquid  # Relative to config directory
   reviewer:
     executor: claude-code
     model: claude-opus-4-6
@@ -88,7 +127,7 @@ concurrency:
 max_cycles: 3
 
 workspace:
-  root: ~/ensemble-workspaces
+  root: workspaces  # Relative to config directory
 
 hooks:
   after_create: "git checkout -b ensemble/$ISSUE_ID"
@@ -129,15 +168,17 @@ Defines where Ensemble reads and writes issues.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | — | Path to the TODO markdown file |
+| `path` | string | `~/ensemble/TODO.md` | Path to the TODO markdown file |
+
+For todo_file trackers, if `path` is not specified, it defaults to `~/ensemble/TODO.md` (the `ensemble` directory in your home folder).
 
 ### repos
 
-List of repositories for workspace setup.
+List of repositories for workspace setup. Paths can be absolute or relative to the config directory.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `path` | string | *required* | Path to repository (supports `$VAR` and `~`) |
+| `path` | string | *required* | Path to repository (supports `$VAR`, `~`, and config-relative paths) |
 | `branch` | string | *required* | Branch name to work on |
 
 ### agents
@@ -150,7 +191,7 @@ Named agent definitions. Each key is the agent name referenced by steps.
 | `model` | string | — | Model identifier (e.g., `"claude-opus-4-6"`) |
 | `acpx_agent` | string | — | ACPX agent name (alternative to executor+model) |
 | `prompt` | string | — | Inline prompt text |
-| `prompt_template` | string | — | Path to a Liquid template file |
+| `prompt_template` | string | — | Path to a Liquid template file (config-relative) |
 
 **Validation rules:**
 - Provide either `acpx_agent` alone, or both `executor` and `model`.
@@ -193,7 +234,7 @@ See [Pipeline Guide](pipelines.md) for details on DAG construction and execution
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `root` | string | system temp dir | Root directory for per-issue workspace directories (supports `$VAR` and `~`) |
+| `root` | string | system temp dir | Root directory for per-issue workspace directories (supports `$VAR`, `~`, and config-relative paths) |
 
 ### hooks
 

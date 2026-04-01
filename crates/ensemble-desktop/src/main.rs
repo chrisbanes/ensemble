@@ -1,7 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use std::path::PathBuf;
 use tauri::Manager;
 use tracing::{error, info};
 
@@ -9,6 +8,7 @@ mod embedded_ui;
 mod orchestrator;
 
 use embedded_ui::{resolve_path, spa_available};
+use ensemble_core::config::location::resolve_config_dir_for_desktop;
 use orchestrator::{get_state, trigger_refresh, DesktopOrchestrator};
 
 fn main() {
@@ -20,28 +20,40 @@ fn main() {
         eprintln!("Build with: cd ../ensemble-ui/src-ui && pnpm run build");
     }
 
-    let config_path = resolve_config_path();
-    if !config_path.exists() {
-        eprintln!("Error: Config file not found: {}", config_path.display());
-        eprintln!("Please create an ensemble.yaml file or run ensemble init to generate one.");
+    // Reject legacy ENSEMBLE_CONFIG env var
+    if std::env::var_os("ENSEMBLE_CONFIG").is_some() {
+        eprintln!(
+            "Error: ENSEMBLE_CONFIG is no longer supported. Use ENSEMBLE_CONFIG_DIR instead."
+        );
+        eprintln!("example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble-desktop");
+        std::process::exit(1);
+    }
+
+    let resolved = match resolve_config_dir_for_desktop(std::env::var_os("ENSEMBLE_CONFIG_DIR")) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: Failed to resolve config directory: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if !resolved.config_path.exists() {
+        let message = format_missing_config_message(&resolved.config_path);
+        eprintln!("Error: {}", message);
 
         if should_show_config_missing_dialog() {
             #[cfg(not(test))]
-            show_config_missing_dialog(&config_path);
+            show_config_missing_dialog(&message);
         }
 
         std::process::exit(1);
     }
 
-    let config_path = normalize_config_path(config_path);
-    if let Err(error) = change_to_config_directory(&config_path) {
-        eprintln!(
-            "Error: Failed to switch to config directory for {}: {}",
-            config_path.display(),
-            error
-        );
-        std::process::exit(1);
-    }
+    info!(
+        config_dir = %resolved.config_dir.display(),
+        config_path = %resolved.config_path.display(),
+        "Resolved configuration paths"
+    );
 
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -52,7 +64,7 @@ fn main() {
         .setup(|app| {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let orchestrator =
-                rt.block_on(async { DesktopOrchestrator::new(config_path).await })?;
+                rt.block_on(async { DesktopOrchestrator::new(resolved.config_path).await })?;
 
             app.manage(orchestrator);
 
@@ -71,21 +83,11 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-fn resolve_config_path() -> PathBuf {
-    std::env::var_os("ENSEMBLE_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("ensemble.yaml"))
-}
-
-fn normalize_config_path(config_path: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&config_path).unwrap_or(config_path)
-}
-
-fn change_to_config_directory(config_path: &std::path::Path) -> std::io::Result<()> {
-    let config_dir = config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-    std::env::set_current_dir(config_dir)
+fn format_missing_config_message(config_path: &std::path::Path) -> String {
+    format!(
+        "Configuration file not found: {}. Please run `ensemble init` to create a configuration directory, or set ENSEMBLE_CONFIG_DIR to an existing directory containing config.yaml.",
+        config_path.display()
+    )
 }
 
 fn should_show_config_missing_dialog() -> bool {
@@ -96,12 +98,7 @@ fn should_show_config_missing_dialog() -> bool {
 }
 
 #[cfg(not(test))]
-fn show_config_missing_dialog(config_path: &std::path::Path) {
-    let message = format!(
-        "Configuration file not found: {}. Please create an ensemble.yaml file or run ensemble init to generate one.",
-        config_path.display()
-    );
-
+fn show_config_missing_dialog(message: &str) {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -128,20 +125,16 @@ fn show_config_missing_dialog(config_path: &std::path::Path) {
             .output()
             .or_else(|_| {
                 Command::new("kdialog")
-                    .args(["--error", &message, "--title=Ensemble"])
+                    .args(["--error", message, "--title=Ensemble"])
                     .output()
             })
-            .or_else(|_| {
-                Command::new("xmessage")
-                    .args(["-center", &message])
-                    .output()
-            });
+            .or_else(|_| Command::new("xmessage").args(["-center", message]).output());
     }
 
     #[cfg(target_os = "windows")]
     {
         use std::process::Command;
-        let _ = Command::new("msg").args(["*", &message]).output();
+        let _ = Command::new("msg").args(["*", message]).output();
     }
 }
 
@@ -157,7 +150,7 @@ fn serve_ui_file(path: String) -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{resolve_config_path, should_show_config_missing_dialog};
+    use crate::{format_missing_config_message, should_show_config_missing_dialog};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, OnceLock};
 
@@ -208,49 +201,12 @@ mod tests {
     }
 
     #[test]
-    fn resolve_config_path_defaults_to_workspace_file() {
-        let _guard = env_lock().lock().unwrap();
-        let env_value = std::env::var_os("ENSEMBLE_CONFIG");
-        std::env::remove_var("ENSEMBLE_CONFIG");
-
-        let resolved = resolve_config_path();
-
-        restore_env("ENSEMBLE_CONFIG", env_value);
-        assert_eq!(resolved, PathBuf::from("ensemble.yaml"));
-    }
-
-    #[test]
-    fn resolve_config_path_prefers_env_override() {
-        let _guard = env_lock().lock().unwrap();
-        let env_value = std::env::var_os("ENSEMBLE_CONFIG");
-        let override_path = PathBuf::from("custom/ensemble.yaml");
-        std::env::set_var("ENSEMBLE_CONFIG", &override_path);
-
-        let resolved = resolve_config_path();
-
-        restore_env("ENSEMBLE_CONFIG", env_value);
-        assert_eq!(resolved, override_path);
-    }
-
-    #[tokio::test]
-    async fn orchestrator_module_loads() {
-        use crate::orchestrator::DesktopOrchestrator;
-        let _ = DesktopOrchestrator::new;
-        fn check_clone<T: Clone>() {}
-        check_clone::<DesktopOrchestrator>();
-    }
-
-    #[test]
-    fn resolve_config_path_returns_relative_override_unchanged() {
-        let _guard = env_lock().lock().unwrap();
-        let env_value = std::env::var_os("ENSEMBLE_CONFIG");
-        let override_path = PathBuf::from("configs/dev/ensemble.yaml");
-        std::env::set_var("ENSEMBLE_CONFIG", &override_path);
-
-        let resolved = resolve_config_path();
-
-        restore_env("ENSEMBLE_CONFIG", env_value);
-        assert_eq!(resolved, override_path);
+    fn missing_config_message_mentions_resolved_config_yaml_path() {
+        let config_path = PathBuf::from("/tmp/ensemble/config.yaml");
+        let message = format_missing_config_message(&config_path);
+        assert!(message.contains("/tmp/ensemble/config.yaml"));
+        assert!(message.contains("ensemble init"));
+        assert!(message.contains("ENSEMBLE_CONFIG_DIR"));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 mod commands;
 mod embedded_ui;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -11,31 +12,29 @@ use ensemble_core::observability::logging::init_logging;
 #[derive(Parser, Debug)]
 #[command(name = "ensemble", about = "Orchestrate coding agents")]
 struct Cli {
+    #[command(flatten)]
+    config: ConfigDirArgs,
+
     /// Subcommand is optional: bare `ensemble` defaults to headless `run`.
     #[command(subcommand)]
     command: Option<Command>,
+}
 
-    /// Path to ensemble.yaml (used when no subcommand is given)
-    #[arg(default_value = "ensemble.yaml")]
-    config_path: PathBuf,
+#[derive(Args, Debug, Clone)]
+struct ConfigDirArgs {
+    /// Path to the ensemble configuration directory (contains config.yaml)
+    #[arg(long, env = "ENSEMBLE_CONFIG_DIR", global = true)]
+    config_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Interactively create an ensemble.yaml configuration file.
+    /// Interactively create an ensemble configuration directory.
     Init,
     /// Start the ensemble orchestrator in headless mode.
-    Run {
-        /// Path to ensemble.yaml
-        #[arg(default_value = "ensemble.yaml")]
-        config_path: PathBuf,
-    },
+    Run,
     /// Start the ensemble orchestrator with web UI.
     Web {
-        /// Path to ensemble.yaml
-        #[arg(default_value = "ensemble.yaml")]
-        config_path: PathBuf,
-
         /// HTTP server bind address.
         #[arg(long, env = "HOST", default_value = "127.0.0.1")]
         host: String,
@@ -44,37 +43,112 @@ enum Command {
         #[arg(long, env = "PORT")]
         port: Option<u16>,
     },
+    /// Open the ensemble configuration directory in the system file manager.
+    OpenConfigDir,
+}
+
+/// Check for legacy config override arguments and print migration error.
+fn reject_legacy_config_overrides(args: impl Iterator<Item = OsString>) -> Result<(), String> {
+    let args_vec: Vec<_> = args.collect();
+
+    // Check for deprecated --config flag
+    if args_vec.iter().any(|a| a == "--config" || a == "-c") {
+        return Err(
+            "error: --config is no longer supported. Use --config-dir or ENSEMBLE_CONFIG_DIR instead.\n\
+             example: ensemble run --config-dir /path/to/config\n\
+             example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble run".to_string()
+        );
+    }
+
+    // Check for ENSEMBLE_CONFIG (old env var)
+    if std::env::var_os("ENSEMBLE_CONFIG").is_some() {
+        return Err(
+            "error: ENSEMBLE_CONFIG is no longer supported. Use ENSEMBLE_CONFIG_DIR instead.\n\
+             example: ENSEMBLE_CONFIG_DIR=/path/to/config ensemble run"
+                .to_string(),
+        );
+    }
+
+    let mut expect_value_for_flag = false;
+    let mut saw_subcommand = false;
+
+    for arg in args_vec.iter().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if expect_value_for_flag {
+            expect_value_for_flag = false;
+            continue;
+        }
+
+        if arg == "--" {
+            break;
+        }
+
+        if arg == "--config-dir" || arg == "--host" || arg == "--port" {
+            expect_value_for_flag = true;
+            continue;
+        }
+
+        if arg.starts_with("--config-dir=")
+            || arg.starts_with("--host=")
+            || arg.starts_with("--port=")
+        {
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            continue;
+        }
+
+        if !saw_subcommand && matches!(arg.as_ref(), "init" | "run" | "web" | "open-config-dir") {
+            saw_subcommand = true;
+            continue;
+        }
+
+        return Err(
+            "error: positional config paths are no longer supported. Use --config-dir or ENSEMBLE_CONFIG_DIR instead.\n\
+             example: ensemble run --config-dir /path/to/config\n\
+             example: ensemble --config-dir /path/to/config"
+                .to_string(),
+        );
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Check for legacy arguments before parsing
+    if let Err(msg) = reject_legacy_config_overrides(std::env::args_os()) {
+        eprintln!("{}", msg);
+        return ExitCode::FAILURE;
+    }
+
     let cli = Cli::parse();
     init_logging();
 
+    let config_dir = cli.config.config_dir;
+
     match cli.command {
-        Some(Command::Init) => commands::init::execute(commands::init::InitArgs).await,
-        Some(Command::Run { config_path }) => {
-            commands::run::execute(commands::run::RunArgs { config_path }).await
+        Some(Command::Init) => {
+            commands::init::execute(commands::init::InitArgs { config_dir }).await
         }
-        Some(Command::Web {
-            config_path,
-            host,
-            port,
-        }) => {
+        Some(Command::Run) => commands::run::execute(commands::run::RunArgs { config_dir }).await,
+        Some(Command::Web { host, port }) => {
             commands::web::execute(commands::web::WebArgs {
-                config_path,
+                config_dir,
                 host,
                 port,
             })
             .await
         }
-        None => {
-            // No subcommand: default to headless run
-            commands::run::execute(commands::run::RunArgs {
-                config_path: cli.config_path,
+        Some(Command::OpenConfigDir) => {
+            commands::open_config_dir::execute(commands::open_config_dir::OpenConfigDirArgs {
+                config_dir,
             })
             .await
         }
+        None => commands::run::execute(commands::run::RunArgs { config_dir }).await,
     }
 }
 
@@ -99,6 +173,7 @@ mod tests {
         let port = std::env::var("PORT").ok();
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
+        std::env::remove_var("ENSEMBLE_CONFIG");
         (guard, host, port)
     }
 
@@ -127,12 +202,12 @@ mod tests {
     // ---- `ensemble run` subcommand ----
 
     #[test]
-    fn test_cli_parse_run_defaults() {
+    fn test_cli_parse_run_with_config_dir() {
         let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from(["ensemble", "run"]);
+        let cli = Cli::parse_from(["ensemble", "run", "--config-dir", "/tmp/ensemble"]);
         match cli.command {
-            Some(Command::Run { config_path }) => {
-                assert_eq!(config_path, PathBuf::from("ensemble.yaml"));
+            Some(Command::Run) => {
+                assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")))
             }
             other => panic!("expected Run subcommand, got {:?}", other),
         }
@@ -140,13 +215,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_parse_run_custom_config() {
+    fn test_cli_parse_run_defaults() {
         let (_guard, host, port) = lock_and_clear_env();
-        let cli = Cli::parse_from(["ensemble", "run", "custom/ensemble.yaml"]);
+        let cli = Cli::parse_from(["ensemble", "run"]);
         match cli.command {
-            Some(Command::Run { config_path }) => {
-                assert_eq!(config_path, PathBuf::from("custom/ensemble.yaml"));
-            }
+            Some(Command::Run) => assert_eq!(cli.config.config_dir, None),
             other => panic!("expected Run subcommand, got {:?}", other),
         }
         restore_env(host, port);
@@ -159,12 +232,8 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "web"]);
         match cli.command {
-            Some(Command::Web {
-                config_path,
-                host: h,
-                port: p,
-            }) => {
-                assert_eq!(config_path, PathBuf::from("ensemble.yaml"));
+            Some(Command::Web { host: h, port: p }) => {
+                assert_eq!(cli.config.config_dir, None);
                 assert_eq!(h, "127.0.0.1");
                 assert_eq!(p, None);
             }
@@ -179,19 +248,16 @@ mod tests {
         let cli = Cli::parse_from([
             "ensemble",
             "web",
+            "--config-dir",
+            "/tmp/ensemble",
             "--host",
             "0.0.0.0",
             "--port",
             "8080",
-            "custom/ensemble.yaml",
         ]);
         match cli.command {
-            Some(Command::Web {
-                config_path,
-                host: h,
-                port: p,
-            }) => {
-                assert_eq!(config_path, PathBuf::from("custom/ensemble.yaml"));
+            Some(Command::Web { host: h, port: p }) => {
+                assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
                 assert_eq!(h, "0.0.0.0");
                 assert_eq!(p, Some(8080));
             }
@@ -253,6 +319,66 @@ mod tests {
         restore_env(host, port);
     }
 
+    // ---- `ensemble open-config-dir` subcommand ----
+
+    #[test]
+    fn test_cli_parse_open_config_dir_subcommand() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from(["ensemble", "open-config-dir"]);
+        assert!(matches!(cli.command, Some(Command::OpenConfigDir)));
+        restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_parse_open_config_dir_with_config_dir() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from([
+            "ensemble",
+            "open-config-dir",
+            "--config-dir",
+            "/tmp/ensemble",
+        ]);
+        match cli.command {
+            Some(Command::OpenConfigDir) => {
+                assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")))
+            }
+            other => panic!("expected OpenConfigDir subcommand, got {:?}", other),
+        }
+        restore_env(host, port);
+    }
+
+    // ---- legacy argument rejection ----
+
+    #[test]
+    fn test_cli_rejects_legacy_config_flag() {
+        let result = reject_legacy_config_overrides(
+            [
+                OsString::from("ensemble"),
+                OsString::from("run"),
+                OsString::from("--config"),
+                OsString::from("old.yaml"),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--config-dir"));
+    }
+
+    #[test]
+    fn test_cli_rejects_legacy_short_config_flag() {
+        let result = reject_legacy_config_overrides(
+            [
+                OsString::from("ensemble"),
+                OsString::from("run"),
+                OsString::from("-c"),
+                OsString::from("old.yaml"),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--config-dir"));
+    }
+
     // ---- no subcommand (default to headless run) ----
 
     #[test]
@@ -260,7 +386,28 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.config_path, PathBuf::from("ensemble.yaml"));
         restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_no_subcommand_accepts_config_dir() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::try_parse_from(["ensemble", "--config-dir", "/tmp/ensemble"])
+            .expect("bare ensemble should accept --config-dir");
+        assert!(cli.command.is_none());
+        restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_rejects_legacy_bare_config_path() {
+        let result = reject_legacy_config_overrides(
+            [
+                OsString::from("ensemble"),
+                OsString::from("custom/ensemble.yaml"),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--config-dir"));
     }
 }
