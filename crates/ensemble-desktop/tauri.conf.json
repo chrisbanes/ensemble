@@ -10,7 +10,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg", "app"]
+    "targets": ["dmg", "app", "deb", "appimage"]
   },
   "app": {
     "windows": [
