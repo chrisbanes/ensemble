@@ -43,13 +43,14 @@ pub fn resolve_config_dir_for_desktop(
 ) -> Result<ResolvedConfigDir, ConfigError> {
     let config_dir = if let Some(env) = env_override {
         let env_path = PathBuf::from(env);
+        let expanded = expand_override_path(&env_path)?;
         // Desktop rejects relative paths
-        if !env_path.is_absolute() {
+        if !expanded.is_absolute() {
             return Err(ConfigError::RelativeDesktopOverride {
-                path: env_path.display().to_string(),
+                path: expanded.display().to_string(),
             });
         }
-        expand_override_path(&env_path)?
+        expanded
     } else {
         default_config_dir()?
     };
@@ -146,6 +147,33 @@ mod tests {
     fn test_resolve_desktop_config_dir_rejects_relative_env_override() {
         let err = resolve_config_dir_for_desktop(Some(OsString::from("configs/dev"))).unwrap_err();
         assert!(err.to_string().contains("relative"));
+    }
+
+    #[test]
+    fn test_resolve_desktop_config_dir_expands_tilde_override() {
+        let home = dirs::home_dir().unwrap();
+        let resolved =
+            resolve_config_dir_for_desktop(Some(OsString::from("~/ensemble-config"))).unwrap();
+        assert_eq!(resolved.config_dir, home.join("ensemble-config"));
+        assert_eq!(
+            resolved.config_path,
+            home.join("ensemble-config").join("config.yaml")
+        );
+    }
+
+    #[test]
+    fn test_resolve_desktop_config_dir_expands_env_override() {
+        std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/desktop-config");
+        let resolved = resolve_config_dir_for_desktop(Some(OsString::from(
+            "$ENSEMBLE_TEST_DESKTOP_CONFIG_DIR",
+        )))
+        .unwrap();
+        assert_eq!(resolved.config_dir, PathBuf::from("/tmp/desktop-config"));
+        assert_eq!(
+            resolved.config_path,
+            PathBuf::from("/tmp/desktop-config/config.yaml")
+        );
+        std::env::remove_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR");
     }
 
     #[test]

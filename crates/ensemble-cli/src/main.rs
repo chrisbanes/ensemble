@@ -12,39 +12,29 @@ use ensemble_core::observability::logging::init_logging;
 #[derive(Parser, Debug)]
 #[command(name = "ensemble", about = "Orchestrate coding agents")]
 struct Cli {
+    #[command(flatten)]
+    config: ConfigDirArgs,
+
     /// Subcommand is optional: bare `ensemble` defaults to headless `run`.
     #[command(subcommand)]
     command: Option<Command>,
-
-    /// Config directory path (deprecated: use subcommand-specific --config-dir instead)
-    #[arg(default_value = None, hide = true)]
-    _legacy_config_path: Option<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]
 struct ConfigDirArgs {
     /// Path to the ensemble configuration directory (contains config.yaml)
-    #[arg(long, env = "ENSEMBLE_CONFIG_DIR")]
+    #[arg(long, env = "ENSEMBLE_CONFIG_DIR", global = true)]
     config_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Interactively create an ensemble configuration directory.
-    Init {
-        #[command(flatten)]
-        config: ConfigDirArgs,
-    },
+    Init,
     /// Start the ensemble orchestrator in headless mode.
-    Run {
-        #[command(flatten)]
-        config: ConfigDirArgs,
-    },
+    Run,
     /// Start the ensemble orchestrator with web UI.
     Web {
-        #[command(flatten)]
-        config: ConfigDirArgs,
-
         /// HTTP server bind address.
         #[arg(long, env = "HOST", default_value = "127.0.0.1")]
         host: String,
@@ -54,10 +44,7 @@ enum Command {
         port: Option<u16>,
     },
     /// Open the ensemble configuration directory in the system file manager.
-    OpenConfigDir {
-        #[command(flatten)]
-        config: ConfigDirArgs,
-    },
+    OpenConfigDir,
 }
 
 /// Check for legacy config override arguments and print migration error.
@@ -82,6 +69,50 @@ fn reject_legacy_config_overrides(args: impl Iterator<Item = OsString>) -> Resul
         );
     }
 
+    let mut expect_value_for_flag = false;
+    let mut saw_subcommand = false;
+
+    for arg in args_vec.iter().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if expect_value_for_flag {
+            expect_value_for_flag = false;
+            continue;
+        }
+
+        if arg == "--" {
+            break;
+        }
+
+        if arg == "--config-dir" || arg == "--host" || arg == "--port" {
+            expect_value_for_flag = true;
+            continue;
+        }
+
+        if arg.starts_with("--config-dir=")
+            || arg.starts_with("--host=")
+            || arg.starts_with("--port=")
+        {
+            continue;
+        }
+
+        if arg.starts_with('-') {
+            continue;
+        }
+
+        if !saw_subcommand && matches!(arg.as_ref(), "init" | "run" | "web" | "open-config-dir") {
+            saw_subcommand = true;
+            continue;
+        }
+
+        return Err(
+            "error: positional config paths are no longer supported. Use --config-dir or ENSEMBLE_CONFIG_DIR instead.\n\
+             example: ensemble run --config-dir /path/to/config\n\
+             example: ensemble --config-dir /path/to/config"
+                .to_string(),
+        );
+    }
+
     Ok(())
 }
 
@@ -96,37 +127,31 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     init_logging();
 
+    let config_dir = cli.config.config_dir;
+
     match cli.command {
-        Some(Command::Init { config }) => {
+        Some(Command::Init) => {
             commands::init::execute(commands::init::InitArgs {
-                config_dir: config.config_dir,
+                config_dir,
             })
             .await
         }
-        Some(Command::Run { config }) => {
-            commands::run::execute(commands::run::RunArgs {
-                config_dir: config.config_dir,
-            })
-            .await
-        }
-        Some(Command::Web { config, host, port }) => {
+        Some(Command::Run) => commands::run::execute(commands::run::RunArgs { config_dir }).await,
+        Some(Command::Web { host, port }) => {
             commands::web::execute(commands::web::WebArgs {
-                config_dir: config.config_dir,
+                config_dir,
                 host,
                 port,
             })
             .await
         }
-        Some(Command::OpenConfigDir { config }) => {
+        Some(Command::OpenConfigDir) => {
             commands::open_config_dir::execute(commands::open_config_dir::OpenConfigDirArgs {
-                config_dir: config.config_dir,
+                config_dir,
             })
             .await
         }
-        None => {
-            // No subcommand: default to headless run with default config dir
-            commands::run::execute(commands::run::RunArgs { config_dir: None }).await
-        }
+        None => commands::run::execute(commands::run::RunArgs { config_dir }).await,
     }
 }
 
@@ -173,7 +198,7 @@ mod tests {
     fn test_cli_parse_init_subcommand() {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "init"]);
-        assert!(matches!(cli.command, Some(Command::Init { .. })));
+        assert!(matches!(cli.command, Some(Command::Init)));
         restore_env(host, port);
     }
 
@@ -184,9 +209,7 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run", "--config-dir", "/tmp/ensemble"]);
         match cli.command {
-            Some(Command::Run { config }) => {
-                assert_eq!(config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
-            }
+            Some(Command::Run) => assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble"))),
             other => panic!("expected Run subcommand, got {:?}", other),
         }
         restore_env(host, port);
@@ -197,9 +220,7 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run"]);
         match cli.command {
-            Some(Command::Run { config }) => {
-                assert_eq!(config.config_dir, None);
-            }
+            Some(Command::Run) => assert_eq!(cli.config.config_dir, None),
             other => panic!("expected Run subcommand, got {:?}", other),
         }
         restore_env(host, port);
@@ -212,13 +233,8 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "web"]);
         match cli.command {
-            Some(Command::Web {
-                config,
-                host: h,
-                port: p,
-                ..
-            }) => {
-                assert_eq!(config.config_dir, None);
+            Some(Command::Web { host: h, port: p }) => {
+                assert_eq!(cli.config.config_dir, None);
                 assert_eq!(h, "127.0.0.1");
                 assert_eq!(p, None);
             }
@@ -241,13 +257,8 @@ mod tests {
             "8080",
         ]);
         match cli.command {
-            Some(Command::Web {
-                config,
-                host: h,
-                port: p,
-                ..
-            }) => {
-                assert_eq!(config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
+            Some(Command::Web { host: h, port: p }) => {
+                assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
                 assert_eq!(h, "0.0.0.0");
                 assert_eq!(p, Some(8080));
             }
@@ -315,7 +326,7 @@ mod tests {
     fn test_cli_parse_open_config_dir_subcommand() {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "open-config-dir"]);
-        assert!(matches!(cli.command, Some(Command::OpenConfigDir { .. })));
+        assert!(matches!(cli.command, Some(Command::OpenConfigDir)));
         restore_env(host, port);
     }
 
@@ -329,9 +340,7 @@ mod tests {
             "/tmp/ensemble",
         ]);
         match cli.command {
-            Some(Command::OpenConfigDir { config }) => {
-                assert_eq!(config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
-            }
+            Some(Command::OpenConfigDir) => assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble"))),
             other => panic!("expected OpenConfigDir subcommand, got {:?}", other),
         }
         restore_env(host, port);
@@ -377,5 +386,27 @@ mod tests {
         let cli = Cli::parse_from(["ensemble"]);
         assert!(cli.command.is_none());
         restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_no_subcommand_accepts_config_dir() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::try_parse_from(["ensemble", "--config-dir", "/tmp/ensemble"])
+            .expect("bare ensemble should accept --config-dir");
+        assert!(cli.command.is_none());
+        restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_rejects_legacy_bare_config_path() {
+        let result = reject_legacy_config_overrides(
+            [
+                OsString::from("ensemble"),
+                OsString::from("custom/ensemble.yaml"),
+            ]
+            .into_iter(),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--config-dir"));
     }
 }

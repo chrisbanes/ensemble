@@ -102,7 +102,7 @@ fn app_launches_without_crash() {
     let minimal_config = r#"
 tracker:
   kind: todo_file
-  file: issues.json
+  path: TODO.md
 agents:
   coder:
     model: claude-sonnet-4-20250514
@@ -111,7 +111,6 @@ agents:
 steps:
   - name: build
     agent: coder
-    prompt: "Build the code"
 on_success: "Done"
 on_failure: "Failed"
 "#;
