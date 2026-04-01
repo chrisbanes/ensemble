@@ -96,9 +96,9 @@ fn app_launches_without_crash() {
 
     println!("Launching app binary: {}", binary_path.display());
 
-    // Create a minimal ensemble.yaml config file in a temp directory
+    // Create a minimal config directory with config.yaml
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let config_path = temp_dir.path().join("ensemble.yaml");
+    let config_path = temp_dir.path().join("config.yaml");
     let minimal_config = r#"
 tracker:
   kind: todo_file
@@ -121,7 +121,7 @@ on_failure: "Failed"
 
     let mut child = Command::new(&binary_path)
         .current_dir(workspace_root)
-        .env("ENSEMBLE_CONFIG", &config_path)
+        .env("ENSEMBLE_CONFIG_DIR", temp_dir.path())
         .env("TAURI_WEBVIEW_AUTOMATION", "1")
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
@@ -178,11 +178,10 @@ fn app_shows_error_when_config_missing() {
     let possible_paths = candidate_binary_paths(manifest_dir, workspace_root);
     let binary_path = resolve_binary_path(&possible_paths).expect("App binary not found");
     let missing_config_dir = tempfile::tempdir().expect("Failed to create temp dir");
-    let missing_config = missing_config_dir.path().join("missing-ensemble.yaml");
 
     let mut child = Command::new(&binary_path)
         .current_dir(workspace_root)
-        .env("ENSEMBLE_CONFIG", &missing_config)
+        .env("ENSEMBLE_CONFIG_DIR", missing_config_dir.path())
         .env("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", "1")
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
@@ -211,8 +210,8 @@ fn app_shows_error_when_config_missing() {
 
     let combined_output = format!("{} {}", stdout, stderr);
     assert!(
-        combined_output.contains("Config file not found")
-            || combined_output.contains("ensemble.yaml"),
+        combined_output.contains("Configuration file not found")
+            || combined_output.contains("config.yaml"),
         "App should show helpful error message about missing config. Got:\n{}",
         combined_output
     );

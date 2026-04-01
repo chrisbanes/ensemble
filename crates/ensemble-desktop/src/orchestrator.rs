@@ -20,7 +20,7 @@ pub struct DesktopOrchestrator {
 impl DesktopOrchestrator {
     /// Initialize the orchestrator from config
     pub async fn new(config_path: PathBuf) -> Result<Self, String> {
-        info!(config_path = %config_path.display(), "Initializing desktop orchestrator");
+        info!(config_path = %config_path.display(), "Initializing desktop orchestrator from config.yaml");
 
         // Load config
         let config =
@@ -32,7 +32,7 @@ impl DesktopOrchestrator {
 
         info!(
             tracker_kind = %config.tracker.kind,
-            "Orchestrator config loaded"
+            "Orchestrator config loaded from config.yaml"
         );
 
         let state = Arc::new(RwLock::new(OrchestratorState::new(

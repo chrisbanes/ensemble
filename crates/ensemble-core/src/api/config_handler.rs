@@ -98,7 +98,7 @@ on_failure: Failed
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
             config: Arc::new(config),
-            config_path: "ensemble.yaml".to_string(),
+            config_path: "config.yaml".to_string(),
         }
     }
 
@@ -109,7 +109,7 @@ on_failure: Failed
         assert_eq!(status, StatusCode::OK);
         assert!(response.valid);
         assert!(response.errors.is_empty());
-        assert_eq!(response.config_path, "ensemble.yaml");
+        assert_eq!(response.config_path, "config.yaml");
         assert_eq!(response.config.tracker.kind, "todo_file");
     }
 
