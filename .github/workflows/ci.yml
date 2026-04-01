@@ -123,7 +123,12 @@ jobs:
         if: matrix.runner == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+
+      - name: Run desktop unit tests
+        run: cargo test -p ensemble-desktop --bin ensemble-desktop -- --nocapture
+        env:
+          SKIP_UI_BUILD: 1
 
       - name: Build Tauri app
         if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
@@ -141,6 +146,10 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+
+      - name: Run E2E smoke test (verify app launches)
+        run: ${{ matrix.runner == 'ubuntu-latest' && 'xvfb-run -a' || '' }} cargo test -p ensemble-desktop --test e2e app_launches_without_crash -- --ignored --nocapture
+        timeout-minutes: 2
 
       - name: Upload desktop artifacts
         if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
