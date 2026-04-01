@@ -131,10 +131,7 @@ async fn main() -> ExitCode {
 
     match cli.command {
         Some(Command::Init) => {
-            commands::init::execute(commands::init::InitArgs {
-                config_dir,
-            })
-            .await
+            commands::init::execute(commands::init::InitArgs { config_dir }).await
         }
         Some(Command::Run) => commands::run::execute(commands::run::RunArgs { config_dir }).await,
         Some(Command::Web { host, port }) => {
@@ -209,7 +206,9 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run", "--config-dir", "/tmp/ensemble"]);
         match cli.command {
-            Some(Command::Run) => assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble"))),
+            Some(Command::Run) => {
+                assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")))
+            }
             other => panic!("expected Run subcommand, got {:?}", other),
         }
         restore_env(host, port);
@@ -340,7 +339,9 @@ mod tests {
             "/tmp/ensemble",
         ]);
         match cli.command {
-            Some(Command::OpenConfigDir) => assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble"))),
+            Some(Command::OpenConfigDir) => {
+                assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")))
+            }
             other => panic!("expected OpenConfigDir subcommand, got {:?}", other),
         }
         restore_env(host, port);
