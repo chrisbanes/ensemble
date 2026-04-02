@@ -1,23 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::Manager;
-use tracing::{error, info};
+use tracing::{info, warn};
 
 mod embedded_ui;
 mod orchestrator;
+mod server;
 
-use embedded_ui::{resolve_path, spa_available};
+use embedded_ui::spa_available;
 use ensemble_core::config::location::resolve_config_dir_for_desktop;
-use orchestrator::{get_state, trigger_refresh, DesktopOrchestrator};
+use orchestrator::DesktopOrchestrator;
+use server::start_desktop_server;
 
 fn main() {
     ensemble_core::observability::logging::init_logging();
     info!("Starting Ensemble Desktop");
 
     if !spa_available() {
-        eprintln!("Warning: SPA assets not found. UI may not display correctly.");
-        eprintln!("Build with: cd ../ensemble-ui/src-ui && pnpm run build");
+        warn!("SPA assets not found. UI may not display correctly.");
+        warn!("Build with: cd ../ensemble-ui/src-ui && pnpm run build");
     }
 
     // Reject legacy ENSEMBLE_CONFIG env var
@@ -37,45 +38,68 @@ fn main() {
         }
     };
 
-    if !resolved.config_path.exists() {
-        let message = format_missing_config_message(&resolved.config_path);
-        eprintln!("Error: {}", message);
-
-        if should_show_config_missing_dialog() {
-            #[cfg(not(test))]
-            show_config_missing_dialog(&message);
-        }
-
-        std::process::exit(1);
-    }
-
     info!(
         config_dir = %resolved.config_dir.display(),
         config_path = %resolved.config_path.display(),
         "Resolved configuration paths"
     );
 
+    // Create Tokio runtime for the server
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+    // Start the local HTTP server
+    let desktop_server = rt
+        .block_on(start_desktop_server(
+            resolved.config_dir.clone(),
+            resolved.config_path.clone(),
+        ))
+        .unwrap_or_else(|e| {
+            eprintln!("Error: Failed to start desktop server: {}", e);
+            std::process::exit(1);
+        });
+
+    info!(url = %desktop_server.url, "Desktop server started");
+
+    // Store server URL and runtime for use in Tauri setup
+    let server_url = desktop_server.url.clone();
+
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            get_state,
-            trigger_refresh,
-            serve_ui_file,
-        ])
-        .setup(|app| {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let orchestrator =
-                rt.block_on(async { DesktopOrchestrator::new(resolved.config_path).await })?;
+        .setup(move |app| {
+            // Create main window pointing to the local server URL
+            tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::External(server_url.clone()),
+            )
+            .title("Ensemble Dashboard")
+            .inner_size(1280.0, 800.0)
+            .resizable(true)
+            .build()
+            .expect("Failed to create main window");
 
-            app.manage(orchestrator);
-
-            let orchestrator_ref = app.state::<DesktopOrchestrator>().inner().clone();
-            rt.spawn(async move {
-                if let Err(e) = orchestrator_ref.start().await {
-                    error!("Orchestrator failed: {}", e);
+            // Initialize orchestrator if we have a valid config
+            rt.block_on(async {
+                if resolved.config_path.exists() {
+                    match DesktopOrchestrator::new(resolved.config_path.clone()).await {
+                        Ok(orchestrator) => {
+                            app.manage(orchestrator);
+                            info!("Orchestrator initialized successfully");
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "Failed to initialize orchestrator - app will run in setup mode"
+                            );
+                        }
+                    }
+                } else {
+                    info!("No config found - app running in setup mode");
                 }
             });
 
+            // Store runtime handle
             app.manage(rt);
+
             info!("Ensemble Desktop initialized successfully");
             Ok(())
         })
@@ -83,75 +107,11 @@ fn main() {
         .expect("error while running tauri application");
 }
 
-fn format_missing_config_message(config_path: &std::path::Path) -> String {
-    format!(
-        "Configuration file not found: {}. Please run `ensemble init` to create a configuration directory, or set ENSEMBLE_CONFIG_DIR to an existing directory containing config.yaml.",
-        config_path.display()
-    )
-}
-
-fn should_show_config_missing_dialog() -> bool {
-    !matches!(
-        std::env::var("ENSEMBLE_SUPPRESS_CONFIG_DIALOG").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
-}
-
-#[cfg(not(test))]
-fn show_config_missing_dialog(message: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
-        let _ = Command::new("osascript")
-            .args([
-                "-e",
-                &format!(
-                    "display dialog \"{}\" buttons {{\"OK\"}} with icon stop",
-                    message
-                ),
-            ])
-            .output();
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        use std::process::Command;
-        let _ = Command::new("zenity")
-            .args([
-                "--error",
-                "--title=Ensemble",
-                &format!("--text={}", message),
-            ])
-            .output()
-            .or_else(|_| {
-                Command::new("kdialog")
-                    .args(["--error", message, "--title=Ensemble"])
-                    .output()
-            })
-            .or_else(|_| Command::new("xmessage").args(["-center", message]).output());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::process::Command;
-        let _ = Command::new("msg").args(["*", message]).output();
-    }
-}
-
-#[tauri::command]
-fn serve_ui_file(path: String) -> Result<serde_json::Value, String> {
-    let file = resolve_path(&path).ok_or_else(|| format!("File not found: {}", path))?;
-    let data_b64 = STANDARD.encode(&file.data);
-    Ok(serde_json::json!({
-        "data": data_b64,
-        "content_type": file.content_type,
-    }))
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::{format_missing_config_message, should_show_config_missing_dialog};
-    use std::path::{Path, PathBuf};
+    use crate::embedded_ui::spa_available;
+    use std::path::Path;
+    use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
     #[test]
@@ -174,14 +134,16 @@ mod tests {
         let windows = config["app"]["windows"]
             .as_array()
             .expect("app.windows should be an array");
-        assert!(!windows.is_empty(), "at least one window should be defined");
-
+        // Window is now created programmatically, so tauri.conf.json may not define it
+        // Just check that if windows are defined, they have required fields
         for (i, window) in windows.iter().enumerate() {
-            assert!(
-                window.get("url").is_some(),
-                "window {} should have a url field",
-                i
-            );
+            if window.get("url").is_some() {
+                assert!(
+                    window.get("label").is_some(),
+                    "window {} should have a label field if url is present",
+                    i
+                );
+            }
         }
     }
 
@@ -196,36 +158,7 @@ mod tests {
 
     #[test]
     fn embedded_ui_module_loads() {
-        use crate::embedded_ui::spa_available;
         let _ = spa_available;
-    }
-
-    #[test]
-    fn missing_config_message_mentions_resolved_config_yaml_path() {
-        let config_path = PathBuf::from("/tmp/ensemble/config.yaml");
-        let message = format_missing_config_message(&config_path);
-        assert!(message.contains("/tmp/ensemble/config.yaml"));
-        assert!(message.contains("ensemble init"));
-        assert!(message.contains("ENSEMBLE_CONFIG_DIR"));
-    }
-
-    #[test]
-    fn suppresses_config_missing_dialog_for_automation() {
-        let _guard = env_lock().lock().unwrap();
-        let previous = std::env::var_os("ENSEMBLE_SUPPRESS_CONFIG_DIALOG");
-        std::env::set_var("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", "1");
-
-        let should_show = should_show_config_missing_dialog();
-
-        restore_env("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", previous);
-        assert!(!should_show);
-    }
-
-    fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
-        match value {
-            Some(value) => std::env::set_var(key, value),
-            None => std::env::remove_var(key),
-        }
     }
 
     fn env_lock() -> &'static Mutex<()> {

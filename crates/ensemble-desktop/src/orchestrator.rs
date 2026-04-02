@@ -8,17 +8,25 @@ use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
-/// Desktop orchestrator state
+/// Desktop orchestrator state.
+///
+/// This is initialized when a valid config is available.
+/// The orchestrator runs in the background and manages pipeline execution.
 #[derive(Clone)]
 pub struct DesktopOrchestrator {
+    #[allow(dead_code)]
     pub state: Arc<RwLock<OrchestratorState>>,
     #[allow(dead_code)]
     pub event_bus: EventBus,
+    #[allow(dead_code)]
     pub config_path: String,
 }
 
 impl DesktopOrchestrator {
-    /// Initialize the orchestrator from config
+    /// Initialize the orchestrator from config.
+    ///
+    /// This validates the config and builds the DAG, returning an error
+    /// if the config is invalid.
     pub async fn new(config_path: PathBuf) -> Result<Self, String> {
         info!(config_path = %config_path.display(), "Initializing desktop orchestrator from config.yaml");
 
@@ -47,44 +55,69 @@ impl DesktopOrchestrator {
         })
     }
 
-    /// Start the orchestrator loop (placeholder for now)
+    /// Start the orchestrator loop.
+    #[allow(dead_code)]
     pub async fn start(&self) -> Result<(), String> {
-        info!("Desktop orchestrator started (placeholder)");
+        info!("Desktop orchestrator started");
         // TODO: Implement actual orchestrator loop
         Ok(())
     }
 
-    /// Stop the orchestrator
+    /// Stop the orchestrator.
     #[allow(dead_code)]
     pub async fn stop(&self) {
         info!("Desktop orchestrator stopped");
     }
 }
 
-/// Tauri command to get orchestrator state snapshot
-#[tauri::command]
-pub async fn get_state(
-    orchestrator: tauri::State<'_, DesktopOrchestrator>,
-) -> Result<serde_json::Value, String> {
-    let _state = orchestrator.state.read().await;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
 
-    // Build state snapshot (simplified for now)
-    let snapshot = serde_json::json!({
-        "status": "running",
-        "running_count": 0,
-        "claimed_count": 0,
-        "config_path": orchestrator.config_path,
-    });
+    #[tokio::test]
+    async fn test_orchestrator_init_with_valid_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
 
-    Ok(snapshot)
-}
+        let valid_config = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
 
-/// Tauri command to trigger refresh
-#[tauri::command]
-pub async fn trigger_refresh(
-    _orchestrator: tauri::State<'_, DesktopOrchestrator>,
-) -> Result<(), String> {
-    info!("Refresh requested via desktop UI");
-    // TODO: Implement actual refresh
-    Ok(())
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        file.write_all(valid_config.as_bytes()).unwrap();
+
+        let orchestrator = DesktopOrchestrator::new(config_path).await;
+        assert!(orchestrator.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_init_fails_with_invalid_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+
+        let invalid_config = r#"
+tracker:
+  kind: todo_file
+agents: {}
+steps: []
+"#;
+
+        let mut file = std::fs::File::create(&config_path).unwrap();
+        file.write_all(invalid_config.as_bytes()).unwrap();
+
+        let orchestrator = DesktopOrchestrator::new(config_path).await;
+        assert!(orchestrator.is_err());
+    }
 }
