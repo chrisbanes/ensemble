@@ -7,6 +7,12 @@ use ensemble_core::config::setup::{
     SetupRequest, SetupStep, SetupTracker,
 };
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OverwritePlan {
+    template_prompts: Vec<std::path::PathBuf>,
+    env_prompt: Option<std::path::PathBuf>,
+}
+
 /// Convert CLI types to a SetupRequest for the shared implementation.
 fn to_setup_request(
     tracker: &TrackerChoice,
@@ -125,33 +131,47 @@ pub fn write_files(
     let artifacts = merge_setup_request(existing_raw_yaml.as_deref(), &request)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
+    let overwrite_plan = plan_overwrites(config_dir, &request, &artifacts);
+
+    for template_path in &overwrite_plan.template_prompts {
+        match inquire::Confirm::new(&format!(
+            "Template '{}' already exists. Overwrite?",
+            template_path.display()
+        ))
+        .with_default(true)
+        .prompt()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("  Skipping {}", template_path.display());
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+
+    if let Some(env_path) = &overwrite_plan.env_prompt {
+        match inquire::Confirm::new(&format!(
+            "{} already exists. Overwrite?",
+            env_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("  Skipping {} (token not saved)", env_path.display());
+                return Ok(());
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+
     // Write the main artifacts
     write_setup_artifacts(config_dir, &request, &artifacts)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     println!("  ✓ {}", config_dir.join("config.yaml").display());
-
-    // Handle template file overwrite prompts
-    let templates_dir = config_dir.join("templates");
-    for step in steps {
-        let template_path = templates_dir.join(format!("{}.liquid", step.name));
-        if template_path.exists() {
-            match inquire::Confirm::new(&format!(
-                "Template '{}' already exists. Overwrite?",
-                template_path.display()
-            ))
-            .with_default(true)
-            .prompt()
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    println!("  Skipping {}", template_path.display());
-                    continue;
-                }
-                Err(_) => return Ok(()),
-            }
-        }
-    }
 
     // Print template paths
     for template_path in artifacts.templates.keys() {
@@ -166,28 +186,11 @@ pub fn write_files(
         }
     }
 
-    // Write .env file with GitHub token if provided interactively
     if let TrackerChoice::GitHub {
         api_token: Some(_), ..
     } = tracker
     {
         let env_path = config_dir.join(".env");
-        if env_path.exists() {
-            match inquire::Confirm::new(&format!(
-                "{} already exists. Overwrite?",
-                env_path.display()
-            ))
-            .with_default(false)
-            .prompt()
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    println!("  Skipping {} (token not saved)", env_path.display());
-                }
-                Err(_) => return Ok(()),
-            }
-        }
-        // The env file is already written by write_setup_artifacts, just need to print confirmation
         if env_path.exists() {
             println!(
                 "  ✓ {} (auto-loaded from config directory)",
@@ -198,6 +201,36 @@ pub fn write_files(
 
     println!("\nDone! Run `ensemble` to start processing issues.");
     Ok(())
+}
+
+fn plan_overwrites(
+    config_dir: &std::path::Path,
+    request: &SetupRequest,
+    artifacts: &ensemble_core::config::setup::SetupArtifacts,
+) -> OverwritePlan {
+    let mut plan = OverwritePlan::default();
+
+    for template_path in artifacts.templates.keys() {
+        let full_path = config_dir.join(template_path);
+        if full_path.exists() {
+            plan.template_prompts.push(full_path);
+        }
+    }
+
+    if matches!(
+        request.tracker,
+        SetupTracker::GitHub {
+            api_token: Some(_),
+            ..
+        }
+    ) {
+        let env_path = config_dir.join(".env");
+        if env_path.exists() {
+            plan.env_prompt = Some(env_path);
+        }
+    }
+
+    plan
 }
 
 #[cfg(test)]
@@ -389,5 +422,47 @@ mod tests {
 
         assert!(yaml.contains("acpx_agent: claude"));
         assert!(!yaml.contains("model:"));
+    }
+
+    #[test]
+    fn test_plan_overwrites_checks_existing_template_and_env_before_writing() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmpdir.path().join("templates")).unwrap();
+        std::fs::write(tmpdir.path().join("templates/build.liquid"), "existing").unwrap();
+        std::fs::write(tmpdir.path().join(".env"), "TOKEN=old\n").unwrap();
+
+        let request = SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/repo".to_string(),
+                project_number: None,
+                api_key_env: "GITHUB_TOKEN".to_string(),
+                api_token: Some("secret".to_string()),
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = build_setup_artifacts(&request);
+
+        let plan = plan_overwrites(tmpdir.path(), &request, &artifacts);
+
+        assert_eq!(
+            plan.template_prompts,
+            vec![tmpdir.path().join("templates/build.liquid")]
+        );
+        assert_eq!(plan.env_prompt, Some(tmpdir.path().join(".env")));
     }
 }

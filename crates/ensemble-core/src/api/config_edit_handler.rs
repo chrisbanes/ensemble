@@ -153,7 +153,14 @@ pub async fn get_setup_defaults(
 ) -> (StatusCode, Json<SetupDefaultsResponse>) {
     let doc_state = state.config_runtime.document_state.read().await;
 
-    let (defaults, has_existing) = if let Some(ref config) = doc_state.active_config {
+    let extracted_setup = doc_state
+        .raw_yaml
+        .as_deref()
+        .and_then(|yaml| crate::config::setup::extract_setup_defaults(yaml).ok());
+
+    let (defaults, has_existing) = if let Some(setup) = extracted_setup {
+        (serde_json::to_value(&setup).unwrap_or_else(|_| default_setup_defaults()), true)
+    } else if let Some(ref config) = doc_state.active_config {
         // Extract defaults from existing config
         let tracker_default = serde_json::json!({
             "kind": config.tracker.kind,
@@ -268,7 +275,7 @@ pub async fn validate_setup(
     Json(request): Json<ValidateSetupRequest>,
 ) -> (StatusCode, Json<ValidateSetupResponse>) {
     let checks = crate::config::setup::run_setup_checks(&request.setup);
-    let can_save = checks.iter().all(|c| c.passed);
+    let can_save = crate::config::setup::setup_can_save(&checks);
 
     let response = ValidateSetupResponse { checks, can_save };
 
@@ -299,10 +306,11 @@ pub async fn save_setup(
     State(state): State<AppState>,
     Json(request): Json<SaveSetupRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
+    let current = state.config_runtime.document_state.read().await.clone();
+
     // First validate the setup
     let checks = crate::config::setup::run_setup_checks(&request.setup);
-    if !checks.iter().all(|c| c.passed) {
-        let current = state.config_runtime.document_state.read().await.clone();
+    if !crate::config::setup::setup_can_save(&checks) {
         let mut response = ConfigStateResponse::from_state(&current);
         response.issues.push(ValidationIssue {
             kind: crate::config::draft::ValidationIssueKind::Config,
@@ -314,25 +322,49 @@ pub async fn save_setup(
         return (StatusCode::BAD_REQUEST, Json(response));
     }
 
-    // Build artifacts from setup request
-    let artifacts = crate::config::setup::build_setup_artifacts(&request.setup);
-
-    // Save the YAML
-    match save_raw_yaml_atomically(&state.config_runtime.config_path, &artifacts.raw_yaml) {
-        Ok(new_state) => {
-            // Update the runtime state
-            *state.config_runtime.document_state.write().await = new_state.clone();
-            let response = ConfigStateResponse::from_state(&new_state);
-            (StatusCode::OK, Json(response))
-        }
+    let artifacts = match crate::config::setup::merge_setup_request(
+        current.raw_yaml.as_deref(),
+        &request.setup,
+    ) {
+        Ok(artifacts) => artifacts,
         Err(e) => {
-            let current = state.config_runtime.document_state.read().await.clone();
-            (
+            return (
                 StatusCode::BAD_REQUEST,
                 Json(build_error_response(&current, &e)),
             )
         }
+    };
+
+    let root = state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    match crate::config::setup::write_setup_artifacts(root, &request.setup, &artifacts) {
+        Ok(()) => match crate::config::draft::load_config_state(&state.config_runtime.config_path) {
+            Ok(new_state) => {
+                *state.config_runtime.document_state.write().await = new_state.clone();
+                let response = ConfigStateResponse::from_state(&new_state);
+                (StatusCode::OK, Json(response))
+            }
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(build_error_response(&current, &e)),
+            ),
+        },
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(build_error_response(&current, &e)),
+        ),
     }
+}
+
+fn default_setup_defaults() -> serde_json::Value {
+    serde_json::json!({
+        "tracker": { "kind": "todo_file" },
+        "has_existing_config": false,
+    })
 }
 
 /// Request to validate guided form content.
@@ -552,5 +584,178 @@ on_failure: Failed
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response.state, "parsed");
         assert!(response.active_config.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_validate_setup_allows_save_when_only_environment_checks_fail() {
+        let (state, _temp_dir) = test_app_state();
+        let request = ValidateSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::TodoFile {
+                    path: PathBuf::from("TODO.md"),
+                },
+                repos: vec![],
+                agents: vec![],
+                steps: vec![crate::config::setup::SetupStep {
+                    name: "build".to_string(),
+                    agent_role: "builder".to_string(),
+                    depends: vec![],
+                    tracker_state: None,
+                }],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (status, Json(response)) =
+            validate_setup(axum::extract::State(state), Json(request)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.checks.iter().any(|check| !check.passed));
+        assert!(response.can_save);
+    }
+
+    #[tokio::test]
+    async fn test_get_setup_defaults_extracts_from_parseable_raw_yaml_without_active_config() {
+        let (state, _temp_dir) = test_app_state();
+        *state.config_runtime.document_state.write().await = ConfigDocumentState {
+            path: state.config_runtime.config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: Some(
+                r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 9
+  api_key: $GITHUB_TOKEN
+  active_states:
+    - Todo
+    - Doing
+  terminal_states:
+    - Done
+repos:
+  - path: /tmp/repo
+    branch: develop
+agents:
+  builder:
+    acpx_agent: claude
+    model: sonnet
+steps:
+  - name: build
+    agent: builder
+    tracker_state: Doing
+on_success: Done
+on_failure: Failed
+"#
+                .to_string(),
+            ),
+            document: None,
+            active_config: None,
+            validation: DraftValidationReport::default(),
+        };
+
+        let (status, Json(response)) = get_setup_defaults(axum::extract::State(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.has_existing_config);
+        assert_eq!(response.defaults["tracker"]["kind"], "github");
+        assert_eq!(response.defaults["tracker"]["repository"], "acme/repo");
+        assert_eq!(response.defaults["repos"][0]["branch"], "develop");
+        assert_eq!(response.defaults["agents"][0]["role"], "builder");
+        assert_eq!(response.defaults["steps"][0]["name"], "build");
+    }
+
+    #[tokio::test]
+    async fn test_save_setup_uses_merge_and_writes_full_artifact_set() {
+        let (state, temp_dir) = test_app_state();
+        let existing_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+  custom_tracker_flag: keep-me
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/build.liquid
+    unsupported_agent_field: keep-agent
+steps:
+  - name: build
+    agent: builder
+    custom_step_field: keep-step
+on_success: Done
+on_failure: Failed
+custom_root:
+  keep: true
+"#;
+        std::fs::write(&state.config_runtime.config_path, existing_yaml).unwrap();
+        *state.config_runtime.document_state.write().await = parse_raw_yaml(
+            state.config_runtime.config_path.clone(),
+            existing_yaml.to_string(),
+        );
+
+        let todo_path = temp_dir.path().join("nested/TODO.md");
+        let request = SaveSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::TodoFile {
+                    path: todo_path.clone(),
+                },
+                repos: vec![],
+                agents: vec![crate::config::setup::SetupAgent {
+                    role: "builder".to_string(),
+                    acpx_agent: "codex".to_string(),
+                    model: Some("sonnet".to_string()),
+                }],
+                steps: vec![crate::config::setup::SetupStep {
+                    name: "build".to_string(),
+                    agent_role: "builder".to_string(),
+                    depends: vec![],
+                    tracker_state: Some("In Progress".to_string()),
+                }],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (status, Json(response)) =
+            save_setup(axum::extract::State(state.clone()), Json(request)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response.state, "parsed");
+        assert!(state.config_runtime.config_path.exists());
+        assert!(temp_dir.path().join("templates/build.liquid").exists());
+        assert!(todo_path.exists());
+
+        let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(saved_yaml.contains("custom_root:"));
+        assert!(saved_yaml.contains("custom_tracker_flag: keep-me"));
+        assert!(saved_yaml.contains("unsupported_agent_field: keep-agent"));
+        assert!(saved_yaml.contains("custom_step_field: keep-step"));
+        assert!(saved_yaml.contains("acpx_agent: codex"));
+    }
+
+    #[tokio::test]
+    async fn test_save_setup_blocks_when_config_is_invalid() {
+        let (state, _temp_dir) = test_app_state();
+        let request = SaveSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::TodoFile {
+                    path: PathBuf::from("TODO.md"),
+                },
+                repos: vec![],
+                agents: vec![],
+                steps: vec![],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (status, Json(response)) =
+            save_setup(axum::extract::State(state), Json(request)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(response
+            .issues
+            .iter()
+            .any(|issue| issue.section == "setup"));
     }
 }

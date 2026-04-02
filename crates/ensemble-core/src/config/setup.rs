@@ -84,7 +84,15 @@ pub struct AgentCapabilities {
 
 /// Result of a setup validation check.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+pub enum SetupCheckKind {
+    Config,
+    Environment,
+}
+
+/// Result of a setup validation check.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupCheck {
+    pub kind: SetupCheckKind,
     pub label: String,
     pub passed: bool,
     pub detail: String,
@@ -186,13 +194,14 @@ pub fn write_setup_artifacts(
     // Write TODO.md if present (for todo_file tracker)
     if let Some(ref todo_content) = artifacts.todo_md {
         if let SetupTracker::TodoFile { path } = &request.tracker {
+            let resolved_path = resolve_tracker_output_path(path);
             // Create parent directories if needed
-            if let Some(parent) = path.parent() {
+            if let Some(parent) = resolved_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ConfigError::ConfigWriteFailed {
                     reason: format!("failed to create TODO.md parent directory: {}", e),
                 })?;
             }
-            std::fs::write(path, todo_content).map_err(|e| ConfigError::ConfigWriteFailed {
+            std::fs::write(&resolved_path, todo_content).map_err(|e| ConfigError::ConfigWriteFailed {
                 reason: format!("failed to write TODO.md: {}", e),
             })?;
         }
@@ -228,6 +237,7 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         .map(|o| o.status.success())
         .unwrap_or(false);
     checks.push(SetupCheck {
+        kind: SetupCheckKind::Environment,
         label: "acpx".to_string(),
         passed: acpx_ok,
         detail: if acpx_ok {
@@ -249,6 +259,7 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
                 None => format!("GitHub repo {}", repository),
             };
             checks.push(SetupCheck {
+                kind: SetupCheckKind::Config,
                 label: "Tracker".to_string(),
                 passed: true,
                 detail,
@@ -256,6 +267,7 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         }
         SetupTracker::TodoFile { path } => {
             checks.push(SetupCheck {
+                kind: SetupCheckKind::Config,
                 label: "Tracker".to_string(),
                 passed: true,
                 detail: format!("TODO.md at {}", path.display()),
@@ -291,6 +303,7 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         };
 
         checks.push(SetupCheck {
+            kind: SetupCheckKind::Environment,
             label: "Repo".to_string(),
             passed,
             detail,
@@ -306,6 +319,7 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
             .unwrap_or(false);
 
         checks.push(SetupCheck {
+            kind: SetupCheckKind::Environment,
             label: format!("Agent: {}", agent.role),
             passed: healthy,
             detail: if healthy {
@@ -320,6 +334,7 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     let dag_result = validate_dag(&request.steps);
     let dag_ok = dag_result.is_ok();
     checks.push(SetupCheck {
+        kind: SetupCheckKind::Config,
         label: "Pipeline".to_string(),
         passed: dag_ok,
         detail: match dag_result {
@@ -328,7 +343,38 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         },
     });
 
+    let draft = crate::config::draft::parse_raw_yaml(
+        PathBuf::from("config.yaml"),
+        build_setup_artifacts(request).raw_yaml,
+    );
+    let config_issues: Vec<_> = draft
+        .validation
+        .issues
+        .iter()
+        .filter(|issue| matches!(issue.kind, crate::config::draft::ValidationIssueKind::Config))
+        .collect();
+    let draft_passed = draft.kind != crate::config::draft::ConfigStateKind::SyntaxError
+        && config_issues.is_empty();
+    checks.push(SetupCheck {
+        kind: SetupCheckKind::Config,
+        label: "Config".to_string(),
+        passed: draft_passed,
+        detail: if draft.kind == crate::config::draft::ConfigStateKind::SyntaxError {
+            "generated config has YAML syntax errors".to_string()
+        } else if let Some(issue) = config_issues.first() {
+            issue.message.clone()
+        } else {
+            "generated config is structurally valid".to_string()
+        },
+    });
+
     checks
+}
+
+pub fn setup_can_save(checks: &[SetupCheck]) -> bool {
+    !checks
+        .iter()
+        .any(|check| !check.passed && check.kind == SetupCheckKind::Config)
 }
 
 /// Extract a SetupRequest from raw YAML (for reconfiguration scenarios).
@@ -899,7 +945,23 @@ fn update_yaml_from_request(
         })?;
 
     // Update tracker section
-    let mut tracker_mapping = serde_yaml::Mapping::new();
+    let existing_tracker_mapping = mapping
+        .get("tracker")
+        .and_then(|value| value.as_mapping())
+        .cloned()
+        .unwrap_or_default();
+    let mut tracker_mapping = existing_tracker_mapping;
+    for key in [
+        "kind",
+        "path",
+        "repository",
+        "api_key",
+        "project_number",
+        "active_states",
+        "terminal_states",
+    ] {
+        tracker_mapping.remove(serde_yaml::Value::String(key.to_string()));
+    }
     match &request.tracker {
         SetupTracker::TodoFile { path } => {
             tracker_mapping.insert(
@@ -997,9 +1059,21 @@ fn update_yaml_from_request(
     }
 
     // Update agents section
+    let existing_agents = mapping
+        .get("agents")
+        .and_then(|value| value.as_mapping())
+        .cloned()
+        .unwrap_or_default();
     let mut agents_map = serde_yaml::Mapping::new();
     for agent in &request.agents {
-        let mut agent_config = serde_yaml::Mapping::new();
+        let mut agent_config = existing_agents
+            .get(serde_yaml::Value::String(agent.role.clone()))
+            .and_then(|value| value.as_mapping())
+            .cloned()
+            .unwrap_or_default();
+        for key in ["acpx_agent", "model", "prompt_template", "prompt"] {
+            agent_config.remove(serde_yaml::Value::String(key.to_string()));
+        }
         agent_config.insert(
             "acpx_agent".into(),
             serde_yaml::Value::String(agent.acpx_agent.clone()),
@@ -1020,11 +1094,26 @@ fn update_yaml_from_request(
     mapping.insert("agents".into(), serde_yaml::Value::Mapping(agents_map));
 
     // Update steps section
+    let existing_steps = mapping
+        .get("steps")
+        .and_then(|value| value.as_sequence())
+        .cloned()
+        .unwrap_or_default();
     let steps_seq: Vec<serde_yaml::Value> = request
         .steps
         .iter()
         .map(|s| {
-            let mut step_map = serde_yaml::Mapping::new();
+            let mut step_map = existing_steps
+                .iter()
+                .find_map(|value| {
+                    let map = value.as_mapping()?;
+                    let name = map.get("name")?.as_str()?;
+                    (name == s.name).then(|| map.clone())
+                })
+                .unwrap_or_default();
+            for key in ["name", "agent", "depends", "tracker_state"] {
+                step_map.remove(serde_yaml::Value::String(key.to_string()));
+            }
             step_map.insert("name".into(), serde_yaml::Value::String(s.name.clone()));
             step_map.insert(
                 "agent".into(),
@@ -1060,6 +1149,15 @@ fn update_yaml_from_request(
     );
 
     Ok(())
+}
+
+fn resolve_tracker_output_path(path: &Path) -> PathBuf {
+    let path_str = path.to_string_lossy();
+    if path_str == "~" || path_str.starts_with("~/") {
+        PathBuf::from(shellexpand::tilde(&path_str).into_owned())
+    } else {
+        path.to_path_buf()
+    }
 }
 
 #[cfg(test)]
@@ -1312,6 +1410,63 @@ custom_section:
     }
 
     #[test]
+    fn merge_setup_request_preserves_custom_fields_in_managed_sections() {
+        let existing_yaml = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: $GITHUB_TOKEN
+  poll_interval_seconds: 120
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/build.liquid
+    unsupported_flag: keep-me
+steps:
+  - name: build
+    agent: builder
+    custom_step_key: keep-step
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/updated".to_string(),
+                project_number: Some(7),
+                api_key_env: "GITHUB_TOKEN".to_string(),
+                api_token: None,
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "codex".to_string(),
+                model: Some("sonnet".to_string()),
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: Some("In Progress".to_string()),
+            }],
+            on_success: "Merged".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = merge_setup_request(Some(existing_yaml), &request).unwrap();
+
+        assert!(artifacts.raw_yaml.contains("poll_interval_seconds: 120"));
+        assert!(artifacts.raw_yaml.contains("unsupported_flag: keep-me"));
+        assert!(artifacts.raw_yaml.contains("custom_step_key: keep-step"));
+        assert!(artifacts.raw_yaml.contains("repository: acme/updated"));
+        assert!(artifacts.raw_yaml.contains("acpx_agent: codex"));
+        assert!(artifacts.raw_yaml.contains("model: sonnet"));
+        assert!(artifacts.raw_yaml.contains("on_success: Merged"));
+    }
+
+    #[test]
     fn agent_capabilities_from_session_json() {
         let json = serde_json::json!({
             "acpx": {
@@ -1439,5 +1594,40 @@ custom_section:
 
         let todo_content = std::fs::read_to_string(&todo_path).unwrap();
         assert_eq!(todo_content, "## Todo\n");
+    }
+
+    #[test]
+    fn write_setup_artifacts_expands_tilde_for_todo_path() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let fake_home = tmpdir.path().join("fake-home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::env::set_var("HOME", &fake_home);
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("~/ensemble/TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = SetupArtifacts {
+            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            templates: BTreeMap::new(),
+            todo_md: Some("## Todo\n".to_string()),
+            env_file: None,
+        };
+
+        write_setup_artifacts(tmpdir.path(), &request, &artifacts).unwrap();
+
+        assert!(fake_home.join("ensemble/TODO.md").exists());
+        assert!(!tmpdir.path().join("~/ensemble/TODO.md").exists());
     }
 }

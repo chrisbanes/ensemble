@@ -92,18 +92,17 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
                     }
                 }
                 Err(e) => {
-                    let report = DraftValidationReport {
-                        issues: vec![ValidationIssue {
-                            kind: ValidationIssueKind::Syntax,
-                            message: e.to_string(),
-                            section: "yaml".to_string(),
-                            field: None,
-                            path: None,
-                        }],
-                    };
+                    let mut report = validate_document(&document);
+                    report.issues.push(ValidationIssue {
+                        kind: ValidationIssueKind::Config,
+                        message: e.to_string(),
+                        section: "config".to_string(),
+                        field: None,
+                        path: None,
+                    });
                     ConfigDocumentState {
                         path,
-                        kind: ConfigStateKind::SyntaxError,
+                        kind: ConfigStateKind::Parsed,
                         raw_yaml: Some(raw_yaml),
                         document: Some(document),
                         active_config: None,
@@ -435,6 +434,38 @@ on_failure: Failed
         assert!(state.document.is_some());
         assert!(state.active_config.is_some());
         assert!(state.validation.issues.is_empty());
+    }
+
+    #[test]
+    fn parse_raw_yaml_returns_parsed_state_with_config_issues_for_typed_invalid_config() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents: []
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let path = PathBuf::from("/tmp/test.yaml");
+
+        let state = parse_raw_yaml(path, raw.to_string());
+
+        assert_eq!(state.kind, ConfigStateKind::Parsed);
+        assert!(state.document.is_some());
+        assert!(state.active_config.is_none());
+        assert!(state
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.kind == ValidationIssueKind::Config));
+        assert!(!state
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.kind == ValidationIssueKind::Syntax));
     }
 
     #[test]

@@ -475,3 +475,52 @@ async fn test_post_yaml_validate_returns_syntax_errors() {
     let json: serde_json::Value = response.json().await.unwrap();
     assert_eq!(json["state"], "syntax_error");
 }
+
+#[tokio::test]
+async fn test_setup_defaults_extract_from_parseable_raw_yaml() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    *state.config_runtime.document_state.write().await = ConfigDocumentState {
+        path: state.config_runtime.config_path.clone(),
+        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
+        raw_yaml: Some(
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 11
+  api_key: $GITHUB_TOKEN
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+repos:
+  - path: /tmp/repo-a
+    branch: main
+agents:
+  builder:
+    acpx_agent: claude
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#
+            .to_string(),
+        ),
+        document: None,
+        active_config: None,
+        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+    };
+
+    let base_url = start_test_server(state).await;
+    let response = reqwest::get(format!("{}/api/v1/config/setup/defaults", base_url))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["has_existing_config"], true);
+    assert_eq!(json["defaults"]["tracker"]["kind"], "github");
+    assert_eq!(json["defaults"]["repos"][0]["branch"], "main");
+    assert_eq!(json["defaults"]["agents"][0]["role"], "builder");
+}
