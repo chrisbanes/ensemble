@@ -23,7 +23,7 @@ import { Plus, Trash2, CheckCircle2, AlertCircle } from "lucide-react";
 
 type WizardStep = "tracker" | "repos" | "agents" | "workflow" | "validation";
 
-type TrackerKind = "todo_file" | "git_hub";
+type TrackerKind = "todo_file" | "github";
 
 interface SetupDraft {
   tracker: SetupTracker;
@@ -41,7 +41,7 @@ interface SetupWizardProps {
 
 const DEFAULT_TODO_TRACKER: SetupTracker = { kind: "todo_file", path: "" };
 const DEFAULT_GH_TRACKER: SetupTracker = { 
-  kind: "git_hub", 
+  kind: "github", 
   repository: "", 
   project_number: null,
   api_key_env: "GITHUB_TOKEN",
@@ -221,7 +221,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         <Select
           value={draft.tracker.kind}
           onValueChange={(value) => {
-            if (value === "todo_file" || value === "git_hub") {
+            if (value === "todo_file" || value === "github") {
               handleTrackerKindChange(value);
             }
           }}
@@ -231,7 +231,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="todo_file">Todo File</SelectItem>
-            <SelectItem value="git_hub">GitHub Project</SelectItem>
+            <SelectItem value="github">GitHub Project</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -285,7 +285,6 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
       )}
     </div>
   );
-
   const renderReposStep = () => {
     const handleAddRepo = () => {
       if (repoPathInput.trim()) {
