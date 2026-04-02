@@ -82,7 +82,7 @@ pub fn generate_yaml(
     on_failure: &str,
 ) -> String {
     let request = to_setup_request(tracker, repos, agents, steps, on_success, on_failure);
-    let artifacts = build_setup_artifacts(&request).unwrap();
+    let artifacts = build_setup_artifacts(&request);
     artifacts.raw_yaml
 }
 
@@ -123,7 +123,7 @@ pub fn write_files(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     // Write the main artifacts
-    write_setup_artifacts(config_dir, &artifacts)
+    write_setup_artifacts(config_dir, &request, &artifacts)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
 
     println!("  ✓ {}", config_dir.join("config.yaml").display());
@@ -156,14 +156,9 @@ pub fn write_files(
         println!("  ✓ {}", full_path.display());
     }
 
-    // Write TODO.md for todo_file tracker
+    // Print TODO.md path for todo_file tracker (already written by write_setup_artifacts)
     if let TrackerChoice::TodoFile { path } = tracker {
-        if let Some(ref todo_content) = artifacts.todo_md {
-            // Create parent directories for TODO file if needed
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(path, todo_content)?;
+        if artifacts.todo_md.is_some() {
             println!("  ✓ {}", path.display());
         }
     }

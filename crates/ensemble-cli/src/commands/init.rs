@@ -98,7 +98,7 @@ pub async fn execute(args: InitArgs) -> ExitCode {
         }
     };
 
-    let discovered_agents = match agents::discover_agents(existing_ref) {
+    let discovered_agents = match agents::discover_agents(existing_ref).await {
         Ok(a) => a,
         Err(e) => {
             eprintln!("{e}");

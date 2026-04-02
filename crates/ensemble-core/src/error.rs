@@ -41,6 +41,9 @@ pub enum ConfigError {
 
     #[error("config write failed: {reason}")]
     ConfigWriteFailed { reason: String },
+
+    #[error("pipeline cannot be empty: at least one step is required")]
+    EmptyPipeline,
 }
 
 #[derive(Debug, Error)]

@@ -106,8 +106,8 @@ impl AgentCapabilities {
 }
 
 /// Build setup artifacts (YAML, templates, etc.) from a setup request.
-pub fn build_setup_artifacts(request: &SetupRequest) -> Result<SetupArtifacts, ConfigError> {
-    let raw_yaml = generate_yaml(request)?;
+pub fn build_setup_artifacts(request: &SetupRequest) -> SetupArtifacts {
+    let raw_yaml = generate_yaml(request);
     let mut templates = BTreeMap::new();
 
     // Generate template for each step
@@ -133,16 +133,20 @@ pub fn build_setup_artifacts(request: &SetupRequest) -> Result<SetupArtifacts, C
         _ => None,
     };
 
-    Ok(SetupArtifacts {
+    SetupArtifacts {
         raw_yaml,
         templates,
         todo_md,
         env_file,
-    })
+    }
 }
 
 /// Write setup artifacts to the specified root directory.
-pub fn write_setup_artifacts(root: &Path, artifacts: &SetupArtifacts) -> Result<(), ConfigError> {
+pub fn write_setup_artifacts(
+    root: &Path,
+    request: &SetupRequest,
+    artifacts: &SetupArtifacts,
+) -> Result<(), ConfigError> {
     // Create config directory if it doesn't exist
     std::fs::create_dir_all(root).map_err(|e| ConfigError::PathExpansionError {
         path: root.display().to_string(),
@@ -174,12 +178,19 @@ pub fn write_setup_artifacts(root: &Path, artifacts: &SetupArtifacts) -> Result<
         })?;
     }
 
-    // Write TODO.md if present
-    if let Some(ref _todo_content) = artifacts.todo_md {
-        // Extract the path from the request tracker
-        // For now, we need to parse the YAML to get the path
-        // Since we don't have direct access to the request here, we'll skip this
-        // The caller is responsible for writing TODO.md to the right location
+    // Write TODO.md if present (for todo_file tracker)
+    if let Some(ref todo_content) = artifacts.todo_md {
+        if let SetupTracker::TodoFile { path } = &request.tracker {
+            // Create parent directories if needed
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| ConfigError::ConfigWriteFailed {
+                    reason: format!("failed to create TODO.md parent directory: {}", e),
+                })?;
+            }
+            std::fs::write(path, todo_content).map_err(|e| ConfigError::ConfigWriteFailed {
+                reason: format!("failed to write TODO.md: {}", e),
+            })?;
+        }
     }
 
     // Write .env file if present
@@ -301,19 +312,15 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     }
 
     // Check pipeline (DAG validation)
-    let dag_ok = validate_dag(&request.steps);
+    let dag_result = validate_dag(&request.steps);
+    let dag_ok = dag_result.is_ok();
     checks.push(SetupCheck {
         label: "Pipeline".to_string(),
         passed: dag_ok,
-        detail: format!(
-            "{} steps, {}",
-            request.steps.len(),
-            if dag_ok {
-                "no cycles"
-            } else {
-                "CYCLE DETECTED"
-            }
-        ),
+        detail: match dag_result {
+            Ok(()) => format!("{} steps, no cycles", request.steps.len()),
+            Err(ref e) => format!("{} steps, error: {}", request.steps.len(), e),
+        },
     });
 
     checks
@@ -396,7 +403,7 @@ pub fn merge_setup_request(
         }
         None => {
             // No existing config, just generate fresh
-            build_setup_artifacts(request)
+            Ok(build_setup_artifacts(request))
         }
     }
 }
@@ -434,13 +441,13 @@ pub fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> 
 }
 
 /// Discover capabilities for a specific agent.
-pub fn discover_agent_capabilities(agent: &str) -> AgentCapabilities {
-    probe_agent_capabilities(agent)
+pub async fn discover_agent_capabilities(agent: &str) -> AgentCapabilities {
+    probe_agent_capabilities(agent).await
 }
 
 // --- Internal helper functions ---
 
-fn generate_yaml(request: &SetupRequest) -> Result<String, ConfigError> {
+fn generate_yaml(request: &SetupRequest) -> String {
     let mut yaml = String::new();
 
     // Tracker section
@@ -526,9 +533,10 @@ fn generate_yaml(request: &SetupRequest) -> Result<String, ConfigError> {
     yaml.push_str(&format!("\non_success: {}\n", request.on_success));
     yaml.push_str(&format!("on_failure: {}\n", request.on_failure));
 
-    Ok(yaml)
+    yaml
 }
 
+/// Generate a template for the given step name.
 pub fn generate_template(step_name: &str) -> String {
     match step_name {
         "review" => "Review the changes made for:\n\
@@ -549,6 +557,7 @@ pub fn generate_template(step_name: &str) -> String {
     }
 }
 
+/// Generate a sample TODO.md content.
 pub fn generate_todo_md() -> String {
     "## Todo\n\
      \n\
@@ -561,7 +570,7 @@ pub fn generate_todo_md() -> String {
         .to_string()
 }
 
-pub fn find_step_for_agent(role: &str, steps: &[SetupStep]) -> String {
+pub(crate) fn find_step_for_agent(role: &str, steps: &[SetupStep]) -> String {
     steps
         .iter()
         .find(|s| s.agent_role == role)
@@ -569,11 +578,11 @@ pub fn find_step_for_agent(role: &str, steps: &[SetupStep]) -> String {
         .unwrap_or_else(|| role.to_string())
 }
 
-fn validate_dag(steps: &[SetupStep]) -> bool {
+fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
     if steps.is_empty() {
-        return false;
+        return Err(ConfigError::EmptyPipeline);
     }
 
     let names: HashSet<&str> = steps.iter().map(|s| s.name.as_str()).collect();
@@ -584,7 +593,9 @@ fn validate_dag(steps: &[SetupStep]) -> bool {
         in_degree.entry(step.name.as_str()).or_insert(0);
         for dep in &step.depends {
             if !names.contains(dep.as_str()) {
-                return false;
+                return Err(ConfigError::ConfigParseError {
+                    reason: format!("step '{}' depends on unknown step '{}'", step.name, dep),
+                });
             }
             adj.entry(dep.as_str())
                 .or_default()
@@ -613,7 +624,13 @@ fn validate_dag(steps: &[SetupStep]) -> bool {
         }
     }
 
-    visited == steps.len()
+    if visited != steps.len() {
+        return Err(ConfigError::ConfigParseError {
+            reason: "cycle detected in step dependencies".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn probe_agent(name: &str) -> bool {
@@ -645,7 +662,7 @@ fn get_agent_version(name: &str) -> String {
     }
 }
 
-fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
+async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let session_name = "ensemble-probe";
 
     // Create session
@@ -666,7 +683,7 @@ fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     }
 
     // Read session JSON from ~/.acpx/sessions/<id>.json
-    let caps = read_session_capabilities(&session_id);
+    let caps = read_session_capabilities(&session_id).await;
 
     // Close session (best-effort)
     let _ = std::process::Command::new("acpx")
@@ -676,7 +693,7 @@ fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     caps
 }
 
-fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
+async fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
     let acpx_dir = dirs::home_dir()
         .map(|h| h.join(".acpx").join("sessions"))
         .unwrap_or_default();
@@ -693,7 +710,7 @@ fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
     AgentCapabilities::default()
@@ -1066,7 +1083,7 @@ mod tests {
             on_failure: "Failed".to_string(),
         };
 
-        let artifacts = build_setup_artifacts(&request).unwrap();
+        let artifacts = build_setup_artifacts(&request);
 
         assert!(artifacts.raw_yaml.contains("acpx_agent: claude"));
         assert!(artifacts
@@ -1102,7 +1119,7 @@ mod tests {
             on_failure: "Failed".to_string(),
         };
 
-        let artifacts = build_setup_artifacts(&request).unwrap();
+        let artifacts = build_setup_artifacts(&request);
 
         assert!(artifacts.raw_yaml.contains("kind: github"));
         assert!(artifacts.raw_yaml.contains("repository: acme/frontend"));
@@ -1140,7 +1157,7 @@ mod tests {
             on_failure: "Failed".to_string(),
         };
 
-        let artifacts = build_setup_artifacts(&request).unwrap();
+        let artifacts = build_setup_artifacts(&request);
 
         assert!(artifacts.env_file.is_some());
         assert_eq!(
@@ -1329,8 +1346,8 @@ custom_section:
             },
         ];
 
-        let valid = validate_dag(&steps);
-        assert!(!valid);
+        let result = validate_dag(&steps);
+        assert!(result.is_err(), "expected cycle detection, got Ok");
     }
 
     #[test]
@@ -1356,13 +1373,29 @@ custom_section:
             },
         ];
 
-        let valid = validate_dag(&steps);
-        assert!(valid);
+        let result = validate_dag(&steps);
+        assert!(result.is_ok(), "expected valid DAG, got error: {:?}", result);
     }
 
     #[test]
     fn write_setup_artifacts_creates_files() {
         let tmpdir = tempfile::tempdir().unwrap();
+        let todo_path = tmpdir.path().join("TODO.md");
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: todo_path.clone(),
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
         let artifacts = SetupArtifacts {
             raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
             templates: {
@@ -1377,12 +1410,13 @@ custom_section:
             env_file: Some("TOKEN=secret\n".to_string()),
         };
 
-        write_setup_artifacts(tmpdir.path(), &artifacts).unwrap();
+        write_setup_artifacts(tmpdir.path(), &request, &artifacts).unwrap();
 
         assert!(tmpdir.path().join("config.yaml").exists());
         assert!(tmpdir.path().join("templates").exists());
         assert!(tmpdir.path().join("templates/build.liquid").exists());
         assert!(tmpdir.path().join(".env").exists());
+        assert!(todo_path.exists(), "TODO.md should be written to the tracker path");
 
         let config_content = std::fs::read_to_string(tmpdir.path().join("config.yaml")).unwrap();
         assert!(config_content.contains("todo_file"));
@@ -1390,5 +1424,8 @@ custom_section:
         let template_content =
             std::fs::read_to_string(tmpdir.path().join("templates/build.liquid")).unwrap();
         assert_eq!(template_content, "Build: {{ issue.title }}");
+
+        let todo_content = std::fs::read_to_string(&todo_path).unwrap();
+        assert_eq!(todo_content, "## Todo\n");
     }
 }

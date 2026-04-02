@@ -1,6 +1,6 @@
 use ensemble_core::config::ensemble::EnsembleConfig;
 use ensemble_core::config::setup::{
-    discover_agent_capabilities, discover_available_agents, AgentCapabilities, DiscoveredAgent,
+    discover_agent_capabilities, discover_available_agents, AgentCapabilities,
 };
 use std::collections::HashMap;
 
@@ -11,15 +11,99 @@ pub struct AgentEntry {
     pub model: Option<String>,
 }
 
-pub fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEntry>, String> {
+/// Status of acpx installation check
+#[derive(Debug, Clone)]
+pub enum AcpxStatus {
+    Installed(String),
+    NotInstalled,
+}
+
+/// Check if acpx is installed without any interactive prompts
+pub fn check_acpx() -> AcpxStatus {
+    match try_acpx_version() {
+        Some(version) => AcpxStatus::Installed(version),
+        None => AcpxStatus::NotInstalled,
+    }
+}
+
+/// Try to get acpx version
+fn try_acpx_version() -> Option<String> {
+    let output = std::process::Command::new("acpx")
+        .arg("--version")
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    } else {
+        None
+    }
+}
+
+/// Build the (program, args) pair for installing acpx globally with the
+/// given package manager. Yarn uses `global add` instead of `install -g`.
+fn install_command(manager: &str) -> (&str, Vec<&str>) {
+    if manager == "yarn" {
+        ("yarn", vec!["global", "add", "acpx@latest"])
+    } else {
+        (manager, vec!["install", "-g", "acpx@latest"])
+    }
+}
+
+pub async fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEntry>, String> {
     // Check acpx is installed and get version
-    let acpx_version = check_acpx()?;
-    println!("Checking acpx... ✓ {acpx_version}\n");
+    let acpx_check = check_acpx();
+    match acpx_check {
+        AcpxStatus::Installed(version) => {
+            println!("Checking acpx... ✓ {version}\n");
+        }
+        AcpxStatus::NotInstalled => {
+            println!("acpx is not installed.\n");
+            println!("Ensemble requires acpx for agent communication.");
+            println!("See: https://github.com/openclaw/acpx\n");
+
+            let options = vec!["npm", "pnpm", "bun", "yarn", "Skip (exit)"];
+            let choice = inquire::Select::new("Install acpx with:", options)
+                .prompt()
+                .map_err(|e| e.to_string())?;
+
+            if choice == "Skip (exit)" {
+                return Err("acpx is required to continue".to_string());
+            }
+
+            let (program, args) = install_command(choice);
+
+            let cmd = format!("{program} {}", args.join(" "));
+            println!("\nRunning: {cmd}\n");
+
+            let status = std::process::Command::new(program)
+                .args(&args)
+                .status()
+                .map_err(|e| format!("{program} failed: {e}"))?;
+
+            if !status.success() {
+                return Err(format!("{cmd} exited with {status}"));
+            }
+
+            // Verify it's now available
+            match try_acpx_version() {
+                Some(version) => {
+                    println!("Checking acpx... ✓ {version}\n");
+                }
+                None => return Err("acpx installed but not found on PATH".to_string()),
+            }
+        }
+    }
 
     // Use shared discovery function
     let discovered = discover_available_agents().map_err(|e| e.to_string())?;
 
-    let mut available: Vec<String> = discovered.iter().map(|d| d.name.clone()).collect();
+    let available: Vec<String> = discovered.iter().map(|d| d.name.clone()).collect();
 
     // Print detected agents
     print!("Detecting agents...");
@@ -80,7 +164,7 @@ pub fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEnt
     let mut capabilities: HashMap<String, AgentCapabilities> = HashMap::new();
     for agent_name in &selected {
         print!("  {agent_name}...");
-        let caps = discover_agent_capabilities(agent_name);
+        let caps = discover_agent_capabilities(agent_name).await;
         if !caps.available_models.is_empty() {
             println!(" {} model(s)", caps.available_models.len());
         } else {
@@ -184,70 +268,6 @@ fn ask_roles(
     }
 
     Ok(agents)
-}
-
-fn check_acpx() -> Result<String, String> {
-    if let Some(version) = try_acpx_version() {
-        return Ok(version);
-    }
-
-    println!("acpx is not installed.\n");
-    println!("Ensemble requires acpx for agent communication.");
-    println!("See: https://github.com/openclaw/acpx\n");
-
-    let options = vec!["npm", "pnpm", "bun", "yarn", "Skip (exit)"];
-    let choice = inquire::Select::new("Install acpx with:", options)
-        .prompt()
-        .map_err(|e| e.to_string())?;
-
-    if choice == "Skip (exit)" {
-        return Err("acpx is required to continue".to_string());
-    }
-
-    let (program, args) = install_command(choice);
-
-    let cmd = format!("{program} {}", args.join(" "));
-    println!("\nRunning: {cmd}\n");
-
-    let status = std::process::Command::new(program)
-        .args(&args)
-        .status()
-        .map_err(|e| format!("{program} failed: {e}"))?;
-
-    if !status.success() {
-        return Err(format!("{cmd} exited with {status}"));
-    }
-
-    // Verify it's now available
-    try_acpx_version().ok_or_else(|| "acpx installed but not found on PATH".to_string())
-}
-
-fn try_acpx_version() -> Option<String> {
-    let output = std::process::Command::new("acpx")
-        .arg("--version")
-        .output()
-        .ok()?;
-
-    if output.status.success() {
-        let v = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if v.is_empty() {
-            None
-        } else {
-            Some(v)
-        }
-    } else {
-        None
-    }
-}
-
-/// Build the (program, args) pair for installing acpx globally with the
-/// given package manager. Yarn uses `global add` instead of `install -g`.
-fn install_command(manager: &str) -> (&str, Vec<&str>) {
-    if manager == "yarn" {
-        ("yarn", vec!["global", "add", "acpx@latest"])
-    } else {
-        (manager, vec!["install", "-g", "acpx@latest"])
-    }
 }
 
 #[cfg(test)]
