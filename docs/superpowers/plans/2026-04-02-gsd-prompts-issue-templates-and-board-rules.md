@@ -15,8 +15,8 @@
 | File | Action | Responsibility |
 |------|--------|----------------|
 | `docs/gsd-workflow.md` | Create | End-user operational guide for using GSD-style workflows with Ensemble |
-| `.github/ISSUE_TEMPLATE/ensemble-parent-planning.md` | Create | Parent issue template for feature planning containers |
-| `.github/ISSUE_TEMPLATE/ensemble-wave-execution.md` | Create | Child wave issue template created after plan approval |
+| `docs/examples/issues/ensemble-parent-planning.md` | Create | Parent issue example for feature planning containers |
+| `docs/examples/issues/ensemble-wave-execution.md` | Create | Child wave issue example created after plan approval |
 | `docs/examples/prompts/gsd-parent-planning-prompt.md` | Create | Reusable prompt for agents planning on parent issues |
 | `docs/examples/prompts/gsd-wave-execution-prompt.md` | Create | Reusable prompt for agents executing wave issues |
 | `docs/examples/github-projects/gsd-board-rules.md` | Create | Concrete board/state rules for parent and child issues |
@@ -110,38 +110,32 @@ git commit -m "Document GSD-style Ensemble workflow"
 
 ---
 
-### Task 2: Add the Parent Issue Template
+### Task 2: Add the Parent Issue Example
 
 **Files:**
-- Create: `.github/ISSUE_TEMPLATE/ensemble-parent-planning.md`
+- Create: `docs/examples/issues/ensemble-parent-planning.md`
 
-- [ ] **Step 0: Verify the parent template directory exists before writing files**
+- [ ] **Step 0: Verify the example issue directory exists before writing files**
 
 Run:
 
 ```bash
-ls .github
+ls docs
 ```
 
-If `.github/ISSUE_TEMPLATE/` does not exist, create it before writing the template.
+If `docs/examples/issues/` does not exist, create it before writing the example.
 
 Run:
 
 ```bash
-mkdir -p .github/ISSUE_TEMPLATE
+mkdir -p docs/examples/issues
 ```
 
 - [ ] **Step 1: Create the template scaffold**
 
-Use a GitHub issue template frontmatter and body like:
+Use a markdown example issue body like:
 
 ```md
----
-name: Ensemble Parent Planning
-about: Planning container for a GSD-style feature workflow
-title: "[Parent] "
----
-
 ## Goal
 
 ## Context
@@ -183,44 +177,38 @@ Verify all of the following acceptance checks:
 - [ ] **Step 4: Commit**
 
 ```bash
-git add .github/ISSUE_TEMPLATE/ensemble-parent-planning.md
-git commit -m "Add parent planning issue template"
+git add docs/examples/issues/ensemble-parent-planning.md
+git commit -m "Add parent planning issue example"
 ```
 
 ---
 
-### Task 3: Add the Wave Issue Template
+### Task 3: Add the Wave Issue Example
 
 **Files:**
-- Create: `.github/ISSUE_TEMPLATE/ensemble-wave-execution.md`
+- Create: `docs/examples/issues/ensemble-wave-execution.md`
 
-- [ ] **Step 0: Verify the wave template directory exists before writing files**
+- [ ] **Step 0: Verify the example issue directory exists before writing files**
 
 Run:
 
 ```bash
-ls .github
+ls docs
 ```
 
-If `.github/ISSUE_TEMPLATE/` does not exist, create it before writing the template.
+If `docs/examples/issues/` does not exist, create it before writing the example.
 
 Run:
 
 ```bash
-mkdir -p .github/ISSUE_TEMPLATE
+mkdir -p docs/examples/issues
 ```
 
 - [ ] **Step 1: Create the template scaffold**
 
-Start with a wave-focused body:
+Start with a wave-focused example body:
 
 ```md
----
-name: Ensemble Wave Execution
-about: Execution container for one approved wave
-title: "[Wave] "
----
-
 ## Parent
 
 ## Wave Number
@@ -274,8 +262,8 @@ Add a small section that says:
 - [ ] **Step 4: Commit**
 
 ```bash
-git add .github/ISSUE_TEMPLATE/ensemble-wave-execution.md
-git commit -m "Add wave execution issue template"
+git add docs/examples/issues/ensemble-wave-execution.md
+git commit -m "Add wave execution issue example"
 ```
 
 ---
@@ -492,7 +480,7 @@ git commit -m "Link GSD workflow guide from README"
 Verify every referenced path exists:
 
 ```bash
-ls docs/gsd-workflow.md .github/ISSUE_TEMPLATE/ensemble-parent-planning.md .github/ISSUE_TEMPLATE/ensemble-wave-execution.md docs/examples/prompts/gsd-parent-planning-prompt.md docs/examples/prompts/gsd-wave-execution-prompt.md docs/examples/github-projects/gsd-board-rules.md
+ls docs/gsd-workflow.md docs/examples/issues/ensemble-parent-planning.md docs/examples/issues/ensemble-wave-execution.md docs/examples/prompts/gsd-parent-planning-prompt.md docs/examples/prompts/gsd-wave-execution-prompt.md docs/examples/github-projects/gsd-board-rules.md
 ```
 
 Expected: all files exist.
@@ -502,7 +490,7 @@ Expected: all files exist.
 Run:
 
 ```bash
-rg -n "In Progress.*review rejection|shared feature branch|child issue per plan" docs .github/ISSUE_TEMPLATE README.md
+rg -n "In Progress.*review rejection|shared feature branch|child issue per plan" docs README.md
 ```
 
 Expected: no contradictory wording remains, or every hit is intentionally updated.
@@ -533,6 +521,6 @@ Expected: either a clean working tree because the per-task commits already captu
 - [ ] **Step 5: Only if verification caused additional edits, create a final cleanup commit**
 
 ```bash
-git add docs/gsd-workflow.md .github/ISSUE_TEMPLATE/ensemble-parent-planning.md .github/ISSUE_TEMPLATE/ensemble-wave-execution.md docs/examples/prompts/gsd-parent-planning-prompt.md docs/examples/prompts/gsd-wave-execution-prompt.md docs/examples/github-projects/gsd-board-rules.md README.md
+git add docs/gsd-workflow.md docs/examples/issues/ensemble-parent-planning.md docs/examples/issues/ensemble-wave-execution.md docs/examples/prompts/gsd-parent-planning-prompt.md docs/examples/prompts/gsd-wave-execution-prompt.md docs/examples/github-projects/gsd-board-rules.md README.md
 git commit -m "Polish GSD workflow documentation package"
 ```
