@@ -15,10 +15,12 @@ use tracing::{error, info, warn};
 
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::load_config_state;
+use ensemble_core::config::draft::ConfigDocumentState;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 
 use crate::embedded_ui::spa_router;
+use crate::error::DesktopError;
 
 /// Default poll interval in milliseconds (30 seconds).
 const DEFAULT_POLL_INTERVAL_MS: u64 = 30000;
@@ -46,7 +48,7 @@ pub struct DesktopServer {
 pub async fn start_desktop_server(
     config_dir: PathBuf,
     config_path: PathBuf,
-) -> Result<DesktopServer, String> {
+) -> Result<DesktopServer, DesktopError> {
     info!(
         config_dir = %config_dir.display(),
         config_path = %config_path.display(),
@@ -89,42 +91,11 @@ pub async fn start_desktop_server(
     }
 
     // Create orchestrator state (only if we have runnable config)
-    let orchestrator_state = if has_runnable_config {
-        let config = document_state.active_config.as_ref().unwrap();
-        Arc::new(RwLock::new(OrchestratorState::new(
-            config.polling.interval_ms,
-            config.concurrency.max_concurrent_agents,
-        )))
-    } else {
-        // Default orchestrator state when no config available
-        Arc::new(RwLock::new(OrchestratorState::new(
-            DEFAULT_POLL_INTERVAL_MS,
-            DEFAULT_MAX_CONCURRENT_AGENTS,
-        )))
-    };
-
+    let orchestrator_state = create_orchestrator_state(&document_state);
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
 
     // Build app state for API
-    let workspace_root = if let Some(ref config) = document_state.active_config {
-        config
-            .workspace
-            .root
-            .as_deref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                std::env::temp_dir()
-                    .join("ensemble_workspaces")
-                    .display()
-                    .to_string()
-            })
-    } else {
-        std::env::temp_dir()
-            .join("ensemble_workspaces")
-            .display()
-            .to_string()
-    };
-
+    let workspace_root = determine_workspace_root(&document_state);
     let history_path = std::path::PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
 
     let app_state = AppState {
@@ -149,17 +120,15 @@ pub async fn start_desktop_server(
     let bind_addr = "127.0.0.1:0";
     info!(addr = %bind_addr, "Binding desktop HTTP server");
 
-    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!(error = %e, addr = %bind_addr, "Failed to bind HTTP server");
-            return Err(format!("Failed to bind HTTP server on {}: {}", bind_addr, e));
-        }
-    };
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| DesktopError::BindFailed {
+            addr: bind_addr.to_string(),
+            source: e,
+        })?;
 
     let actual_addr = listener.local_addr().unwrap();
-    let server_url = url::Url::parse(&format!("http://{}", actual_addr))
-        .map_err(|e| format!("Failed to parse server URL: {}", e))?;
+    let server_url = url::Url::parse(&format!("http://{}", actual_addr))?;
 
     info!(
         url = %server_url,
@@ -177,6 +146,45 @@ pub async fn start_desktop_server(
         url: server_url,
         shutdown,
     })
+}
+
+/// Create orchestrator state from config, using defaults if no config available.
+fn create_orchestrator_state(
+    document_state: &ConfigDocumentState,
+) -> Arc<RwLock<OrchestratorState>> {
+    if let Some(ref config) = document_state.active_config {
+        Arc::new(RwLock::new(OrchestratorState::new(
+            config.polling.interval_ms,
+            config.concurrency.max_concurrent_agents,
+        )))
+    } else {
+        Arc::new(RwLock::new(OrchestratorState::new(
+            DEFAULT_POLL_INTERVAL_MS,
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        )))
+    }
+}
+
+/// Determine workspace root from config, using default temp directory if unavailable.
+fn determine_workspace_root(document_state: &ConfigDocumentState) -> String {
+    if let Some(ref config) = document_state.active_config {
+        config
+            .workspace
+            .root
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(default_workspace_path)
+    } else {
+        default_workspace_path()
+    }
+}
+
+/// Get the default workspace path in temp directory.
+fn default_workspace_path() -> String {
+    std::env::temp_dir()
+        .join("ensemble_workspaces")
+        .display()
+        .to_string()
 }
 
 #[cfg(test)]

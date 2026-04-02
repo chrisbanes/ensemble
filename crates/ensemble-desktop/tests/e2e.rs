@@ -132,36 +132,7 @@ on_failure: "Failed"
     std::thread::sleep(Duration::from_secs(3));
 
     // Check if the process is still running
-    let result = match child.try_wait() {
-        Ok(Some(status)) => {
-            // Process exited - this is a failure
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-
-            if let Some(mut out) = child.stdout.take() {
-                use std::io::Read;
-                out.read_to_string(&mut stdout).ok();
-            }
-            if let Some(mut err) = child.stderr.take() {
-                use std::io::Read;
-                err.read_to_string(&mut stderr).ok();
-            }
-
-            Err(format!(
-                "App crashed on startup!\nExit status: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-                status, stdout, stderr
-            ))
-        }
-        Ok(None) => {
-            // Process is still running - success!
-            println!("App launched successfully and is still running after 3 seconds");
-            // Kill it gracefully
-            let _ = child.kill();
-            let _ = child.wait();
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to check app status: {}", e)),
-    };
+    let result = check_app_running(&mut child);
 
     if let Err(msg) = result {
         panic!("{}", msg);
@@ -201,36 +172,10 @@ fn app_stays_running_when_config_missing() {
     std::thread::sleep(Duration::from_secs(3));
 
     // Check if the process is still running (it should be now!)
-    let result = match child.try_wait() {
-        Ok(Some(status)) => {
-            // Process exited - this is a failure for the new behavior
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-
-            if let Some(mut out) = child.stdout.take() {
-                use std::io::Read;
-                out.read_to_string(&mut stdout).ok();
-            }
-            if let Some(mut err) = child.stderr.take() {
-                use std::io::Read;
-                err.read_to_string(&mut stderr).ok();
-            }
-
-            Err(format!(
-                "App crashed when config missing (should stay running)!\nExit status: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-                status, stdout, stderr
-            ))
-        }
-        Ok(None) => {
-            // Process is still running - success!
-            println!("App launched successfully with missing config and is still running after 3 seconds");
-            // Kill it gracefully
-            let _ = child.kill();
-            let _ = child.wait();
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to check app status: {}", e)),
-    };
+    let result = check_app_running_with_message(
+        &mut child,
+        "App crashed when config missing (should stay running)!",
+    );
 
     if let Err(msg) = result {
         panic!("{}", msg);
@@ -301,4 +246,48 @@ fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
 fn env_lock() -> &'static Mutex<()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Check if the app is still running and return appropriate result.
+/// Kills the process gracefully on success.
+fn check_app_running(child: &mut std::process::Child) -> Result<(), String> {
+    check_app_running_with_message(child, "App crashed on startup!")
+}
+
+/// Check if the app is still running with a custom error message.
+/// Kills the process gracefully on success.
+fn check_app_running_with_message(
+    child: &mut std::process::Child,
+    crash_message: &str,
+) -> Result<(), String> {
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            // Process exited - this is a failure
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+
+            if let Some(mut out) = child.stdout.take() {
+                use std::io::Read;
+                out.read_to_string(&mut stdout).ok();
+            }
+            if let Some(mut err) = child.stderr.take() {
+                use std::io::Read;
+                err.read_to_string(&mut stderr).ok();
+            }
+
+            Err(format!(
+                "{}\nExit status: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                crash_message, status, stdout, stderr
+            ))
+        }
+        Ok(None) => {
+            // Process is still running - success!
+            println!("App launched successfully and is still running after 3 seconds");
+            // Kill it gracefully
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to check app status: {}", e)),
+    }
 }

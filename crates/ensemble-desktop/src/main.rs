@@ -4,6 +4,7 @@ use tauri::Manager;
 use tracing::{info, warn};
 
 mod embedded_ui;
+mod error;
 mod orchestrator;
 mod server;
 

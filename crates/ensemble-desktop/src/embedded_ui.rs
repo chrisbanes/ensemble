@@ -1,3 +1,9 @@
+//! Embedded SPA UI serving for the desktop app.
+//!
+//! NOTE: This file duplicates the embedded_ui implementation in ensemble-cli.
+//! This duplication should be extracted to ensemble-core for shared use
+//! between CLI and desktop. See: crates/ensemble-cli/src/embedded_ui.rs
+
 use axum::{
     body::Body,
     http::{header, StatusCode, Uri},

@@ -16,6 +16,7 @@ serde_json = { workspace = true }
 mime_guess = "2"
 axum = { workspace = true }
 url = "2"
+thiserror = { workspace = true }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

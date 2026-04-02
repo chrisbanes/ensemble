@@ -8,17 +8,20 @@ use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::pipeline::dag::build_dag;
 
+use crate::error::DesktopError;
+
 /// Desktop orchestrator state.
 ///
 /// This is initialized when a valid config is available.
 /// The orchestrator runs in the background and manages pipeline execution.
+///
+/// NOTE: Fields are marked with #[allow(dead_code)] as they are used
+/// by Tauri app state management which clippy cannot detect.
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct DesktopOrchestrator {
-    #[allow(dead_code)]
     pub state: Arc<RwLock<OrchestratorState>>,
-    #[allow(dead_code)]
     pub event_bus: EventBus,
-    #[allow(dead_code)]
     pub config_path: String,
 }
 
@@ -27,16 +30,17 @@ impl DesktopOrchestrator {
     ///
     /// This validates the config and builds the DAG, returning an error
     /// if the config is invalid.
-    pub async fn new(config_path: PathBuf) -> Result<Self, String> {
+    pub async fn new(config_path: PathBuf) -> Result<Self, DesktopError> {
         info!(config_path = %config_path.display(), "Initializing desktop orchestrator from config.yaml");
 
         // Load config
         let config =
-            load_config(&config_path).map_err(|e| format!("Failed to load config: {}", e))?;
+            load_config(&config_path).map_err(|e| DesktopError::ConfigLoadFailed(e.to_string()))?;
 
-        validate_config(&config).map_err(|e| format!("Config validation failed: {}", e))?;
+        validate_config(&config)
+            .map_err(|e| DesktopError::ConfigValidationFailed(e.to_string()))?;
 
-        build_dag(&config.steps).map_err(|e| format!("DAG validation failed: {}", e))?;
+        build_dag(&config.steps).map_err(|e| DesktopError::DagValidationFailed(e.to_string()))?;
 
         info!(
             tracker_kind = %config.tracker.kind,
@@ -56,14 +60,18 @@ impl DesktopOrchestrator {
     }
 
     /// Start the orchestrator loop.
+    ///
+    /// TODO: Implement actual orchestrator loop.
     #[allow(dead_code)]
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self) -> Result<(), DesktopError> {
         info!("Desktop orchestrator started");
         // TODO: Implement actual orchestrator loop
         Ok(())
     }
 
     /// Stop the orchestrator.
+    ///
+    /// TODO: Implement graceful shutdown.
     #[allow(dead_code)]
     pub async fn stop(&self) {
         info!("Desktop orchestrator stopped");
