@@ -111,5 +111,6 @@ This opens the resolved configuration directory in your system's file manager. I
 
 - [Configuration Reference](docs/configuration.md) — every `config.yaml` field
 - [Pipeline Guide](docs/pipelines.md) — steps, DAGs, verdicts, retries
+- [GSD-Style Workflow](docs/gsd-workflow.md) — parent planning issues, wave execution issues, and board rules
 - [Contributing](docs/contributing.md) — building, testing, project structure
 - [Roadmap](docs/roadmap.md) — what's built, what's coming
