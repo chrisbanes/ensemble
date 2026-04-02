@@ -190,3 +190,26 @@ export function useRetryMutation() {
     },
   });
 }
+
+// Placeholder hooks for guided form mutations until client is regenerated
+export function useValidateGuidedFormMutation() {
+  return {
+    mutateAsync: async (_params: { baseRawYaml: string; form: unknown }) => {
+      // TODO: Call actual API after client regeneration
+      console.warn("validateGuidedForm not yet implemented - needs client regeneration");
+    },
+    isPending: false,
+  };
+}
+
+export function useSaveGuidedFormMutation() {
+  const queryClient = useQueryClient();
+  return {
+    mutateAsync: async (_params: { baseRawYaml: string; form: unknown }) => {
+      // TODO: Call actual API after client regeneration
+      console.warn("saveGuidedForm not yet implemented - needs client regeneration");
+      queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+    },
+    isPending: false,
+  };
+}

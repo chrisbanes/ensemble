@@ -1,27 +1,44 @@
-import { useConfigStateQuery } from "@/hooks";
+import { useConfigStateQuery, useValidateGuidedFormMutation, useSaveGuidedFormMutation, useValidateYamlDraftMutation, useSaveYamlDraftMutation } from "@/hooks";
 import type { ValidationIssue } from "@/generated/models";
 import SetupWizard from "@/components/config/SetupWizard";
 import YamlEditor from "@/components/config/YamlEditor";
+import GuidedEditor, { type GuidedForm } from "@/components/config/GuidedEditor";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Edit2 } from "lucide-react";
+import { Edit2, FileText, Settings } from "lucide-react";
 
 export default function ConfigPage() {
   const { data, isLoading, isError, refetch } = useConfigStateQuery();
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+  const [activeTab, setActiveTab] = useState<"guided" | "yaml">("guided");
+  const [comparisonMode, setComparisonMode] = useState(false);
 
-  const handleSave = async (_yaml: string) => {
-    // TODO: Implement save mutation
+  const validateGuidedFormMutation = useValidateGuidedFormMutation();
+  const saveGuidedFormMutation = useSaveGuidedFormMutation();
+  const validateYamlMutation = useValidateYamlDraftMutation();
+  const saveYamlMutation = useSaveYamlDraftMutation();
+
+  const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string) => {
+    await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+  };
+
+  const handleSaveGuided = async (form: GuidedForm, baseRawYaml: string) => {
+    await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form });
     await refetch();
   };
 
-  const handleValidate = async (_yaml: string) => {
-    // TODO: Implement validate mutation
+  const handleValidateYaml = async (yaml: string) => {
+    await validateYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+  };
+
+  const handleSaveYaml = async (yaml: string) => {
+    await saveYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+    await refetch();
   };
 
   const handleReset = () => {
-    // Reset handled internally by YamlEditor
+    // Reset handled internally by editors
   };
 
   if (isLoading) {
@@ -35,6 +52,7 @@ export default function ConfigPage() {
   if (!data) return null;
 
   const { state, issues, raw_yaml: rawYaml } = data;
+  const guidedForm = data.guided_form;
   const hasIssues = issues.length > 0;
   const isRunnable = state === "parsed" && data.active_config != null && !hasIssues;
 
@@ -60,8 +78,8 @@ export default function ConfigPage() {
           rawYaml={rawYaml || ""}
           isRecoveryMode={true}
           issues={issues}
-          onValidate={handleValidate}
-          onSave={handleSave}
+          onValidate={handleValidateYaml}
+          onSave={handleSaveYaml}
           onReset={handleReset}
         />
       </div>
@@ -113,14 +131,71 @@ export default function ConfigPage() {
                 <Edit2 className="h-4 w-4 mr-2" />
                 Reconfigure
               </Button>
+              {rawYaml && (
+                <Button variant="outline" onClick={() => setComparisonMode(!comparisonMode)}>
+                  <FileText className="h-4 w-4 mr-2" />
+                  {comparisonMode ? "Hide Comparison" : "Compare with Saved"}
+                </Button>
+              )}
             </div>
-            <div className="mt-4 flex gap-2 text-sm">
-              <span className="px-2 py-1 rounded bg-green-200 dark:bg-green-700">Guided</span>
-              <span className="px-2 py-1 rounded bg-gray-200 dark:bg-gray-700">YAML</span>
-              <span className="px-2 py-1 rounded bg-gray-200 dark:bg-gray-700">Validation</span>
+            <div className="mt-4 flex gap-2 text-sm border-b">
+              <button
+                onClick={() => setActiveTab("guided")}
+                className={`px-3 py-2 rounded-t-lg flex items-center gap-1 ${
+                  activeTab === "guided"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Settings className="h-4 w-4" />
+                Guided
+              </button>
+              <button
+                onClick={() => setActiveTab("yaml")}
+                className={`px-3 py-2 rounded-t-lg flex items-center gap-1 ${
+                  activeTab === "yaml"
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <FileText className="h-4 w-4" />
+                YAML
+              </button>
+            </div>
+            <div className="mt-4">
+              {activeTab === "guided" && guidedForm && (
+                <GuidedEditor
+                  initialForm={guidedForm as GuidedForm}
+                  baseRawYaml={rawYaml || ""}
+                  issues={issues}
+                  onValidate={handleValidateGuided}
+                  onSave={handleSaveGuided}
+                  onReset={handleReset}
+                />
+              )}
+              {activeTab === "yaml" && rawYaml && (
+                <YamlEditor
+                  rawYaml={rawYaml}
+                  isRecoveryMode={false}
+                  issues={issues}
+                  onValidate={handleValidateYaml}
+                  onSave={handleSaveYaml}
+                  onReset={handleReset}
+                />
+              )}
             </div>
           </CardContent>
         </Card>
+        {comparisonMode && rawYaml && (
+          <Card>
+            <CardContent className="p-6">
+              <h3 className="text-lg font-medium mb-4">Raw YAML (Read Only)</h3>
+              <pre className="bg-muted p-4 rounded-lg overflow-x-auto text-sm">
+                <code>{rawYaml}</code>
+              </pre>
+            </CardContent>
+          </Card>
+        )}
       </div>
     );
   }

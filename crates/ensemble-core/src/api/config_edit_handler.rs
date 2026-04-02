@@ -24,6 +24,7 @@ pub struct ConfigStateResponse {
     pub raw_yaml: Option<String>,
     pub issues: Vec<ValidationIssue>,
     pub active_config: Option<EnsembleConfig>,
+    pub guided_form: Option<crate::config::form::GuidedConfigForm>,
 }
 
 impl ConfigStateResponse {
@@ -35,12 +36,19 @@ impl ConfigStateResponse {
             ConfigStateKind::Parsed => "parsed",
         };
 
+        // Extract guided form if we have valid YAML
+        let guided_form = state
+            .raw_yaml
+            .as_ref()
+            .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok());
+
         Self {
             state: state_str.to_string(),
             config_path: state.path.display().to_string(),
             raw_yaml: state.raw_yaml.clone(),
             issues: state.validation.issues.clone(),
             active_config: state.active_config.clone(),
+            guided_form,
         }
     }
 }
@@ -113,7 +121,10 @@ pub async fn save_yaml(
         }
         Err(e) => {
             let current = state.config_runtime.document_state.read().await.clone();
-            (StatusCode::BAD_REQUEST, Json(build_error_response(&current, &e)))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(build_error_response(&current, &e)),
+            )
         }
     }
 }
@@ -316,7 +327,146 @@ pub async fn save_setup(
         }
         Err(e) => {
             let current = state.config_runtime.document_state.read().await.clone();
-            (StatusCode::BAD_REQUEST, Json(build_error_response(&current, &e)))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(build_error_response(&current, &e)),
+            )
+        }
+    }
+}
+
+/// Request to validate guided form content.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ValidateGuidedFormRequest {
+    pub base_raw_yaml: String,
+    pub form: crate::config::form::GuidedConfigForm,
+}
+
+/// Response containing guided form validation results.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ValidateGuidedFormResponse {
+    pub merged_yaml: String,
+    pub issues: Vec<crate::config::draft::ValidationIssue>,
+    pub valid: bool,
+}
+
+/// POST /api/v1/config/form/validate
+///
+/// Validates guided form content by merging with base YAML and validating.
+#[utoipa::path(
+    post,
+    path = "/api/v1/config/form/validate",
+    operation_id = "validateGuidedForm",
+    request_body = ValidateGuidedFormRequest,
+    responses(
+        (status = 200, description = "Validation result", body = ValidateGuidedFormResponse)
+    ),
+    tag = "config"
+)]
+pub async fn validate_guided_form(
+    Json(request): Json<ValidateGuidedFormRequest>,
+) -> (StatusCode, Json<ValidateGuidedFormResponse>) {
+    match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
+        Ok(merged_yaml) => {
+            // Parse and validate the merged YAML
+            let draft = crate::config::draft::parse_raw_yaml(
+                std::path::PathBuf::from("config.yaml"),
+                merged_yaml.clone(),
+            );
+
+            let valid = draft.kind == crate::config::draft::ConfigStateKind::Parsed
+                && draft.validation.issues.is_empty();
+
+            let response = ValidateGuidedFormResponse {
+                merged_yaml,
+                issues: draft.validation.issues,
+                valid,
+            };
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            let response = ValidateGuidedFormResponse {
+                merged_yaml: request.base_raw_yaml,
+                issues: vec![crate::config::draft::ValidationIssue {
+                    kind: crate::config::draft::ValidationIssueKind::Config,
+                    message: format!("Form merge failed: {}", e),
+                    section: "form".to_string(),
+                    field: None,
+                    path: None,
+                }],
+                valid: false,
+            };
+            (StatusCode::BAD_REQUEST, Json(response))
+        }
+    }
+}
+
+/// Request to save guided form content.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SaveGuidedFormRequest {
+    pub base_raw_yaml: String,
+    pub form: crate::config::form::GuidedConfigForm,
+}
+
+/// Response containing the result of saving guided form content.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SaveGuidedFormResponse {
+    pub merged_yaml: String,
+}
+
+/// POST /api/v1/config/form/save
+///
+/// Saves guided form content by merging with base YAML and saving to config file.
+#[utoipa::path(
+    post,
+    path = "/api/v1/config/form/save",
+    operation_id = "saveGuidedForm",
+    request_body = SaveGuidedFormRequest,
+    responses(
+        (status = 200, description = "Save result", body = SaveGuidedFormResponse),
+        (status = 400, description = "Merge or save failed")
+    ),
+    tag = "config"
+)]
+pub async fn save_guided_form(
+    State(state): State<AppState>,
+    Json(request): Json<SaveGuidedFormRequest>,
+) -> (StatusCode, Json<ConfigStateResponse>) {
+    // First, merge the guided form with the base YAML
+    let merged_yaml =
+        match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
+            Ok(yaml) => yaml,
+            Err(e) => {
+                let current = state.config_runtime.document_state.read().await.clone();
+                let mut response = ConfigStateResponse::from_state(&current);
+                response.issues.push(crate::config::draft::ValidationIssue {
+                    kind: crate::config::draft::ValidationIssueKind::Config,
+                    message: format!("Form merge failed: {}", e),
+                    section: "form".to_string(),
+                    field: None,
+                    path: None,
+                });
+                return (StatusCode::BAD_REQUEST, Json(response));
+            }
+        };
+
+    // Now save the merged YAML using the same path as save_yaml
+    match crate::config::draft::save_raw_yaml_atomically(
+        &state.config_runtime.config_path,
+        &merged_yaml,
+    ) {
+        Ok(new_state) => {
+            // Update the runtime state
+            *state.config_runtime.document_state.write().await = new_state.clone();
+            let response = ConfigStateResponse::from_state(&new_state);
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            let current = state.config_runtime.document_state.read().await.clone();
+            (
+                StatusCode::BAD_REQUEST,
+                Json(build_error_response(&current, &e)),
+            )
         }
     }
 }
