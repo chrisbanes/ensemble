@@ -15,6 +15,8 @@ import {
   useSaveYaml,
   useValidateYaml,
   getGetConfigQueryKey,
+  useValidateGuidedForm,
+  useSaveGuidedForm,
 } from "./generated/api/config/config";
 import { useGetConversation } from "./generated/api/conversation/conversation";
 import type {
@@ -24,6 +26,7 @@ import type {
   ConversationResponse,
   HistoryResponse,
   ConfigStateResponse,
+  GuidedConfigForm,
 } from "./generated/models";
 
 /**
@@ -191,25 +194,41 @@ export function useRetryMutation() {
   });
 }
 
-// Placeholder hooks for guided form mutations until client is regenerated
 export function useValidateGuidedFormMutation() {
+  const generatedMutation = useValidateGuidedForm();
+  
   return {
-    mutateAsync: async (_params: { baseRawYaml: string; form: unknown }) => {
-      // TODO: Call actual API after client regeneration
-      console.warn("validateGuidedForm not yet implemented - needs client regeneration");
+    mutateAsync: async (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
+      return generatedMutation.mutateAsync({
+        data: {
+          base_raw_yaml: params.baseRawYaml,
+          form: params.form,
+        },
+      });
     },
-    isPending: false,
+    isPending: generatedMutation.isPending,
   };
 }
 
 export function useSaveGuidedFormMutation() {
   const queryClient = useQueryClient();
-  return {
-    mutateAsync: async (_params: { baseRawYaml: string; form: unknown }) => {
-      // TODO: Call actual API after client regeneration
-      console.warn("saveGuidedForm not yet implemented - needs client regeneration");
-      queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+  const generatedMutation = useSaveGuidedForm({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
     },
-    isPending: false,
+  });
+  
+  return {
+    mutateAsync: async (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
+      return generatedMutation.mutateAsync({
+        data: {
+          base_raw_yaml: params.baseRawYaml,
+          form: params.form,
+        },
+      });
+    },
+    isPending: generatedMutation.isPending,
   };
 }

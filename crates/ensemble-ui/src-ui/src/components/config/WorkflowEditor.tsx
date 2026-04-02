@@ -31,21 +31,6 @@ interface WorkflowEditorProps {
   onChange: (draft: WorkflowDraft) => void;
 }
 
-export interface WorkflowAgent {
-  name: string;
-  label: string;
-}
-
-export interface WorkflowDraft {
-  steps: WorkflowStep[];
-  agents: WorkflowAgent[];
-}
-
-interface WorkflowEditorProps {
-  value: WorkflowDraft;
-  onChange: (draft: WorkflowDraft) => void;
-}
-
 export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps) {
   const { steps, agents } = value;
 

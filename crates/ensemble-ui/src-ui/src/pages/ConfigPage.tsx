@@ -134,7 +134,7 @@ export default function ConfigPage() {
               {rawYaml && (
                 <Button variant="outline" onClick={() => setComparisonMode(!comparisonMode)}>
                   <FileText className="h-4 w-4 mr-2" />
-                  {comparisonMode ? "Hide Comparison" : "Compare with Saved"}
+                  {comparisonMode ? "Hide Saved YAML" : "View Saved YAML"}
                 </Button>
               )}
             </div>

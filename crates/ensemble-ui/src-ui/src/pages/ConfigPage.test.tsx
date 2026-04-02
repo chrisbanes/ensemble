@@ -29,4 +29,11 @@ describe("ConfigPage", () => {
 
     expect(await screen.findByText("Set up Ensemble")).toBeInTheDocument();
   });
+
+  // NOTE: Full YAML/guided sync test requires backend integration mocking
+  // to verify that YAML tab reflects updated values after guided form save.
+  // This would require:
+  // 1. Mocking useSaveGuidedFormMutation to return updated config
+  // 2. Mocking refetch to return new raw_yaml
+  // 3. Verifying YAML tab content matches the updated raw_yaml
 });
