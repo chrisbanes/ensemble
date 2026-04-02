@@ -1,10 +1,11 @@
 use crate::error::ConfigError;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
 /// Request to generate setup artifacts for a new or updated configuration.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupRequest {
     pub tracker: SetupTracker,
     pub repos: Vec<SetupRepo>,
@@ -15,15 +16,18 @@ pub struct SetupRequest {
 }
 
 /// Tracker configuration for setup.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SetupTracker {
     TodoFile {
+        #[schema(value_type = String)]
         path: PathBuf,
     },
     GitHub {
         repository: String,
         project_number: Option<i64>,
         api_key_env: String,
+        #[serde(skip)]
         api_token: Option<String>,
         active_states: Vec<String>,
         terminal_states: Vec<String>,
@@ -31,14 +35,15 @@ pub enum SetupTracker {
 }
 
 /// Repository entry for setup.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupRepo {
+    #[schema(value_type = String)]
     pub path: PathBuf,
     pub branch: String,
 }
 
 /// Agent entry for setup.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupAgent {
     pub role: String,
     pub acpx_agent: String,
@@ -46,7 +51,7 @@ pub struct SetupAgent {
 }
 
 /// Pipeline step entry for setup.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupStep {
     pub name: String,
     pub agent_role: String,
@@ -55,7 +60,7 @@ pub struct SetupStep {
 }
 
 /// Generated artifacts from a setup request.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupArtifacts {
     pub raw_yaml: String,
     pub templates: BTreeMap<String, String>,
@@ -64,7 +69,7 @@ pub struct SetupArtifacts {
 }
 
 /// A discovered agent from the system.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DiscoveredAgent {
     pub name: String,
     pub label: String,
@@ -72,13 +77,13 @@ pub struct DiscoveredAgent {
 }
 
 /// Capabilities discovered by probing an acpx agent session.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AgentCapabilities {
     pub available_models: Vec<String>,
 }
 
 /// Result of a setup validation check.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SetupCheck {
     pub label: String,
     pub passed: bool,
@@ -1374,7 +1379,11 @@ custom_section:
         ];
 
         let result = validate_dag(&steps);
-        assert!(result.is_ok(), "expected valid DAG, got error: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "expected valid DAG, got error: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1416,7 +1425,10 @@ custom_section:
         assert!(tmpdir.path().join("templates").exists());
         assert!(tmpdir.path().join("templates/build.liquid").exists());
         assert!(tmpdir.path().join(".env").exists());
-        assert!(todo_path.exists(), "TODO.md should be written to the tracker path");
+        assert!(
+            todo_path.exists(),
+            "TODO.md should be written to the tracker path"
+        );
 
         let config_content = std::fs::read_to_string(tmpdir.path().join("config.yaml")).unwrap();
         assert!(config_content.contains("todo_file"));

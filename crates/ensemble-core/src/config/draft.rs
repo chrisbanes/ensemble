@@ -148,7 +148,7 @@ pub fn validate_document(document: &serde_yaml::Value) -> DraftValidationReport 
             ("on_failure", "transitions"),
         ];
         for (key, section) in required_sections {
-            if !mapping.contains_key(&serde_yaml::Value::String(key.to_string())) {
+            if !mapping.contains_key(serde_yaml::Value::String(key.to_string())) {
                 issues.push(ValidationIssue {
                     kind: ValidationIssueKind::Config,
                     message: format!("missing required section: {}", key),

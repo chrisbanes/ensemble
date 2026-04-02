@@ -230,6 +230,8 @@ pub async fn post_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::router::{AppState, ConfigRuntime};
+    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
     use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry};
@@ -257,14 +259,27 @@ mod tests {
     fn build_app_state_with_running() -> AppState {
         let mut state = OrchestratorState::new(30000, 10);
         state.add_running(&test_issue(), None);
+
+        let config_path = PathBuf::from("ensemble.yaml");
+        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+            path: config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            validation: DraftValidationReport::default(),
+        }));
+
         AppState {
             orchestrator_state: Arc::new(RwLock::new(state)),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
-            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            config_path: "ensemble.yaml".to_string(),
+            config_runtime: ConfigRuntime {
+                config_path,
+                document_state,
+            },
         }
     }
 
@@ -277,14 +292,27 @@ mod tests {
             due_at_ms: 999999,
             error: Some("timeout".to_string()),
         });
+
+        let config_path = PathBuf::from("ensemble.yaml");
+        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+            path: config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            validation: DraftValidationReport::default(),
+        }));
+
         AppState {
             orchestrator_state: Arc::new(RwLock::new(state)),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
-            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            config_path: "ensemble.yaml".to_string(),
+            config_runtime: ConfigRuntime {
+                config_path,
+                document_state,
+            },
         }
     }
 

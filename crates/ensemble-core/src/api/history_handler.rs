@@ -42,6 +42,8 @@ pub async fn get_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::router::{AppState, ConfigRuntime};
+    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
     use crate::history::model::{HistoryRecord, TokenTotals};
     use crate::history::writer::HistoryWriter;
     use crate::observability::events::EventBus;
@@ -52,14 +54,26 @@ mod tests {
     use tokio::sync::RwLock;
 
     fn build_app_state(history_path: PathBuf) -> AppState {
+        let config_path = PathBuf::from("ensemble.yaml");
+        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+            path: config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            validation: DraftValidationReport::default(),
+        }));
+
         AppState {
             orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
             workspace_root: "/tmp/workspaces".to_string(),
             history_path,
             event_bus: EventBus::new(),
-            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            config_path: "ensemble.yaml".to_string(),
+            config_runtime: ConfigRuntime {
+                config_path,
+                document_state,
+            },
         }
     }
 

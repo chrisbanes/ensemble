@@ -16,7 +16,7 @@ import type {
   IssueDetailSnapshot,
   ConversationResponse,
   HistoryResponse,
-  ConfigResponse,
+  ConfigStateResponse,
 } from "./generated/models";
 
 /**
@@ -97,10 +97,10 @@ export function useHistoryQuery(params: GetHistoryParams) {
 }
 
 export function useConfigQuery() {
-  return useGetConfig<ConfigResponse>({
+  return useGetConfig<ConfigStateResponse>({
     query: {
       staleTime: 60_000,
-      select: (resp) => resp.data as ConfigResponse,
+      select: (resp) => resp.data as ConfigStateResponse,
     },
   });
 }

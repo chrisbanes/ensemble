@@ -66,7 +66,7 @@ pub async fn run_validation(
         repos: setup_repos,
         agents: setup_agents,
         steps: setup_steps,
-        on_success: "Done".to_string(), // Not used by checks
+        on_success: "Done".to_string(),   // Not used by checks
         on_failure: "Failed".to_string(), // Not used by checks
     };
 
