@@ -90,6 +90,7 @@ pub fn create_api_router(state: AppState) -> Router {
             "/config/setup/validate",
             post(config_edit_handler::validate_setup),
         )
+        .route("/config/setup/save", post(config_edit_handler::save_setup))
         // Config form endpoints
         .route(
             "/config/form/validate",
