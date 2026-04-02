@@ -1,19 +1,8 @@
 use ensemble_core::config::ensemble::EnsembleConfig;
+use ensemble_core::config::setup::{
+    discover_agent_capabilities, discover_available_agents, AgentCapabilities, DiscoveredAgent,
+};
 use std::collections::HashMap;
-
-const KNOWN_AGENTS: &[(&str, &str)] = &[
-    ("claude", "Claude Code"),
-    ("codex", "Codex CLI"),
-    ("gemini", "Gemini CLI"),
-    ("amp", "Amp"),
-    ("aider", "Aider"),
-    ("goose", "Goose"),
-    ("copilot", "GitHub Copilot"),
-    ("droid", "Factory Droid"),
-    ("cursor", "Cursor Agent"),
-    ("qwen", "Qwen Code"),
-    ("opencode", "OpenCode"),
-];
 
 #[derive(Debug)]
 pub struct AgentEntry {
@@ -22,44 +11,25 @@ pub struct AgentEntry {
     pub model: Option<String>,
 }
 
-/// Capabilities discovered by probing an acpx agent session.
-#[derive(Debug, Default, Clone)]
-pub struct AgentCapabilities {
-    pub available_models: Vec<String>,
-}
-
-impl AgentCapabilities {
-    /// Extract capabilities from a parsed session JSON file.
-    pub fn from_session_json(json: &serde_json::Value) -> Self {
-        let mut caps = Self::default();
-
-        if let Some(models) = json
-            .get("acpx")
-            .and_then(|a| a.get("available_models"))
-            .and_then(|m| m.as_array())
-        {
-            caps.available_models = models
-                .iter()
-                .filter_map(|v| v.as_str().map(str::to_owned))
-                .collect();
-        }
-
-        caps
-    }
-}
-
 pub fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEntry>, String> {
+    // Check acpx is installed and get version
     let acpx_version = check_acpx()?;
     println!("Checking acpx... ✓ {acpx_version}\n");
 
-    let mut available = Vec::new();
+    // Use shared discovery function
+    let discovered = discover_available_agents().map_err(|e| e.to_string())?;
+
+    let mut available: Vec<String> = discovered.iter().map(|d| d.name.clone()).collect();
+
+    // Print detected agents
     print!("Detecting agents...");
-    for (name, label) in KNOWN_AGENTS {
-        if probe_agent(name) {
-            let version = get_agent_version(name);
-            println!("\n  ✓ {name:<12} {label} {version}");
-            available.push((*name).to_string());
-        }
+    for agent in &discovered {
+        let version_label = if agent.version.is_empty() {
+            String::new()
+        } else {
+            format!("({})", agent.version)
+        };
+        println!("\n  ✓ {:<12} {} {}", agent.name, agent.label, version_label);
     }
 
     if available.is_empty() {
@@ -105,12 +75,12 @@ pub fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<AgentEnt
         return Err("at least one agent is required".to_string());
     }
 
-    // Probe capabilities for selected agents
+    // Probe capabilities for selected agents using shared function
     println!("\nProbing agent capabilities...");
     let mut capabilities: HashMap<String, AgentCapabilities> = HashMap::new();
     for agent_name in &selected {
         print!("  {agent_name}...");
-        let caps = probe_agent_capabilities(agent_name);
+        let caps = discover_agent_capabilities(agent_name);
         if !caps.available_models.is_empty() {
             println!(" {} model(s)", caps.available_models.len());
         } else {
@@ -268,108 +238,6 @@ fn try_acpx_version() -> Option<String> {
     } else {
         None
     }
-}
-
-fn probe_agent(name: &str) -> bool {
-    let output = std::process::Command::new("acpx")
-        .args(["--agent", name, "--version"])
-        .output();
-
-    match output {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
-    }
-}
-
-fn get_agent_version(name: &str) -> String {
-    let output = std::process::Command::new("acpx")
-        .args(["--agent", name, "--version"])
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => {
-            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if v.is_empty() {
-                String::new()
-            } else {
-                format!("({v})")
-            }
-        }
-        _ => String::new(),
-    }
-}
-
-/// Probe an acpx agent for model and reasoning capabilities.
-///
-/// Creates a short-lived session, reads the session JSON to extract
-/// capabilities, then closes the session. Returns empty capabilities
-/// on any failure.
-///
-/// NOTE: This uses blocking I/O (`thread::sleep`, `fs::read_to_string`)
-/// and may block the current thread for up to 10 seconds per agent while
-/// waiting for the session file to be populated. This is acceptable in the
-/// interactive init wizard context but should not be called from async
-/// hot paths.
-fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
-    let session_name = "ensemble-probe";
-
-    // Create session
-    let output = std::process::Command::new("acpx")
-        .args([agent_name, "sessions", "ensure", "--name", session_name])
-        .output();
-
-    let session_id = match output {
-        Ok(ref o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            // Output format: "<uuid>\t(created)" or just "<uuid>"
-            stdout.trim().split('\t').next().unwrap_or("").to_string()
-        }
-        _ => return AgentCapabilities::default(),
-    };
-
-    if session_id.is_empty() {
-        return AgentCapabilities::default();
-    }
-
-    // Read session JSON from ~/.acpx/sessions/<id>.json
-    let caps = read_session_capabilities(&session_id);
-
-    // Close session (best-effort)
-    let _ = std::process::Command::new("acpx")
-        .args([agent_name, "sessions", "close", session_name])
-        .output();
-
-    caps
-}
-
-/// Read capabilities from a session JSON file.
-///
-/// Returns as soon as the session JSON is parseable and contains an `acpx`
-/// object (with or without models), rather than always blocking for the full
-/// timeout when an agent never populates `available_models`.
-fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
-    let acpx_dir = dirs::home_dir()
-        .map(|h| h.join(".acpx").join("sessions"))
-        .unwrap_or_default();
-
-    let session_file = acpx_dir.join(format!("{session_id}.json"));
-
-    // Wait for the session file to appear and become parseable
-    for _ in 0..20 {
-        if let Ok(content) = std::fs::read_to_string(&session_file) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                // Once the acpx object is present, return whatever we have.
-                // Agents that never populate available_models will have an
-                // empty list rather than blocking for the full 10s timeout.
-                if json.get("acpx").is_some() {
-                    return AgentCapabilities::from_session_json(&json);
-                }
-            }
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-
-    AgentCapabilities::default()
 }
 
 /// Build the (program, args) pair for installing acpx globally with the
