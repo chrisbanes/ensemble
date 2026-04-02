@@ -111,7 +111,8 @@ Required fields:
 - included plans or tasks from the approved plan
 - dependencies on prior waves
 - success criteria for the wave
-- links to spec, plan, and verification artifacts
+- links to spec and plan artifacts
+- expected verification artifact path
 
 Optional best-effort fields:
 
@@ -136,7 +137,17 @@ If a field cannot be updated consistently by the available tooling, it should be
 
 ## Board Model
 
-The board should use a small number of coarse states:
+The board should use one shared GitHub status field with a union of parent and child states.
+
+Parent issues use:
+
+- `Draft`
+- `Planning`
+- `Plan Review`
+- `Planned`
+- `Done`
+
+Child wave issues use:
 
 - `Planned`
 - `Ready`
@@ -146,6 +157,8 @@ The board should use a small number of coarse states:
 - `Done`
 
 Only `Ready` issues are eligible for Ensemble pickup.
+
+Using one shared status field keeps board automation and filtering simple while still allowing parent and child issues to use different subsets of the available states.
 
 Wave promotion is handled through board policy rather than Ensemble logic:
 
@@ -191,6 +204,19 @@ Recommended transient workspace state:
 The repo is the long-lived record. The issue links to that record. The workspace is disposable.
 
 Using per-wave verification files avoids one large shared verification document becoming a conflict hotspot across multiple execution cycles.
+
+## Branch Model
+
+The recommended default is one branch per wave, created from `main`.
+
+This model assumes:
+
+- parent planning artifacts are committed or merged before any child wave is released
+- a later wave is not promoted to `Ready` until all of its dependency waves are `Done` and their required code is available on `main`
+
+This keeps each wave branch independently reviewable and avoids a long-lived shared feature branch becoming the hidden source of truth.
+
+If a team prefers a shared integration branch for wave execution, that is a valid local variation, but the default recommendation is branch-per-wave from `main`.
 
 ## Agent Prompt Contract
 
@@ -287,6 +313,8 @@ Suggested parent states:
 
 The parent issue is updated by the planning or release workflow, not by Ensemble's child execution loop. That workflow is responsible for moving the parent into `Plan Review`, `Planned`, and `Done`.
 
+Parent completion is detected by the same planning or release workflow that manages wave promotion. When all child wave issues are `Done`, that workflow moves the parent issue to `Done`.
+
 ### Child Wave Issue
 
 Suggested child states:
@@ -303,7 +331,8 @@ State ownership for child issues:
 - planning agent sets initial `Planned` or `Ready` when creating wave issues
 - Ensemble moves `Ready` to `In Progress` when it dispatches a run, if the tracker integration supports that transition
 - execution agent moves the issue to `Needs Input` or `In Review` when the result requires it and the available tracker tooling allows it
-- execution completion or follow-up automation moves successfully completed issues to `Done`
+- execution agent is the default authority for moving successfully completed issues to `Done` and review-required issues to `In Review` when tracker write tools are available
+- follow-up automation may mirror or repair those transitions, but it should not be the primary source of truth
 
 If a particular tracker write is not supported by the runtime environment, the agent must still record the intended state in the issue comment or verification artifact so the missing transition is visible.
 
@@ -313,11 +342,13 @@ If a particular tracker write is not supported by the runtime environment, the a
 - persistent ambiguity or product uncertainty should move the issue to `Needs Input`
 - review-required outcomes should move the issue to `In Review`
 - unrecoverable technical failure should remain attached to the same wave issue with an explicit failure summary and either retry or human intervention path
-- review rejection should return the same child wave issue to `Ready` or `In Progress` depending on whether execution can resume automatically or needs a fresh dispatch
+- review rejection should return the same child wave issue to `Ready`
 
 The key rule is that retries and blockers stay attached to the same wave issue so the tracker preserves one operational thread per wave.
 
 Review rejection should never create a replacement wave issue. The same issue remains the unit of record until the wave is complete or deliberately cancelled.
+
+Returning rejected work to `Ready` preserves a single re-dispatch state: Ensemble only picks up issues that are ready to run again.
 
 ## Issue Creation Capability
 
@@ -340,7 +371,7 @@ The planning prompt for parent issues should explicitly require the agent to:
 - avoid clarifying-question loops unless blocked
 - produce a finalized wave plan before creating child issues
 - create exactly one child issue per wave
-- include parent reference, wave number, dependencies, success criteria, and artifact links in each child issue
+- include parent reference, wave number, dependencies, success criteria, spec/plan links, and expected verification artifact path in each child issue
 - set initial board state based on wave order
 
 The execution prompt for wave issues should explicitly require the agent to:
