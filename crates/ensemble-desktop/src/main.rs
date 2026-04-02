@@ -112,8 +112,6 @@ fn main() {
 mod tests {
     use crate::embedded_ui::spa_available;
     use std::path::Path;
-    use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn tauri_config_is_valid() {
@@ -160,10 +158,5 @@ mod tests {
     #[test]
     fn embedded_ui_module_loads() {
         let _ = spa_available;
-    }
-
-    fn env_lock() -> &'static Mutex<()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 }

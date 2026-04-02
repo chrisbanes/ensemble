@@ -61,7 +61,6 @@ use utoipa::OpenApi;
         crate::api::config_edit_handler::ValidateGuidedFormRequest,
         crate::api::config_edit_handler::ValidateGuidedFormResponse,
         crate::api::config_edit_handler::SaveGuidedFormRequest,
-        crate::api::config_edit_handler::SaveGuidedFormResponse,
         crate::config::draft::ValidationIssue,
         crate::config::draft::ValidationIssueKind,
         crate::config::setup::SetupRequest,

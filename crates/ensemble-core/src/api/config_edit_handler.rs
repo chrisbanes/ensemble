@@ -512,12 +512,6 @@ pub struct SaveGuidedFormRequest {
     pub form: crate::config::form::GuidedConfigForm,
 }
 
-/// Response containing the result of saving guided form content.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct SaveGuidedFormResponse {
-    pub merged_yaml: String,
-}
-
 /// POST /api/v1/config/form/save
 ///
 /// Saves guided form content by merging with base YAML and saving to config file.
@@ -527,7 +521,7 @@ pub struct SaveGuidedFormResponse {
     operation_id = "saveGuidedForm",
     request_body = SaveGuidedFormRequest,
     responses(
-        (status = 200, description = "Save result", body = SaveGuidedFormResponse),
+        (status = 200, description = "Save result", body = ConfigStateResponse),
         (status = 400, description = "Merge or save failed")
     ),
     tag = "config"

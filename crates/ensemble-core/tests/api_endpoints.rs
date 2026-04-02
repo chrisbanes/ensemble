@@ -7,7 +7,6 @@ use ensemble_core::config::draft::ConfigDocumentState;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
-use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
