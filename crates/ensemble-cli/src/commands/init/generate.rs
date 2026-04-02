@@ -73,6 +73,7 @@ fn to_setup_request(
     }
 }
 
+#[allow(dead_code)]
 pub fn generate_yaml(
     tracker: &TrackerChoice,
     repos: &[RepoEntry],
@@ -86,11 +87,13 @@ pub fn generate_yaml(
     artifacts.raw_yaml
 }
 
+#[allow(dead_code)]
 pub fn generate_template(step_name: &str) -> String {
     // Delegate to the shared implementation via internal helper
     ensemble_core::config::setup::generate_template(step_name)
 }
 
+#[allow(dead_code)]
 pub fn generate_todo_md() -> String {
     // Delegate to the shared implementation via internal helper
     ensemble_core::config::setup::generate_todo_md()
@@ -120,11 +123,11 @@ pub fn write_files(
     };
 
     let artifacts = merge_setup_request(existing_raw_yaml.as_deref(), &request)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     // Write the main artifacts
     write_setup_artifacts(config_dir, &request, &artifacts)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     println!("  ✓ {}", config_dir.join("config.yaml").display());
 
