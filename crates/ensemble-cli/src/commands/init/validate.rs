@@ -2,13 +2,9 @@ use crate::commands::init::agents::AgentEntry;
 use crate::commands::init::pipeline::PipelineStep;
 use crate::commands::init::repos::RepoEntry;
 use crate::commands::init::tracker::TrackerChoice;
-
-#[derive(Debug)]
-struct CheckResult {
-    label: String,
-    passed: bool,
-    detail: String,
-}
+use ensemble_core::config::setup::{
+    run_setup_checks, SetupAgent, SetupRepo, SetupRequest, SetupStep, SetupTracker,
+};
 
 pub async fn run_validation(
     tracker: &TrackerChoice,
@@ -18,113 +14,64 @@ pub async fn run_validation(
 ) -> Result<bool, inquire::InquireError> {
     println!("\nValidating configuration...\n");
 
-    let mut checks = Vec::new();
-
-    let acpx_ok = std::process::Command::new("acpx")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    checks.push(CheckResult {
-        label: "acpx".to_string(),
-        passed: acpx_ok,
-        detail: if acpx_ok {
-            "installed".to_string()
-        } else {
-            "not found on PATH".to_string()
-        },
-    });
-
-    match tracker {
+    // Convert CLI types to setup types
+    let setup_tracker = match tracker {
+        TrackerChoice::TodoFile { path } => SetupTracker::TodoFile { path: path.clone() },
         TrackerChoice::GitHub {
             repository,
             project_number,
+            api_key_env,
+            active_states,
+            terminal_states,
             ..
-        } => {
-            let detail = match project_number {
-                Some(n) => format!("GitHub Projects #{n} on {repository}"),
-                None => format!("GitHub repo {repository}"),
-            };
-            checks.push(CheckResult {
-                label: "Tracker".to_string(),
-                passed: true,
-                detail,
-            });
-        }
-        TrackerChoice::TodoFile { path } => {
-            checks.push(CheckResult {
-                label: "Tracker".to_string(),
-                passed: true,
-                detail: format!("TODO.md at {}", path.display()),
-            });
-        }
-    }
+        } => SetupTracker::GitHub {
+            repository: repository.clone(),
+            project_number: *project_number,
+            api_key_env: api_key_env.clone(),
+            api_token: None, // Token is handled separately
+            active_states: active_states.clone(),
+            terminal_states: terminal_states.clone(),
+        },
+    };
 
-    for repo in repos {
-        let exists = repo.path.join(".git").exists();
-        let branch_ok = std::process::Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{}", repo.branch),
-            ])
-            .current_dir(&repo.path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+    let setup_repos: Vec<SetupRepo> = repos
+        .iter()
+        .map(|r| SetupRepo {
+            path: r.path.clone(),
+            branch: r.branch.clone(),
+        })
+        .collect();
 
-        let passed = exists && branch_ok;
-        let detail = if passed {
-            format!("{} (git, branch: {})", repo.path.display(), repo.branch)
-        } else if !exists {
-            format!("{} — not a git repo", repo.path.display())
-        } else {
-            format!(
-                "{} — branch '{}' not found",
-                repo.path.display(),
-                repo.branch
-            )
-        };
+    let setup_agents: Vec<SetupAgent> = agents
+        .iter()
+        .map(|a| SetupAgent {
+            role: a.role.clone(),
+            acpx_agent: a.acpx_agent.clone(),
+            model: a.model.clone(),
+        })
+        .collect();
 
-        checks.push(CheckResult {
-            label: "Repo".to_string(),
-            passed,
-            detail,
-        });
-    }
+    let setup_steps: Vec<SetupStep> = steps
+        .iter()
+        .map(|s| SetupStep {
+            name: s.name.clone(),
+            agent_role: s.agent_role.clone(),
+            depends: s.depends.clone(),
+            tracker_state: s.tracker_state.clone(),
+        })
+        .collect();
 
-    for agent in agents {
-        let healthy = std::process::Command::new("acpx")
-            .args(["--agent", &agent.acpx_agent, "--version"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+    let request = SetupRequest {
+        tracker: setup_tracker,
+        repos: setup_repos,
+        agents: setup_agents,
+        steps: setup_steps,
+        on_success: "Done".to_string(),   // Not used by checks
+        on_failure: "Failed".to_string(), // Not used by checks
+    };
 
-        checks.push(CheckResult {
-            label: format!("Agent: {}", agent.role),
-            passed: healthy,
-            detail: if healthy {
-                format!("{}, healthy via acpx", agent.acpx_agent)
-            } else {
-                format!("{}, health check failed", agent.acpx_agent)
-            },
-        });
-    }
-
-    let dag_ok = validate_dag(steps);
-    checks.push(CheckResult {
-        label: "Pipeline".to_string(),
-        passed: dag_ok,
-        detail: format!(
-            "{} steps, {}",
-            steps.len(),
-            if dag_ok {
-                "no cycles"
-            } else {
-                "CYCLE DETECTED"
-            }
-        ),
-    });
+    // Run the shared setup checks
+    let checks = run_setup_checks(&request);
 
     let mut failures = 0;
     for check in &checks {
@@ -147,51 +94,4 @@ pub async fn run_validation(
     inquire::Confirm::new("Write config anyway?")
         .with_default(false)
         .prompt()
-}
-
-fn validate_dag(steps: &[PipelineStep]) -> bool {
-    use std::collections::{HashMap, HashSet, VecDeque};
-
-    if steps.is_empty() {
-        return false;
-    }
-
-    let names: HashSet<&str> = steps.iter().map(|s| s.name.as_str()).collect();
-    let mut in_degree: HashMap<&str, usize> = HashMap::new();
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for step in steps {
-        in_degree.entry(step.name.as_str()).or_insert(0);
-        for dep in &step.depends {
-            if !names.contains(dep.as_str()) {
-                return false;
-            }
-            adj.entry(dep.as_str())
-                .or_default()
-                .push(step.name.as_str());
-            *in_degree.entry(step.name.as_str()).or_insert(0) += 1;
-        }
-    }
-
-    let mut queue: VecDeque<&str> = in_degree
-        .iter()
-        .filter(|(_, &deg)| deg == 0)
-        .map(|(&name, _)| name)
-        .collect();
-
-    let mut visited = 0;
-    while let Some(node) = queue.pop_front() {
-        visited += 1;
-        if let Some(deps) = adj.get(node) {
-            for &next in deps {
-                let deg = in_degree.get_mut(next).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(next);
-                }
-            }
-        }
-    }
-
-    visited == steps.len()
 }

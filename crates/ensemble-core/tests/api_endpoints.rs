@@ -2,12 +2,13 @@
 //! hit endpoints with reqwest, verify JSON shapes match SPEC.md Section 13.7.2.
 
 use chrono::Utc;
-use ensemble_core::api::router::{create_api_router, AppState};
+use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
+use ensemble_core::config::draft::ConfigDocumentState;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
-use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
@@ -30,7 +31,8 @@ fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
     }
 }
 
-fn build_populated_app_state() -> AppState {
+fn build_populated_app_state() -> (AppState, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
     let issue1 = test_issue("NODE_123", "my-repo#42", "In Progress");
     let running_entry = RunningEntry {
         issue_id: "NODE_123".to_string(),
@@ -72,15 +74,32 @@ fn build_populated_app_state() -> AppState {
     state.agent_totals.total_tokens = 7400;
     state.agent_totals.seconds_running = 120.5;
 
-    AppState {
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
+    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+        path: config_path.clone(),
+        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
+        raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+    }));
+
+    let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/ensemble_workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir
+            .path()
+            .join("ensemble_workspaces")
+            .display()
+            .to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
-        config: std::sync::Arc::new(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-        config_path: "ensemble.yaml".to_string(),
-    }
+        config_runtime: ConfigRuntime {
+            config_path,
+            document_state,
+        },
+    };
+    (app_state, temp_dir)
 }
 
 /// Start an axum test server and return the base URL.
@@ -99,7 +118,7 @@ async fn start_test_server(app_state: AppState) -> String {
 
 #[tokio::test]
 async fn test_get_state_endpoint() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -172,7 +191,7 @@ async fn test_get_state_endpoint() {
 
 #[tokio::test]
 async fn test_get_issue_detail_running() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -208,7 +227,7 @@ async fn test_get_issue_detail_running() {
 
 #[tokio::test]
 async fn test_get_issue_detail_retrying() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -233,7 +252,7 @@ async fn test_get_issue_detail_retrying() {
 
 #[tokio::test]
 async fn test_get_issue_detail_not_found() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -256,7 +275,7 @@ async fn test_get_issue_detail_not_found() {
 
 #[tokio::test]
 async fn test_post_refresh_endpoint() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -279,7 +298,7 @@ async fn test_post_refresh_endpoint() {
 
 #[tokio::test]
 async fn test_get_refresh_returns_405() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -298,16 +317,29 @@ async fn test_get_refresh_returns_405() {
 
 #[tokio::test]
 async fn test_get_state_empty_system() {
+    let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
+
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
+    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+        path: config_path.clone(),
+        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
+        raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+    }));
 
     let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
-        config: std::sync::Arc::new(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-        config_path: "ensemble.yaml".to_string(),
+        config_runtime: ConfigRuntime {
+            config_path,
+            document_state,
+        },
     };
 
     let base_url = start_test_server(app_state).await;
@@ -335,22 +367,37 @@ async fn test_get_state_empty_system() {
 
 // --- Static serving and API 404 fallback tests ---
 
-fn build_empty_app_state() -> AppState {
+fn build_empty_app_state() -> (AppState, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
-    AppState {
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
+    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+        path: config_path.clone(),
+        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
+        raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+    }));
+
+    let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
-        config: std::sync::Arc::new(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-        config_path: "ensemble.yaml".to_string(),
-    }
+        config_runtime: ConfigRuntime {
+            config_path,
+            document_state,
+        },
+    };
+    (app_state, temp_dir)
 }
 
 #[tokio::test]
 async fn test_api_unknown_route_returns_json_404() {
-    let base_url = start_test_server(build_empty_app_state()).await;
+    let (app_state, _temp_dir) = build_empty_app_state();
+    let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
     let response = client
@@ -364,4 +411,115 @@ async fn test_api_unknown_route_returns_json_404() {
     let json: serde_json::Value = response.json().await.unwrap();
     assert!(json.get("error").is_some(), "expected JSON error envelope");
     assert_eq!(json["error"]["code"], "not_found");
+}
+
+// --- Config management tests ---
+
+fn build_app_state_without_config() -> (AppState, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
+    let state = OrchestratorState::new(30000, 10);
+    let config_path = temp_dir.path().join("nonexistent_config.yaml");
+    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+        path: config_path.clone(),
+        kind: ensemble_core::config::draft::ConfigStateKind::Missing,
+        raw_yaml: None,
+        document: None,
+        active_config: None,
+        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+    }));
+
+    let app_state = AppState {
+        orchestrator_state: Arc::new(RwLock::new(state)),
+        refresh_requested: Arc::new(tokio::sync::Notify::new()),
+        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
+        event_bus: EventBus::new(),
+        config_runtime: ConfigRuntime {
+            config_path,
+            document_state,
+        },
+    };
+    (app_state, temp_dir)
+}
+
+#[tokio::test]
+async fn test_get_config_reports_missing_state() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    let base_url = start_test_server(state).await;
+    let response = reqwest::get(format!("{}/api/v1/config", base_url))
+        .await
+        .unwrap();
+    let status = response.status();
+    let json: serde_json::Value = response.json().await.unwrap();
+
+    assert_eq!(status, 200);
+    assert_eq!(json["state"], "missing");
+    assert!(json["active_config"].is_null());
+}
+
+#[tokio::test]
+async fn test_post_yaml_validate_returns_syntax_errors() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    let base_url = start_test_server(state).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{}/api/v1/config/yaml/validate", base_url))
+        .json(&serde_json::json!({ "raw_yaml": "tracker:\n  kind: todo_file\nagents: [" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["state"], "syntax_error");
+}
+
+#[tokio::test]
+async fn test_setup_defaults_extract_from_parseable_raw_yaml() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    *state.config_runtime.document_state.write().await = ConfigDocumentState {
+        path: state.config_runtime.config_path.clone(),
+        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
+        raw_yaml: Some(
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 11
+  api_key: $GITHUB_TOKEN
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+repos:
+  - path: /tmp/repo-a
+    branch: main
+agents:
+  builder:
+    acpx_agent: claude
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#
+            .to_string(),
+        ),
+        document: None,
+        active_config: None,
+        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+    };
+
+    let base_url = start_test_server(state).await;
+    let response = reqwest::get(format!("{}/api/v1/config/setup/defaults", base_url))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["has_existing_config"], true);
+    assert_eq!(json["defaults"]["tracker"]["kind"], "github");
+    assert_eq!(json["defaults"]["repos"][0]["branch"], "main");
+    assert_eq!(json["defaults"]["agents"][0]["role"], "builder");
 }

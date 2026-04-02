@@ -20,15 +20,6 @@
     ]
   },
   "app": {
-    "windows": [
-      {
-        "title": "Ensemble Dashboard",
-        "width": 1280,
-        "height": 800,
-        "resizable": true,
-        "fullscreen": false,
-        "url": "index.html"
-      }
-    ]
+    "windows": []
   }
 }

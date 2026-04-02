@@ -8,25 +8,17 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import NotificationPanel from "./NotificationPanel";
 import { getUnreadCount, subscribe } from "@/notifications";
 import { cn } from "@/lib/utils";
-
-const navItems = [
-  { to: "/", label: "Dashboard" },
-  { to: "/history", label: "History" },
-  { to: "/config", label: "Config" },
-];
-
-function navLinkClass({ isActive }: { isActive: boolean }) {
-  return cn(
-    "px-3 py-2 rounded-md text-sm font-medium transition-colors",
-    isActive
-      ? "bg-gray-900 text-white dark:bg-gray-700"
-      : "text-gray-300 hover:bg-gray-700 hover:text-white",
-  );
-}
+import { useConfigStateQuery } from "@/hooks";
 
 export default function Layout() {
   const [theme, setThemeState] = useState<Theme>(getTheme);
   const [unreadCount, setUnreadCount] = useState(getUnreadCount);
+  const { data: configData } = useConfigStateQuery();
+
+  // Check if config is runnable (parsed state with no issues and valid config)
+  const isConfigRunnable = configData
+    ? configData.state === "parsed" && configData.active_config != null && configData.issues.length === 0
+    : false;
 
   useEffect(() => {
     return subscribe(() => setUnreadCount(getUnreadCount()));
@@ -37,6 +29,16 @@ export default function Layout() {
     setThemeState(next);
   }
 
+  function navLinkClass({ isActive }: { isActive: boolean }, disabled = false) {
+    return cn(
+      "px-3 py-2 rounded-md text-sm font-medium transition-colors",
+      isActive
+        ? "bg-gray-900 text-white dark:bg-gray-700"
+        : "text-gray-300 hover:bg-gray-700 hover:text-white",
+      disabled && "opacity-50 cursor-not-allowed pointer-events-none",
+    );
+  }
+
   return (
     <div className="min-h-screen flex flex-col">
       <nav className="bg-gray-800 shadow">
@@ -45,11 +47,25 @@ export default function Layout() {
             <div className="flex items-center gap-4">
               <span className="text-white font-bold text-lg">Ensemble</span>
               <div className="flex items-center gap-1">
-                {navItems.map((item) => (
-                  <NavLink key={item.to} to={item.to} end={item.to === "/"} className={navLinkClass}>
-                    {item.label}
-                  </NavLink>
-                ))}
+                <NavLink
+                  to="/"
+                  end
+                  className={(props) => navLinkClass(props, !isConfigRunnable)}
+                >
+                  Dashboard
+                </NavLink>
+                <NavLink
+                  to="/history"
+                  className={(props) => navLinkClass(props, !isConfigRunnable)}
+                >
+                  History
+                </NavLink>
+                <NavLink
+                  to="/config"
+                  className={navLinkClass}
+                >
+                  Config
+                </NavLink>
               </div>
             </div>
 

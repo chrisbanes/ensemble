@@ -1,5 +1,7 @@
-use crate::api::{config_handler, controls, conversation, handlers, history_handler, ws};
-use crate::config::ensemble::EnsembleConfig;
+use crate::api::{
+    config_edit_handler, config_handler, controls, conversation, handlers, history_handler, ws,
+};
+use crate::config::draft::ConfigDocumentState;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use axum::http::StatusCode;
@@ -10,6 +12,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use utoipa::OpenApi;
+
+/// Runtime configuration store that holds the current config state.
+#[derive(Clone)]
+pub struct ConfigRuntime {
+    pub config_path: PathBuf,
+    pub document_state: Arc<RwLock<ConfigDocumentState>>,
+}
 
 /// Shared application state passed to all API handlers.
 #[derive(Clone)]
@@ -25,10 +34,8 @@ pub struct AppState {
     pub history_path: PathBuf,
     /// Event bus for pipeline event broadcasting.
     pub event_bus: EventBus,
-    /// The loaded ensemble configuration.
-    pub config: Arc<EnsembleConfig>,
-    /// Path to the config.yaml file.
-    pub config_path: String,
+    /// Runtime configuration store with document state.
+    pub config_runtime: ConfigRuntime,
 }
 
 /// Create the axum router for the Ensemble HTTP API.
@@ -64,6 +71,35 @@ pub fn create_api_router(state: AppState) -> Router {
         )
         .route("/history", get(history_handler::get_history))
         .route("/config", get(config_handler::get_config))
+        // Config YAML endpoints
+        .route(
+            "/config/yaml/validate",
+            post(config_edit_handler::validate_yaml),
+        )
+        .route("/config/yaml/save", post(config_edit_handler::save_yaml))
+        // Config setup endpoints
+        .route(
+            "/config/setup/defaults",
+            get(config_edit_handler::get_setup_defaults),
+        )
+        .route(
+            "/config/setup/agents",
+            get(config_edit_handler::get_setup_agents),
+        )
+        .route(
+            "/config/setup/validate",
+            post(config_edit_handler::validate_setup),
+        )
+        .route("/config/setup/save", post(config_edit_handler::save_setup))
+        // Config form endpoints
+        .route(
+            "/config/form/validate",
+            post(config_edit_handler::validate_guided_form),
+        )
+        .route(
+            "/config/form/save",
+            post(config_edit_handler::save_guided_form),
+        )
         .route(
             "/{identifier}/conversation",
             get(conversation::get_conversation),
@@ -116,15 +152,29 @@ mod tests {
     use super::*;
 
     fn test_app_state() -> AppState {
+        use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+
         let state = OrchestratorState::new(30000, 10);
+        let config_path = PathBuf::from("ensemble.yaml");
+        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+            path: config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
+            document: None,
+            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            validation: DraftValidationReport::default(),
+        }));
+
         AppState {
             orchestrator_state: Arc::new(RwLock::new(state)),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
             workspace_root: "/tmp/workspaces".to_string(),
             history_path: PathBuf::from("/tmp/history.jsonl"),
             event_bus: EventBus::new(),
-            config: Arc::new(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            config_path: "ensemble.yaml".to_string(),
+            config_runtime: ConfigRuntime {
+                config_path,
+                document_state,
+            },
         }
     }
 

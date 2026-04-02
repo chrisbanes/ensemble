@@ -9,6 +9,15 @@ import {
   usePostStop,
   usePostRetry,
 } from "./generated/api/controls/controls";
+import {
+  useSaveSetup,
+  useValidateSetup,
+  useSaveYaml,
+  useValidateYaml,
+  getGetConfigQueryKey,
+  useValidateGuidedForm,
+  useSaveGuidedForm,
+} from "./generated/api/config/config";
 import { useGetConversation } from "./generated/api/conversation/conversation";
 import type {
   GetHistoryParams,
@@ -16,7 +25,8 @@ import type {
   IssueDetailSnapshot,
   ConversationResponse,
   HistoryResponse,
-  ConfigResponse,
+  ConfigStateResponse,
+  GuidedConfigForm,
 } from "./generated/models";
 
 /**
@@ -97,10 +107,56 @@ export function useHistoryQuery(params: GetHistoryParams) {
 }
 
 export function useConfigQuery() {
-  return useGetConfig<ConfigResponse>({
+  return useGetConfig<ConfigStateResponse>({
     query: {
       staleTime: 60_000,
-      select: (resp) => resp.data as ConfigResponse,
+      select: (resp) => resp.data as ConfigStateResponse,
+    },
+  });
+}
+
+export function useConfigStateQuery() {
+  return useGetConfig<ConfigStateResponse>({
+    query: {
+      staleTime: 60_000,
+      select: (resp) => resp.data as ConfigStateResponse,
+    },
+  });
+}
+
+export function useValidateYamlDraftMutation() {
+  const queryClient = useQueryClient();
+  return useValidateYaml({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
+    },
+  });
+}
+
+export function useSaveYamlDraftMutation() {
+  const queryClient = useQueryClient();
+  return useSaveYaml({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
+    },
+  });
+}
+
+export function useValidateSetupMutation() {
+  return useValidateSetup();
+}
+
+export function useSaveSetupMutation() {
+  const queryClient = useQueryClient();
+  return useSaveSetup({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
     },
   });
 }
@@ -136,4 +192,43 @@ export function useRetryMutation() {
       },
     },
   });
+}
+
+export function useValidateGuidedFormMutation() {
+  const generatedMutation = useValidateGuidedForm();
+  
+  return {
+    mutateAsync: async (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
+      return generatedMutation.mutateAsync({
+        data: {
+          base_raw_yaml: params.baseRawYaml,
+          form: params.form,
+        },
+      });
+    },
+    isPending: generatedMutation.isPending,
+  };
+}
+
+export function useSaveGuidedFormMutation() {
+  const queryClient = useQueryClient();
+  const generatedMutation = useSaveGuidedForm({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
+    },
+  });
+  
+  return {
+    mutateAsync: async (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
+      return generatedMutation.mutateAsync({
+        data: {
+          base_raw_yaml: params.baseRawYaml,
+          form: params.form,
+        },
+      });
+    },
+    isPending: generatedMutation.isPending,
+  };
 }

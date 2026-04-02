@@ -13,6 +13,14 @@ use utoipa::OpenApi;
         crate::api::handlers::post_refresh,
         crate::api::history_handler::get_history,
         crate::api::config_handler::get_config,
+        crate::api::config_edit_handler::validate_yaml,
+        crate::api::config_edit_handler::save_yaml,
+        crate::api::config_edit_handler::get_setup_defaults,
+        crate::api::config_edit_handler::get_setup_agents,
+        crate::api::config_edit_handler::validate_setup,
+        crate::api::config_edit_handler::save_setup,
+        crate::api::config_edit_handler::validate_guided_form,
+        crate::api::config_edit_handler::save_guided_form,
         crate::api::conversation::get_conversation,
         crate::api::conversation::get_conversation_message,
         crate::api::controls::post_stop,
@@ -41,6 +49,26 @@ use utoipa::OpenApi;
         crate::api::controls::RetryResponse,
         // Config types
         crate::api::config_handler::ConfigResponse,
+        crate::api::config_edit_handler::ConfigStateResponse,
+        crate::api::config_edit_handler::ValidateYamlRequest,
+        crate::api::config_edit_handler::SaveYamlRequest,
+        crate::api::config_edit_handler::SetupDefaultsResponse,
+        crate::api::config_edit_handler::SetupAgentsResponse,
+        crate::api::config_edit_handler::DiscoveredAgentInfo,
+        crate::api::config_edit_handler::ValidateSetupRequest,
+        crate::api::config_edit_handler::ValidateSetupResponse,
+        crate::api::config_edit_handler::SaveSetupRequest,
+        crate::api::config_edit_handler::ValidateGuidedFormRequest,
+        crate::api::config_edit_handler::ValidateGuidedFormResponse,
+        crate::api::config_edit_handler::SaveGuidedFormRequest,
+        crate::config::draft::ValidationIssue,
+        crate::config::draft::ValidationIssueKind,
+        crate::config::setup::SetupRequest,
+        crate::config::setup::SetupTracker,
+        crate::config::setup::SetupRepo,
+        crate::config::setup::SetupAgent,
+        crate::config::setup::SetupStep,
+        crate::config::setup::SetupCheck,
         crate::config::ensemble::EnsembleConfig,
         crate::config::ensemble::TrackerConfig,
         crate::config::ensemble::AgentConfig,
@@ -50,6 +78,19 @@ use utoipa::OpenApi;
         crate::config::ensemble::WorkspaceConfig,
         crate::config::ensemble::HooksConfig,
         crate::config::ensemble::AgentRuntimeConfig,
+        // Guided form types
+        crate::config::form::GuidedConfigForm,
+        crate::config::form::GuidedTrackerForm,
+        crate::config::form::GuidedRepoForm,
+        crate::config::form::GuidedAgentForm,
+        crate::config::form::GuidedStepForm,
+        crate::config::form::GuidedRuntimeForm,
+        crate::config::form::GuidedConcurrencyForm,
+        crate::config::form::GuidedPollingForm,
+        crate::config::form::GuidedWorkspaceForm,
+        crate::config::form::GuidedHooksForm,
+        crate::config::form::GuidedAgentRuntimeForm,
+        crate::config::form::GuidedTransitionForm,
         // History types
         crate::history::model::HistoryRecord,
         crate::history::model::TokenTotals,
@@ -78,5 +119,17 @@ mod tests {
         let spec = ApiDoc::openapi().to_pretty_json().unwrap();
         assert!(spec.contains("\"openapi\":"));
         assert!(spec.contains("Ensemble API"));
+    }
+
+    #[test]
+    fn test_openapi_documents_save_guided_form_with_config_state_response() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        assert_eq!(
+            spec["paths"]["/api/v1/config/form/save"]["post"]["responses"]["200"]["content"]
+                ["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ConfigStateResponse"
+        );
     }
 }

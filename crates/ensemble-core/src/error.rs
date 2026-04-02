@@ -36,6 +36,14 @@ pub enum ConfigError {
     NotADirectory { path: String },
     #[error("path expansion failed for '{path}': {reason}")]
     PathExpansionError { path: String, reason: String },
+    #[error("config write rejected: {reason}")]
+    ConfigWriteRejected { reason: String },
+
+    #[error("config write failed: {reason}")]
+    ConfigWriteFailed { reason: String },
+
+    #[error("pipeline cannot be empty: at least one step is required")]
+    EmptyPipeline,
 }
 
 #[derive(Debug, Error)]

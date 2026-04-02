@@ -2,7 +2,85 @@ use crate::commands::init::agents::AgentEntry;
 use crate::commands::init::pipeline::PipelineStep;
 use crate::commands::init::repos::RepoEntry;
 use crate::commands::init::tracker::TrackerChoice;
+use ensemble_core::config::setup::{
+    build_setup_artifacts, merge_setup_request, resolve_tracker_output_path, write_setup_artifacts,
+    SetupAgent, SetupRepo, SetupRequest, SetupStep, SetupTracker,
+};
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct OverwritePlan {
+    template_prompts: Vec<std::path::PathBuf>,
+    env_prompt: Option<std::path::PathBuf>,
+    todo_prompt: Option<std::path::PathBuf>,
+}
+
+/// Convert CLI types to a SetupRequest for the shared implementation.
+fn to_setup_request(
+    tracker: &TrackerChoice,
+    repos: &[RepoEntry],
+    agents: &[AgentEntry],
+    steps: &[PipelineStep],
+    on_success: &str,
+    on_failure: &str,
+) -> SetupRequest {
+    let tracker = match tracker {
+        TrackerChoice::TodoFile { path } => SetupTracker::TodoFile { path: path.clone() },
+        TrackerChoice::GitHub {
+            repository,
+            project_number,
+            api_key_env,
+            api_token,
+            active_states,
+            terminal_states,
+            ..
+        } => SetupTracker::GitHub {
+            repository: repository.clone(),
+            project_number: *project_number,
+            api_key_env: api_key_env.clone(),
+            api_token: api_token.clone(),
+            active_states: active_states.clone(),
+            terminal_states: terminal_states.clone(),
+        },
+    };
+
+    let repos = repos
+        .iter()
+        .map(|r| SetupRepo {
+            path: r.path.clone(),
+            branch: r.branch.clone(),
+        })
+        .collect();
+
+    let agents = agents
+        .iter()
+        .map(|a| SetupAgent {
+            role: a.role.clone(),
+            acpx_agent: a.acpx_agent.clone(),
+            model: a.model.clone(),
+        })
+        .collect();
+
+    let steps = steps
+        .iter()
+        .map(|s| SetupStep {
+            name: s.name.clone(),
+            agent_role: s.agent_role.clone(),
+            depends: s.depends.clone(),
+            tracker_state: s.tracker_state.clone(),
+        })
+        .collect();
+
+    SetupRequest {
+        tracker,
+        repos,
+        agents,
+        steps,
+        on_success: on_success.to_string(),
+        on_failure: on_failure.to_string(),
+    }
+}
+
+#[allow(dead_code)]
 pub fn generate_yaml(
     tracker: &TrackerChoice,
     repos: &[RepoEntry],
@@ -11,129 +89,21 @@ pub fn generate_yaml(
     on_success: &str,
     on_failure: &str,
 ) -> String {
-    let mut yaml = String::new();
-
-    yaml.push_str("tracker:\n");
-    match tracker {
-        TrackerChoice::TodoFile { path } => {
-            yaml.push_str("  kind: todo_file\n");
-            yaml.push_str(&format!("  path: {}\n", path.display()));
-            yaml.push_str("  active_states:\n");
-            yaml.push_str("    - Todo\n");
-            yaml.push_str("    - In Progress\n");
-            yaml.push_str("  terminal_states:\n");
-            yaml.push_str(&format!("    - {}\n", on_success));
-            if on_failure != on_success {
-                yaml.push_str(&format!("    - {}\n", on_failure));
-            }
-        }
-        TrackerChoice::GitHub {
-            repository,
-            project_number,
-            api_key_env,
-            active_states,
-            terminal_states,
-            ..
-        } => {
-            yaml.push_str("  kind: github\n");
-            yaml.push_str(&format!("  repository: {repository}\n"));
-            yaml.push_str(&format!("  api_key: ${api_key_env}\n"));
-            if let Some(n) = project_number {
-                yaml.push_str(&format!("  project_number: {n}\n"));
-            }
-            yaml.push_str("  active_states:\n");
-            for s in active_states {
-                yaml.push_str(&format!("    - {s}\n"));
-            }
-            yaml.push_str("  terminal_states:\n");
-            for s in terminal_states {
-                yaml.push_str(&format!("    - {s}\n"));
-            }
-        }
-    }
-
-    if !repos.is_empty() {
-        yaml.push_str("\nrepos:\n");
-        for repo in repos {
-            yaml.push_str(&format!("  - path: {}\n", repo.path.display()));
-            yaml.push_str(&format!("    branch: {}\n", repo.branch));
-        }
-    }
-
-    yaml.push_str("\nagents:\n");
-    for agent in agents {
-        yaml.push_str(&format!("  {}:\n", agent.role));
-        yaml.push_str(&format!("    acpx_agent: {}\n", agent.acpx_agent));
-        if let Some(ref model) = agent.model {
-            yaml.push_str(&format!("    model: {model}\n"));
-        }
-        yaml.push_str(&format!(
-            "    prompt_template: templates/{}.liquid\n",
-            find_step_for_agent(&agent.role, steps)
-        ));
-    }
-
-    yaml.push_str("\nsteps:\n");
-    for step in steps {
-        yaml.push_str(&format!("  - name: {}\n", step.name));
-        yaml.push_str(&format!("    agent: {}\n", step.agent_role));
-        if !step.depends.is_empty() {
-            yaml.push_str("    depends:\n");
-            for dep in &step.depends {
-                yaml.push_str(&format!("      - {dep}\n"));
-            }
-        }
-        if let Some(ref state) = step.tracker_state {
-            yaml.push_str(&format!("    tracker_state: {state}\n"));
-        }
-    }
-
-    yaml.push_str(&format!("\non_success: {on_success}\n"));
-    yaml.push_str(&format!("on_failure: {on_failure}\n"));
-
-    yaml
+    let request = to_setup_request(tracker, repos, agents, steps, on_success, on_failure);
+    let artifacts = build_setup_artifacts(&request);
+    artifacts.raw_yaml
 }
 
-/// Find the step name associated with an agent role.
-/// Falls back to the role name itself if no matching step is found.
-fn find_step_for_agent(role: &str, steps: &[PipelineStep]) -> String {
-    steps
-        .iter()
-        .find(|s| s.agent_role == role)
-        .map(|s| s.name.clone())
-        .unwrap_or_else(|| role.to_string())
-}
-
+#[allow(dead_code)]
 pub fn generate_template(step_name: &str) -> String {
-    match step_name {
-        "review" => "Review the changes made for:\n\
-             \n\
-             **{{ issue.title }}**\n\
-             \n\
-             {{ issue.description }}\n\
-             \n\
-             Check for correctness, test coverage, and code quality.\n\
-             Write your verdict to `.ensemble/verdict.json`.\n"
-            .to_string(),
-        _ => "Solve the following issue:\n\
-             \n\
-             **{{ issue.title }}**\n\
-             \n\
-             {{ issue.description }}\n"
-            .to_string(),
-    }
+    // Delegate to the shared implementation via internal helper
+    ensemble_core::config::setup::generate_template(step_name)
 }
 
+#[allow(dead_code)]
 pub fn generate_todo_md() -> String {
-    "## Todo\n\
-     \n\
-     - [SAMPLE-1] Set up project build system\n\
-       Configure the build toolchain and verify all dependencies resolve correctly.\n\
-     \n\
-     ## In Progress\n\
-     \n\
-     ## Done\n"
-        .to_string()
+    // Delegate to the shared implementation via internal helper
+    ensemble_core::config::setup::generate_todo_md()
 }
 
 pub fn write_files(
@@ -150,84 +120,174 @@ pub fn write_files(
     // Create config directory if it doesn't exist
     std::fs::create_dir_all(config_dir)?;
 
-    let yaml = generate_yaml(tracker, repos, agents, steps, on_success, on_failure);
-    let config_path = config_dir.join("config.yaml");
-    std::fs::write(&config_path, &yaml)?;
-    println!("  ✓ {}", config_path.display());
+    let request = to_setup_request(tracker, repos, agents, steps, on_success, on_failure);
 
-    let templates_dir = config_dir.join("templates");
-    std::fs::create_dir_all(&templates_dir)?;
-    for step in steps {
-        let template = generate_template(&step.name);
-        let path = templates_dir.join(format!("{}.liquid", step.name));
-        if path.exists() {
-            match inquire::Confirm::new(&format!(
-                "Template '{}' already exists. Overwrite?",
-                path.display()
-            ))
-            .with_default(true)
-            .prompt()
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    println!("  Skipping {}", path.display());
-                    continue;
-                }
-                Err(_) => return Ok(()),
+    // For reconfiguration, try to read existing config
+    let existing_raw_yaml = if config_dir.join("config.yaml").exists() {
+        std::fs::read_to_string(config_dir.join("config.yaml")).ok()
+    } else {
+        None
+    };
+
+    let mut artifacts = merge_setup_request(existing_raw_yaml.as_deref(), &request)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    let overwrite_plan = plan_overwrites(config_dir, &request, &artifacts);
+    let mut declined = OverwritePlan::default();
+
+    for template_path in &overwrite_plan.template_prompts {
+        match inquire::Confirm::new(&format!(
+            "Template '{}' already exists. Overwrite?",
+            template_path.display()
+        ))
+        .with_default(true)
+        .prompt()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("  Skipping {}", template_path.display());
+                declined.template_prompts.push(template_path.clone());
             }
+            Err(_) => return Ok(()),
         }
-        std::fs::write(&path, &template)?;
-        println!("  ✓ {}", path.display());
     }
 
+    if let Some(env_path) = &overwrite_plan.env_prompt {
+        match inquire::Confirm::new(&format!(
+            "{} already exists. Overwrite?",
+            env_path.display()
+        ))
+        .with_default(false)
+        .prompt()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("  Skipping {} (token not saved)", env_path.display());
+                declined.env_prompt = Some(env_path.clone());
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+
+    if let Some(todo_path) = &overwrite_plan.todo_prompt {
+        match inquire::Confirm::new(&format!(
+            "{} already exists. Overwrite?",
+            todo_path.display()
+        ))
+        .with_default(true)
+        .prompt()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("  Skipping {}", todo_path.display());
+                declined.todo_prompt = Some(todo_path.clone());
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+
+    apply_declined_overwrites(config_dir, &request, &mut artifacts, &declined);
+
+    // Write the main artifacts
+    write_setup_artifacts(config_dir, &request, &artifacts)
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+    println!("  ✓ {}", config_dir.join("config.yaml").display());
+
+    // Print template paths
+    for template_path in artifacts.templates.keys() {
+        let full_path = config_dir.join(template_path);
+        println!("  ✓ {}", full_path.display());
+    }
+
+    // Print TODO.md path for todo_file tracker (already written by write_setup_artifacts)
     if let TrackerChoice::TodoFile { path } = tracker {
-        // Create parent directories for TODO file if needed
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if artifacts.todo_md.is_some() {
+            println!("  ✓ {}", path.display());
         }
-        std::fs::write(path, generate_todo_md())?;
-        println!("  ✓ {}", path.display());
     }
 
-    // Write .env file with GitHub token if provided interactively
     if let TrackerChoice::GitHub {
-        api_token: Some(token),
-        api_key_env,
-        ..
+        api_token: Some(_), ..
     } = tracker
     {
         let env_path = config_dir.join(".env");
         if env_path.exists() {
-            match inquire::Confirm::new(&format!(
-                "{} already exists. Overwrite?",
+            println!(
+                "  ✓ {} (auto-loaded from config directory)",
                 env_path.display()
-            ))
-            .with_default(false)
-            .prompt()
-            {
-                Ok(true) => {}
-                Ok(false) => {
-                    println!("  Skipping {} (token not saved)", env_path.display());
-                }
-                Err(_) => return Ok(()),
-            }
+            );
         }
-        std::fs::write(&env_path, format!("{}={}\n", api_key_env, token))?;
-        // Set restrictive permissions (user read/write only)
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&env_path, perms)?;
-        }
-        println!(
-            "  ✓ {} (auto-loaded from config directory)",
-            env_path.display()
-        );
     }
 
     println!("\nDone! Run `ensemble` to start processing issues.");
     Ok(())
+}
+
+fn plan_overwrites(
+    config_dir: &std::path::Path,
+    request: &SetupRequest,
+    artifacts: &ensemble_core::config::setup::SetupArtifacts,
+) -> OverwritePlan {
+    let mut plan = OverwritePlan::default();
+
+    for template_path in artifacts.templates.keys() {
+        let full_path = config_dir.join(template_path);
+        if full_path.exists() {
+            plan.template_prompts.push(full_path);
+        }
+    }
+
+    if matches!(
+        request.tracker,
+        SetupTracker::GitHub {
+            api_token: Some(_),
+            ..
+        }
+    ) {
+        let env_path = config_dir.join(".env");
+        if env_path.exists() {
+            plan.env_prompt = Some(env_path);
+        }
+    }
+
+    if artifacts.todo_md.is_some() {
+        if let SetupTracker::TodoFile { path } = &request.tracker {
+            if let Ok(todo_path) = resolve_tracker_output_path(path, config_dir) {
+                if todo_path.exists() {
+                    plan.todo_prompt = Some(todo_path);
+                }
+            }
+        }
+    }
+
+    plan
+}
+
+fn apply_declined_overwrites(
+    config_dir: &std::path::Path,
+    request: &SetupRequest,
+    artifacts: &mut ensemble_core::config::setup::SetupArtifacts,
+    declined: &OverwritePlan,
+) {
+    artifacts.templates.retain(|template_path, _| {
+        !declined
+            .template_prompts
+            .iter()
+            .any(|existing| existing == &config_dir.join(template_path))
+    });
+
+    if declined.env_prompt.is_some() {
+        artifacts.env_file = None;
+    }
+
+    if let (Some(_), SetupTracker::TodoFile { path }) = (&declined.todo_prompt, &request.tracker) {
+        if let Ok(todo_path) = resolve_tracker_output_path(path, config_dir) {
+            if declined.todo_prompt.as_ref() == Some(&todo_path) {
+                artifacts.todo_md = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -419,5 +479,117 @@ mod tests {
 
         assert!(yaml.contains("acpx_agent: claude"));
         assert!(!yaml.contains("model:"));
+    }
+
+    #[test]
+    fn test_plan_overwrites_checks_existing_template_and_env_before_writing() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmpdir.path().join("templates")).unwrap();
+        std::fs::write(tmpdir.path().join("templates/build.liquid"), "existing").unwrap();
+        std::fs::write(tmpdir.path().join(".env"), "TOKEN=old\n").unwrap();
+
+        let request = SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/repo".to_string(),
+                project_number: None,
+                api_key_env: "GITHUB_TOKEN".to_string(),
+                api_token: Some("secret".to_string()),
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = build_setup_artifacts(&request);
+
+        let plan = plan_overwrites(tmpdir.path(), &request, &artifacts);
+
+        assert_eq!(
+            plan.template_prompts,
+            vec![tmpdir.path().join("templates/build.liquid")]
+        );
+        assert_eq!(plan.env_prompt, Some(tmpdir.path().join(".env")));
+        assert_eq!(plan.todo_prompt, None);
+    }
+
+    #[test]
+    fn test_plan_overwrites_checks_existing_todo_target_before_writing() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::write(tmpdir.path().join("TODO.md"), "existing todo\n").unwrap();
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = build_setup_artifacts(&request);
+
+        let plan = plan_overwrites(tmpdir.path(), &request, &artifacts);
+
+        assert_eq!(plan.todo_prompt, Some(tmpdir.path().join("TODO.md")));
+    }
+
+    #[test]
+    fn test_apply_declined_overwrites_skips_only_selected_artifacts() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let mut artifacts = build_setup_artifacts(&request);
+        artifacts.env_file = Some("GITHUB_TOKEN=secret\n".to_string());
+
+        let declined = OverwritePlan {
+            template_prompts: vec![tmpdir.path().join("templates/build.liquid")],
+            env_prompt: None,
+            todo_prompt: Some(tmpdir.path().join("TODO.md")),
+        };
+
+        apply_declined_overwrites(tmpdir.path(), &request, &mut artifacts, &declined);
+
+        assert!(artifacts.templates.is_empty());
+        assert!(artifacts.todo_md.is_none());
+        assert!(artifacts.env_file.is_some());
     }
 }

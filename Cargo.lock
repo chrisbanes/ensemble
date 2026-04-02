@@ -1009,7 +1009,7 @@ dependencies = [
 name = "ensemble-desktop"
 version = "0.0.1"
 dependencies = [
- "base64 0.22.1",
+ "axum",
  "ensemble-core",
  "mime_guess",
  "rust-embed",
@@ -1018,8 +1018,10 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

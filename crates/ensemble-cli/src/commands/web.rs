@@ -4,14 +4,19 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use ensemble_core::api::router::{create_api_router, AppState};
-use ensemble_core::config::ensemble::{load_config, validate_config};
+use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
+use ensemble_core::config::draft::load_config_state;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
-use ensemble_core::pipeline::dag::build_dag;
 
 use crate::embedded_ui::spa_router;
+
+/// Default poll interval in milliseconds (30 seconds).
+const DEFAULT_POLL_INTERVAL_MS: u64 = 30000;
+
+/// Default maximum number of concurrent agents.
+const DEFAULT_MAX_CONCURRENT_AGENTS: u32 = 10;
 
 #[derive(Debug, Clone)]
 pub struct WebArgs {
@@ -21,6 +26,9 @@ pub struct WebArgs {
 }
 
 /// Run the orchestrator with web UI (SPA + API server)
+///
+/// This now serves the UI and API regardless of config state.
+/// If config is missing or invalid, the UI will show the setup wizard.
 pub async fn execute(args: WebArgs) -> ExitCode {
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
@@ -52,68 +60,97 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         "starting ensemble in web mode"
     );
 
-    // Load and validate config.yaml
-    let config = match load_config(&resolved.config_path) {
-        Ok(cfg) => cfg,
+    // Load config state - may be missing, syntax error, or parsed
+    let document_state = match load_config_state(&resolved.config_path) {
+        Ok(state) => state,
         Err(e) => {
-            error!(error = %e, path = %resolved.config_path.display(), "failed to load config");
-            eprintln!(
-                "error: failed to load {}: {}",
-                resolved.config_path.display(),
-                e
-            );
-            return ExitCode::FAILURE;
+            error!(error = %e, path = %resolved.config_path.display(), "failed to load config state");
+            // Create a default missing state
+            ensemble_core::config::draft::ConfigDocumentState {
+                path: resolved.config_path.clone(),
+                kind: ensemble_core::config::draft::ConfigStateKind::Missing,
+                raw_yaml: None,
+                document: None,
+                active_config: None,
+                validation: ensemble_core::config::draft::DraftValidationReport::default(),
+            }
         }
     };
 
-    if let Err(e) = validate_config(&config) {
-        error!(error = %e, "config validation failed");
-        eprintln!("error: config validation failed: {}", e);
-        return ExitCode::FAILURE;
+    // Determine if we have a runnable config
+    let has_runnable_config = document_state.active_config.is_some();
+
+    if has_runnable_config {
+        let config = document_state.active_config.as_ref().unwrap();
+        info!(
+            tracker_kind = %config.tracker.kind,
+            poll_interval_ms = config.polling.interval_ms,
+            max_concurrent = config.concurrency.max_concurrent_agents,
+            "config loaded successfully - orchestrator can run"
+        );
+    } else {
+        warn!(
+            config_state = ?document_state.kind,
+            "no valid config found - serving UI in setup mode"
+        );
+        eprintln!(
+            "warning: no valid config found at {}",
+            resolved.config_path.display()
+        );
+        eprintln!(
+            "  The UI will show the setup wizard. Configure ensemble to start the orchestrator."
+        );
     }
 
-    if let Err(e) = build_dag(&config.steps) {
-        error!(error = %e, "step DAG validation failed");
-        eprintln!("error: step DAG validation failed: {}", e);
-        return ExitCode::FAILURE;
-    }
-
-    info!(
-        tracker_kind = %config.tracker.kind,
-        poll_interval_ms = config.polling.interval_ms,
-        max_concurrent = config.concurrency.max_concurrent_agents,
-        "config loaded successfully"
-    );
-
-    // Create orchestrator state
-    let orchestrator_state = Arc::new(RwLock::new(OrchestratorState::new(
-        config.polling.interval_ms,
-        config.concurrency.max_concurrent_agents,
-    )));
+    // Create orchestrator state (only if we have runnable config)
+    let orchestrator_state = if has_runnable_config {
+        let config = document_state.active_config.as_ref().unwrap();
+        Arc::new(RwLock::new(OrchestratorState::new(
+            config.polling.interval_ms,
+            config.concurrency.max_concurrent_agents,
+        )))
+    } else {
+        // Default orchestrator state when no config available
+        Arc::new(RwLock::new(OrchestratorState::new(
+            DEFAULT_POLL_INTERVAL_MS,
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        )))
+    };
 
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
 
     // Build app state for API
-    let workspace_root = config
-        .workspace
-        .root
-        .as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            std::env::temp_dir()
-                .join("ensemble_workspaces")
-                .display()
-                .to_string()
-        });
+    let workspace_root = if let Some(ref config) = document_state.active_config {
+        config
+            .workspace
+            .root
+            .as_deref()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                std::env::temp_dir()
+                    .join("ensemble_workspaces")
+                    .display()
+                    .to_string()
+            })
+    } else {
+        std::env::temp_dir()
+            .join("ensemble_workspaces")
+            .display()
+            .to_string()
+    };
+
     let history_path = std::path::PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
+
     let app_state = AppState {
         orchestrator_state: orchestrator_state.clone(),
         refresh_requested: refresh_notify.clone(),
         workspace_root,
         history_path,
         event_bus: EventBus::new(),
-        config: Arc::new(config.clone()),
-        config_path: resolved.config_path.display().to_string(),
+        config_runtime: ConfigRuntime {
+            config_path: resolved.config_path,
+            document_state: Arc::new(RwLock::new(document_state)),
+        },
     };
 
     // Create combined router: API routes + SPA fallback
@@ -164,8 +201,14 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         }
     });
 
-    // TODO: Start orchestrator poll loop (Plan 3 wires this up).
-    info!("ensemble web mode is running (orchestrator loop placeholder, press Ctrl+C to stop)");
+    // Only start orchestrator if we have a valid config
+    if has_runnable_config {
+        info!("orchestrator can start (loop placeholder)");
+    } else {
+        info!("orchestrator disabled - waiting for valid config via setup wizard");
+    }
+
+    info!("ensemble web mode is running (press Ctrl+C to stop)");
 
     // Wait for shutdown signal (ctrl-c)
     match tokio::signal::ctrl_c().await {

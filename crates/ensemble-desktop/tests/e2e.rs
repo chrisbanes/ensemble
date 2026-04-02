@@ -132,90 +132,54 @@ on_failure: "Failed"
     std::thread::sleep(Duration::from_secs(3));
 
     // Check if the process is still running
-    let result = match child.try_wait() {
-        Ok(Some(status)) => {
-            // Process exited - this is a failure
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-
-            if let Some(mut out) = child.stdout.take() {
-                use std::io::Read;
-                out.read_to_string(&mut stdout).ok();
-            }
-            if let Some(mut err) = child.stderr.take() {
-                use std::io::Read;
-                err.read_to_string(&mut stderr).ok();
-            }
-
-            Err(format!(
-                "App crashed on startup!\nExit status: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
-                status, stdout, stderr
-            ))
-        }
-        Ok(None) => {
-            // Process is still running - success!
-            println!("App launched successfully and is still running after 3 seconds");
-            // Kill it gracefully
-            let _ = child.kill();
-            let _ = child.wait();
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to check app status: {}", e)),
-    };
+    let result = check_app_running(&mut child);
 
     if let Err(msg) = result {
         panic!("{}", msg);
     }
 }
 
-/// Verify the app shows a helpful error and exits gracefully when config is missing.
+/// Launch the app with missing config and verify it stays running.
+///
+/// The app should start a local HTTP server and show the setup wizard UI
+/// instead of crashing. This is the new behavior after Task 4.
 #[test]
 #[ignore = "Requires compiled app binary - run with: cargo build --release -p ensemble-desktop first"]
-fn app_shows_error_when_config_missing() {
+fn app_stays_running_when_config_missing() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
     let possible_paths = candidate_binary_paths(manifest_dir, workspace_root);
     let binary_path = resolve_binary_path(&possible_paths).expect("App binary not found");
     let missing_config_dir = tempfile::tempdir().expect("Failed to create temp dir");
 
+    println!(
+        "Launching app binary without config: {}",
+        binary_path.display()
+    );
+
     let mut child = Command::new(&binary_path)
         .current_dir(workspace_root)
         .env("ENSEMBLE_CONFIG_DIR", missing_config_dir.path())
         .env("ENSEMBLE_SUPPRESS_CONFIG_DIALOG", "1")
+        .env("TAURI_WEBVIEW_AUTOMATION", "1")
         .env("RUST_BACKTRACE", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("Failed to launch app binary");
 
-    // Wait for it to exit
-    let status = child.wait().expect("Failed to wait for app");
+    // Give the app a few seconds to initialize the HTTP server
+    std::thread::sleep(Duration::from_secs(3));
 
-    let mut stdout = String::new();
-    let mut stderr = String::new();
-    if let Some(mut out) = child.stdout.take() {
-        use std::io::Read;
-        out.read_to_string(&mut stdout).ok();
-    }
-    if let Some(mut err) = child.stderr.take() {
-        use std::io::Read;
-        err.read_to_string(&mut stderr).ok();
-    }
-
-    assert!(
-        !status.success(),
-        "App should exit with error when config is missing"
+    // Check if the process is still running (it should be now!)
+    let result = check_app_running_with_message(
+        &mut child,
+        "App crashed when config missing (should stay running)!",
     );
 
-    let combined_output = format!("{} {}", stdout, stderr);
-    assert!(
-        combined_output.contains("Configuration file not found")
-            || combined_output.contains("config.yaml"),
-        "App should show helpful error message about missing config. Got:\n{}",
-        combined_output
-    );
-
-    println!("✓ App correctly exits with error when config is missing");
+    if let Err(msg) = result {
+        panic!("{}", msg);
+    }
 }
 
 fn candidate_binary_paths(manifest_dir: &Path, workspace_root: &Path) -> Vec<PathBuf> {
@@ -282,4 +246,48 @@ fn restore_env(key: &str, value: Option<std::ffi::OsString>) {
 fn env_lock() -> &'static Mutex<()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     ENV_LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// Check if the app is still running and return appropriate result.
+/// Kills the process gracefully on success.
+fn check_app_running(child: &mut std::process::Child) -> Result<(), String> {
+    check_app_running_with_message(child, "App crashed on startup!")
+}
+
+/// Check if the app is still running with a custom error message.
+/// Kills the process gracefully on success.
+fn check_app_running_with_message(
+    child: &mut std::process::Child,
+    crash_message: &str,
+) -> Result<(), String> {
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            // Process exited - this is a failure
+            let mut stdout = String::new();
+            let mut stderr = String::new();
+
+            if let Some(mut out) = child.stdout.take() {
+                use std::io::Read;
+                out.read_to_string(&mut stdout).ok();
+            }
+            if let Some(mut err) = child.stderr.take() {
+                use std::io::Read;
+                err.read_to_string(&mut stderr).ok();
+            }
+
+            Err(format!(
+                "{}\nExit status: {:?}\n\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                crash_message, status, stdout, stderr
+            ))
+        }
+        Ok(None) => {
+            // Process is still running - success!
+            println!("App launched successfully and is still running after 3 seconds");
+            // Kill it gracefully
+            let _ = child.kill();
+            let _ = child.wait();
+            Ok(())
+        }
+        Err(e) => Err(format!("Failed to check app status: {}", e)),
+    }
 }
