@@ -23,6 +23,7 @@ pub enum SetupTracker {
         #[schema(value_type = String)]
         path: PathBuf,
     },
+    #[serde(rename = "github")]
     GitHub {
         repository: String,
         project_number: Option<i64>,

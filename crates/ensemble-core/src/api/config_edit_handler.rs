@@ -518,7 +518,7 @@ mod tests {
     fn test_app_state() -> (AppState, TempDir) {
         let temp_dir = TempDir::new().unwrap();
         let state = OrchestratorState::new(30000, 10);
-        let config_path = temp_dir.path().join("test_config.yaml");
+        let config_path = temp_dir.path().join("config.yaml");
         let document_state = Arc::new(RwLock::new(ConfigDocumentState {
             path: config_path.clone(),
             kind: ConfigStateKind::Missing,
@@ -595,7 +595,11 @@ on_failure: Failed
                     path: PathBuf::from("TODO.md"),
                 },
                 repos: vec![],
-                agents: vec![],
+                agents: vec![crate::config::setup::SetupAgent {
+                    role: "builder".to_string(),
+                    acpx_agent: "claude".to_string(),
+                    model: None,
+                }],
                 steps: vec![crate::config::setup::SetupStep {
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
