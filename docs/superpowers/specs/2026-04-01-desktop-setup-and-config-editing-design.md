@@ -2,7 +2,7 @@
 
 ## Overview
 
-Ensemble's current desktop out-of-the-box experience breaks down at the first-run moment: if `ensemble.yaml` is missing, the app exits and tells the user to run the CLI wizard. The web and desktop clients also treat configuration as read-only, even though setup and workflow changes are a core part of operating Ensemble.
+Ensemble's current desktop out-of-the-box experience breaks down at the first-run moment: if the resolved `config.yaml` is missing from the config directory, the app exits and tells the user to run the CLI wizard. The web and desktop clients also treat configuration as read-only, even though setup and workflow changes are a core part of operating Ensemble.
 
 This design adds an in-app setup experience equivalent to `ensemble init`, shared across desktop and web, and evolves the existing Config page into a hybrid config editor with first-class workflow editing.
 
@@ -10,7 +10,7 @@ This design adds an in-app setup experience equivalent to `ensemble init`, share
 
 | Topic | Decision |
 |---|---|
-| First-run behavior | If `ensemble.yaml` is missing, desktop opens an in-app setup wizard instead of exiting |
+| First-run behavior | If the resolved `config.yaml` is missing, desktop opens an in-app setup wizard instead of exiting |
 | Web parity | The same setup/editor UI is available in `ensemble web`, not desktop-only |
 | Editing model | Hybrid: guided forms for common configuration + raw YAML editor for advanced edits |
 | Existing Config page | Replace read-only status view with an editable config workspace |
@@ -90,7 +90,7 @@ The first-run wizard mirrors the current CLI flow but uses GUI controls instead 
 5. **Agent Roles And Models** - assign role names and optional model selections
 6. **Workflow** - choose default workflow or customize steps
 7. **Validation** - run dry-run checks and show fixable failures
-8. **Write Config** - save `ensemble.yaml` and generated template files
+8. **Write Config** - save `config.yaml` into the resolved config directory and write generated companion files
 
 ### Desktop-specific behavior
 
@@ -240,7 +240,7 @@ Config editing uses an explicit draft workflow:
 
 Save should fail safely:
 
-- never partially overwrite `ensemble.yaml`
+- never partially overwrite `config.yaml`
 - do not activate an invalid config
 - keep the unsaved draft in memory when save fails
 - clearly separate validation failures from environment failures like missing `acpx` or bad repo paths

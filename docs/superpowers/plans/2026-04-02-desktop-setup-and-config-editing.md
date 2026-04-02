@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement a shared desktop/web setup and config-editing experience that can create, repair, validate, save, and reload `ensemble.yaml` without requiring the CLI.
+**Goal:** Implement a shared desktop/web setup and config-editing experience that can create, repair, validate, save, and reload the resolved `config.yaml` in Ensemble's config directory without requiring the CLI.
 
 **Architecture:** Add shared config-draft and setup-artifact services in `ensemble-core`, expose them through config-management HTTP endpoints, and update both `ensemble web` and the Tauri desktop app to tolerate missing or invalid config on startup. Replace the read-only Config page with a stateful workspace that supports Setup Mode, YAML recovery/editing, and guided workflow editing while preserving unknown YAML fields.
 
@@ -74,7 +74,7 @@ Add focused tests in `crates/ensemble-core/src/config/draft.rs` for missing file
 #[test]
 fn load_config_state_reports_missing_file() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ensemble.yaml");
+    let path = dir.path().join("config.yaml");
 
     let state = load_config_state(&path).unwrap();
 
@@ -86,7 +86,7 @@ fn load_config_state_reports_missing_file() {
 #[test]
 fn load_config_state_preserves_raw_yaml_for_syntax_errors() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("ensemble.yaml");
+    let path = dir.path().join("config.yaml");
     std::fs::write(&path, "tracker:\n  kind: todo_file\nagents: [\n").unwrap();
 
     let state = load_config_state(&path).unwrap();
@@ -212,7 +212,7 @@ Create tests in `crates/ensemble-core/src/config/setup.rs` that verify setup art
 #[test]
 fn build_setup_artifacts_creates_yaml_and_templates() {
     let request = SetupRequest {
-        tracker: SetupTracker::TodoFile { path: PathBuf::from("TODO.md") },
+        tracker: SetupTracker::TodoFile { path: PathBuf::from("~/ensemble/TODO.md") },
         repos: vec![],
         agents: vec![SetupAgent {
             role: "builder".to_string(),
@@ -286,7 +286,7 @@ Replace direct string assembly in `crates/ensemble-cli/src/commands/init/generat
 ```rust
 let request = SetupRequest::from_cli(tracker, repos, agents, steps, on_success, on_failure);
 let artifacts = merge_setup_request(existing_raw_yaml.as_deref(), &request)?;
-write_setup_artifacts(Path::new("."), &artifacts)?;
+write_setup_artifacts(&resolved.config_dir, &artifacts)?;
 ```
 
 For fresh CLI init, `existing_raw_yaml` is `None`. For re-running init over an existing parseable config, pass the original file contents so unsupported fields are preserved.
@@ -547,7 +547,7 @@ pub struct DesktopServer {
     pub shutdown: tokio::task::JoinHandle<()>,
 }
 
-pub async fn start_desktop_server(config_path: PathBuf) -> Result<DesktopServer, String> {
+pub async fn start_desktop_server(config_dir: PathBuf, config_path: PathBuf) -> Result<DesktopServer, String> {
     // load ConfigDocumentState
     // build AppState
     // bind 127.0.0.1:0
@@ -570,7 +570,11 @@ Example shape:
 
 ```rust
 let rt = tokio::runtime::Runtime::new().unwrap();
-let desktop_server = rt.block_on(start_desktop_server(resolve_config_path()))?;
+let resolved = resolve_config_dir_for_desktop(std::env::var_os("ENSEMBLE_CONFIG_DIR"))?;
+let desktop_server = rt.block_on(start_desktop_server(
+    resolved.config_dir.clone(),
+    resolved.config_path.clone(),
+))?;
 
 tauri::Builder::default()
     .setup(move |app| {
@@ -660,7 +664,7 @@ Create `crates/ensemble-ui/src-ui/src/pages/ConfigPage.test.tsx` with a missing-
 it("shows setup mode when the config state is missing", async () => {
   vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
     state: "missing",
-    config_path: "/tmp/ensemble.yaml",
+    config_path: "/tmp/ensemble/config.yaml",
     raw_yaml: null,
     issues: [],
     active_config: null,
@@ -1073,7 +1077,7 @@ Expected:
 
 Run these by hand before declaring success:
 
-1. `ensemble web --port 9131` with no `ensemble.yaml` -> `/config` shows Setup Mode
+1. `ensemble web --port 9131` with no resolved `config.yaml` -> `/config` shows Setup Mode
 2. `ensemble web --port 9131` with YAML syntax error -> `/config` shows YAML recovery
 3. Save a valid setup from the web UI -> config reloads without restarting the process
 4. Launch desktop with missing config -> app stays open instead of exiting
