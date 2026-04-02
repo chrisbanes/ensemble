@@ -8,8 +8,21 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Edit2 } from "lucide-react";
 
 export default function ConfigPage() {
-  const { data, isLoading, isError } = useConfigStateQuery();
+  const { data, isLoading, isError, refetch } = useConfigStateQuery();
   const [showSetupWizard, setShowSetupWizard] = useState(false);
+
+  const handleSave = async (_yaml: string) => {
+    // TODO: Implement save mutation
+    await refetch();
+  };
+
+  const handleValidate = async (_yaml: string) => {
+    // TODO: Implement validate mutation
+  };
+
+  const handleReset = () => {
+    // Reset handled internally by YamlEditor
+  };
 
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading configuration...</div>;
@@ -47,6 +60,9 @@ export default function ConfigPage() {
           rawYaml={rawYaml || ""}
           isRecoveryMode={true}
           issues={issues}
+          onValidate={handleValidate}
+          onSave={handleSave}
+          onReset={handleReset}
         />
       </div>
     );

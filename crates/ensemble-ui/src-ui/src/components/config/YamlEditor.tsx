@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml } from "@codemirror/lang-yaml";
 import type { ValidationIssue } from "@/generated/models";
@@ -29,6 +29,12 @@ export default function YamlEditor({
 }: YamlEditorProps) {
   const [rawYaml, setRawYaml] = useState(initialYaml);
   const [hasChanges, setHasChanges] = useState(false);
+
+  // Update state when initialYaml prop changes (e.g., after save)
+  useEffect(() => {
+    setRawYaml(initialYaml);
+    setHasChanges(false);
+  }, [initialYaml]);
 
   const handleChange = (value: string) => {
     setRawYaml(value);

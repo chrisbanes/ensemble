@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useGetSetupDefaults, useGetSetupAgents } from "@/generated/api/config/config";
 import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
 import type { 
@@ -65,6 +65,9 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     canSave: boolean;
     checks: SetupCheck[];
   } | null>(null);
+  const [repoPathInput, setRepoPathInput] = useState("");
+  const [repoBranchInput, setRepoBranchInput] = useState("main");
+  const hasVisitedWorkflow = useRef(false);
 
   const { data: defaultsData, isLoading: isLoadingDefaults } = useGetSetupDefaults({
     query: { enabled: true },
@@ -120,14 +123,20 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   };
 
   const handleNext = () => {
-    if (currentStepIndex < steps.length - 1 && steps[currentStepIndex + 1]) {
-      setCurrentStep(steps[currentStepIndex + 1]!.key);
+    if (currentStepIndex < steps.length - 1) {
+      const nextStep = steps[currentStepIndex + 1];
+      if (nextStep) {
+        setCurrentStep(nextStep.key);
+      }
     }
   };
 
   const handleBack = () => {
-    if (currentStepIndex > 0 && steps[currentStepIndex - 1]) {
-      setCurrentStep(steps[currentStepIndex - 1]!.key);
+    if (currentStepIndex > 0) {
+      const prevStep = steps[currentStepIndex - 1];
+      if (prevStep) {
+        setCurrentStep(prevStep.key);
+      }
     }
   };
 
@@ -182,11 +191,12 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     return [];
   };
 
-  // Update workflow when agents change
+  // Update workflow when agents change (only on first visit to workflow step)
   useEffect(() => {
-    if (currentStep === "workflow" && draft.agents.length > 0) {
+    if (currentStep === "workflow" && draft.agents.length > 0 && !hasVisitedWorkflow.current) {
       const defaultSteps = generateDefaultWorkflow(draft.agents);
       setDraft(prev => ({ ...prev, steps: defaultSteps }));
+      hasVisitedWorkflow.current = true;
     }
   }, [draft.agents, currentStep]);
 
@@ -276,50 +286,43 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     </div>
   );
 
-  const renderReposStep = () => (
+  const renderReposStep = () => {
+    const handleAddRepo = () => {
+      if (repoPathInput.trim()) {
+        setDraft(prev => ({
+          ...prev,
+          repos: [...prev.repos, { path: repoPathInput, branch: repoBranchInput || "main" }],
+        }));
+        setRepoPathInput("");
+        setRepoBranchInput("main");
+      }
+    };
+
+    return (
     <div className="space-y-4">
       <div className="flex gap-2">
         <Input
           placeholder="Repository path"
-          id="repo-path"
-          aria-label="Repository path"
+          value={repoPathInput}
+          onChange={(e) => setRepoPathInput(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
-              const pathInput = e.currentTarget;
-              const branchInput = document.getElementById("repo-branch") as HTMLInputElement;
-              if (pathInput.value.trim()) {
-                setDraft(prev => ({
-                  ...prev,
-                  repos: [...prev.repos, { path: pathInput.value, branch: branchInput?.value || "main" }],
-                }));
-                pathInput.value = "";
-                if (branchInput) branchInput.value = "";
-              }
+              handleAddRepo();
             }
           }}
+          aria-label="Repository path"
         />
         <Input
           placeholder="Branch"
-          id="repo-branch"
-          defaultValue="main"
+          value={repoBranchInput}
+          onChange={(e) => setRepoBranchInput(e.target.value)}
           className="w-32"
           aria-label="Branch"
         />
         <Button
           variant="outline"
           size="icon"
-          onClick={() => {
-            const pathInput = document.getElementById("repo-path") as HTMLInputElement;
-            const branchInput = document.getElementById("repo-branch") as HTMLInputElement;
-            if (pathInput?.value.trim()) {
-              setDraft(prev => ({
-                ...prev,
-                repos: [...prev.repos, { path: pathInput.value, branch: branchInput?.value || "main" }],
-              }));
-              pathInput.value = "";
-              if (branchInput) branchInput.value = "";
-            }
-          }}
+          onClick={handleAddRepo}
         >
           <Plus className="h-4 w-4" />
         </Button>
@@ -350,7 +353,8 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         </div>
       )}
     </div>
-  );
+    );
+  };
 
   const renderAgentsStep = () => (
     <div className="space-y-4">
