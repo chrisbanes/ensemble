@@ -1,4 +1,4 @@
-use crate::api::router::{AppState, ConfigRuntime};
+use crate::api::router::AppState;
 use crate::config::draft::{
     parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState, ConfigStateKind, ValidationIssue,
 };
@@ -8,6 +8,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// Request to validate YAML content.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -42,6 +43,19 @@ impl ConfigStateResponse {
             active_config: state.active_config.clone(),
         }
     }
+}
+
+/// Build an error response from a config error.
+fn build_error_response(current: &ConfigDocumentState, error: &ConfigError) -> ConfigStateResponse {
+    let mut response = ConfigStateResponse::from_state(current);
+    response.issues.push(ValidationIssue {
+        kind: crate::config::draft::ValidationIssueKind::Config,
+        message: format!("Save failed: {}", error),
+        section: "save".to_string(),
+        field: None,
+        path: None,
+    });
+    response
 }
 
 /// POST /api/v1/config/yaml/validate
@@ -98,28 +112,10 @@ pub async fn save_yaml(
             (StatusCode::OK, Json(response))
         }
         Err(e) => {
-            // Return error response with current state
             let current = state.config_runtime.document_state.read().await.clone();
-            let mut response = ConfigStateResponse::from_state(&current);
-            response.issues.push(ValidationIssue {
-                kind: crate::config::draft::ValidationIssueKind::Config,
-                message: format!("Save failed: {}", e),
-                section: "save".to_string(),
-                field: None,
-                path: None,
-            });
-            (StatusCode::BAD_REQUEST, Json(response))
+            (StatusCode::BAD_REQUEST, Json(build_error_response(&current, &e)))
         }
     }
-}
-
-/// Reload the runtime config store after a successful save.
-pub async fn reload_config_runtime(
-    config_runtime: &ConfigRuntime,
-) -> Result<ConfigStateResponse, ConfigError> {
-    let refreshed = crate::config::draft::load_config_state(&config_runtime.config_path)?;
-    *config_runtime.document_state.write().await = refreshed.clone();
-    Ok(ConfigStateResponse::from_state(&refreshed))
 }
 
 /// Response containing setup defaults.
@@ -188,12 +184,11 @@ pub struct DiscoveredAgentInfo {
     pub name: String,
     pub label: String,
     pub version: String,
-    pub available_models: Vec<String>,
 }
 
 /// GET /api/v1/config/setup/agents
 ///
-/// Returns discovered agents and their available models.
+/// Returns discovered agents.
 #[utoipa::path(
     get,
     path = "/api/v1/config/setup/agents",
@@ -215,7 +210,6 @@ pub async fn get_setup_agents(
                     name: a.name.clone(),
                     label: a.label,
                     version: a.version,
-                    available_models: vec![], // Models discovered per-agent on demand
                 })
                 .collect();
 
@@ -224,8 +218,8 @@ pub async fn get_setup_agents(
             };
             (StatusCode::OK, Json(response))
         }
-        Err(_) => {
-            // Return empty list if discovery fails
+        Err(e) => {
+            warn!(error = %e, "agent discovery failed, returning empty list");
             let response = SetupAgentsResponse { agents: vec![] };
             (StatusCode::OK, Json(response))
         }
@@ -322,15 +316,7 @@ pub async fn save_setup(
         }
         Err(e) => {
             let current = state.config_runtime.document_state.read().await.clone();
-            let mut response = ConfigStateResponse::from_state(&current);
-            response.issues.push(ValidationIssue {
-                kind: crate::config::draft::ValidationIssueKind::Config,
-                message: format!("Save failed: {}", e),
-                section: "save".to_string(),
-                field: None,
-                path: None,
-            });
-            (StatusCode::BAD_REQUEST, Json(response))
+            (StatusCode::BAD_REQUEST, Json(build_error_response(&current, &e)))
         }
     }
 }
@@ -344,11 +330,13 @@ mod tests {
     use crate::orchestrator::state::OrchestratorState;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use tempfile::TempDir;
     use tokio::sync::RwLock;
 
-    fn test_app_state() -> AppState {
+    fn test_app_state() -> (AppState, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
         let state = OrchestratorState::new(30000, 10);
-        let config_path = PathBuf::from("/tmp/test_config.yaml");
+        let config_path = temp_dir.path().join("test_config.yaml");
         let document_state = Arc::new(RwLock::new(ConfigDocumentState {
             path: config_path.clone(),
             kind: ConfigStateKind::Missing,
@@ -358,22 +346,23 @@ mod tests {
             validation: DraftValidationReport::default(),
         }));
 
-        AppState {
+        let app_state = AppState {
             orchestrator_state: Arc::new(RwLock::new(state)),
             refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
+            workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+            history_path: temp_dir.path().join("history.jsonl"),
             event_bus: EventBus::new(),
             config_runtime: ConfigRuntime {
                 config_path,
                 document_state,
             },
-        }
+        };
+        (app_state, temp_dir)
     }
 
     #[tokio::test]
     async fn test_validate_yaml_detects_syntax_errors() {
-        let state = test_app_state();
+        let (state, _temp_dir) = test_app_state();
         let request = ValidateYamlRequest {
             raw_yaml: "tracker:\n  kind: todo_file\nagents: [".to_string(),
         };
@@ -388,7 +377,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_validate_yaml_accepts_valid_config() {
-        let state = test_app_state();
+        let (state, _temp_dir) = test_app_state();
         let request = ValidateYamlRequest {
             raw_yaml: r#"
 tracker:

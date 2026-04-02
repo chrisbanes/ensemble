@@ -9,6 +9,7 @@ use ensemble_core::orchestrator::state::OrchestratorState;
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tempfile::TempDir;
 use tokio::sync::RwLock;
 
 fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
@@ -31,7 +32,8 @@ fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
     }
 }
 
-fn build_populated_app_state() -> AppState {
+fn build_populated_app_state() -> (AppState, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
     let issue1 = test_issue("NODE_123", "my-repo#42", "In Progress");
     let running_entry = RunningEntry {
         issue_id: "NODE_123".to_string(),
@@ -73,7 +75,7 @@ fn build_populated_app_state() -> AppState {
     state.agent_totals.total_tokens = 7400;
     state.agent_totals.seconds_running = 120.5;
 
-    let config_path = PathBuf::from("/tmp/ensemble_test_config.yaml");
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
     let document_state = Arc::new(RwLock::new(ConfigDocumentState {
         path: config_path.clone(),
         kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
@@ -83,17 +85,18 @@ fn build_populated_app_state() -> AppState {
         validation: ensemble_core::config::draft::DraftValidationReport::default(),
     }));
 
-    AppState {
+    let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/ensemble_workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir.path().join("ensemble_workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path,
             document_state,
         },
-    }
+    };
+    (app_state, temp_dir)
 }
 
 /// Start an axum test server and return the base URL.
@@ -112,7 +115,7 @@ async fn start_test_server(app_state: AppState) -> String {
 
 #[tokio::test]
 async fn test_get_state_endpoint() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -185,7 +188,7 @@ async fn test_get_state_endpoint() {
 
 #[tokio::test]
 async fn test_get_issue_detail_running() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -221,7 +224,7 @@ async fn test_get_issue_detail_running() {
 
 #[tokio::test]
 async fn test_get_issue_detail_retrying() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -246,7 +249,7 @@ async fn test_get_issue_detail_retrying() {
 
 #[tokio::test]
 async fn test_get_issue_detail_not_found() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -269,7 +272,7 @@ async fn test_get_issue_detail_not_found() {
 
 #[tokio::test]
 async fn test_post_refresh_endpoint() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -292,7 +295,7 @@ async fn test_post_refresh_endpoint() {
 
 #[tokio::test]
 async fn test_get_refresh_returns_405() {
-    let app_state = build_populated_app_state();
+    let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
@@ -311,9 +314,10 @@ async fn test_get_refresh_returns_405() {
 
 #[tokio::test]
 async fn test_get_state_empty_system() {
+    let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
 
-    let config_path = PathBuf::from("/tmp/ensemble_test_config.yaml");
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
     let document_state = Arc::new(RwLock::new(ConfigDocumentState {
         path: config_path.clone(),
         kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
@@ -326,8 +330,8 @@ async fn test_get_state_empty_system() {
     let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path,
@@ -360,9 +364,10 @@ async fn test_get_state_empty_system() {
 
 // --- Static serving and API 404 fallback tests ---
 
-fn build_empty_app_state() -> AppState {
+fn build_empty_app_state() -> (AppState, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
-    let config_path = PathBuf::from("/tmp/ensemble_test_config.yaml");
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
     let document_state = Arc::new(RwLock::new(ConfigDocumentState {
         path: config_path.clone(),
         kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
@@ -372,22 +377,24 @@ fn build_empty_app_state() -> AppState {
         validation: ensemble_core::config::draft::DraftValidationReport::default(),
     }));
 
-    AppState {
+    let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path,
             document_state,
         },
-    }
+    };
+    (app_state, temp_dir)
 }
 
 #[tokio::test]
 async fn test_api_unknown_route_returns_json_404() {
-    let base_url = start_test_server(build_empty_app_state()).await;
+    let (app_state, _temp_dir) = build_empty_app_state();
+    let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
 
     let response = client
@@ -405,9 +412,10 @@ async fn test_api_unknown_route_returns_json_404() {
 
 // --- Config management tests ---
 
-fn build_app_state_without_config() -> AppState {
+fn build_app_state_without_config() -> (AppState, TempDir) {
+    let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
-    let config_path = PathBuf::from("/tmp/nonexistent_config.yaml");
+    let config_path = temp_dir.path().join("nonexistent_config.yaml");
     let document_state = Arc::new(RwLock::new(ConfigDocumentState {
         path: config_path.clone(),
         kind: ensemble_core::config::draft::ConfigStateKind::Missing,
@@ -417,22 +425,23 @@ fn build_app_state_without_config() -> AppState {
         validation: ensemble_core::config::draft::DraftValidationReport::default(),
     }));
 
-    AppState {
+    let app_state = AppState {
         orchestrator_state: Arc::new(RwLock::new(state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: "/tmp/workspaces".to_string(),
-        history_path: PathBuf::from("/tmp/ensemble_test_history.jsonl"),
+        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path,
             document_state,
         },
-    }
+    };
+    (app_state, temp_dir)
 }
 
 #[tokio::test]
 async fn test_get_config_reports_missing_state() {
-    let state = build_app_state_without_config();
+    let (state, _temp_dir) = build_app_state_without_config();
     let base_url = start_test_server(state).await;
     let response = reqwest::get(format!("{}/api/v1/config", base_url))
         .await
@@ -447,7 +456,7 @@ async fn test_get_config_reports_missing_state() {
 
 #[tokio::test]
 async fn test_post_yaml_validate_returns_syntax_errors() {
-    let state = build_app_state_without_config();
+    let (state, _temp_dir) = build_app_state_without_config();
     let base_url = start_test_server(state).await;
     let client = reqwest::Client::new();
 

@@ -12,6 +12,12 @@ use ensemble_core::orchestrator::state::OrchestratorState;
 
 use crate::embedded_ui::spa_router;
 
+/// Default poll interval in milliseconds (30 seconds).
+const DEFAULT_POLL_INTERVAL_MS: u64 = 30000;
+
+/// Default maximum number of concurrent agents.
+const DEFAULT_MAX_CONCURRENT_AGENTS: u32 = 10;
+
 #[derive(Debug, Clone)]
 pub struct WebArgs {
     pub config_dir: Option<PathBuf>,
@@ -105,7 +111,10 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         )))
     } else {
         // Default orchestrator state when no config available
-        Arc::new(RwLock::new(OrchestratorState::new(30000, 10)))
+        Arc::new(RwLock::new(OrchestratorState::new(
+            DEFAULT_POLL_INTERVAL_MS,
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        )))
     };
 
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
