@@ -3,14 +3,15 @@ use crate::commands::init::pipeline::PipelineStep;
 use crate::commands::init::repos::RepoEntry;
 use crate::commands::init::tracker::TrackerChoice;
 use ensemble_core::config::setup::{
-    build_setup_artifacts, merge_setup_request, write_setup_artifacts, SetupAgent, SetupRepo,
-    SetupRequest, SetupStep, SetupTracker,
+    build_setup_artifacts, merge_setup_request, resolve_tracker_output_path, write_setup_artifacts,
+    SetupAgent, SetupRepo, SetupRequest, SetupStep, SetupTracker,
 };
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OverwritePlan {
     template_prompts: Vec<std::path::PathBuf>,
     env_prompt: Option<std::path::PathBuf>,
+    todo_prompt: Option<std::path::PathBuf>,
 }
 
 /// Convert CLI types to a SetupRequest for the shared implementation.
@@ -128,10 +129,11 @@ pub fn write_files(
         None
     };
 
-    let artifacts = merge_setup_request(existing_raw_yaml.as_deref(), &request)
+    let mut artifacts = merge_setup_request(existing_raw_yaml.as_deref(), &request)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
     let overwrite_plan = plan_overwrites(config_dir, &request, &artifacts);
+    let mut declined = OverwritePlan::default();
 
     for template_path in &overwrite_plan.template_prompts {
         match inquire::Confirm::new(&format!(
@@ -144,7 +146,7 @@ pub fn write_files(
             Ok(true) => {}
             Ok(false) => {
                 println!("  Skipping {}", template_path.display());
-                return Ok(());
+                declined.template_prompts.push(template_path.clone());
             }
             Err(_) => return Ok(()),
         }
@@ -161,11 +163,30 @@ pub fn write_files(
             Ok(true) => {}
             Ok(false) => {
                 println!("  Skipping {} (token not saved)", env_path.display());
-                return Ok(());
+                declined.env_prompt = Some(env_path.clone());
             }
             Err(_) => return Ok(()),
         }
     }
+
+    if let Some(todo_path) = &overwrite_plan.todo_prompt {
+        match inquire::Confirm::new(&format!(
+            "{} already exists. Overwrite?",
+            todo_path.display()
+        ))
+        .with_default(true)
+        .prompt()
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("  Skipping {}", todo_path.display());
+                declined.todo_prompt = Some(todo_path.clone());
+            }
+            Err(_) => return Ok(()),
+        }
+    }
+
+    apply_declined_overwrites(config_dir, &request, &mut artifacts, &declined);
 
     // Write the main artifacts
     write_setup_artifacts(config_dir, &request, &artifacts)
@@ -230,7 +251,43 @@ fn plan_overwrites(
         }
     }
 
+    if artifacts.todo_md.is_some() {
+        if let SetupTracker::TodoFile { path } = &request.tracker {
+            if let Ok(todo_path) = resolve_tracker_output_path(path, config_dir) {
+                if todo_path.exists() {
+                    plan.todo_prompt = Some(todo_path);
+                }
+            }
+        }
+    }
+
     plan
+}
+
+fn apply_declined_overwrites(
+    config_dir: &std::path::Path,
+    request: &SetupRequest,
+    artifacts: &mut ensemble_core::config::setup::SetupArtifacts,
+    declined: &OverwritePlan,
+) {
+    artifacts.templates.retain(|template_path, _| {
+        !declined
+            .template_prompts
+            .iter()
+            .any(|existing| existing == &config_dir.join(template_path))
+    });
+
+    if declined.env_prompt.is_some() {
+        artifacts.env_file = None;
+    }
+
+    if let (Some(_), SetupTracker::TodoFile { path }) = (&declined.todo_prompt, &request.tracker) {
+        if let Ok(todo_path) = resolve_tracker_output_path(path, config_dir) {
+            if declined.todo_prompt.as_ref() == Some(&todo_path) {
+                artifacts.todo_md = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -464,5 +521,75 @@ mod tests {
             vec![tmpdir.path().join("templates/build.liquid")]
         );
         assert_eq!(plan.env_prompt, Some(tmpdir.path().join(".env")));
+        assert_eq!(plan.todo_prompt, None);
+    }
+
+    #[test]
+    fn test_plan_overwrites_checks_existing_todo_target_before_writing() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::write(tmpdir.path().join("TODO.md"), "existing todo\n").unwrap();
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = build_setup_artifacts(&request);
+
+        let plan = plan_overwrites(tmpdir.path(), &request, &artifacts);
+
+        assert_eq!(plan.todo_prompt, Some(tmpdir.path().join("TODO.md")));
+    }
+
+    #[test]
+    fn test_apply_declined_overwrites_skips_only_selected_artifacts() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let mut artifacts = build_setup_artifacts(&request);
+        artifacts.env_file = Some("GITHUB_TOKEN=secret\n".to_string());
+
+        let declined = OverwritePlan {
+            template_prompts: vec![tmpdir.path().join("templates/build.liquid")],
+            env_prompt: None,
+            todo_prompt: Some(tmpdir.path().join("TODO.md")),
+        };
+
+        apply_declined_overwrites(tmpdir.path(), &request, &mut artifacts, &declined);
+
+        assert!(artifacts.templates.is_empty());
+        assert!(artifacts.todo_md.is_none());
+        assert!(artifacts.env_file.is_some());
     }
 }

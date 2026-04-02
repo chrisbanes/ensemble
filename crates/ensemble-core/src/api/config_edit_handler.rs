@@ -159,19 +159,12 @@ pub async fn get_setup_defaults(
         .and_then(|yaml| crate::config::setup::extract_setup_defaults(yaml).ok());
 
     let (defaults, has_existing) = if let Some(setup) = extracted_setup {
-        (serde_json::to_value(&setup).unwrap_or_else(|_| default_setup_defaults()), true)
+        (
+            serde_json::to_value(&setup).unwrap_or_else(|_| default_setup_defaults()),
+            true,
+        )
     } else if let Some(ref config) = doc_state.active_config {
-        // Extract defaults from existing config
-        let tracker_default = serde_json::json!({
-            "kind": config.tracker.kind,
-        });
-
-        let defaults = serde_json::json!({
-            "tracker": tracker_default,
-            "has_existing_config": true,
-        });
-
-        (defaults, true)
+        (setup_defaults_from_active_config(config), true)
     } else {
         // Return empty defaults
         let defaults = serde_json::json!({
@@ -342,17 +335,19 @@ pub async fn save_setup(
         .unwrap_or_else(|| std::path::Path::new("."));
 
     match crate::config::setup::write_setup_artifacts(root, &request.setup, &artifacts) {
-        Ok(()) => match crate::config::draft::load_config_state(&state.config_runtime.config_path) {
-            Ok(new_state) => {
-                *state.config_runtime.document_state.write().await = new_state.clone();
-                let response = ConfigStateResponse::from_state(&new_state);
-                (StatusCode::OK, Json(response))
+        Ok(()) => {
+            match crate::config::draft::load_config_state(&state.config_runtime.config_path) {
+                Ok(new_state) => {
+                    *state.config_runtime.document_state.write().await = new_state.clone();
+                    let response = ConfigStateResponse::from_state(&new_state);
+                    (StatusCode::OK, Json(response))
+                }
+                Err(e) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(build_error_response(&current, &e)),
+                ),
             }
-            Err(e) => (
-                StatusCode::BAD_REQUEST,
-                Json(build_error_response(&current, &e)),
-            ),
-        },
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(build_error_response(&current, &e)),
@@ -364,6 +359,83 @@ fn default_setup_defaults() -> serde_json::Value {
     serde_json::json!({
         "tracker": { "kind": "todo_file" },
         "has_existing_config": false,
+    })
+}
+
+fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Value {
+    let tracker = match config.tracker.kind.as_str() {
+        "github" => serde_json::json!({
+            "kind": "github",
+            "repository": config.tracker.repository,
+            "project_number": config.tracker.project_number,
+            "api_key_env": config
+                .tracker
+                .api_key
+                .as_deref()
+                .and_then(|key| key.strip_prefix('$'))
+                .unwrap_or("GITHUB_TOKEN"),
+            "active_states": config.tracker.active_states,
+            "terminal_states": config.tracker.terminal_states,
+        }),
+        _ => serde_json::json!({
+            "kind": "todo_file",
+            "path": config
+                .tracker
+                .path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "TODO.md".to_string()),
+        }),
+    };
+
+    let repos: Vec<_> = config
+        .repos
+        .iter()
+        .map(|repo| {
+            serde_json::json!({
+                "path": repo.path,
+                "branch": repo.branch,
+            })
+        })
+        .collect();
+
+    let agents: Vec<_> = config
+        .agents
+        .iter()
+        .map(|(role, agent)| {
+            serde_json::json!({
+                "role": role,
+                "acpx_agent": agent
+                    .acpx_agent
+                    .as_ref()
+                    .or(agent.executor.as_ref())
+                    .cloned()
+                    .unwrap_or_default(),
+                "model": agent.model,
+            })
+        })
+        .collect();
+
+    let steps: Vec<_> = config
+        .steps
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "name": step.name,
+                "agent_role": step.agent,
+                "depends": step.depends.clone().unwrap_or_default(),
+                "tracker_state": step.tracker_state,
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "tracker": tracker,
+        "repos": repos,
+        "agents": agents,
+        "steps": steps,
+        "on_success": config.on_success,
+        "on_failure": config.on_failure,
     })
 }
 
@@ -673,6 +745,60 @@ on_failure: Failed
     }
 
     #[tokio::test]
+    async fn test_get_setup_defaults_falls_back_to_full_active_config_shape() {
+        let (state, _temp_dir) = test_app_state();
+        *state.config_runtime.document_state.write().await = ConfigDocumentState {
+            path: state.config_runtime.config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(
+                crate::config::ensemble::parse_config(
+                    r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 17
+  api_key: $GITHUB_TOKEN
+  active_states:
+    - Todo
+    - Doing
+  terminal_states:
+    - Done
+repos:
+  - path: /tmp/repo
+    branch: develop
+agents:
+  builder:
+    executor: codex
+    model: sonnet
+    prompt_template: templates/build.liquid
+steps:
+  - name: build
+    agent: builder
+    tracker_state: Doing
+on_success: Done
+on_failure: Failed
+"#,
+                )
+                .unwrap(),
+            ),
+            validation: DraftValidationReport::default(),
+        };
+
+        let (status, Json(response)) = get_setup_defaults(axum::extract::State(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.has_existing_config);
+        assert_eq!(response.defaults["tracker"]["kind"], "github");
+        assert_eq!(response.defaults["tracker"]["repository"], "acme/repo");
+        assert_eq!(response.defaults["repos"][0]["branch"], "develop");
+        assert_eq!(response.defaults["agents"][0]["role"], "builder");
+        assert_eq!(response.defaults["agents"][0]["acpx_agent"], "codex");
+        assert_eq!(response.defaults["steps"][0]["name"], "build");
+    }
+
+    #[tokio::test]
     async fn test_save_setup_uses_merge_and_writes_full_artifact_set() {
         let (state, temp_dir) = test_app_state();
         let existing_yaml = r#"
@@ -756,13 +882,9 @@ custom_root:
             },
         };
 
-        let (status, Json(response)) =
-            save_setup(axum::extract::State(state), Json(request)).await;
+        let (status, Json(response)) = save_setup(axum::extract::State(state), Json(request)).await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(response
-            .issues
-            .iter()
-            .any(|issue| issue.section == "setup"));
+        assert!(response.issues.iter().any(|issue| issue.section == "setup"));
     }
 }

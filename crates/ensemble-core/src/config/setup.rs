@@ -167,48 +167,47 @@ pub fn write_setup_artifacts(
         reason: e.to_string(),
     })?;
 
-    // Write config.yaml
-    let config_path = root.join("config.yaml");
-    std::fs::write(&config_path, &artifacts.raw_yaml).map_err(|e| {
-        ConfigError::ConfigWriteFailed {
-            reason: format!("failed to write config.yaml: {}", e),
-        }
-    })?;
-
-    // Write templates
+    // Write templates before config.yaml so a companion write failure does not
+    // leave a newly-activated config pointing at missing artifacts.
     let templates_dir = root.join("templates");
-    std::fs::create_dir_all(&templates_dir).map_err(|e| ConfigError::ConfigWriteFailed {
-        reason: format!("failed to create templates directory: {}", e),
-    })?;
+    if !artifacts.templates.is_empty() {
+        std::fs::create_dir_all(&templates_dir).map_err(|e| ConfigError::ConfigWriteFailed {
+            reason: format!("failed to create templates directory: {}", e),
+        })?;
+    }
 
     for (template_path, content) in &artifacts.templates {
-        // Extract just the filename from templates/<name>.liquid
-        let template_name = template_path
-            .strip_prefix("templates/")
-            .unwrap_or(template_path);
-        let path = templates_dir.join(template_name);
+        let path = root.join(template_path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ConfigError::ConfigWriteFailed {
+                reason: format!(
+                    "failed to create template parent directory '{}': {}",
+                    parent.display(),
+                    e
+                ),
+            })?;
+        }
         std::fs::write(&path, content).map_err(|e| ConfigError::ConfigWriteFailed {
             reason: format!("failed to write template '{}': {}", path.display(), e),
         })?;
     }
 
-    // Write TODO.md if present (for todo_file tracker)
     if let Some(ref todo_content) = artifacts.todo_md {
         if let SetupTracker::TodoFile { path } = &request.tracker {
-            let resolved_path = resolve_tracker_output_path(path);
-            // Create parent directories if needed
+            let resolved_path = resolve_tracker_output_path(path, root)?;
             if let Some(parent) = resolved_path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| ConfigError::ConfigWriteFailed {
                     reason: format!("failed to create TODO.md parent directory: {}", e),
                 })?;
             }
-            std::fs::write(&resolved_path, todo_content).map_err(|e| ConfigError::ConfigWriteFailed {
-                reason: format!("failed to write TODO.md: {}", e),
+            std::fs::write(&resolved_path, todo_content).map_err(|e| {
+                ConfigError::ConfigWriteFailed {
+                    reason: format!("failed to write TODO.md: {}", e),
+                }
             })?;
         }
     }
 
-    // Write .env file if present
     if let Some(ref env_content) = artifacts.env_file {
         let env_path = root.join(".env");
         std::fs::write(&env_path, env_content).map_err(|e| ConfigError::ConfigWriteFailed {
@@ -223,6 +222,13 @@ pub fn write_setup_artifacts(
             let _ = std::fs::set_permissions(&env_path, perms);
         }
     }
+
+    let config_path = root.join("config.yaml");
+    std::fs::write(&config_path, &artifacts.raw_yaml).map_err(|e| {
+        ConfigError::ConfigWriteFailed {
+            reason: format!("failed to write config.yaml: {}", e),
+        }
+    })?;
 
     Ok(())
 }
@@ -352,7 +358,12 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         .validation
         .issues
         .iter()
-        .filter(|issue| matches!(issue.kind, crate::config::draft::ValidationIssueKind::Config))
+        .filter(|issue| {
+            matches!(
+                issue.kind,
+                crate::config::draft::ValidationIssueKind::Config
+            )
+        })
         .collect();
     let draft_passed = draft.kind != crate::config::draft::ConfigStateKind::SyntaxError
         && config_issues.is_empty();
@@ -790,9 +801,7 @@ fn extract_tracker(doc: &serde_yaml::Value) -> Result<SetupTracker, ConfigError>
                 .get("path")
                 .and_then(|p| p.as_str())
                 .map(PathBuf::from)
-                .ok_or_else(|| ConfigError::ConfigParseError {
-                    reason: "todo_file tracker missing path".to_string(),
-                })?;
+                .unwrap_or_else(|| PathBuf::from("TODO.md"));
             Ok(SetupTracker::TodoFile { path })
         }
         "github" => {
@@ -872,7 +881,10 @@ fn extract_agents(doc: &serde_yaml::Value) -> Result<Vec<SetupAgent>, ConfigErro
             map.iter()
                 .filter_map(|(role, config)| {
                     let role = role.as_str()?;
-                    let acpx_agent = config.get("acpx_agent")?.as_str()?;
+                    let acpx_agent = config
+                        .get("acpx_agent")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| config.get("executor").and_then(|value| value.as_str()))?;
                     let model = config
                         .get("model")
                         .and_then(|m| m.as_str())
@@ -1152,13 +1164,27 @@ fn update_yaml_from_request(
     Ok(())
 }
 
-fn resolve_tracker_output_path(path: &Path) -> PathBuf {
+pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathBuf, ConfigError> {
     let path_str = path.to_string_lossy();
-    if path_str == "~" || path_str.starts_with("~/") {
-        PathBuf::from(shellexpand::tilde(&path_str).into_owned())
+    let expanded = if path_str.contains('$') {
+        shellexpand::env(&path_str)
+            .map_err(|e| ConfigError::PathExpansionError {
+                path: path_str.to_string(),
+                reason: e.to_string(),
+            })?
+            .into_owned()
     } else {
-        path.to_path_buf()
-    }
+        path_str.to_string()
+    };
+
+    let expanded = shellexpand::tilde(&expanded).into_owned();
+    let expanded_path = PathBuf::from(expanded);
+
+    Ok(if expanded_path.is_relative() {
+        base_dir.join(expanded_path)
+    } else {
+        expanded_path
+    })
 }
 
 #[cfg(test)]
@@ -1630,5 +1656,141 @@ on_failure: Failed
 
         assert!(fake_home.join("ensemble/TODO.md").exists());
         assert!(!tmpdir.path().join("~/ensemble/TODO.md").exists());
+    }
+
+    #[test]
+    fn write_setup_artifacts_rebases_relative_todo_path_from_config_dir() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("nested/TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = SetupArtifacts {
+            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            templates: BTreeMap::new(),
+            todo_md: Some("## Todo\n".to_string()),
+            env_file: None,
+        };
+
+        write_setup_artifacts(tmpdir.path(), &request, &artifacts).unwrap();
+
+        assert!(tmpdir.path().join("nested/TODO.md").exists());
+    }
+
+    #[test]
+    fn write_setup_artifacts_expands_env_for_todo_path_before_rebasing() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::env::set_var("ENSEMBLE_TODO_PATH", "env-dir/TODO.md");
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("$ENSEMBLE_TODO_PATH"),
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = SetupArtifacts {
+            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            templates: BTreeMap::new(),
+            todo_md: Some("## Todo\n".to_string()),
+            env_file: None,
+        };
+
+        write_setup_artifacts(tmpdir.path(), &request, &artifacts).unwrap();
+
+        assert!(tmpdir.path().join("env-dir/TODO.md").exists());
+        assert!(!tmpdir.path().join("$ENSEMBLE_TODO_PATH").exists());
+    }
+
+    #[test]
+    fn write_setup_artifacts_does_not_activate_config_before_companions_succeed() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        std::fs::write(tmpdir.path().join("templates"), "blocking file").unwrap();
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = SetupArtifacts {
+            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            templates: {
+                let mut map = BTreeMap::new();
+                map.insert(
+                    "templates/build.liquid".to_string(),
+                    "Build: {{ issue.title }}".to_string(),
+                );
+                map
+            },
+            todo_md: Some("## Todo\n".to_string()),
+            env_file: None,
+        };
+
+        let result = write_setup_artifacts(tmpdir.path(), &request, &artifacts);
+
+        assert!(result.is_err());
+        assert!(!tmpdir.path().join("config.yaml").exists());
+    }
+
+    #[test]
+    fn extract_setup_defaults_accepts_executor_agents_and_default_todo_tracker_path() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    executor: codex
+    model: sonnet
+    prompt_template: templates/build.liquid
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = extract_setup_defaults(yaml).unwrap();
+
+        match &request.tracker {
+            SetupTracker::TodoFile { path } => {
+                assert_eq!(path, &PathBuf::from("TODO.md"));
+            }
+            _ => panic!("expected TodoFile tracker"),
+        }
+        assert_eq!(request.agents.len(), 1);
+        assert_eq!(request.agents[0].role, "builder");
+        assert_eq!(request.agents[0].acpx_agent, "codex");
+        assert_eq!(request.agents[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(request.steps.len(), 1);
+        assert_eq!(request.steps[0].name, "build");
     }
 }

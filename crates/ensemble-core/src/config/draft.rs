@@ -76,18 +76,21 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
             match typed {
                 Ok(config) => {
                     let mut report = validate_document(&document);
+                    let mut config_valid = true;
                     if let Err(e) = validate_config(&config) {
                         report.issues.push(pipeline_error_to_validation_issue(e));
+                        config_valid = false;
                     }
                     if let Err(e) = build_dag(&config.steps) {
                         report.issues.push(pipeline_error_to_validation_issue(e));
+                        config_valid = false;
                     }
                     ConfigDocumentState {
                         path,
                         kind: ConfigStateKind::Parsed,
                         raw_yaml: Some(raw_yaml),
                         document: Some(document),
-                        active_config: Some(config),
+                        active_config: if config_valid { Some(config) } else { None },
                         validation: report,
                     }
                 }
@@ -466,6 +469,36 @@ on_failure: Failed
             .issues
             .iter()
             .any(|issue| issue.kind == ValidationIssueKind::Syntax));
+    }
+
+    #[test]
+    fn parse_raw_yaml_clears_active_config_when_semantic_validation_fails() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: missing
+on_success: Done
+on_failure: Failed
+"#;
+        let path = PathBuf::from("/tmp/test.yaml");
+
+        let state = parse_raw_yaml(path, raw.to_string());
+
+        assert_eq!(state.kind, ConfigStateKind::Parsed);
+        assert!(state.document.is_some());
+        assert!(state.active_config.is_none());
+        assert!(state
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.message.contains("unknown agent reference: missing")));
     }
 
     #[test]

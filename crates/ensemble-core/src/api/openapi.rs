@@ -121,4 +121,16 @@ mod tests {
         assert!(spec.contains("\"openapi\":"));
         assert!(spec.contains("Ensemble API"));
     }
+
+    #[test]
+    fn test_openapi_documents_save_guided_form_with_config_state_response() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        assert_eq!(
+            spec["paths"]["/api/v1/config/form/save"]["post"]["responses"]["200"]["content"]
+                ["application/json"]["schema"]["$ref"],
+            "#/components/schemas/ConfigStateResponse"
+        );
+    }
 }
