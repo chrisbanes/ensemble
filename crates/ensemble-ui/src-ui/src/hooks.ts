@@ -9,6 +9,13 @@ import {
   usePostStop,
   usePostRetry,
 } from "./generated/api/controls/controls";
+import {
+  useSaveSetup,
+  useValidateSetup,
+  useSaveYaml,
+  useValidateYaml,
+  getGetConfigQueryKey,
+} from "./generated/api/config/config";
 import { useGetConversation } from "./generated/api/conversation/conversation";
 import type {
   GetHistoryParams,
@@ -101,6 +108,52 @@ export function useConfigQuery() {
     query: {
       staleTime: 60_000,
       select: (resp) => resp.data as ConfigStateResponse,
+    },
+  });
+}
+
+export function useConfigStateQuery() {
+  return useGetConfig<ConfigStateResponse>({
+    query: {
+      staleTime: 60_000,
+      select: (resp) => resp.data as ConfigStateResponse,
+    },
+  });
+}
+
+export function useValidateYamlDraftMutation() {
+  const queryClient = useQueryClient();
+  return useValidateYaml({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
+    },
+  });
+}
+
+export function useSaveYamlDraftMutation() {
+  const queryClient = useQueryClient();
+  return useSaveYaml({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
+    },
+  });
+}
+
+export function useValidateSetupMutation() {
+  return useValidateSetup();
+}
+
+export function useSaveSetupMutation() {
+  const queryClient = useQueryClient();
+  return useSaveSetup({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
+      },
     },
   });
 }

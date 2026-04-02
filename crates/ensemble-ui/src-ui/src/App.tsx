@@ -6,7 +6,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const IssueDetail = lazy(() => import("./pages/IssueDetail"));
 const History = lazy(() => import("./pages/History"));
-const ConfigStatus = lazy(() => import("./pages/ConfigStatus"));
+const ConfigPage = lazy(() => import("./pages/ConfigPage"));
 
 function PageLoader() {
   return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
@@ -21,7 +21,7 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/issue/:identifier" element={<IssueDetail />} />
             <Route path="/history" element={<History />} />
-            <Route path="/config" element={<ConfigStatus />} />
+            <Route path="/config" element={<ConfigPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
