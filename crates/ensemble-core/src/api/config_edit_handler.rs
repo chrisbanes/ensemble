@@ -594,7 +594,10 @@ on_failure: Failed
                 tracker: crate::config::setup::SetupTracker::TodoFile {
                     path: PathBuf::from("TODO.md"),
                 },
-                repos: vec![],
+                repos: vec![crate::config::setup::SetupRepo {
+                    path: PathBuf::from("/nonexistent/repo"),
+                    branch: "main".to_string(),
+                }],
                 agents: vec![crate::config::setup::SetupAgent {
                     role: "builder".to_string(),
                     acpx_agent: "claude".to_string(),
