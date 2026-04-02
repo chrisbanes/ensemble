@@ -34,7 +34,7 @@ ENSEMBLE_CONFIG_DIR=$HOME/projects/ensemble ensemble run
 ensemble open-config-dir
 ```
 
-This opens the resolved configuration directory in your system's file manager. If the directory doesn't exist, it will prompt you to run `ensemble init` to create it.
+This opens the resolved configuration directory in your system's file manager. If the directory doesn't exist, it prints guidance to run `ensemble init` to create it.
 
 **Legacy note:** The old `ENSEMBLE_CONFIG` environment variable and `--config` flag are no longer supported. Use `ENSEMBLE_CONFIG_DIR` and `--config-dir` instead.
 

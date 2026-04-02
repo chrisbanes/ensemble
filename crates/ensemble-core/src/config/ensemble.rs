@@ -265,19 +265,21 @@ fn resolve_env_var(value: &str) -> Option<String> {
 }
 
 /// Expand `~` to home directory in a path string.
-fn expand_tilde(path_str: &str) -> PathBuf {
+fn expand_tilde(path_str: &str) -> Result<PathBuf, crate::error::ConfigError> {
     if let Some(rest) = path_str.strip_prefix('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest.strip_prefix('/').unwrap_or(rest));
-        }
+        let home = dirs::home_dir().ok_or(crate::error::ConfigError::HomeDirUnavailable)?;
+        return Ok(home.join(rest.strip_prefix('/').unwrap_or(rest)));
     }
-    PathBuf::from(path_str)
+    Ok(PathBuf::from(path_str))
 }
 
 /// Resolve a path string: expand `$VAR` then `~`.
 /// Returns `None` if the path references an unset/empty env var.
-fn resolve_path(path_str: &str) -> Option<PathBuf> {
-    resolve_env_var(path_str).map(|resolved| expand_tilde(&resolved))
+fn resolve_path(path_str: &str) -> Result<Option<PathBuf>, crate::error::ConfigError> {
+    match resolve_env_var(path_str) {
+        Some(resolved) => expand_tilde(&resolved).map(Some),
+        None => Ok(None),
+    }
 }
 
 impl EnsembleConfig {
@@ -289,9 +291,8 @@ impl EnsembleConfig {
     /// - `workspace.root`
     /// - `agents.*.prompt_template`
     /// - `repos[*].path`
-    pub fn resolve_env(&mut self) {
+    pub fn resolve_env(&mut self) -> Result<(), crate::error::ConfigError> {
         self.resolve_env_from(Path::new("."))
-            .expect("CWD should always be available");
     }
 
     /// Resolve environment variables and rebase relative paths from the config directory.
@@ -316,7 +317,7 @@ impl EnsembleConfig {
 
         if let Some(ref path) = self.tracker.path {
             let path_str = path.to_string_lossy();
-            let resolved = resolve_path(&path_str);
+            let resolved = resolve_path(&path_str)?;
             self.tracker.path = resolved.map(|p| {
                 if p.is_absolute() {
                     p
@@ -328,7 +329,7 @@ impl EnsembleConfig {
 
         // workspace.root: $VAR + ~ expansion + rebase
         if let Some(ref root) = self.workspace.root {
-            let resolved = resolve_path(root);
+            let resolved = resolve_path(root)?;
             self.workspace.root = resolved.map(|p| {
                 let final_path = if p.is_absolute() {
                     p
@@ -342,7 +343,7 @@ impl EnsembleConfig {
         // repos[*].path: $VAR + ~ expansion + rebase
         for repo in &mut self.repos {
             let path_str = &repo.path;
-            if let Some(resolved) = resolve_path(path_str) {
+            if let Some(resolved) = resolve_path(path_str)? {
                 let final_path = if resolved.is_absolute() {
                     resolved
                 } else {
@@ -356,7 +357,7 @@ impl EnsembleConfig {
         for agent in self.agents.values_mut() {
             if let Some(ref path) = agent.prompt_template {
                 let path_str = path.to_string_lossy();
-                let resolved = resolve_path(&path_str);
+                let resolved = resolve_path(&path_str)?;
                 agent.prompt_template = resolved.map(|p| {
                     if p.is_absolute() {
                         p
@@ -383,7 +384,15 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
     // Load .env from config directory (best-effort, don't fail if missing)
     let env_path = config_dir.join(".env");
     if env_path.exists() {
-        let _ = dotenvy::from_path(&env_path);
+        dotenvy::from_path(&env_path).map_err(|err| {
+            crate::error::ConfigError::ConfigParseError {
+                reason: format!(
+                    "failed to load .env file from {}: {}",
+                    env_path.display(),
+                    err
+                ),
+            }
+        })?;
     }
 
     let content = std::fs::read_to_string(path).map_err(|_| {
@@ -449,6 +458,9 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn minimal_yaml() -> &'static str {
         r#"
@@ -710,6 +722,7 @@ on_failure: Failed
 
     #[test]
     fn test_resolve_env_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ENSEMBLE_TEST_KEY_2B", "secret123");
         let yaml = r#"
 tracker:
@@ -728,13 +741,14 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         assert_eq!(config.tracker.api_key.as_deref(), Some("secret123"));
         std::env::remove_var("ENSEMBLE_TEST_KEY_2B");
     }
 
     #[test]
     fn test_resolve_env_empty_var_is_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ENSEMBLE_EMPTY_2B", "");
         let yaml = r#"
 tracker:
@@ -753,7 +767,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         assert_eq!(config.tracker.api_key, None);
         std::env::remove_var("ENSEMBLE_EMPTY_2B");
     }
@@ -776,7 +790,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
             config.tracker.path.unwrap(),
@@ -914,7 +928,7 @@ workspace:
   root: ~/workspaces
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         let home = std::env::var("HOME").unwrap();
         let expected = format!("{}/workspaces", home);
         assert_eq!(config.workspace.root.as_deref(), Some(expected.as_str()));
@@ -973,6 +987,7 @@ on_failure: Failed
 
     #[test]
     fn test_resolve_env_repos_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ENSEMBLE_TEST_REPO", "/test/repo");
         let yaml = r#"
 tracker:
@@ -992,7 +1007,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         assert_eq!(config.repos[0].path, "/test/repo");
         std::env::remove_var("ENSEMBLE_TEST_REPO");
     }
@@ -1017,7 +1032,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(config.repos[0].path, format!("{}/projects/myrepo", home));
     }
@@ -1098,9 +1113,10 @@ on_failure: Failed
 
     #[test]
     fn test_load_config_loads_sibling_dotenv_without_overriding_existing_env() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".env"), "GITHUB_TOKEN=from-dotenv\n").unwrap();
-        std::env::set_var("GITHUB_TOKEN", "from-process");
+        std::fs::write(dir.path().join(".env"), "ENSEMBLE_TEST_TOKEN=from-dotenv\n").unwrap();
+        std::env::set_var("ENSEMBLE_TEST_TOKEN", "from-process");
 
         std::fs::write(
             dir.path().join("config.yaml"),
@@ -1108,7 +1124,7 @@ on_failure: Failed
 tracker:
   kind: github
   repository: acme/repo
-  api_key: $GITHUB_TOKEN
+  api_key: $ENSEMBLE_TEST_TOKEN
 agents:
   builder:
     acpx_agent: claude
@@ -1126,6 +1142,19 @@ on_failure: Failed
         // Process env var should take precedence over .env
         assert_eq!(config.tracker.api_key.as_deref(), Some("from-process"));
 
-        std::env::remove_var("GITHUB_TOKEN");
+        std::env::remove_var("ENSEMBLE_TEST_TOKEN");
+    }
+
+    #[test]
+    fn test_load_config_errors_for_invalid_sibling_dotenv() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "NOT VALID\n=").unwrap();
+        std::fs::write(dir.path().join("config.yaml"), minimal_yaml()).unwrap();
+
+        let err = load_config(&dir.path().join("config.yaml")).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::error::ConfigError::ConfigParseError { .. }
+        ));
     }
 }

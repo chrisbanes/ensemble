@@ -167,18 +167,21 @@ mod tests {
         std::sync::MutexGuard<'static, ()>,
         Option<String>,
         Option<String>,
+        Option<String>,
     ) {
         let guard = ENV_LOCK.lock().unwrap();
         let host = std::env::var("HOST").ok();
         let port = std::env::var("PORT").ok();
+        let config_dir = std::env::var("ENSEMBLE_CONFIG_DIR").ok();
         std::env::remove_var("HOST");
         std::env::remove_var("PORT");
+        std::env::remove_var("ENSEMBLE_CONFIG_DIR");
         std::env::remove_var("ENSEMBLE_CONFIG");
-        (guard, host, port)
+        (guard, host, port, config_dir)
     }
 
-    /// Helper: restore previously saved HOST/PORT env vars.
-    fn restore_env(host: Option<String>, port: Option<String>) {
+    /// Helper: restore previously saved HOST/PORT/ENSEMBLE_CONFIG_DIR env vars.
+    fn restore_env(host: Option<String>, port: Option<String>, config_dir: Option<String>) {
         match host {
             Some(v) => std::env::set_var("HOST", v),
             None => std::env::remove_var("HOST"),
@@ -187,23 +190,27 @@ mod tests {
             Some(v) => std::env::set_var("PORT", v),
             None => std::env::remove_var("PORT"),
         }
+        match config_dir {
+            Some(v) => std::env::set_var("ENSEMBLE_CONFIG_DIR", v),
+            None => std::env::remove_var("ENSEMBLE_CONFIG_DIR"),
+        }
     }
 
     // ---- `ensemble init` subcommand ----
 
     #[test]
     fn test_cli_parse_init_subcommand() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "init"]);
         assert!(matches!(cli.command, Some(Command::Init)));
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     // ---- `ensemble run` subcommand ----
 
     #[test]
     fn test_cli_parse_run_with_config_dir() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run", "--config-dir", "/tmp/ensemble"]);
         match cli.command {
             Some(Command::Run) => {
@@ -211,25 +218,25 @@ mod tests {
             }
             other => panic!("expected Run subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_parse_run_defaults() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run"]);
         match cli.command {
             Some(Command::Run) => assert_eq!(cli.config.config_dir, None),
             other => panic!("expected Run subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     // ---- `ensemble web` subcommand ----
 
     #[test]
     fn test_cli_parse_web_defaults() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "web"]);
         match cli.command {
             Some(Command::Web { host: h, port: p }) => {
@@ -239,12 +246,12 @@ mod tests {
             }
             other => panic!("expected Web subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_parse_web_custom_args() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from([
             "ensemble",
             "web",
@@ -263,36 +270,36 @@ mod tests {
             }
             other => panic!("expected Web subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_web_env_host() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         std::env::set_var("HOST", "10.0.0.1");
         let cli = Cli::parse_from(["ensemble", "web"]);
         match cli.command {
             Some(Command::Web { host: h, .. }) => assert_eq!(h, "10.0.0.1"),
             other => panic!("expected Web subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_web_env_port() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         std::env::set_var("PORT", "9090");
         let cli = Cli::parse_from(["ensemble", "web"]);
         match cli.command {
             Some(Command::Web { port: p, .. }) => assert_eq!(p, Some(9090)),
             other => panic!("expected Web subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_web_flag_overrides_env() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         std::env::set_var("HOST", "10.0.0.1");
         std::env::set_var("PORT", "9090");
         let cli = Cli::parse_from(["ensemble", "web", "--host", "0.0.0.0", "--port", "3000"]);
@@ -305,33 +312,33 @@ mod tests {
             }
             other => panic!("expected Web subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_web_ephemeral_port() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "web", "--port", "0"]);
         match cli.command {
             Some(Command::Web { port: p, .. }) => assert_eq!(p, Some(0)),
             other => panic!("expected Web subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     // ---- `ensemble open-config-dir` subcommand ----
 
     #[test]
     fn test_cli_parse_open_config_dir_subcommand() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "open-config-dir"]);
         assert!(matches!(cli.command, Some(Command::OpenConfigDir)));
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_parse_open_config_dir_with_config_dir() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from([
             "ensemble",
             "open-config-dir",
@@ -344,7 +351,7 @@ mod tests {
             }
             other => panic!("expected OpenConfigDir subcommand, got {:?}", other),
         }
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     // ---- legacy argument rejection ----
@@ -383,19 +390,19 @@ mod tests {
 
     #[test]
     fn test_cli_no_subcommand_defaults() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble"]);
         assert!(cli.command.is_none());
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]
     fn test_cli_no_subcommand_accepts_config_dir() {
-        let (_guard, host, port) = lock_and_clear_env();
+        let (_guard, host, port, config_dir) = lock_and_clear_env();
         let cli = Cli::try_parse_from(["ensemble", "--config-dir", "/tmp/ensemble"])
             .expect("bare ensemble should accept --config-dir");
         assert!(cli.command.is_none());
-        restore_env(host, port);
+        restore_env(host, port, config_dir);
     }
 
     #[test]

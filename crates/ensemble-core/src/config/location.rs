@@ -119,8 +119,16 @@ fn expand_override_path(path: &Path) -> Result<PathBuf, ConfigError> {
         path_str.to_string()
     };
 
-    // Expand tilde
-    let expanded = shellexpand::tilde(&expanded).to_string();
+    // Expand tilde and fail if home dir cannot be resolved.
+    let expanded = if expanded.starts_with('~') {
+        let tilde_expanded = shellexpand::tilde(&expanded).to_string();
+        if tilde_expanded.starts_with('~') {
+            return Err(ConfigError::HomeDirUnavailable);
+        }
+        tilde_expanded
+    } else {
+        expanded
+    };
 
     Ok(PathBuf::from(expanded))
 }
@@ -128,6 +136,9 @@ fn expand_override_path(path: &Path) -> Result<PathBuf, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_config_path_for_dir_appends_config_yaml() {
@@ -163,6 +174,7 @@ mod tests {
 
     #[test]
     fn test_resolve_desktop_config_dir_expands_env_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/desktop-config");
         let resolved = resolve_config_dir_for_desktop(Some(OsString::from(
             "$ENSEMBLE_TEST_DESKTOP_CONFIG_DIR",
@@ -219,6 +231,12 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         let resolved = expand_override_path(Path::new("~/ensemble")).unwrap();
         assert_eq!(resolved, home.join("ensemble"));
+    }
+
+    #[test]
+    fn test_expand_override_rejects_unexpanded_tilde() {
+        let err = expand_override_path(Path::new("~definitely-not-expanded")).unwrap_err();
+        assert!(matches!(err, ConfigError::HomeDirUnavailable));
     }
 
     #[test]
