@@ -7,9 +7,7 @@ use super::state::OrchestratorState;
 /// Check if an issue is eligible for dispatch.
 /// Returns None if eligible, or Some(reason) explaining why not.
 ///
-/// Accepts both pre-lowercased slices (from internal callers) and raw state
-/// strings (from external callers). Internal normalization ensures backward
-/// compatibility regardless of input casing.
+/// Compares state names case-insensitively without allocating normalized copies.
 pub fn is_dispatch_eligible(
     issue: &Issue,
     state: &OrchestratorState,
@@ -33,19 +31,13 @@ pub fn is_dispatch_eligible(
 
     let state_lower = issue.state.to_lowercase();
 
-    // Normalize inputs to lowercase for case-insensitive comparison.
-    // Internal callers already pass pre-lowercased slices, so this is a no-op
-    // for them. External callers get backward-compatible behavior.
-    let active_lower: Vec<String> = active_states.iter().map(|s| s.to_lowercase()).collect();
-    let terminal_lower: Vec<String> = terminal_states.iter().map(|s| s.to_lowercase()).collect();
-
     // Must be in active states
-    if !active_lower.contains(&state_lower) {
+    if !contains_state(active_states, &issue.state) {
         return Some(format!("state '{}' not in active states", issue.state));
     }
 
     // Must NOT be in terminal states
-    if terminal_lower.contains(&state_lower) {
+    if contains_state(terminal_states, &issue.state) {
         return Some(format!("state '{}' is terminal", issue.state));
     }
 
@@ -78,7 +70,7 @@ pub fn is_dispatch_eligible(
     if state_lower == "todo" && !issue.blocked_by.is_empty() {
         let has_non_terminal_blocker = issue.blocked_by.iter().any(|blocker| {
             if let Some(ref blocker_state) = blocker.state {
-                !terminal_lower.contains(&blocker_state.to_lowercase())
+                !contains_state(terminal_states, blocker_state)
             } else {
                 // Unknown state — treat as non-terminal (conservative)
                 true
@@ -90,6 +82,12 @@ pub fn is_dispatch_eligible(
     }
 
     None
+}
+
+fn contains_state(states: &[String], needle: &str) -> bool {
+    states
+        .iter()
+        .any(|state| state.eq_ignore_ascii_case(needle))
 }
 
 /// Sort issues for dispatch priority.

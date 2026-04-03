@@ -86,4 +86,31 @@ describe("YamlEditor", () => {
 
     expect(await screen.findByText(/tracker path is invalid/i)).toBeInTheDocument();
   });
+
+  it("keeps existing issues visible when validate fails", async () => {
+    const user = userEvent.setup();
+
+    renderWithProviders(
+      <YamlEditor
+        rawYaml={`tracker:\n  kind: todo_file\n  path: /tmp/todo.md`}
+        issues={[
+          {
+            kind: ValidationIssueKind.Config,
+            section: "tracker",
+            message: "existing issue",
+            field: "path",
+            path: "tracker.path",
+          },
+        ]}
+        onValidate={vi.fn(async () => {
+          throw new Error("validation failed");
+        })}
+      />,
+      { route: "/config" }
+    );
+
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+
+    expect(await screen.findByText(/existing issue/i)).toBeInTheDocument();
+  });
 });

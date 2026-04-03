@@ -26,6 +26,7 @@ utoipa = { workspace = true }
 dirs = { workspace = true }
 dotenvy = { workspace = true }
 shellexpand = "3"
+shlex = "1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

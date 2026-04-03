@@ -135,10 +135,25 @@ fn resolve_agent_command(
             return cmd;
         }
         if let Some(ref executor) = ac.executor {
-            return executor.clone();
+            return shell_escape_command(executor);
         }
     }
-    default_command.to_string()
+    shell_escape_command(default_command)
+}
+
+fn shell_escape_command(command: &str) -> String {
+    let parts = shlex::split(command)
+        .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect());
+
+    if parts.is_empty() {
+        return shell_escape(command);
+    }
+
+    parts
+        .iter()
+        .map(|part| shell_escape(part))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[async_trait]
@@ -474,20 +489,20 @@ mod tests {
     #[test]
     fn test_resolve_agent_command_falls_back_to_default() {
         let cmd = resolve_agent_command(None, "default-cmd");
-        assert_eq!(cmd, "default-cmd");
+        assert_eq!(cmd, "'default-cmd'");
     }
 
     #[test]
-    fn test_resolve_agent_command_uses_executor_raw() {
+    fn test_resolve_agent_command_escapes_executor_tokens() {
         let config = crate::config::ensemble::AgentConfig {
             acpx_agent: None,
             model: None,
-            executor: Some("codex --profile prod".to_string()),
+            executor: Some("codex --profile prod; touch /tmp/pwned".to_string()),
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
         };
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
-        assert_eq!(cmd, "codex --profile prod");
+        assert_eq!(cmd, "'codex' '--profile' 'prod;' 'touch' '/tmp/pwned'");
     }
 }
