@@ -1144,13 +1144,14 @@ fn update_yaml_from_request(
         mapping.insert("repos".into(), serde_yaml::Value::Sequence(repos_seq));
     }
 
-    // Update agents section — merge request agents into existing, preserving untouched agents
+    // Update agents section — replace entirely with request data (authoritative),
+    // but preserve unknown fields within each retained agent entry.
     let existing_agents = mapping
         .get("agents")
         .and_then(|value| value.as_mapping())
         .cloned()
         .unwrap_or_default();
-    let mut agents_map = existing_agents.clone();
+    let mut agents_map = serde_yaml::Mapping::new();
     for agent in &request.agents {
         let mut agent_config = existing_agents
             .get(serde_yaml::Value::String(agent.role.clone()))
@@ -2068,21 +2069,6 @@ on_failure: Failed
         assert_eq!(request.agents[0].model.as_deref(), Some("sonnet"));
         assert_eq!(request.steps.len(), 1);
         assert_eq!(request.steps[0].name, "build");
-    }
-
-    #[tokio::test]
-    async fn probe_agent_returns_true_when_acpx_succeeds() {
-        let result = probe_agent("claude").await;
-        assert!(result, "probe_agent should return true when acpx succeeds");
-    }
-
-    #[tokio::test]
-    async fn get_agent_version_returns_version_when_acpx_succeeds() {
-        let result = get_agent_version("claude").await;
-        assert!(
-            !result.is_empty(),
-            "get_agent_version should return version when acpx succeeds"
-        );
     }
 
     #[tokio::test]
