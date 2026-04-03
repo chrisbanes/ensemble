@@ -27,7 +27,7 @@ fn redact_secrets(yaml: &str) -> String {
                     let sep_pos = trimmed.find(':').or_else(|| trimmed.find('=')).unwrap();
                     let value = trimmed[sep_pos + 1..].trim();
                     if !value.starts_with('$') {
-                        return format!("{}{} [REDACTED]", indent, &trimmed[..sep_pos + 1]);
+                        return format!("{}{} \"[REDACTED]\"", indent, &trimmed[..sep_pos + 1]);
                     }
                 }
             }

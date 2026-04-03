@@ -295,17 +295,22 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     // Check repos
     for repo in &request.repos {
         let exists = repo.path.join(".git").exists();
-        let branch_ok = tokio::process::Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{}", repo.branch),
-            ])
-            .current_dir(&repo.path)
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let branch_ok = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/heads/{}", repo.branch),
+                ])
+                .current_dir(&repo.path)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) => output.status.success(),
+            _ => false,
+        };
 
         let passed = exists && branch_ok;
         let detail = if passed {

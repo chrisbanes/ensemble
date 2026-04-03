@@ -290,6 +290,8 @@ pub fn apply_guided_form(
                 "labels_filter".into(),
                 form.tracker.labels_filter.clone().into(),
             );
+        } else {
+            tm.remove("labels_filter");
         }
     }
 
@@ -313,6 +315,8 @@ pub fn apply_guided_form(
         .collect();
     if !repos_seq.is_empty() {
         mapping.insert("repos".into(), repos_seq.into());
+    } else {
+        mapping.remove("repos");
     }
 
     // Update agents section — merge into existing mappings to preserve unknown fields

@@ -20,7 +20,7 @@ pub fn normalize_spa_path(path: &str) -> &str {
     }
 }
 
-pub fn resolve_spa_asset<F>(path: &str, mut get_asset: F) -> ResolvedSpaAsset
+pub fn resolve_spa_asset<F>(path: &str, mut get_asset: F) -> Option<ResolvedSpaAsset>
 where
     F: FnMut(&str) -> Option<Cow<'static, [u8]>>,
 {
@@ -33,19 +33,15 @@ where
         "index.html".to_string(),
     ] {
         if let Some(bytes) = get_asset(&candidate) {
-            return ResolvedSpaAsset {
+            return Some(ResolvedSpaAsset {
                 content_type: content_type_for_path(&candidate).to_string(),
                 path: candidate,
                 bytes: bytes.into_owned(),
-            };
+            });
         }
     }
 
-    ResolvedSpaAsset {
-        path: "index.html".to_string(),
-        content_type: "text/plain; charset=utf-8".to_string(),
-        bytes: b"index.html not found - UI may not be built".to_vec(),
-    }
+    None
 }
 
 pub fn serve_file_response<F>(path: &str, mut get_asset: F) -> Response<Body>
@@ -71,16 +67,14 @@ pub fn serve_spa_response<F>(path: &str, get_asset: F) -> Response<Body>
 where
     F: FnMut(&str) -> Option<Cow<'static, [u8]>>,
 {
-    let resolved = resolve_spa_asset(path, get_asset);
-    let status = if resolved.path == "index.html"
-        && resolved.bytes == b"index.html not found - UI may not be built"
-    {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::OK
-    };
-
-    build_response(status, &resolved.content_type, resolved.bytes)
+    match resolve_spa_asset(path, get_asset) {
+        Some(resolved) => build_response(StatusCode::OK, &resolved.content_type, resolved.bytes),
+        None => build_response(
+            StatusCode::NOT_FOUND,
+            "text/plain; charset=utf-8",
+            b"index.html not found - UI may not be built".to_vec(),
+        ),
+    }
 }
 
 pub fn spa_available<F>(mut get_asset: F) -> bool

@@ -4,7 +4,7 @@ import type { ValidationIssue } from "@/generated/models";
 import SetupWizard from "@/components/config/SetupWizard";
 import YamlEditor from "@/components/config/YamlEditor";
 import GuidedEditor, { type GuidedForm } from "@/components/config/GuidedEditor";
-import { useEffect, useState } from "react";
+import { useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Edit2, FileText, Settings } from "lucide-react";
@@ -98,6 +98,10 @@ export default function ConfigPage() {
 
   const { state, raw_yaml: rawYaml } = data;
   const guidedForm = data.guided_form;
+  const memoizedForm = useMemo(
+    () => (guidedForm ? toGuidedForm(guidedForm) : null),
+    [guidedForm]
+  );
 
   const hasIssues = displayedIssues.length > 0;
   const isEditable = state === "parsed";
@@ -200,9 +204,9 @@ export default function ConfigPage() {
               </button>
             </div>
             <div className="mt-4">
-              {activeTab === "guided" && guidedForm && (
+              {activeTab === "guided" && memoizedForm && (
                 <GuidedEditor
-                  initialForm={toGuidedForm(guidedForm)}
+                  initialForm={memoizedForm}
                   baseRawYaml={rawYaml || ""}
                   issues={displayedIssues}
                   onValidate={handleValidateGuided}

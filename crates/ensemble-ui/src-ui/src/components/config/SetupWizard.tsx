@@ -439,13 +439,21 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                         agents: prev.agents.filter((_, i) => i !== index),
                       }));
                       setCustomAgents(prev => {
-                        const updated = { ...prev };
-                        delete updated[index];
+                        const updated: Record<number, boolean> = {};
+                        for (const [k, v] of Object.entries(prev)) {
+                          const numK = Number(k);
+                          if (numK < index) updated[numK] = v;
+                          else if (numK > index) updated[numK - 1] = v;
+                        }
                         return updated;
                       });
                       setPromptModes(prev => {
-                        const updated = { ...prev };
-                        delete updated[index];
+                        const updated: Record<number, "inline" | "file"> = {};
+                        for (const [k, v] of Object.entries(prev)) {
+                          const numK = Number(k);
+                          if (numK < index) updated[numK] = v;
+                          else if (numK > index) updated[numK - 1] = v;
+                        }
                         return updated;
                       });
                     }}
