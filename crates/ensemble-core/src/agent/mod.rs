@@ -1,6 +1,7 @@
 pub mod acp_client;
 pub mod events;
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -36,11 +37,65 @@ pub trait AgentRunner: Send + Sync {
 /// Real ACP agent runner that implements the full worker loop from SPEC.md Section 16.5.
 pub struct AcpAgentRunner {
     pub config: Arc<RwLock<EnsembleConfig>>,
+    cached_prompts: RwLock<HashMap<String, String>>,
 }
 
 impl AcpAgentRunner {
     pub fn new(config: Arc<RwLock<EnsembleConfig>>) -> Self {
-        Self { config }
+        Self {
+            config,
+            cached_prompts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Clear the prompt cache. Call this when config is reloaded.
+    pub fn clear_cache(&self) {
+        let cache = self.cached_prompts.try_write();
+        if let Ok(mut cache) = cache {
+            cache.clear();
+        }
+    }
+
+    async fn get_or_cache_prompt_template(&self, agent_name: &str) -> Result<String, AgentError> {
+        {
+            let cache = self.cached_prompts.read().await;
+            if let Some(template) = cache.get(agent_name) {
+                return Ok(template.clone());
+            }
+        }
+
+        let config = self.config.read().await;
+        let agent_config = config.agents.get(agent_name).ok_or_else(|| {
+            AgentError::PromptError {
+                reason: format!("agent '{}' not found in config", agent_name),
+            }
+        })?;
+
+        let template = if let Some(ref prompt) = agent_config.prompt {
+            prompt.clone()
+        } else if let Some(ref template_path) = agent_config.prompt_template {
+            std::fs::read_to_string(template_path).map_err(|e| AgentError::PromptError {
+                reason: format!(
+                    "failed to read prompt template '{}': {}",
+                    template_path.display(),
+                    e
+                ),
+            })?
+        } else {
+            return Err(AgentError::PromptError {
+                reason: format!(
+                    "agent '{}' has neither prompt nor prompt_template",
+                    agent_name
+                ),
+            });
+        };
+
+        {
+            let mut cache = self.cached_prompts.write().await;
+            cache.insert(agent_name.to_string(), template.clone());
+        }
+
+        Ok(template)
     }
 
     /// Build the prompt for a given turn.
@@ -54,40 +109,11 @@ impl AcpAgentRunner {
         turn_number: u32,
     ) -> Result<String, AgentError> {
         if turn_number == 1 {
-            let config = self.config.read().await;
-            let agent_config =
-                config
-                    .agents
-                    .get(agent_name)
-                    .ok_or_else(|| AgentError::PromptError {
-                        reason: format!("agent '{}' not found in config", agent_name),
-                    })?;
-
-            // Resolve the prompt template: inline prompt or file-based prompt_template
-            let template_str = if let Some(ref prompt) = agent_config.prompt {
-                prompt.clone()
-            } else if let Some(ref template_path) = agent_config.prompt_template {
-                std::fs::read_to_string(template_path).map_err(|e| AgentError::PromptError {
-                    reason: format!(
-                        "failed to read prompt template '{}': {}",
-                        template_path.display(),
-                        e
-                    ),
-                })?
-            } else {
-                return Err(AgentError::PromptError {
-                    reason: format!(
-                        "agent '{}' has neither prompt nor prompt_template",
-                        agent_name
-                    ),
-                });
-            };
-
-            render_prompt(&template_str, issue, attempt).map_err(|e| AgentError::PromptError {
+            let template = self.get_or_cache_prompt_template(agent_name).await?;
+            render_prompt(&template, issue, attempt).map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
             })
         } else {
-            // Continuation turns: send guidance, not the full original prompt
             Ok(format!(
                 "Continue working on {}. This is turn {} of this session. \
                  The issue is still in an active state. \
