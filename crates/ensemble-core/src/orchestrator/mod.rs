@@ -296,15 +296,17 @@ impl Orchestrator {
 
     /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
     async fn dispatch_issue(&self, issue: &Issue, attempt: Option<u32>) {
+<<<<<<< HEAD
         let (dag, config_snapshot) = {
             let config = self.config.read().await;
-            match build_dag(&config.steps) {
-                Ok(d) => (d, Arc::new(config.clone())),
+            let dag = match build_dag(&config.steps) {
+                Ok(d) => d,
                 Err(e) => {
                     warn!(issue_id = %issue.id, error = %e, "failed to build step DAG, skipping dispatch");
                     return;
                 }
-            }
+            };
+            (dag, Arc::new(config.clone()))
         };
 
         let cycle = attempt.unwrap_or(1);
@@ -338,6 +340,7 @@ impl Orchestrator {
                 .await;
             }
         }
+
     }
 
     /// Dispatch a single pipeline step: set tracker state if specified, spawn worker.
