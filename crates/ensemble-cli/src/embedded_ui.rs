@@ -11,33 +11,20 @@ struct SpaAssets;
 /// Serve an embedded file by path, returning 404 if not found
 #[allow(dead_code)]
 pub fn serve_file(path: &str) -> impl IntoResponse {
-    serve_file_response(path, |asset_path| {
-        SpaAssets::get(asset_path)
-            .map(|file| file.data.into_owned().into_boxed_slice())
-            .map(Box::leak)
-            .map(|bytes| &*bytes)
-    })
+    serve_file_response(path, |asset_path| SpaAssets::get(asset_path).map(|f| f.data))
 }
 
 /// Serve the SPA with fallback to index.html for client-side routing
 pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
     serve_spa_response(uri.path(), |asset_path| {
-        SpaAssets::get(asset_path)
-            .map(|file| file.data.into_owned().into_boxed_slice())
-            .map(Box::leak)
-            .map(|bytes| &*bytes)
+        SpaAssets::get(asset_path).map(|f| f.data)
     })
 }
 
 /// Check if the SPA is available (assets were embedded)
 #[allow(dead_code)]
 pub fn spa_available() -> bool {
-    core_spa_available(|asset_path| {
-        SpaAssets::get(asset_path)
-            .map(|file| file.data.into_owned().into_boxed_slice())
-            .map(Box::leak)
-            .map(|bytes| &*bytes)
-    })
+    core_spa_available(|asset_path| SpaAssets::get(asset_path).map(|f| f.data))
 }
 
 /// Router for serving embedded SPA

@@ -3,6 +3,7 @@ use axum::{
     http::{header, StatusCode},
     response::Response,
 };
+use std::borrow::Cow;
 
 pub struct ResolvedSpaAsset {
     pub path: String,
@@ -21,7 +22,7 @@ pub fn normalize_spa_path(path: &str) -> &str {
 
 pub fn resolve_spa_asset<F>(path: &str, mut get_asset: F) -> ResolvedSpaAsset
 where
-    F: FnMut(&str) -> Option<&'static [u8]>,
+    F: FnMut(&str) -> Option<Cow<'static, [u8]>>,
 {
     let normalized = normalize_spa_path(path);
 
@@ -35,7 +36,7 @@ where
             return ResolvedSpaAsset {
                 content_type: content_type_for_path(&candidate).to_string(),
                 path: candidate,
-                bytes: bytes.to_vec(),
+                bytes: bytes.into_owned(),
             };
         }
     }
@@ -49,22 +50,26 @@ where
 
 pub fn serve_file_response<F>(path: &str, mut get_asset: F) -> Response<Body>
 where
-    F: FnMut(&str) -> Option<&'static [u8]>,
+    F: FnMut(&str) -> Option<Cow<'static, [u8]>>,
 {
     let normalized = normalize_spa_path(path);
     match get_asset(normalized) {
-        Some(bytes) => build_response(StatusCode::OK, content_type_for_path(normalized), bytes),
+        Some(bytes) => build_response(
+            StatusCode::OK,
+            content_type_for_path(normalized),
+            bytes.into_owned(),
+        ),
         None => build_response(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
-            &b"Not found"[..],
+            b"Not found".to_vec(),
         ),
     }
 }
 
 pub fn serve_spa_response<F>(path: &str, get_asset: F) -> Response<Body>
 where
-    F: FnMut(&str) -> Option<&'static [u8]>,
+    F: FnMut(&str) -> Option<Cow<'static, [u8]>>,
 {
     let resolved = resolve_spa_asset(path, get_asset);
     let status = if resolved.path == "index.html"
@@ -80,7 +85,7 @@ where
 
 pub fn spa_available<F>(mut get_asset: F) -> bool
 where
-    F: FnMut(&str) -> Option<&'static [u8]>,
+    F: FnMut(&str) -> Option<Cow<'static, [u8]>>,
 {
     get_asset("index.html").is_some()
 }
@@ -99,5 +104,10 @@ where
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
         .body(body.into())
-        .expect("static SPA response should be valid")
+        .unwrap_or_else(|_| {
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("failed to build response"))
+                .expect("fallback response should be valid")
+        })
 }

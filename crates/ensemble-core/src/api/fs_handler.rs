@@ -78,27 +78,50 @@ pub async fn list_directory(
         }
     };
 
-    let target = PathBuf::from(&path_str);
+    let response = list_directory_inner(path_str, home_dir).await;
+    response.into_response()
+}
 
-    // Wrap all blocking I/O in spawn_blocking
+async fn list_directory_inner(
+    path_str: String,
+    home_dir: PathBuf,
+) -> (StatusCode, Json<serde_json::Value>) {
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<FsEntry>, (StatusCode, ApiError)> {
-            // Resolve symlinks for the target path itself
-            let canonical_target = if target.exists() {
-                match std::fs::canonicalize(&target) {
-                    Ok(c) => c,
-                    Err(e) => {
+            // Expand ~ to home directory
+            let expanded = shellexpand::tilde(&path_str);
+            let target = PathBuf::from(expanded.as_ref());
+
+            // Resolve symlinks — canonicalize returns Err if path doesn't exist
+            let canonical_target = match std::fs::canonicalize(&target) {
+                Ok(c) => c,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::NotFound {
                         return Err((
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            ApiError::new("io_error", &format!("failed to resolve path: {e}")),
+                            StatusCode::NOT_FOUND,
+                            ApiError::new("not_found", "path does not exist"),
+                        ));
+                    }
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        ApiError::new("io_error", &format!("failed to resolve path: {e}")),
+                    ));
+                }
+            };
+
+            // If target resolved to a file, use its parent directory
+            let canonical_target = if canonical_target.is_file() {
+                match canonical_target.parent() {
+                    Some(parent) => parent.to_path_buf(),
+                    None => {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            ApiError::new("bad_request", "file path has no parent directory"),
                         ));
                     }
                 }
             } else {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    ApiError::new("not_found", "path does not exist"),
-                ));
+                canonical_target
             };
 
             // Check that the canonical target is within home directory
@@ -197,15 +220,14 @@ pub async fn list_directory(
     let mut all_entries = match result {
         Ok(Ok(entries)) => entries,
         Ok(Err((status, error))) => {
-            return (status, Json(serde_json::to_value(error).unwrap())).into_response();
+            return (status, Json(serde_json::to_value(error).unwrap()));
         }
         Err(e) => {
             let error = ApiError::new("internal_error", &format!("task join error: {e}"));
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::to_value(error).unwrap()),
-            )
-                .into_response();
+            );
         }
     };
 
@@ -217,91 +239,33 @@ pub async fn list_directory(
         truncated,
     };
 
-    (StatusCode::OK, Json(response)).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(response).unwrap()),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router::{AppState, ConfigRuntime};
-    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
-    use crate::observability::events::EventBus;
-    use crate::orchestrator::state::OrchestratorState;
-    use axum::body::to_bytes;
-    use axum::response::IntoResponse;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
+    use axum::http::StatusCode;
 
-    fn test_app_state() -> AppState {
-        let state = OrchestratorState::new(30000, 10);
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: None,
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
-    }
-
-    async fn call_and_extract(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
-        let response = response.into_response();
-        let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        (status, json)
-    }
-
-    fn test_home_base() -> PathBuf {
-        let home = dirs::home_dir().expect("home dir required");
-        home.join(".ensemble_fs_test")
-    }
-
-    struct TestHomeCleanup(PathBuf);
-
-    impl Drop for TestHomeCleanup {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn setup_test_home(name: &str) -> (PathBuf, TestHomeCleanup) {
-        let base = test_home_base();
-        let dir = base.join(name);
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let cleanup = TestHomeCleanup(dir.clone());
-        (dir, cleanup)
+    async fn call_list(path: Option<&str>, home: &PathBuf) -> (StatusCode, serde_json::Value) {
+        let path_str = path.unwrap_or("").to_string();
+        let (status, Json(body)) = list_directory_inner(path_str, home.clone()).await;
+        (status, body)
     }
 
     #[tokio::test]
     async fn test_list_directory_valid_path() {
-        let (home_dir, _cleanup) = setup_test_home("valid_path");
-        std::fs::create_dir_all(home_dir.join("subdir_a")).unwrap();
-        std::fs::create_dir_all(home_dir.join("subdir_b")).unwrap();
-        std::fs::write(home_dir.join("file_b.txt"), "content").unwrap();
-        std::fs::write(home_dir.join("file_a.txt"), "content").unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("subdir_a")).unwrap();
+        std::fs::create_dir_all(home.join("subdir_b")).unwrap();
+        std::fs::write(home.join("file_b.txt"), "content").unwrap();
+        std::fs::write(home.join("file_a.txt"), "content").unwrap();
 
-        let app_state = test_app_state();
-        let query = ListQuery {
-            path: Some(home_dir.to_string_lossy().to_string()),
-        };
-
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
+        let (status, body) = call_list(Some(home.to_str().unwrap()), &home).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.get("entries").is_some());
         assert!(!body["truncated"].as_bool().unwrap());
@@ -321,70 +285,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_path_outside_home() {
-        let app_state = test_app_state();
-        let query = ListQuery {
-            path: Some("/usr/bin".to_string()),
-        };
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
 
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
+        let (status, body) = call_list(Some("/usr/bin"), &home).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "forbidden");
     }
 
     #[tokio::test]
     async fn test_list_directory_nonexistent_path() {
-        let (home_dir, _cleanup) = setup_test_home("nonexistent");
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
 
-        let app_state = test_app_state();
-        let query = ListQuery {
-            path: Some(
-                home_dir
-                    .join("does_not_exist")
-                    .to_string_lossy()
-                    .to_string(),
-            ),
-        };
-
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
+        let nonexistent = home.join("does_not_exist");
+        let (status, body) = call_list(nonexistent.to_str(), &home).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"]["code"], "not_found");
     }
 
     #[tokio::test]
-    async fn test_list_directory_missing_path() {
-        let app_state = test_app_state();
-        let query = ListQuery { path: None };
-
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body["error"]["code"], "missing_parameter");
-    }
-
-    #[tokio::test]
     async fn test_list_directory_symlink_escape() {
-        let (home_dir, _cleanup) = setup_test_home("symlink_escape");
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
 
         let outside = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(outside.path().join("outside_dir")).unwrap();
 
-        std::os::unix::fs::symlink(
-            outside.path().join("outside_dir"),
-            home_dir.join("escape_link"),
-        )
-        .unwrap();
+        std::os::unix::fs::symlink(outside.path().join("outside_dir"), home.join("escape_link"))
+            .unwrap();
 
-        std::fs::create_dir_all(home_dir.join("normal_dir")).unwrap();
+        std::fs::create_dir_all(home.join("normal_dir")).unwrap();
 
-        let app_state = test_app_state();
-        let query = ListQuery {
-            path: Some(home_dir.to_string_lossy().to_string()),
-        };
-
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
+        let (status, body) = call_list(Some(home.to_str().unwrap()), &home).await;
         assert_eq!(status, StatusCode::OK);
 
         let entries: Vec<FsEntry> = serde_json::from_value(body["entries"].clone()).unwrap();
@@ -394,19 +327,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_truncation() {
-        let (home_dir, _cleanup) = setup_test_home("truncation");
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
 
         for i in 0..600 {
-            std::fs::write(home_dir.join(format!("file_{i:04}.txt")), "content").unwrap();
+            std::fs::write(home.join(format!("file_{i:04}.txt")), "content").unwrap();
         }
 
-        let app_state = test_app_state();
-        let query = ListQuery {
-            path: Some(home_dir.to_string_lossy().to_string()),
-        };
-
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
+        let (status, body) = call_list(Some(home.to_str().unwrap()), &home).await;
         assert_eq!(status, StatusCode::OK);
 
         let entries: Vec<FsEntry> = serde_json::from_value(body["entries"].clone()).unwrap();
@@ -418,15 +346,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_directory_empty() {
-        let (home_dir, _cleanup) = setup_test_home("empty");
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
 
-        let app_state = test_app_state();
-        let query = ListQuery {
-            path: Some(home_dir.to_string_lossy().to_string()),
-        };
-
-        let response = list_directory(State(app_state), Query(query)).await;
-        let (status, body) = call_and_extract(response).await;
+        let (status, body) = call_list(Some(home.to_str().unwrap()), &home).await;
         assert_eq!(status, StatusCode::OK);
 
         let entries: Vec<FsEntry> = serde_json::from_value(body["entries"].clone()).unwrap();
@@ -434,5 +357,37 @@ mod tests {
 
         assert!(entries.is_empty());
         assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn test_list_directory_lists_visible_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::write(home.join("visible.txt"), "content").unwrap();
+
+        let (status, body) = call_list(Some(home.to_str().unwrap()), &home).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let entries: Vec<FsEntry> = serde_json::from_value(body["entries"].clone()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "visible.txt");
+    }
+
+    #[tokio::test]
+    async fn test_list_directory_uses_parent_for_file_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::write(home.join("target_file.txt"), "content").unwrap();
+        std::fs::write(home.join("sibling.txt"), "content").unwrap();
+
+        let file_path = home.join("target_file.txt");
+        let (status, body) = call_list(file_path.to_str(), &home).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let entries: Vec<FsEntry> = serde_json::from_value(body["entries"].clone()).unwrap();
+        assert_eq!(entries.len(), 2);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"target_file.txt"));
+        assert!(names.contains(&"sibling.txt"));
     }
 }

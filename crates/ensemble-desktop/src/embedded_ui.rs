@@ -10,22 +10,14 @@ struct SpaAssets;
 
 /// Check if SPA is available
 pub fn spa_available() -> bool {
-    core_spa_available(|asset_path| {
-        SpaAssets::get(asset_path)
-            .map(|file| file.data.into_owned().into_boxed_slice())
-            .map(Box::leak)
-            .map(|bytes| &*bytes)
-    })
+    core_spa_available(|asset_path| SpaAssets::get(asset_path).map(|f| f.data))
 }
 
 /// Serve the SPA with fallback to index.html for client-side routing.
 /// This is an axum-compatible handler that mirrors the CLI embedded_ui implementation.
 pub async fn serve_spa(uri: Uri) -> impl IntoResponse {
     serve_spa_response(uri.path(), |asset_path| {
-        SpaAssets::get(asset_path)
-            .map(|file| file.data.into_owned().into_boxed_slice())
-            .map(Box::leak)
-            .map(|bytes| &*bytes)
+        SpaAssets::get(asset_path).map(|f| f.data)
     })
 }
 

@@ -1,4 +1,5 @@
 use ensemble_core::ui::{normalize_spa_path, resolve_spa_asset};
+use std::borrow::Cow;
 
 #[test]
 fn normalize_spa_path_maps_root_to_index() {
@@ -9,7 +10,7 @@ fn normalize_spa_path_maps_root_to_index() {
 #[test]
 fn resolve_spa_asset_checks_html_and_directory_fallbacks() {
     let resolved = resolve_spa_asset("/settings", |path| match path {
-        "settings.html" => Some(b"settings".as_slice()),
+        "settings.html" => Some(Cow::Borrowed(b"settings".as_slice())),
         _ => None,
     });
 
@@ -21,7 +22,7 @@ fn resolve_spa_asset_checks_html_and_directory_fallbacks() {
 #[test]
 fn resolve_spa_asset_falls_back_to_root_index() {
     let resolved = resolve_spa_asset("/missing", |path| match path {
-        "index.html" => Some(b"root-index".as_slice()),
+        "index.html" => Some(Cow::Borrowed(b"root-index".as_slice())),
         _ => None,
     });
 

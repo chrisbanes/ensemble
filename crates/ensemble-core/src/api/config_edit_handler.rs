@@ -935,8 +935,16 @@ custom_root:
     }
 
     #[test]
-    fn redact_secrets_handles_equals_separator() {
+    fn redact_secrets_redacts_literal_secret() {
         let yaml = "secret: mysecretvalue";
+        let redacted = redact_secrets(yaml);
+        assert!(!redacted.contains("mysecretvalue"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_handles_equals_separator() {
+        let yaml = "secret=mysecretvalue";
         let redacted = redact_secrets(yaml);
         assert!(!redacted.contains("mysecretvalue"));
         assert!(redacted.contains("[REDACTED]"));
