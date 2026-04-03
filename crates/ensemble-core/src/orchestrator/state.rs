@@ -227,8 +227,8 @@ impl OrchestratorState {
     }
 
     /// Get all running issue IDs.
-    pub fn running_issue_ids(&self) -> Vec<String> {
-        self.running.keys().cloned().collect()
+    pub fn running_issue_ids(&self) -> impl Iterator<Item = &str> {
+        self.running.keys().map(|k| k.as_str())
     }
 
     /// Get an immutable reference to a pipeline run.
@@ -445,7 +445,7 @@ mod tests {
         state.add_running(&test_issue("a", "Todo"), None);
         state.add_running(&test_issue("b", "Todo"), None);
 
-        let mut ids = state.running_issue_ids();
+        let mut ids: Vec<&str> = state.running_issue_ids().collect();
         ids.sort();
         assert_eq!(ids, vec!["a", "b"]);
     }

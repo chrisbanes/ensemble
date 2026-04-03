@@ -87,7 +87,7 @@ pub async fn reconcile_tracker_states(
     active_states_lower: &[String],
     terminal_states_lower: &[String],
 ) -> ReconcileTrackerResult {
-    let running_ids = state.running_issue_ids();
+    let running_ids: Vec<String> = state.running_issue_ids().map(|s| s.to_string()).collect();
     if running_ids.is_empty() {
         return ReconcileTrackerResult {
             updates: vec![],
