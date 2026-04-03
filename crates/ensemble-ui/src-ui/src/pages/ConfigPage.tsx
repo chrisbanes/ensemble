@@ -90,6 +90,12 @@ export default function ConfigPage() {
     await refetch();
   };
 
+  const guidedForm = data?.guided_form;
+  const memoizedForm = useMemo(
+    () => (guidedForm ? toGuidedForm(guidedForm) : null),
+    [guidedForm]
+  );
+
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading configuration...</div>;
   }
@@ -101,11 +107,6 @@ export default function ConfigPage() {
   if (!data) return null;
 
   const { state, raw_yaml: rawYaml } = data;
-  const guidedForm = data.guided_form;
-  const memoizedForm = useMemo(
-    () => (guidedForm ? toGuidedForm(guidedForm) : null),
-    [guidedForm]
-  );
 
   const hasIssues = (displayedIssues.length > 0 || issues.length > 0);
   const isEditable = state === "parsed";

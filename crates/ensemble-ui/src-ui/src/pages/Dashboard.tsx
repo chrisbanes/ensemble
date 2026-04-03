@@ -8,14 +8,14 @@ import AgentTotals from "@/components/AgentTotals";
 
 export default function Dashboard() {
   const { data: configState } = useConfigStateQuery();
-  if (configState?.state === "missing") {
-    return <Navigate to="/config" replace />;
-  }
-
   const { data, isLoading, isError, error } = useStateQuery();
   const refreshMutation = useRefreshMutation();
   const retryMutation = useRetryMutation();
   const pollCountdown = useNextPollCountdown(data?.last_tick_at ?? null, data?.poll_interval_ms);
+
+  if (configState?.state === "missing") {
+    return <Navigate to="/config" replace />;
+  }
 
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
