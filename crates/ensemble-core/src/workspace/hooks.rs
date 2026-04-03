@@ -11,7 +11,8 @@ const STDERR_TRUNCATE_LIMIT: usize = 500;
 
 /// Run a shell hook script in the given workspace directory with a timeout.
 ///
-/// The script is executed via `bash -lc <script>` with cwd set to `workspace_path`.
+/// The script is executed via `bash -lc <script>` (falling back to `sh -lc` if
+/// bash is unavailable) with cwd set to `workspace_path`.
 /// Returns Ok(()) on success, Err on failure or timeout.
 pub async fn run_hook(
     hook_name: &str,
@@ -23,8 +24,16 @@ pub async fn run_hook(
 
     let duration = Duration::from_millis(timeout_ms);
 
+    // Try bash first, fall back to sh if unavailable
+    let shell = if Command::new("bash").arg("--version").output().await.is_ok() {
+        "bash"
+    } else {
+        warn!(hook = hook_name, "bash not found, falling back to sh for hook execution");
+        "sh"
+    };
+
     // kill_on_drop ensures the child is killed if we drop it (e.g. on timeout)
-    let child = Command::new("bash")
+    let child = Command::new(shell)
         .arg("-lc")
         .arg(script)
         .current_dir(workspace_path)
