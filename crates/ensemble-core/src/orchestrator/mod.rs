@@ -501,22 +501,15 @@ impl Orchestrator {
     ) {
         let mut state = self.state.write().await;
 
+        // Handle special cases
         match &event {
-            AgentEvent::SessionStarted {
-                session_id,
-                agent_pid,
-            } => {
+            AgentEvent::SessionStarted { session_id, agent_pid } => {
                 state.update_session_info(issue_id, session_id, agent_pid.as_deref());
-                state.update_agent_event(issue_id, "session_started", None, timestamp);
             }
             AgentEvent::TurnStarted => {
                 state.increment_turn_count(issue_id);
-                state.update_agent_event(issue_id, "turn_started", None, timestamp);
             }
-            AgentEvent::TurnUpdate { content } => {
-                state.update_agent_event(issue_id, "turn_update", Some(content), timestamp);
-            }
-            AgentEvent::TurnCompleted { usage } => {
+            AgentEvent::TurnCompleted { usage } | AgentEvent::TurnFailed { usage, .. } => {
                 if let Some(u) = usage {
                     state.update_token_usage(
                         issue_id,
@@ -525,50 +518,17 @@ impl Orchestrator {
                         u.total_tokens,
                     );
                 }
-                state.update_agent_event(issue_id, "turn_completed", None, timestamp);
             }
-            AgentEvent::TurnFailed { reason, usage } => {
-                if let Some(u) = usage {
-                    state.update_token_usage(
-                        issue_id,
-                        u.input_tokens,
-                        u.output_tokens,
-                        u.total_tokens,
-                    );
-                }
-                state.update_agent_event(issue_id, "turn_failed", Some(reason), timestamp);
-            }
-            AgentEvent::PermissionRequested { description, .. } => {
-                state.update_agent_event(
-                    issue_id,
-                    "permission_requested",
-                    Some(description),
-                    timestamp,
-                );
-            }
-            AgentEvent::PermissionResolved { .. } => {
-                state.update_agent_event(issue_id, "permission_resolved", None, timestamp);
-            }
-            AgentEvent::Notification { message } => {
-                state.update_agent_event(issue_id, "notification", Some(message), timestamp);
-            }
-            AgentEvent::OtherMessage { raw } => {
-                state.update_agent_event(
-                    issue_id,
-                    "other_message",
-                    Some(&raw.chars().take(100).collect::<String>()),
-                    timestamp,
-                );
-            }
-            AgentEvent::Malformed { line } => {
-                state.update_agent_event(
-                    issue_id,
-                    "malformed",
-                    Some(&line.chars().take(100).collect::<String>()),
-                    timestamp,
-                );
-            }
+            _ => {}
         }
+
+        // Common path: update agent event
+        state.update_agent_event(
+            issue_id,
+            event.event_name(),
+            event.message_for_state().as_deref(),
+            timestamp,
+        );
     }
 
     /// Handle a worker exit. Integrates with PipelineRun to drive step DAG.

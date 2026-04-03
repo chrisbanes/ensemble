@@ -84,6 +84,37 @@ pub enum AgentEvent {
     },
 }
 
+impl AgentEvent {
+    /// Returns the event name for logging/state tracking.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            AgentEvent::SessionStarted { .. } => "session_started",
+            AgentEvent::TurnStarted => "turn_started",
+            AgentEvent::TurnUpdate { .. } => "turn_update",
+            AgentEvent::TurnCompleted { .. } => "turn_completed",
+            AgentEvent::TurnFailed { .. } => "turn_failed",
+            AgentEvent::PermissionRequested { .. } => "permission_requested",
+            AgentEvent::PermissionResolved { .. } => "permission_resolved",
+            AgentEvent::Notification { .. } => "notification",
+            AgentEvent::OtherMessage { .. } => "other_message",
+            AgentEvent::Malformed { .. } => "malformed",
+        }
+    }
+
+    /// Returns the message content for state tracking, truncated.
+    pub fn message_for_state(&self) -> Option<String> {
+        match self {
+            AgentEvent::TurnUpdate { content } => Some(content.clone()),
+            AgentEvent::TurnFailed { reason, .. } => Some(reason.clone()),
+            AgentEvent::PermissionRequested { description, .. } => Some(description.clone()),
+            AgentEvent::Notification { message } => Some(message.clone()),
+            AgentEvent::OtherMessage { raw } => Some(raw.chars().take(100).collect()),
+            AgentEvent::Malformed { line } => Some(line.chars().take(100).collect()),
+            _ => None,
+        }
+    }
+}
+
 /// Events sent from worker tasks to the orchestrator.
 #[derive(Debug)]
 pub enum WorkerEvent {
