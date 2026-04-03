@@ -532,4 +532,18 @@ on_failure: Todo
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
         assert_eq!(cmd, "'codex' '--profile' 'prod;' 'touch' '/tmp/pwned'");
     }
+
+    #[test]
+    fn test_resolve_agent_command_escapes_executor() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: None,
+            model: None,
+            executor: Some("my-agent; rm -rf /".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        assert_eq!(cmd, "'my-agent; rm -rf /'");
+    }
 }
