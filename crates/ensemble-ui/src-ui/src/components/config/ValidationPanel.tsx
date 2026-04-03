@@ -27,7 +27,7 @@ export default function ValidationPanel({
             className="text-sm text-destructive/90 flex items-start gap-2"
           >
             <span className="font-mono text-xs bg-destructive/20 px-1.5 py-0.5 rounded">
-              {issue.section}
+              {issue.section ?? ""}
               {issue.field && `.${issue.field}`}
             </span>
             <span>{issue.message}</span>

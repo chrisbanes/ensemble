@@ -80,48 +80,127 @@ pub async fn list_directory(
 
     let target = PathBuf::from(&path_str);
 
-    // Resolve symlinks for the target path itself
-    let canonical_target = if target.exists() {
-        match std::fs::canonicalize(&target) {
-            Ok(c) => c,
-            Err(e) => {
-                let error = ApiError::new("io_error", &format!("failed to resolve path: {e}"));
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::to_value(error).unwrap()),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        // Path doesn't exist — check if parent can be canonicalized
-        if let Some(parent) = target.parent() {
-            if parent.exists() {
-                // Path doesn't exist within a valid parent
-                let error = ApiError::new("not_found", "path does not exist");
-                return (
+    // Wrap all blocking I/O in spawn_blocking
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<Vec<FsEntry>, (StatusCode, ApiError)> {
+            // Resolve symlinks for the target path itself
+            let canonical_target = if target.exists() {
+                match std::fs::canonicalize(&target) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            ApiError::new("io_error", &format!("failed to resolve path: {e}")),
+                        ));
+                    }
+                }
+            } else {
+                return Err((
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::to_value(error).unwrap()),
-                )
-                    .into_response();
-            }
-        }
-        let error = ApiError::new("not_found", "path does not exist");
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::to_value(error).unwrap()),
-        )
-            .into_response();
-    };
+                    ApiError::new("not_found", "path does not exist"),
+                ));
+            };
 
-    // Check that the canonical target is within home directory
-    let canonical_home = match std::fs::canonicalize(&home_dir) {
-        Ok(c) => c,
+            // Check that the canonical target is within home directory
+            let canonical_home = match std::fs::canonicalize(&home_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        ApiError::new(
+                            "internal_error",
+                            &format!("failed to resolve home directory: {e}"),
+                        ),
+                    ));
+                }
+            };
+
+            if !canonical_target.starts_with(&canonical_home) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    ApiError::new("forbidden", "path is outside the home directory"),
+                ));
+            }
+
+            if !canonical_target.is_dir() {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    ApiError::new("not_found", "path is not a directory"),
+                ));
+            }
+
+            // Read directory contents
+            let entries = match std::fs::read_dir(&canonical_target) {
+                Ok(rd) => rd,
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        ApiError::new("io_error", &format!("failed to read directory: {e}")),
+                    ));
+                }
+            };
+
+            let mut dirs: Vec<FsEntry> = Vec::new();
+            let mut files: Vec<FsEntry> = Vec::new();
+
+            for entry_result in entries {
+                let entry = match entry_result {
+                    Ok(e) => e,
+                    Err(e) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            ApiError::new(
+                                "io_error",
+                                &format!("failed to read directory entry: {e}"),
+                            ),
+                        ));
+                    }
+                };
+
+                let entry_path = entry.path();
+
+                // Resolve symlinks and check if the resolved path is within home
+                let canonical_entry = match std::fs::canonicalize(&entry_path) {
+                    Ok(c) => c,
+                    Err(_) => continue, // Skip entries we can't canonicalize
+                };
+
+                if !canonical_entry.starts_with(&canonical_home) {
+                    // Symlink escapes home — exclude from results
+                    continue;
+                }
+
+                let is_dir = canonical_entry.is_dir();
+                let name = entry.file_name().to_string_lossy().to_string();
+                let path = entry_path.to_string_lossy().to_string();
+
+                let fs_entry = FsEntry { name, is_dir, path };
+
+                if is_dir {
+                    dirs.push(fs_entry);
+                } else {
+                    files.push(fs_entry);
+                }
+            }
+
+            // Sort alphabetically within each group
+            dirs.sort_by(|a, b| a.name.cmp(&b.name));
+            files.sort_by(|a, b| a.name.cmp(&b.name));
+
+            let mut all_entries = dirs;
+            all_entries.extend(files);
+
+            Ok(all_entries)
+        })
+        .await;
+
+    let mut all_entries = match result {
+        Ok(Ok(entries)) => entries,
+        Ok(Err((status, error))) => {
+            return (status, Json(serde_json::to_value(error).unwrap())).into_response();
+        }
         Err(e) => {
-            let error = ApiError::new(
-                "internal_error",
-                &format!("failed to resolve home directory: {e}"),
-            );
+            let error = ApiError::new("internal_error", &format!("task join error: {e}"));
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::to_value(error).unwrap()),
@@ -129,87 +208,6 @@ pub async fn list_directory(
                 .into_response();
         }
     };
-
-    if !canonical_target.starts_with(&canonical_home) {
-        let error = ApiError::new("forbidden", "path is outside the home directory");
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::to_value(error).unwrap()),
-        )
-            .into_response();
-    }
-
-    if !canonical_target.is_dir() {
-        let error = ApiError::new("not_found", "path is not a directory");
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::to_value(error).unwrap()),
-        )
-            .into_response();
-    }
-
-    // Read directory contents
-    let entries = match std::fs::read_dir(&canonical_target) {
-        Ok(rd) => rd,
-        Err(e) => {
-            let error = ApiError::new("io_error", &format!("failed to read directory: {e}"));
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::to_value(error).unwrap()),
-            )
-                .into_response();
-        }
-    };
-
-    let mut dirs: Vec<FsEntry> = Vec::new();
-    let mut files: Vec<FsEntry> = Vec::new();
-
-    for entry_result in entries {
-        let entry = match entry_result {
-            Ok(e) => e,
-            Err(e) => {
-                let error =
-                    ApiError::new("io_error", &format!("failed to read directory entry: {e}"));
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::to_value(error).unwrap()),
-                )
-                    .into_response();
-            }
-        };
-
-        let entry_path = entry.path();
-
-        // Resolve symlinks and check if the resolved path is within home
-        let canonical_entry = match std::fs::canonicalize(&entry_path) {
-            Ok(c) => c,
-            Err(_) => continue, // Skip entries we can't canonicalize
-        };
-
-        if !canonical_entry.starts_with(&canonical_home) {
-            // Symlink escapes home — exclude from results
-            continue;
-        }
-
-        let is_dir = canonical_entry.is_dir();
-        let name = entry.file_name().to_string_lossy().to_string();
-        let path = entry_path.to_string_lossy().to_string();
-
-        let fs_entry = FsEntry { name, is_dir, path };
-
-        if is_dir {
-            dirs.push(fs_entry);
-        } else {
-            files.push(fs_entry);
-        }
-    }
-
-    // Sort alphabetically within each group
-    dirs.sort_by(|a, b| a.name.cmp(&b.name));
-    files.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut all_entries = dirs;
-    all_entries.extend(files);
 
     let truncated = all_entries.len() > MAX_ENTRIES;
     all_entries.truncate(MAX_ENTRIES);

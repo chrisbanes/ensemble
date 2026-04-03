@@ -116,7 +116,7 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
 
           return (
             <div
-              key={index}
+              key={step.name || `${index}`}
               className="flex items-start gap-3 p-4 border rounded-lg bg-card"
             >
               <div className="flex flex-col gap-1">

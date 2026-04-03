@@ -107,15 +107,6 @@ export function useHistoryQuery(params: GetHistoryParams) {
   });
 }
 
-export function useConfigQuery() {
-  return useGetConfig<ConfigStateResponse>({
-    query: {
-      staleTime: 60_000,
-      select: (resp) => resp.data as ConfigStateResponse,
-    },
-  });
-}
-
 export function useConfigStateQuery() {
   return useGetConfig<ConfigStateResponse>({
     query: {

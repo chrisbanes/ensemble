@@ -111,8 +111,9 @@ export default function GuidedEditor({
   const [trackerPathBrowserOpen, setTrackerPathBrowserOpen] = useState(false);
 
   useEffect(() => {
-    setDisplayedIssues(issues);
-  }, [issues]);
+    setForm(initialForm);
+    setIsDirty(false);
+  }, [initialForm]);
 
   const handleFormChange = (updates: Partial<GuidedForm>) => {
     setForm((prev) => ({ ...prev, ...updates }));
@@ -120,18 +121,13 @@ export default function GuidedEditor({
   };
 
   const handleValidate = async () => {
-    setIsValidating(true);
+      setIsValidating(true);
     try {
-      try {
-        const nextIssues = await onValidate(form, baseRawYaml);
-        setDisplayedIssues(nextIssues);
-        setLastValidation({
-          timestamp: new Date(),
-          issues: nextIssues,
-        });
-      } catch {
-        // Keep the last visible issues when validation fails.
-      }
+      const validatedIssues = await onValidate(form, baseRawYaml);
+      setLastValidation({
+        timestamp: new Date(),
+        issues: validatedIssues,
+      });
     } finally {
       setIsValidating(false);
     }
@@ -216,7 +212,7 @@ export default function GuidedEditor({
                 <ul className="mt-2 space-y-1 text-sm text-red-700 dark:text-red-300">
                   {displayedIssues.map((issue, i) => (
                     <li key={i}>
-                      {issue.section && `${issue.section}: `}
+              {issue.section ? `${issue.section}: ` : ""}
                       {issue.message}
                     </li>
                   ))}
@@ -410,7 +406,7 @@ export default function GuidedEditor({
                   handleFormChange({
                     runtime: {
                       ...form.runtime,
-                      max_cycles: parseInt(e.target.value) || 0,
+                      max_cycles: parseInt(e.target.value, 10) || 0,
                     },
                   })
                 }
@@ -428,7 +424,7 @@ export default function GuidedEditor({
                       ...form.runtime,
                       concurrency: {
                         ...form.runtime.concurrency,
-                        max_concurrent_agents: parseInt(e.target.value) || 0,
+                          max_concurrent_agents: parseInt(e.target.value, 10) || 0,
                       },
                     },
                   })
@@ -446,7 +442,7 @@ export default function GuidedEditor({
                     runtime: {
                       ...form.runtime,
                       polling: {
-                        interval_ms: parseInt(e.target.value) || 0,
+                        interval_ms: parseInt(e.target.value, 10) || 0,
                       },
                     },
                   })

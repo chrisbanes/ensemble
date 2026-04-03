@@ -25,8 +25,8 @@ futures-util = { workspace = true }
 utoipa = { workspace = true }
 dirs = { workspace = true }
 dotenvy = { workspace = true }
-shellexpand = "3"
-shlex = "1"
+shellexpand = { workspace = true }
+mime_guess = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

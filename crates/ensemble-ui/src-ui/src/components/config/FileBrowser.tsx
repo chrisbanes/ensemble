@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Dialog } from "@base-ui/react";
 import { Button } from "@/components/ui/button";
+import { File, Folder } from "lucide-react";
 
 interface FsEntry {
   name: string;
@@ -23,6 +24,10 @@ interface FileBrowserProps {
 }
 
 type FetchState = "idle" | "loading" | "error";
+
+function hasParentTraversal(path: string) {
+  return path.split("/").some((segment) => segment === "..");
+}
 
 function getBreadcrumbSegments(currentPath: string): { label: string; path: string }[] {
   if (currentPath === "/") return [{ label: "/", path: "/" }];
@@ -53,6 +58,12 @@ export default function FileBrowser({
   const [truncated, setTruncated] = useState(false);
 
   const fetchDirectory = useCallback(async (path: string) => {
+    if (hasParentTraversal(path)) {
+      setErrorMessage("Parent directory traversal is not allowed");
+      setFetchState("error");
+      setEntries([]);
+      return;
+    }
     setFetchState("loading");
     setErrorMessage(null);
     setSelectedPath(null);
@@ -132,8 +143,8 @@ export default function FileBrowser({
       onOpenChange={(isOpen: boolean) => onOpenChange(isOpen)}
       modal
     >
-      <Dialog.Backdrop className="fixed inset-0 bg-black/50 z-40" />
       <Dialog.Portal>
+        <Dialog.Backdrop className="fixed inset-0 bg-black/50 z-40" />
         <Dialog.Popup
           className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-background border rounded-lg shadow-lg w-full max-w-2xl max-h-[80vh] flex flex-col"
         >
@@ -202,7 +213,7 @@ export default function FileBrowser({
                       onDoubleClick={() => handleDoubleClick(entry)}
                     >
                       <span className="shrink-0">
-                        {entry.is_dir ? "\uD83D\uDCC1" : "\uD83D\uDCC4"}
+                        {entry.is_dir ? <Folder className="h-4 w-4" /> : <File className="h-4 w-4" />}
                       </span>
                       <span className="truncate">{entry.name}</span>
                     </li>

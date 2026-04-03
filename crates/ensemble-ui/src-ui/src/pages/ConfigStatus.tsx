@@ -1,11 +1,12 @@
-import { useConfigQuery } from "@/hooks";
+import { useConfigStateQuery } from "@/hooks";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { AlertTriangle, CheckCircle2, XCircle } from "lucide-react";
 
 export default function ConfigStatus() {
-  const { data, isLoading, isError } = useConfigQuery();
+  const { data, isLoading, isError } = useConfigStateQuery();
 
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading configuration...</div>;
@@ -37,13 +38,13 @@ export default function ConfigStatus() {
             : "bg-red-50 dark:bg-red-900/30 border-red-200 dark:border-red-800",
       )}>
         <div className="flex items-center gap-2">
-          <span className={cn("text-lg", 
-            isValid ? "text-green-600 dark:text-green-400" : 
-            hasIssues ? "text-yellow-600 dark:text-yellow-400" :
-            "text-red-600 dark:text-red-400"
-          )}>
-            {isValid ? "✓" : hasIssues ? "⚠" : "✗"}
-          </span>
+          {isValid ? (
+            <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />
+          ) : hasIssues ? (
+            <AlertTriangle className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />
+          ) : (
+            <XCircle className="h-5 w-5 text-red-600 dark:text-red-400" />
+          )}
           <span className={cn("font-medium", 
             isValid ? "text-green-800 dark:text-green-200" :
             hasIssues ? "text-yellow-800 dark:text-yellow-200" :

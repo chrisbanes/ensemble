@@ -12,6 +12,7 @@ import type {
 } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { 
   Select,
@@ -213,6 +214,10 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     }
   }, [draft.agents, currentStep]);
 
+  useEffect(() => {
+    hasVisitedWorkflow.current = false;
+  }, [draft.agents]);
+
   const handleTrackerKindChange = (value: TrackerKind) => {
     if (value === "todo_file") {
       setDraft(prev => ({
@@ -310,8 +315,8 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               onChange={(e) => setDraft(prev => ({
                 ...prev,
                 tracker: { 
-                  ...prev.tracker,
-                  project_number: e.target.value ? parseInt(e.target.value) : null,
+                  ...DEFAULT_GH_TRACKER,
+                  project_number: e.target.value ? parseInt(e.target.value, 10) : null,
                 } as SetupTracker,
               }))}
             />
@@ -352,6 +357,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           size="icon"
           onClick={() => setRepoPathBrowserOpen(true)}
           title="Browse for directory"
+          aria-label="Browse for repository directory"
         >
           <FolderOpen className="h-4 w-4" />
         </Button>
@@ -366,6 +372,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           variant="outline"
           size="icon"
           onClick={handleAddRepo}
+          aria-label="Add repository"
         >
           <Plus className="h-4 w-4" />
         </Button>
@@ -463,18 +470,6 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm">Model (optional)</label>
-                  <Input
-                    value={agent.model || ""}
-                    onChange={(e) => setDraft(prev => {
-                      const newAgents = [...prev.agents];
-                      newAgents[index] = { ...agent, model: e.target.value || null };
-                      return { ...prev, agents: newAgents };
-                    })}
-                    placeholder="e.g., gpt-4"
-                  />
-                </div>
-                <div className="space-y-2">
                   <label className="text-sm" htmlFor={`agent-select-${index}`}>Agent</label>
                   <Select
                     value={isCustom ? "__custom__" : agent.acpx_agent}
@@ -496,7 +491,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                       }
                     }}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger id={`agent-select-${index}`}>
                       <SelectValue placeholder="Select agent" />
                     </SelectTrigger>
                     <SelectContent>
@@ -545,7 +540,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
 
               {/* Prompt Configuration */}
               <div className="space-y-2 pt-2 border-t">
-                <label className="text-sm">Prompt Configuration</label>
+                <label className="text-sm" htmlFor={`prompt-mode-${index}`}>Prompt Configuration</label>
                 <Select
                   value={promptMode}
                   onValueChange={(value) => {
@@ -562,7 +557,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                     });
                   }}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger id={`prompt-mode-${index}`}>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
@@ -572,8 +567,8 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                 </Select>
 
                 {promptMode === "inline" ? (
-                  <textarea
-                    className="w-full min-h-[100px] p-2 text-sm border rounded-md bg-background"
+                  <Textarea
+                    className="min-h-[100px]"
                     placeholder="Enter prompt content..."
                     value={agent.prompt || ""}
                     onChange={(e) => setDraft(prev => {
@@ -624,12 +619,20 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               ? draft.agents[activePromptAgentIndex]?.prompt_file || "~" 
               : "~"}
             onSelect={(path) => {
-              if (activePromptAgentIndex !== null) {
+              if (
+                activePromptAgentIndex !== null
+                && activePromptAgentIndex >= 0
+                && activePromptAgentIndex < draft.agents.length
+              ) {
                 setDraft(prev => {
                   const newAgents = [...prev.agents];
-                  newAgents[activePromptAgentIndex] = { 
-                    ...newAgents[activePromptAgentIndex]!, 
-                    prompt_file: path 
+                  const selectedAgent = newAgents[activePromptAgentIndex];
+                  if (!selectedAgent) {
+                    return prev;
+                  }
+                  newAgents[activePromptAgentIndex] = {
+                    ...selectedAgent,
+                    prompt_file: path,
                   };
                   return { ...prev, agents: newAgents };
                 });

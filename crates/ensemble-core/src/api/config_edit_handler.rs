@@ -10,6 +10,33 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+/// Redact literal secret values from YAML text.
+/// Preserves `$ENV_VAR` references (they're not actual secrets in the file).
+/// Patterns matched (case-insensitive, as YAML keys): api_key, token, password, secret.
+fn redact_secrets(yaml: &str) -> String {
+    let secret_keys = ["api_key", "token", "password", "secret"];
+    yaml.lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let lower = trimmed.to_lowercase();
+            for &key in &secret_keys {
+                let prefix = format!("{key}:");
+                let prefix_eq = format!("{key}=");
+                if lower.starts_with(&prefix) || lower.starts_with(&prefix_eq) {
+                    let sep_pos = trimmed.find(':').or_else(|| trimmed.find('=')).unwrap();
+                    let value = trimmed[sep_pos + 1..].trim();
+                    if !value.starts_with('$') {
+                        return format!("{}{} [REDACTED]", indent, &trimmed[..sep_pos + 1]);
+                    }
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Request to validate YAML content.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ValidateYamlRequest {
@@ -45,7 +72,7 @@ impl ConfigStateResponse {
         Self {
             state: state_str.to_string(),
             config_path: state.path.display().to_string(),
-            raw_yaml: state.raw_yaml.clone(),
+            raw_yaml: state.raw_yaml.as_ref().map(|y| redact_secrets(y)),
             issues: state.validation.issues.clone(),
             active_config: state.active_config.clone(),
             guided_form,
@@ -112,20 +139,18 @@ pub async fn save_yaml(
     State(state): State<AppState>,
     Json(request): Json<SaveYamlRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
+    let mut doc_state = state.config_runtime.document_state.write().await;
+
     match save_raw_yaml_atomically(&state.config_runtime.config_path, &request.raw_yaml) {
         Ok(new_state) => {
-            // Update the runtime state
-            *state.config_runtime.document_state.write().await = new_state.clone();
+            *doc_state = new_state.clone();
             let response = ConfigStateResponse::from_state(&new_state);
             (StatusCode::OK, Json(response))
         }
-        Err(e) => {
-            let current = state.config_runtime.document_state.read().await.clone();
-            (
-                StatusCode::BAD_REQUEST,
-                Json(build_error_response(&current, &e)),
-            )
-        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(build_error_response(&doc_state, &e)),
+        ),
     }
 }
 
@@ -299,12 +324,12 @@ pub async fn save_setup(
     State(state): State<AppState>,
     Json(request): Json<SaveSetupRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
-    let current = state.config_runtime.document_state.read().await.clone();
+    let mut doc_state = state.config_runtime.document_state.write().await;
 
     // First validate the setup
     let checks = crate::config::setup::run_setup_checks(&request.setup).await;
     if !crate::config::setup::setup_can_save(&checks) {
-        let mut response = ConfigStateResponse::from_state(&current);
+        let mut response = ConfigStateResponse::from_state(&doc_state);
         response.issues.push(ValidationIssue {
             kind: crate::config::draft::ValidationIssueKind::Config,
             message: "Setup validation failed".to_string(),
@@ -316,14 +341,14 @@ pub async fn save_setup(
     }
 
     let artifacts = match crate::config::setup::merge_setup_request(
-        current.raw_yaml.as_deref(),
+        doc_state.raw_yaml.as_deref(),
         &request.setup,
     ) {
         Ok(artifacts) => artifacts,
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(build_error_response(&current, &e)),
+                Json(build_error_response(&doc_state, &e)),
             )
         }
     };
@@ -338,19 +363,19 @@ pub async fn save_setup(
         Ok(()) => {
             match crate::config::draft::load_config_state(&state.config_runtime.config_path) {
                 Ok(new_state) => {
-                    *state.config_runtime.document_state.write().await = new_state.clone();
+                    *doc_state = new_state.clone();
                     let response = ConfigStateResponse::from_state(&new_state);
                     (StatusCode::OK, Json(response))
                 }
                 Err(e) => (
                     StatusCode::BAD_REQUEST,
-                    Json(build_error_response(&current, &e)),
+                    Json(build_error_response(&doc_state, &e)),
                 ),
             }
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(build_error_response(&current, &e)),
+            Json(build_error_response(&doc_state, &e)),
         ),
     }
 }
@@ -531,13 +556,14 @@ pub async fn save_guided_form(
     State(state): State<AppState>,
     Json(request): Json<SaveGuidedFormRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
+    let mut doc_state = state.config_runtime.document_state.write().await;
+
     // First, merge the guided form with the base YAML
     let merged_yaml =
         match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
             Ok(yaml) => yaml,
             Err(e) => {
-                let current = state.config_runtime.document_state.read().await.clone();
-                let mut response = ConfigStateResponse::from_state(&current);
+                let mut response = ConfigStateResponse::from_state(&doc_state);
                 response.issues.push(crate::config::draft::ValidationIssue {
                     kind: crate::config::draft::ValidationIssueKind::Config,
                     message: format!("Form merge failed: {}", e),
@@ -555,18 +581,14 @@ pub async fn save_guided_form(
         &merged_yaml,
     ) {
         Ok(new_state) => {
-            // Update the runtime state
-            *state.config_runtime.document_state.write().await = new_state.clone();
+            *doc_state = new_state.clone();
             let response = ConfigStateResponse::from_state(&new_state);
             (StatusCode::OK, Json(response))
         }
-        Err(e) => {
-            let current = state.config_runtime.document_state.read().await.clone();
-            (
-                StatusCode::BAD_REQUEST,
-                Json(build_error_response(&current, &e)),
-            )
-        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(build_error_response(&doc_state, &e)),
+        ),
     }
 }
 
@@ -885,5 +907,45 @@ custom_root:
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert!(response.issues.iter().any(|issue| issue.section == "setup"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_literal_api_key() {
+        let yaml = "tracker:\n  kind: github\n  api_key: ghp_secret123";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("[REDACTED]"));
+        assert!(!redacted.contains("ghp_secret123"));
+    }
+
+    #[test]
+    fn redact_secrets_preserves_env_var_reference() {
+        let yaml = "tracker:\n  api_key: $GITHUB_TOKEN";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("$GITHUB_TOKEN"));
+        assert!(!redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_token_and_password() {
+        let yaml = "auth:\n  token: abc123\n  password: hunter2";
+        let redacted = redact_secrets(yaml);
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_handles_equals_separator() {
+        let yaml = "secret: mysecretvalue";
+        let redacted = redact_secrets(yaml);
+        assert!(!redacted.contains("mysecretvalue"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_preserves_indentation() {
+        let yaml = "tracker:\n  api_key: ghp_secret";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.starts_with("tracker:\n  api_key:"));
     }
 }

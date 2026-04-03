@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 pub mod agents;
+pub mod convert;
 pub mod generate;
 pub mod pipeline;
 pub mod repos;
@@ -40,13 +41,45 @@ pub async fn execute(args: InitArgs) -> ExitCode {
         }
     };
 
-    // Check for legacy ensemble.yaml and warn
+    // Offer to migrate legacy ensemble.yaml before loading defaults.
     let legacy_path = resolved.config_dir.join("ensemble.yaml");
     if legacy_path.exists() && !resolved.config_path.exists() {
-        eprintln!(
-            "found legacy ensemble.yaml at {} - rename it to config.yaml",
-            legacy_path.display()
-        );
+        let rename_legacy = match inquire::Confirm::new(&format!(
+            "Found legacy {}. Rename it to {}?",
+            legacy_path.display(),
+            resolved.config_path.display()
+        ))
+        .with_default(true)
+        .prompt()
+        {
+            Ok(value) => value,
+            Err(e) => {
+                eprintln!("error: failed to confirm legacy config migration: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+
+        if rename_legacy {
+            if let Err(e) = std::fs::rename(&legacy_path, &resolved.config_path) {
+                eprintln!(
+                    "error: failed to rename {} to {}: {e}",
+                    legacy_path.display(),
+                    resolved.config_path.display()
+                );
+                return ExitCode::FAILURE;
+            }
+            println!(
+                "Renamed {} to {}.",
+                legacy_path.display(),
+                resolved.config_path.display()
+            );
+        } else {
+            eprintln!(
+                "warning: legacy config at {} will be ignored until renamed to {}",
+                legacy_path.display(),
+                resolved.config_path.display()
+            );
+        }
     }
 
     // Try to load existing config for defaults

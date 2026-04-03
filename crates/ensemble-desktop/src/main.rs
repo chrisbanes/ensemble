@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use ensemble_core::observability::events::EventBus;
 use tauri::Manager;
 use tracing::{info, warn};
 
@@ -45,23 +46,36 @@ fn main() {
         "Resolved configuration paths"
     );
 
-    // Create Tokio runtime for the server
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    // Create a single shared EventBus for both orchestrator and server
+    let event_bus = EventBus::new();
 
-    // Start the local HTTP server
-    let desktop_server = rt
-        .block_on(start_desktop_server(
-            resolved.config_dir.clone(),
+    // Initialize orchestrator before the Tauri builder so we don't block the UI thread.
+    // Use tauri::async_runtime::block_on instead of a manual tokio runtime.
+    let orchestrator = if resolved.config_path.exists() {
+        tauri::async_runtime::block_on(DesktopOrchestrator::new(
             resolved.config_path.clone(),
+            event_bus.clone(),
         ))
-        .unwrap_or_else(|e| {
-            eprintln!("Error: Failed to start desktop server: {}", e);
-            std::process::exit(1);
-        });
+        .ok()
+    } else {
+        info!("No config found - app running in setup mode");
+        None
+    };
+
+    // Start the local HTTP server using Tauri's async runtime
+    let desktop_server = tauri::async_runtime::block_on(start_desktop_server(
+        resolved.config_dir.clone(),
+        resolved.config_path.clone(),
+        event_bus.clone(),
+    ))
+    .unwrap_or_else(|e| {
+        eprintln!("Error: Failed to start desktop server: {}", e);
+        std::process::exit(1);
+    });
 
     info!(url = %desktop_server.url, "Desktop server started");
 
-    // Store server URL and runtime for use in Tauri setup
+    // Store server URL for use in Tauri setup
     let server_url = desktop_server.url.clone();
 
     tauri::Builder::default()
@@ -78,28 +92,13 @@ fn main() {
             .build()
             .expect("Failed to create main window");
 
-            // Initialize orchestrator if we have a valid config
-            rt.block_on(async {
-                if resolved.config_path.exists() {
-                    match DesktopOrchestrator::new(resolved.config_path.clone()).await {
-                        Ok(orchestrator) => {
-                            app.manage(orchestrator);
-                            info!("Orchestrator initialized successfully");
-                        }
-                        Err(e) => {
-                            warn!(
-                                error = %e,
-                                "Failed to initialize orchestrator - app will run in setup mode"
-                            );
-                        }
-                    }
-                } else {
-                    info!("No config found - app running in setup mode");
-                }
-            });
-
-            // Store runtime handle
-            app.manage(rt);
+            // Register orchestrator if it was initialized successfully
+            if let Some(orch) = orchestrator {
+                app.manage(orch);
+                info!("Orchestrator registered with Tauri app state");
+            } else if resolved.config_path.exists() {
+                warn!("Failed to initialize orchestrator - app will run in setup mode");
+            }
 
             info!("Ensemble Desktop initialized successfully");
             Ok(())

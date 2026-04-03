@@ -187,7 +187,14 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         }
     };
 
-    let actual_addr = listener.local_addr().unwrap();
+    let actual_addr = match listener.local_addr() {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!(error = %e, "failed to get local address");
+            eprintln!("error: failed to get local address: {}", e);
+            return ExitCode::FAILURE;
+        }
+    };
     info!(
         addr = %actual_addr,
         "HTTP server listening. Open http://{} in your browser",

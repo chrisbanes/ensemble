@@ -127,24 +127,19 @@ describe("SetupWizard", () => {
     await user.clear(branchInput);
     await user.type(branchInput, "main");
 
-    // Add the repository by clicking the icon button (no accessible name)
-    const addButtons = screen.getAllByRole("button").filter(btn => 
-      btn.className.includes("size-8")
-    );
-    expect(addButtons.length).toBeGreaterThan(0);
-    await user.click(addButtons[0]!);
+    await user.click(screen.getByRole("button", { name: /add repository/i }));
 
     // Navigate to Agents step
     await user.click(screen.getByRole("button", { name: /next/i }));
 
     // Fill in agent fields - wait for agents to load (skip loading check since mock is synchronous)
     await waitFor(() => {
-      const agentSelect = screen.getByRole("combobox");
+      const agentSelect = screen.getByLabelText("Agent");
       expect(agentSelect).toBeInTheDocument();
     });
 
     // Select an agent from dropdown
-    const agentSelect = screen.getByRole("combobox");
+    const agentSelect = screen.getByLabelText("Agent");
     await user.click(agentSelect);
     const builderOption = await screen.findByText(/builder agent/i);
     await user.click(builderOption);

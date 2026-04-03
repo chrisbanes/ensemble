@@ -4,7 +4,7 @@ use crate::commands::init::repos::RepoEntry;
 use crate::commands::init::tracker::TrackerChoice;
 use ensemble_core::config::setup::{
     build_setup_artifacts, merge_setup_request, resolve_tracker_output_path, write_setup_artifacts,
-    SetupAgent, SetupRepo, SetupRequest, SetupStep, SetupTracker,
+    SetupRequest, SetupTracker,
 };
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -23,60 +23,11 @@ fn to_setup_request(
     on_success: &str,
     on_failure: &str,
 ) -> SetupRequest {
-    let tracker = match tracker {
-        TrackerChoice::TodoFile { path } => SetupTracker::TodoFile { path: path.clone() },
-        TrackerChoice::GitHub {
-            repository,
-            project_number,
-            api_key_env,
-            api_token,
-            active_states,
-            terminal_states,
-            ..
-        } => SetupTracker::GitHub {
-            repository: repository.clone(),
-            project_number: *project_number,
-            api_key_env: api_key_env.clone(),
-            api_token: api_token.clone(),
-            active_states: active_states.clone(),
-            terminal_states: terminal_states.clone(),
-        },
-    };
-
-    let repos = repos
-        .iter()
-        .map(|r| SetupRepo {
-            path: r.path.clone(),
-            branch: r.branch.clone(),
-        })
-        .collect();
-
-    let agents = agents
-        .iter()
-        .map(|a| SetupAgent {
-            role: a.role.clone(),
-            acpx_agent: a.acpx_agent.clone(),
-            model: a.model.clone(),
-            prompt: None,
-            prompt_file: None,
-        })
-        .collect();
-
-    let steps = steps
-        .iter()
-        .map(|s| SetupStep {
-            name: s.name.clone(),
-            agent_role: s.agent_role.clone(),
-            depends: s.depends.clone(),
-            tracker_state: s.tracker_state.clone(),
-        })
-        .collect();
-
     SetupRequest {
-        tracker,
-        repos,
-        agents,
-        steps,
+        tracker: tracker.into(),
+        repos: repos.iter().map(Into::into).collect(),
+        agents: agents.iter().map(Into::into).collect(),
+        steps: steps.iter().map(Into::into).collect(),
         on_success: on_success.to_string(),
         on_failure: on_failure.to_string(),
     }
@@ -150,7 +101,7 @@ pub fn write_files(
                 println!("  Skipping {}", template_path.display());
                 declined.template_prompts.push(template_path.clone());
             }
-            Err(_) => return Ok(()),
+            Err(e) => return Err(std::io::Error::other(format!("prompt cancelled: {e}"))),
         }
     }
 
@@ -167,7 +118,7 @@ pub fn write_files(
                 println!("  Skipping {} (token not saved)", env_path.display());
                 declined.env_prompt = Some(env_path.clone());
             }
-            Err(_) => return Ok(()),
+            Err(e) => return Err(std::io::Error::other(format!("prompt cancelled: {e}"))),
         }
     }
 
@@ -184,7 +135,7 @@ pub fn write_files(
                 println!("  Skipping {}", todo_path.display());
                 declined.todo_prompt = Some(todo_path.clone());
             }
-            Err(_) => return Ok(()),
+            Err(e) => return Err(std::io::Error::other(format!("prompt cancelled: {e}"))),
         }
     }
 
@@ -295,6 +246,7 @@ fn apply_declined_overwrites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ensemble_core::config::setup::{SetupAgent, SetupStep};
     use std::path::PathBuf;
 
     #[test]

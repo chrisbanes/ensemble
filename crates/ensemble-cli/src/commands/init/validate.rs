@@ -2,9 +2,28 @@ use crate::commands::init::agents::AgentEntry;
 use crate::commands::init::pipeline::PipelineStep;
 use crate::commands::init::repos::RepoEntry;
 use crate::commands::init::tracker::TrackerChoice;
-use ensemble_core::config::setup::{
-    run_setup_checks, SetupAgent, SetupRepo, SetupRequest, SetupStep, SetupTracker,
-};
+use ensemble_core::config::setup::{run_setup_checks, SetupRequest, SetupTracker};
+
+fn validation_request(
+    tracker: &TrackerChoice,
+    repos: &[RepoEntry],
+    agents: &[AgentEntry],
+    steps: &[PipelineStep],
+) -> SetupRequest {
+    let mut setup_tracker: SetupTracker = tracker.into();
+    if let SetupTracker::GitHub { api_token, .. } = &mut setup_tracker {
+        *api_token = None;
+    }
+
+    SetupRequest {
+        tracker: setup_tracker,
+        repos: repos.iter().map(Into::into).collect(),
+        agents: agents.iter().map(Into::into).collect(),
+        steps: steps.iter().map(Into::into).collect(),
+        on_success: "Done".to_string(),   // Not used by checks
+        on_failure: "Failed".to_string(), // Not used by checks
+    }
+}
 
 pub async fn run_validation(
     tracker: &TrackerChoice,
@@ -14,63 +33,7 @@ pub async fn run_validation(
 ) -> Result<bool, inquire::InquireError> {
     println!("\nValidating configuration...\n");
 
-    // Convert CLI types to setup types
-    let setup_tracker = match tracker {
-        TrackerChoice::TodoFile { path } => SetupTracker::TodoFile { path: path.clone() },
-        TrackerChoice::GitHub {
-            repository,
-            project_number,
-            api_key_env,
-            active_states,
-            terminal_states,
-            ..
-        } => SetupTracker::GitHub {
-            repository: repository.clone(),
-            project_number: *project_number,
-            api_key_env: api_key_env.clone(),
-            api_token: None, // Token is handled separately
-            active_states: active_states.clone(),
-            terminal_states: terminal_states.clone(),
-        },
-    };
-
-    let setup_repos: Vec<SetupRepo> = repos
-        .iter()
-        .map(|r| SetupRepo {
-            path: r.path.clone(),
-            branch: r.branch.clone(),
-        })
-        .collect();
-
-    let setup_agents: Vec<SetupAgent> = agents
-        .iter()
-        .map(|a| SetupAgent {
-            role: a.role.clone(),
-            acpx_agent: a.acpx_agent.clone(),
-            model: a.model.clone(),
-            prompt: None,
-            prompt_file: None,
-        })
-        .collect();
-
-    let setup_steps: Vec<SetupStep> = steps
-        .iter()
-        .map(|s| SetupStep {
-            name: s.name.clone(),
-            agent_role: s.agent_role.clone(),
-            depends: s.depends.clone(),
-            tracker_state: s.tracker_state.clone(),
-        })
-        .collect();
-
-    let request = SetupRequest {
-        tracker: setup_tracker,
-        repos: setup_repos,
-        agents: setup_agents,
-        steps: setup_steps,
-        on_success: "Done".to_string(),   // Not used by checks
-        on_failure: "Failed".to_string(), // Not used by checks
-    };
+    let request = validation_request(tracker, repos, agents, steps);
 
     // Run the shared setup checks
     let checks = run_setup_checks(&request).await;
@@ -96,4 +59,79 @@ pub async fn run_validation(
     inquire::Confirm::new("Write config anyway?")
         .with_default(false)
         .prompt()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn validation_request_uses_shared_conversions_and_omits_github_token() {
+        let tracker = TrackerChoice::GitHub {
+            repository: "acme/frontend".to_string(),
+            project_number: Some(42),
+            api_key_env: "GITHUB_TOKEN".to_string(),
+            api_token: Some("secret".to_string()),
+            active_states: vec!["Todo".to_string()],
+            terminal_states: vec!["Done".to_string()],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let repos = vec![RepoEntry {
+            path: PathBuf::from("/tmp/repo-a"),
+            branch: "main".to_string(),
+        }];
+        let agents = vec![AgentEntry {
+            role: "builder".to_string(),
+            acpx_agent: "claude".to_string(),
+            model: Some("sonnet".to_string()),
+        }];
+        let steps = vec![PipelineStep {
+            name: "implement".to_string(),
+            agent_role: "builder".to_string(),
+            depends: vec![],
+            tracker_state: Some("In Progress".to_string()),
+        }];
+
+        let request = validation_request(&tracker, &repos, &agents, &steps);
+
+        assert_eq!(request.repos.len(), 1);
+        assert_eq!(request.repos[0].path, PathBuf::from("/tmp/repo-a"));
+        assert_eq!(request.repos[0].branch, "main");
+        assert_eq!(request.agents.len(), 1);
+        assert_eq!(request.agents[0].role, "builder");
+        assert_eq!(request.agents[0].acpx_agent, "claude");
+        assert_eq!(request.agents[0].model.as_deref(), Some("sonnet"));
+        assert_eq!(request.agents[0].prompt, None);
+        assert_eq!(request.agents[0].prompt_file, None);
+        assert_eq!(request.steps.len(), 1);
+        assert_eq!(request.steps[0].name, "implement");
+        assert_eq!(request.steps[0].agent_role, "builder");
+        assert_eq!(
+            request.steps[0].tracker_state.as_deref(),
+            Some("In Progress")
+        );
+        assert_eq!(request.on_success, "Done");
+        assert_eq!(request.on_failure, "Failed");
+
+        match request.tracker {
+            SetupTracker::GitHub {
+                repository,
+                project_number,
+                api_key_env,
+                api_token,
+                active_states,
+                terminal_states,
+            } => {
+                assert_eq!(repository, "acme/frontend");
+                assert_eq!(project_number, Some(42));
+                assert_eq!(api_key_env, "GITHUB_TOKEN");
+                assert_eq!(api_token, None);
+                assert_eq!(active_states, vec!["Todo"]);
+                assert_eq!(terminal_states, vec!["Done"]);
+            }
+            other => panic!("expected github tracker, got {other:?}"),
+        }
+    }
 }

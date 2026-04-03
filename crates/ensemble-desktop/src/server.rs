@@ -15,24 +15,26 @@ use tracing::{error, info, warn};
 
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::load_config_state;
-use ensemble_core::config::draft::ConfigDocumentState;
+use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+use ensemble_core::config::ensemble::{ConcurrencyConfig, PollingConfig};
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::OrchestratorState;
 
 use crate::embedded_ui::spa_router;
 use crate::error::DesktopError;
 
-/// Default poll interval in milliseconds (30 seconds).
-const DEFAULT_POLL_INTERVAL_MS: u64 = 30000;
-
-/// Default maximum number of concurrent agents.
-const DEFAULT_MAX_CONCURRENT_AGENTS: u32 = 10;
-
 /// Desktop server handle containing the URL and shutdown handle.
 pub struct DesktopServer {
     pub url: url::Url,
-    #[allow(dead_code)]
-    pub shutdown: tokio::task::JoinHandle<()>,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl Drop for DesktopServer {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+    }
 }
 
 /// Start the local HTTP server for the desktop app.
@@ -48,6 +50,7 @@ pub struct DesktopServer {
 pub async fn start_desktop_server(
     config_dir: PathBuf,
     config_path: PathBuf,
+    event_bus: EventBus,
 ) -> Result<DesktopServer, DesktopError> {
     info!(
         config_dir = %config_dir.display(),
@@ -60,14 +63,13 @@ pub async fn start_desktop_server(
         Ok(state) => state,
         Err(e) => {
             error!(error = %e, path = %config_path.display(), "Failed to load config state");
-            // Create a default missing state
-            ensemble_core::config::draft::ConfigDocumentState {
+            ConfigDocumentState {
                 path: config_path.clone(),
-                kind: ensemble_core::config::draft::ConfigStateKind::Missing,
+                kind: ConfigStateKind::Missing,
                 raw_yaml: None,
                 document: None,
                 active_config: None,
-                validation: ensemble_core::config::draft::DraftValidationReport::default(),
+                validation: DraftValidationReport::default(),
             }
         }
     };
@@ -103,7 +105,7 @@ pub async fn start_desktop_server(
         refresh_requested: refresh_notify.clone(),
         workspace_root,
         history_path,
-        event_bus: EventBus::new(),
+        event_bus,
         config_runtime: ConfigRuntime {
             config_path,
             document_state: Arc::new(RwLock::new(document_state)),
@@ -127,7 +129,7 @@ pub async fn start_desktop_server(
             source: e,
         })?;
 
-    let actual_addr = listener.local_addr().unwrap();
+    let actual_addr = listener.local_addr()?;
     let server_url = url::Url::parse(&format!("http://{}", actual_addr))?;
 
     info!(
@@ -136,15 +138,20 @@ pub async fn start_desktop_server(
     );
 
     // Start server in background
-    let shutdown = tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let server = axum::serve(listener, router).with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        });
+
+        if let Err(e) = server.await {
             error!(error = %e, "HTTP server error");
         }
     });
 
     Ok(DesktopServer {
         url: server_url,
-        shutdown,
+        shutdown: Some(shutdown_tx),
     })
 }
 
@@ -158,9 +165,11 @@ fn create_orchestrator_state(
             config.concurrency.max_concurrent_agents,
         )))
     } else {
+        let polling = PollingConfig::default();
+        let concurrency = ConcurrencyConfig::default();
         Arc::new(RwLock::new(OrchestratorState::new(
-            DEFAULT_POLL_INTERVAL_MS,
-            DEFAULT_MAX_CONCURRENT_AGENTS,
+            polling.interval_ms,
+            concurrency.max_concurrent_agents,
         )))
     }
 }
@@ -197,16 +206,14 @@ mod tests {
         let config_path = temp_dir.path().join("config.yaml");
 
         // Server should start even without config
-        let server = start_desktop_server(temp_dir.path().to_path_buf(), config_path)
-            .await
-            .expect("Server should start with missing config");
+        let server =
+            start_desktop_server(temp_dir.path().to_path_buf(), config_path, EventBus::new())
+                .await
+                .expect("Server should start with missing config");
 
         // URL should be valid
         assert_eq!(server.url.scheme(), "http");
         assert!(server.url.host().is_some());
-
-        // Cleanup
-        server.shutdown.abort();
     }
 
     #[tokio::test]
@@ -232,15 +239,13 @@ on_failure: Failed
         std::fs::write(&config_path, valid_config).unwrap();
 
         // Server should start with valid config
-        let server = start_desktop_server(temp_dir.path().to_path_buf(), config_path)
-            .await
-            .expect("Server should start with valid config");
+        let server =
+            start_desktop_server(temp_dir.path().to_path_buf(), config_path, EventBus::new())
+                .await
+                .expect("Server should start with valid config");
 
         // URL should be valid
         assert_eq!(server.url.scheme(), "http");
         assert!(server.url.host().is_some());
-
-        // Cleanup
-        server.shutdown.abort();
     }
 }
