@@ -11,7 +11,9 @@ struct SpaAssets;
 /// Serve an embedded file by path, returning 404 if not found
 #[allow(dead_code)]
 pub fn serve_file(path: &str) -> impl IntoResponse {
-    serve_file_response(path, |asset_path| SpaAssets::get(asset_path).map(|f| f.data))
+    serve_file_response(path, |asset_path| {
+        SpaAssets::get(asset_path).map(|f| f.data)
+    })
 }
 
 /// Serve the SPA with fallback to index.html for client-side routing

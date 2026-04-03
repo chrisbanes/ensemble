@@ -315,7 +315,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               onChange={(e) => setDraft(prev => ({
                 ...prev,
                 tracker: { 
-                  ...DEFAULT_GH_TRACKER,
+                  ...prev.tracker,
                   project_number: e.target.value ? parseInt(e.target.value, 10) : null,
                 } as SetupTracker,
               }))}

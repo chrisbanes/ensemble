@@ -124,6 +124,7 @@ export default function GuidedEditor({
       setIsValidating(true);
     try {
       const validatedIssues = await onValidate(form, baseRawYaml);
+      setDisplayedIssues(validatedIssues);
       setLastValidation({
         timestamp: new Date(),
         issues: validatedIssues,

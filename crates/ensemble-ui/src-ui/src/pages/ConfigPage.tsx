@@ -66,23 +66,27 @@ export default function ConfigPage() {
 
   const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string): Promise<ValidationIssue[]> => {
     const response = await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    setDisplayedIssues(response.data.issues);
     await refetch();
     return response.data.issues;
   };
 
   const handleSaveGuided = async (form: GuidedForm, baseRawYaml: string) => {
     await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    setDisplayedIssues([]);
     await refetch();
   };
 
   const handleValidateYaml = async (yaml: string): Promise<ValidationIssue[]> => {
     const response = await validateYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+    setDisplayedIssues(response.data.issues);
     await refetch();
     return response.data.issues;
   };
 
   const handleSaveYaml = async (yaml: string) => {
     await saveYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+    setDisplayedIssues([]);
     await refetch();
   };
 
@@ -103,8 +107,9 @@ export default function ConfigPage() {
     [guidedForm]
   );
 
-  const hasIssues = displayedIssues.length > 0;
+  const hasIssues = (displayedIssues.length > 0 || issues.length > 0);
   const isEditable = state === "parsed";
+  const bannerIssues = displayedIssues.length > 0 ? displayedIssues : issues;
 
   // Missing config - show setup mode
   if (state === "missing" || showSetupWizard) {
@@ -161,7 +166,7 @@ export default function ConfigPage() {
               </p>
               {hasIssues && (
                 <ul className="mt-2 space-y-2">
-                  {displayedIssues.map((issue: ValidationIssue, i: number) => (
+                  {bannerIssues.map((issue: ValidationIssue, i: number) => (
                     <li key={i} className="text-sm text-red-600 dark:text-red-400">{issue.message}</li>
                   ))}
                 </ul>
