@@ -508,28 +508,16 @@ pub fn apply_guided_form(
     })
 }
 
-fn get_or_create_mapping<'a>(
-    mapping: &'a mut serde_yaml::Mapping,
-    key: &str,
-) -> &'a mut serde_yaml::Mapping {
-    let value = mapping
-        .entry(serde_yaml::Value::String(key.to_string()))
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !matches!(value, serde_yaml::Value::Mapping(_)) {
-        *value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    match value {
-        serde_yaml::Value::Mapping(inner) => inner,
-        _ => unreachable!(),
-    }
-}
-
 fn replace_known_fields<const N: usize>(
     mapping: &mut serde_yaml::Mapping,
     fields: [(&str, serde_yaml::Value); N],
 ) {
     for (key, value) in fields {
-        mapping.insert(key.into(), value);
+        if value.is_null() {
+            mapping.remove(key);
+        } else {
+            mapping.insert(key.into(), value);
+        }
     }
 }
 

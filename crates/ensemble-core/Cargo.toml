@@ -26,6 +26,7 @@ utoipa = { workspace = true }
 dirs = { workspace = true }
 dotenvy = { workspace = true }
 shellexpand = { workspace = true }
+shlex = "1"
 mime_guess = { workspace = true }
 
 [dev-dependencies]

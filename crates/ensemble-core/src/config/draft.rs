@@ -80,7 +80,7 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
                 Ok(mut config) => {
                     let mut report = validate_document(&document);
                     let mut config_valid = true;
-                    if let Err(e) = config.resolve_env_from(config_dir) {
+                    if let Err(e) = config.resolve_env_from(config_dir, &Default::default()) {
                         report.issues.push(config_error_to_validation_issue(e));
                         config_valid = false;
                     }

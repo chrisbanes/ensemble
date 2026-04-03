@@ -2151,7 +2151,7 @@ on_failure: Failed
     }
 
     #[test]
-    fn merge_preserves_existing_agents_not_in_request() {
+    fn merge_replaces_agents_authoritatively() {
         let existing_yaml = r#"
 tracker:
   kind: todo_file
@@ -2200,12 +2200,12 @@ on_failure: Failed
         let builder = agents.get("builder").unwrap().as_mapping().unwrap();
         assert_eq!(builder.get("model").unwrap().as_str().unwrap(), "opus");
 
-        // reviewer should be preserved (not in request)
-        let reviewer = agents.get("reviewer").unwrap().as_mapping().unwrap();
-        assert_eq!(
-            reviewer.get("acpx_agent").unwrap().as_str().unwrap(),
-            "codex"
+        // reviewer should NOT be preserved (not in request — authoritative replacement)
+        assert!(
+            agents.get("reviewer").is_none(),
+            "reviewer should be removed since it's not in the request"
         );
+        assert_eq!(agents.len(), 1, "only builder should remain in agents");
     }
 
     #[test]
