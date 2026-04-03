@@ -54,12 +54,8 @@ export default function YamlEditor({
 
   const handleValidate = async () => {
     if (!onValidate) return;
-    try {
-      const nextIssues = await onValidate(rawYaml);
-      setValidationIssues(nextIssues);
-    } catch {
-      // Keep the last visible issues when validation fails.
-    }
+    const nextIssues = await onValidate(rawYaml);
+    setValidationIssues(nextIssues);
   };
 
   const handleSave = () => {

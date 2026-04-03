@@ -3,7 +3,7 @@ import type { ValidationIssue } from "@/generated/models";
 import SetupWizard from "@/components/config/SetupWizard";
 import YamlEditor from "@/components/config/YamlEditor";
 import GuidedEditor, { type GuidedForm } from "@/components/config/GuidedEditor";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Edit2, FileText, Settings } from "lucide-react";
@@ -13,8 +13,6 @@ export default function ConfigPage() {
   const [showSetupWizard, setShowSetupWizard] = useState(false);
   const [activeTab, setActiveTab] = useState<"guided" | "yaml">("guided");
   const [comparisonMode, setComparisonMode] = useState(false);
-  const [displayedIssues, setDisplayedIssues] = useState<ValidationIssue[]>([]);
-  const issues = data?.issues ?? [];
 
   const validateGuidedFormMutation = useValidateGuidedFormMutation();
   const saveGuidedFormMutation = useSaveGuidedFormMutation();
@@ -23,7 +21,6 @@ export default function ConfigPage() {
 
   const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string) => {
     const response = await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
-    setDisplayedIssues(response.data.issues);
     return response.data.issues;
   };
 
@@ -34,7 +31,6 @@ export default function ConfigPage() {
 
   const handleValidateYaml = async (yaml: string) => {
     const response = await validateYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
-    setDisplayedIssues(response.data.issues);
     return response.data.issues;
   };
 
@@ -47,10 +43,6 @@ export default function ConfigPage() {
     // Reset handled internally by editors
   };
 
-  useEffect(() => {
-    setDisplayedIssues(issues);
-  }, [issues]);
-
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading configuration...</div>;
   }
@@ -61,10 +53,9 @@ export default function ConfigPage() {
 
   if (!data) return null;
 
-  const { state, raw_yaml: rawYaml } = data;
+  const { state, issues, raw_yaml: rawYaml } = data;
   const guidedForm = data.guided_form;
-
-  const hasIssues = displayedIssues.length > 0;
+  const hasIssues = issues.length > 0;
   const isEditable = state === "parsed";
 
   // Missing config - show setup mode
@@ -120,7 +111,7 @@ export default function ConfigPage() {
               </p>
               {hasIssues && (
                 <ul className="mt-2 space-y-2">
-                  {displayedIssues.map((issue: ValidationIssue, i: number) => (
+                  {issues.map((issue: ValidationIssue, i: number) => (
                     <li key={i} className="text-sm text-red-600 dark:text-red-400">{issue.message}</li>
                   ))}
                 </ul>
@@ -167,7 +158,7 @@ export default function ConfigPage() {
                 <GuidedEditor
                   initialForm={guidedForm as GuidedForm}
                   baseRawYaml={rawYaml || ""}
-                  issues={displayedIssues}
+                  issues={issues}
                   onValidate={handleValidateGuided}
                   onSave={handleSaveGuided}
                   onReset={handleReset}
@@ -177,7 +168,7 @@ export default function ConfigPage() {
                 <YamlEditor
                   rawYaml={rawYaml}
                   isRecoveryMode={false}
-                  issues={displayedIssues}
+                  issues={issues}
                   onValidate={handleValidateYaml}
                   onSave={handleSaveYaml}
                   onReset={handleReset}

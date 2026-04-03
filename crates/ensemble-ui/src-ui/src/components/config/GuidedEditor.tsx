@@ -119,16 +119,12 @@ export default function GuidedEditor({
   const handleValidate = async () => {
     setIsValidating(true);
     try {
-      try {
-        const nextIssues = await onValidate(form, baseRawYaml);
-        setDisplayedIssues(nextIssues);
-        setLastValidation({
-          timestamp: new Date(),
-          issues: nextIssues,
-        });
-      } catch {
-        // Keep the last visible issues when validation fails.
-      }
+      const nextIssues = await onValidate(form, baseRawYaml);
+      setDisplayedIssues(nextIssues);
+      setLastValidation({
+        timestamp: new Date(),
+        issues: nextIssues,
+      });
     } finally {
       setIsValidating(false);
     }
