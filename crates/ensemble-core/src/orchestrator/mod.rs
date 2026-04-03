@@ -162,6 +162,18 @@ impl Orchestrator {
             state.last_tick_at = Some(Utc::now());
         }
 
+        // Pre-compute lowercase state lists once per tick
+        let (active_lower, terminal_lower) = {
+            let config = self.config.read().await;
+            let active_lower: Vec<String> = config.tracker.active_states.iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+            let terminal_lower: Vec<String> = config.tracker.terminal_states.iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+            (active_lower, terminal_lower)
+        };
+
         // 1. Reconcile stalled runs
         let stall_timeout_ms = {
             let config = self.config.read().await;
@@ -193,13 +205,12 @@ impl Orchestrator {
 
         // 2. Reconcile tracker states
         {
-            let config = self.config.read().await;
             let state = self.state.read().await;
             let reconcile_result = reconcile_tracker_states(
                 &state,
                 self.tracker.as_ref(),
-                &config.tracker.active_states,
-                &config.tracker.terminal_states,
+                &active_lower,
+                &terminal_lower,
             )
             .await;
 
@@ -252,7 +263,6 @@ impl Orchestrator {
         sort_for_dispatch(&mut candidates);
 
         // 5. Dispatch eligible issues while slots remain
-        let config = self.config.read().await;
         for issue in &candidates {
             {
                 let state = self.state.read().await;
@@ -266,8 +276,8 @@ impl Orchestrator {
                 is_dispatch_eligible(
                     issue,
                     &state,
-                    &config.tracker.active_states,
-                    &config.tracker.terminal_states,
+                    &active_lower,
+                    &terminal_lower,
                     &HashMap::new(),
                 )
             };

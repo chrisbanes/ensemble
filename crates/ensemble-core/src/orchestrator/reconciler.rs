@@ -65,16 +65,14 @@ pub enum ReconcileAction {
 /// Determine the reconcile action for a single refreshed issue.
 pub fn determine_reconcile_action(
     issue: &Issue,
-    active_states: &[String],
-    terminal_states: &[String],
+    active_states_lower: &[String],
+    terminal_states_lower: &[String],
 ) -> ReconcileAction {
     let state_lower = issue.state.to_lowercase();
-    let terminal_lower: Vec<String> = terminal_states.iter().map(|s| s.to_lowercase()).collect();
-    let active_lower: Vec<String> = active_states.iter().map(|s| s.to_lowercase()).collect();
 
-    if terminal_lower.contains(&state_lower) {
+    if terminal_states_lower.contains(&state_lower) {
         ReconcileAction::TerminateAndCleanup(issue.clone())
-    } else if active_lower.contains(&state_lower) {
+    } else if active_states_lower.contains(&state_lower) {
         ReconcileAction::UpdateSnapshot(issue.clone())
     } else {
         ReconcileAction::TerminateNoCleanup(issue.clone())
@@ -240,11 +238,11 @@ mod tests {
     }
 
     fn default_active() -> Vec<String> {
-        vec!["Todo".to_string(), "In Progress".to_string()]
+        vec!["todo".to_string(), "in progress".to_string()]
     }
 
     fn default_terminal() -> Vec<String> {
-        vec!["Done".to_string(), "Closed".to_string()]
+        vec!["done".to_string(), "closed".to_string()]
     }
 
     // --- Stall detection tests ---

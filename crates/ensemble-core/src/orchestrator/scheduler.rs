@@ -9,8 +9,8 @@ use super::state::OrchestratorState;
 pub fn is_dispatch_eligible(
     issue: &Issue,
     state: &OrchestratorState,
-    active_states: &[String],
-    terminal_states: &[String],
+    active_states_lower: &[String],
+    terminal_states_lower: &[String],
     max_concurrent_by_state: &HashMap<String, u32>,
 ) -> Option<String> {
     // Must have required fields
@@ -30,14 +30,12 @@ pub fn is_dispatch_eligible(
     let state_lower = issue.state.to_lowercase();
 
     // Must be in active states
-    let active_lower: Vec<String> = active_states.iter().map(|s| s.to_lowercase()).collect();
-    if !active_lower.contains(&state_lower) {
+    if !active_states_lower.contains(&state_lower) {
         return Some(format!("state '{}' not in active states", issue.state));
     }
 
     // Must NOT be in terminal states
-    let terminal_lower: Vec<String> = terminal_states.iter().map(|s| s.to_lowercase()).collect();
-    if terminal_lower.contains(&state_lower) {
+    if terminal_states_lower.contains(&state_lower) {
         return Some(format!("state '{}' is terminal", issue.state));
     }
 
@@ -70,7 +68,7 @@ pub fn is_dispatch_eligible(
     if state_lower == "todo" && !issue.blocked_by.is_empty() {
         let has_non_terminal_blocker = issue.blocked_by.iter().any(|blocker| {
             if let Some(ref blocker_state) = blocker.state {
-                !terminal_lower.contains(&blocker_state.to_lowercase())
+                !terminal_states_lower.contains(&blocker_state.to_lowercase())
             } else {
                 // Unknown state — treat as non-terminal (conservative)
                 true
@@ -159,11 +157,11 @@ mod tests {
     }
 
     fn default_active() -> Vec<String> {
-        vec!["Todo".to_string(), "In Progress".to_string()]
+        vec!["todo".to_string(), "in progress".to_string()]
     }
 
     fn default_terminal() -> Vec<String> {
-        vec!["Done".to_string(), "Closed".to_string()]
+        vec!["done".to_string(), "closed".to_string()]
     }
 
     #[test]
