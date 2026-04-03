@@ -296,7 +296,6 @@ impl Orchestrator {
 
     /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
     async fn dispatch_issue(&self, issue: &Issue, attempt: Option<u32>) {
-<<<<<<< HEAD
         let (dag, config_snapshot) = {
             let config = self.config.read().await;
             let dag = match build_dag(&config.steps) {
