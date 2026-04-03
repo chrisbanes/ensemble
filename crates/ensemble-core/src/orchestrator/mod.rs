@@ -165,10 +165,16 @@ impl Orchestrator {
         // Pre-compute lowercase state lists once per tick
         let (active_lower, terminal_lower) = {
             let config = self.config.read().await;
-            let active_lower: Vec<String> = config.tracker.active_states.iter()
+            let active_lower: Vec<String> = config
+                .tracker
+                .active_states
+                .iter()
                 .map(|s| s.to_lowercase())
                 .collect();
-            let terminal_lower: Vec<String> = config.tracker.terminal_states.iter()
+            let terminal_lower: Vec<String> = config
+                .tracker
+                .terminal_states
+                .iter()
                 .map(|s| s.to_lowercase())
                 .collect();
             (active_lower, terminal_lower)
@@ -504,7 +510,10 @@ impl Orchestrator {
 
         // Handle special cases
         match &event {
-            AgentEvent::SessionStarted { session_id, agent_pid } => {
+            AgentEvent::SessionStarted {
+                session_id,
+                agent_pid,
+            } => {
                 state.update_session_info(issue_id, session_id, agent_pid.as_deref());
             }
             AgentEvent::TurnStarted => {

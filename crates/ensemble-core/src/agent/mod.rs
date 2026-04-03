@@ -65,11 +65,13 @@ impl AcpAgentRunner {
         }
 
         let config = self.config.read().await;
-        let agent_config = config.agents.get(agent_name).ok_or_else(|| {
-            AgentError::PromptError {
-                reason: format!("agent '{}' not found in config", agent_name),
-            }
-        })?;
+        let agent_config =
+            config
+                .agents
+                .get(agent_name)
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!("agent '{}' not found in config", agent_name),
+                })?;
 
         let template = if let Some(ref prompt) = agent_config.prompt {
             prompt.clone()
