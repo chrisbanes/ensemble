@@ -136,6 +136,85 @@ Use the same wave issue for retries, review cycles, and ambiguity handling.
 
 If tracker state writes are unavailable, record the intended next state in the issue comment or verification artifact instead of silently dropping it.
 
+## Guidance For Spec-Driven Workflows
+
+Most SDD-style workflows can work with Ensemble if you import their discipline rather than their interaction model.
+
+The practical rule is:
+
+- convert conversations into durable artifacts
+- convert approvals into explicit tracker or workflow gates
+- convert open-ended collaboration into bounded handoffs
+
+In practice, that means:
+
+- planning work writes or updates `SPEC.md` and `PLAN.md`
+- execution work consumes approved artifacts rather than replanning from scratch
+- approval happens through issue state and review flow, not in-run chat
+- missing information should move the issue to `Needs Input` instead of triggering long clarifying-question loops
+
+Good fit for Ensemble:
+
+- work with clear scope and success criteria
+- parent issues that produce durable planning artifacts
+- child execution issues that point at those artifacts
+- review steps that can stop cleanly for human approval
+
+Poor fit for autonomous execution:
+
+- tasks that depend on repeated back-and-forth with a human
+- vague execution issues with no durable plan or acceptance criteria
+- workflows that assume the agent can pause for hours in a live conversation and then continue the same session
+
+### Translating Common SDD Phases
+
+Discovery or brainstorming:
+
+- create a planning issue
+- write a draft spec with explicit assumptions
+- send that spec to review instead of trying to resolve every question live
+
+Specification:
+
+- write `SPEC.md`
+- move to a review state such as `Plan Review`
+- update the spec asynchronously after human feedback
+
+Planning:
+
+- write `PLAN.md`
+- decompose into wave issues only after the plan is approved
+- make each execution issue link to the exact artifacts it should follow
+
+Implementation:
+
+- dispatch only execution-ready issues
+- prefer conservative decisions from repo context and approved artifacts
+- stop only for true blockers, external dependencies, or explicit approval boundaries
+
+Review and verification:
+
+- keep review on the same issue
+- use `In Review` for approval gates
+- send rejected work back to `Ready` on the same issue
+
+### Current Product Boundary
+
+Today, human input is mostly a between-run workflow rather than a first-class live interaction system inside Ensemble.
+
+That means the current recommended pattern is:
+
+1. agent identifies a real blocker or review boundary
+2. issue moves to `Needs Input` or `In Review`
+3. human updates the issue, comments, or linked artifacts
+4. issue returns to `Ready` for another run
+
+This keeps Ensemble effective even before first-class human interaction requests exist in the product.
+
+See also:
+
+- `docs/superpowers/specs/2026-04-03-human-interaction-requests-design.md`
+
 ## Worked Example
 
 Parent issue: `Add issue templates and planning workflow`
