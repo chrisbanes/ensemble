@@ -262,6 +262,81 @@ pub async fn get_setup_agents(
     }
 }
 
+/// SSE event for a discovered agent.
+#[derive(Debug, Serialize)]
+struct AgentDiscoveredEvent {
+    pub name: String,
+    pub label: String,
+    pub version: String,
+}
+
+/// GET /api/v1/config/setup/agents/stream
+///
+/// Returns discovered agents as a Server-Sent Events stream.
+/// Each agent is sent as it's discovered, allowing progressive UI updates.
+#[utoipa::path(
+    get,
+    path = "/api/v1/config/setup/agents/stream",
+    operation_id = "getSetupAgentsStream",
+    responses(
+        (status = 200, description = "Stream of discovered agents", body = String)
+    ),
+    tag = "config"
+)]
+pub async fn get_setup_agents_stream(
+    State(_state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    use axum::response::sse::{Event, Sse};
+
+    // List of agents to probe and stream
+    let agents = vec![
+        ("claude".to_string(), "Claude Code".to_string()),
+        ("codex".to_string(), "Codex CLI".to_string()),
+        ("gemini".to_string(), "Gemini CLI".to_string()),
+        ("amp".to_string(), "Amp".to_string()),
+        ("aider".to_string(), "Aider".to_string()),
+        ("goose".to_string(), "Goose".to_string()),
+        ("copilot".to_string(), "GitHub Copilot".to_string()),
+        ("droid".to_string(), "Factory Droid".to_string()),
+        ("cursor".to_string(), "Cursor Agent".to_string()),
+        ("qwen".to_string(), "Qwen Code".to_string()),
+        ("opencode".to_string(), "OpenCode".to_string()),
+    ];
+
+    let stream = async_stream::stream! {
+        for (name, label) in agents {
+            // Probe agent with timeout
+            let probe_result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                async {
+                    if crate::config::setup::probe_agent(&name).await {
+                        let version = crate::config::setup::get_agent_version(&name).await;
+                        Some(AgentDiscoveredEvent {
+                            name: name.clone(),
+                            label: label.clone(),
+                            version,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            ).await;
+
+            if let Ok(Some(agent)) = probe_result {
+                if let Ok(json) = serde_json::to_string(&agent) {
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(json));
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(1))
+            .text("keep-alive"),
+    )
+}
+
 /// Request to validate a setup configuration.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ValidateSetupRequest {

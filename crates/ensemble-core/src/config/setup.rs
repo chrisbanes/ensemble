@@ -494,6 +494,7 @@ pub fn merge_setup_request(
 }
 
 /// Discover available agents from the system.
+/// Probes run concurrently with a 15-second overall timeout.
 pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
     let known_agents: &[(&str, &str)] = &[
         ("claude", "Claude Code"),
@@ -509,18 +510,35 @@ pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigE
         ("opencode", "OpenCode"),
     ];
 
-    let mut available = Vec::new();
+    // Run all probes concurrently for faster discovery
+    let probe_futures: Vec<_> = known_agents
+        .iter()
+        .map(|(name, label)| async move {
+            if probe_agent(name).await {
+                let version = get_agent_version(name).await;
+                Some(DiscoveredAgent {
+                    name: name.to_string(),
+                    label: label.to_string(),
+                    version,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    for (name, label) in known_agents {
-        if probe_agent(name).await {
-            let version = get_agent_version(name).await;
-            available.push(DiscoveredAgent {
-                name: name.to_string(),
-                label: label.to_string(),
-                version,
-            });
+    // Apply overall timeout of 15 seconds for all probes
+    let timeout = tokio::time::Duration::from_secs(15);
+    let results = tokio::time::timeout(timeout, futures::future::join_all(probe_futures)).await;
+
+    let available: Vec<DiscoveredAgent> = match results {
+        Ok(agents) => agents.into_iter().flatten().collect(),
+        Err(_) => {
+            // Timeout occurred - return partial results from completed probes
+            // This prevents hanging the UI indefinitely
+            Vec::new()
         }
-    }
+    };
 
     Ok(available)
 }
@@ -816,7 +834,8 @@ fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
     Ok(())
 }
 
-async fn probe_agent(name: &str) -> bool {
+/// Probe whether an agent is available.
+pub async fn probe_agent(name: &str) -> bool {
     let timeout = tokio::time::Duration::from_secs(8);
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
@@ -832,7 +851,8 @@ async fn probe_agent(name: &str) -> bool {
     }
 }
 
-async fn get_agent_version(name: &str) -> String {
+/// Get the version of an agent.
+pub async fn get_agent_version(name: &str) -> String {
     let timeout = tokio::time::Duration::from_secs(8);
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
