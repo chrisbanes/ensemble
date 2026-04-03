@@ -586,10 +586,22 @@ fn generate_yaml(request: &SetupRequest) -> String {
         if let Some(ref model) = agent.model {
             yaml.push_str(&format!("    model: {}\n", model));
         }
-        yaml.push_str(&format!(
-            "    prompt_template: templates/{}.liquid\n",
-            find_step_for_agent(&agent.role, &request.steps)
-        ));
+        // Emit prompt or prompt_template based on agent config
+        // If both are set, prompt takes precedence and prompt_file is silently ignored
+        if let Some(ref prompt) = agent.prompt {
+            let quoted = serde_yaml::to_string(&prompt)
+                .unwrap_or_else(|_| format!("\"{}\"", prompt.replace('\\', "\\\\").replace('"', "\\\"")));
+            yaml.push_str(&format!("    prompt: {}", quoted.trim_end()));
+        } else if let Some(ref prompt_file) = agent.prompt_file {
+            let quoted = serde_yaml::to_string(&prompt_file)
+                .unwrap_or_else(|_| format!("\"{}\"", prompt_file.replace('\\', "\\\\").replace('"', "\\\"")));
+            yaml.push_str(&format!("    prompt_template: {}", quoted.trim_end()));
+        } else {
+            let template_path = format!("templates/{}.liquid", find_step_for_agent(&agent.role, &request.steps));
+            let quoted = serde_yaml::to_string(&template_path).unwrap_or_else(|_| format!("\"{}\"", template_path));
+            yaml.push_str(&format!("    prompt_template: {}", quoted.trim_end()));
+        }
+        yaml.push('\n');
     }
 
     // Steps section
@@ -915,12 +927,20 @@ fn extract_agents(doc: &serde_yaml::Value) -> Result<Vec<SetupAgent>, ConfigErro
                         .get("model")
                         .and_then(|m| m.as_str())
                         .map(String::from);
+                    let prompt = config
+                        .get("prompt")
+                        .and_then(|p| p.as_str())
+                        .map(String::from);
+                    let prompt_file = config
+                        .get("prompt_template")
+                        .and_then(|p| p.as_str())
+                        .map(String::from);
                     Some(SetupAgent {
                         role: role.to_string(),
                         acpx_agent: acpx_agent.to_string(),
                         model,
-                        prompt: None,
-                        prompt_file: None,
+                        prompt,
+                        prompt_file,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1122,11 +1142,21 @@ fn update_yaml_from_request(
         if let Some(ref model) = agent.model {
             agent_config.insert("model".into(), serde_yaml::Value::String(model.clone()));
         }
-        let template_name = find_step_for_agent(&agent.role, &request.steps);
-        agent_config.insert(
-            "prompt_template".into(),
-            serde_yaml::Value::String(format!("templates/{}.liquid", template_name)),
-        );
+        // Emit prompt or prompt_template based on agent config
+        if let Some(ref prompt) = agent.prompt {
+            agent_config.insert("prompt".into(), serde_yaml::Value::String(prompt.clone()));
+        } else if let Some(ref prompt_file) = agent.prompt_file {
+            agent_config.insert(
+                "prompt_template".into(),
+                serde_yaml::Value::String(prompt_file.clone()),
+            );
+        } else {
+            let template_name = find_step_for_agent(&agent.role, &request.steps);
+            agent_config.insert(
+                "prompt_template".into(),
+                serde_yaml::Value::String(format!("templates/{}.liquid", template_name)),
+            );
+        }
         agents_map.insert(
             serde_yaml::Value::String(agent.role.clone()),
             serde_yaml::Value::Mapping(agent_config),
@@ -1361,6 +1391,155 @@ on_failure: Failed
         assert_eq!(request.steps.len(), 1);
         assert_eq!(request.steps[0].name, "build");
         assert_eq!(request.on_success, "Done");
+    }
+
+    #[test]
+    fn build_setup_artifacts_emits_inline_prompt() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: Some("Build it.".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        assert!(artifacts.raw_yaml.contains("prompt: \"Build it.\""));
+        assert!(!artifacts.raw_yaml.contains("prompt_template"));
+    }
+
+    #[test]
+    fn build_setup_artifacts_emits_prompt_template() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: None,
+                prompt_file: Some("templates/custom.liquid".to_string()),
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        assert!(artifacts.raw_yaml.contains("prompt_template: \"templates/custom.liquid\""));
+        assert!(!artifacts.raw_yaml.contains("prompt:"));
+    }
+
+    #[test]
+    fn build_setup_artifacts_prompt_with_special_chars() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: Some("Build it: use #hashtags and \"quotes\"".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        // Should be properly quoted so YAML parses correctly
+        let reparsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let agents = reparsed.get("agents").unwrap().as_mapping().unwrap();
+        let builder = agents.get("builder").unwrap().as_mapping().unwrap();
+        let prompt = builder.get("prompt").unwrap().as_str().unwrap();
+        assert_eq!(prompt, "Build it: use #hashtags and \"quotes\"");
+    }
+
+    #[test]
+    fn build_setup_artifacts_prompt_takes_precedence_over_prompt_file() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: Some("Inline prompt".to_string()),
+                prompt_file: Some("templates/ignored.liquid".to_string()),
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        assert!(artifacts.raw_yaml.contains("prompt: \"Inline prompt\""));
+        assert!(!artifacts.raw_yaml.contains("ignored"));
+    }
+
+    #[test]
+    fn extract_setup_defaults_from_yaml_with_prompt_file() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/custom.liquid
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = extract_setup_defaults(yaml).unwrap();
+
+        assert_eq!(request.agents.len(), 1);
+        assert_eq!(request.agents[0].role, "builder");
+        assert_eq!(request.agents[0].prompt_file, Some("templates/custom.liquid".to_string()));
+        assert_eq!(request.agents[0].prompt, None);
     }
 
     #[test]
