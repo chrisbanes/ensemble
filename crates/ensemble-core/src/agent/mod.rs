@@ -135,7 +135,7 @@ fn resolve_agent_command(
             return cmd;
         }
         if let Some(ref executor) = ac.executor {
-            return executor.clone();
+            return shell_escape(executor);
         }
     }
     default_command.to_string()
@@ -475,5 +475,19 @@ mod tests {
     fn test_resolve_agent_command_falls_back_to_default() {
         let cmd = resolve_agent_command(None, "default-cmd");
         assert_eq!(cmd, "default-cmd");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_escapes_executor() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: None,
+            model: None,
+            executor: Some("my-agent; rm -rf /".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        assert_eq!(cmd, "'my-agent; rm -rf /'");
     }
 }
