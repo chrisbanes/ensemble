@@ -11,8 +11,8 @@ use super::state::OrchestratorState;
 pub fn is_dispatch_eligible(
     issue: &Issue,
     state: &OrchestratorState,
-    active_states: &[String],
-    terminal_states: &[String],
+    active_states_lower: &[String],
+    terminal_states_lower: &[String],
     max_concurrent_by_state: &HashMap<String, u32>,
 ) -> Option<String> {
     // Must have required fields
@@ -30,12 +30,12 @@ pub fn is_dispatch_eligible(
     }
 
     // Must be in active states
-    if !contains_state(active_states, &issue.state) {
+    if !contains_state(active_states_lower, &issue.state) {
         return Some(format!("state '{}' not in active states", issue.state));
     }
 
     // Must NOT be in terminal states
-    if contains_state(terminal_states, &issue.state) {
+    if contains_state(terminal_states_lower, &issue.state) {
         return Some(format!("state '{}' is terminal", issue.state));
     }
 
@@ -68,7 +68,7 @@ pub fn is_dispatch_eligible(
     if issue.state.eq_ignore_ascii_case("todo") && !issue.blocked_by.is_empty() {
         let has_non_terminal_blocker = issue.blocked_by.iter().any(|blocker| {
             if let Some(ref blocker_state) = blocker.state {
-                !contains_state(terminal_states, blocker_state)
+                !contains_state(terminal_states_lower, blocker_state)
             } else {
                 // Unknown state — treat as non-terminal (conservative)
                 true
