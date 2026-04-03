@@ -11,7 +11,7 @@ const STDERR_TRUNCATE_LIMIT: usize = 500;
 
 /// Run a shell hook script in the given workspace directory with a timeout.
 ///
-/// The script is executed via `sh -lc <script>` with cwd set to `workspace_path`.
+/// The script is executed via `bash -lc <script>` with cwd set to `workspace_path`.
 /// Returns Ok(()) on success, Err on failure or timeout.
 pub async fn run_hook(
     hook_name: &str,
@@ -24,7 +24,7 @@ pub async fn run_hook(
     let duration = Duration::from_millis(timeout_ms);
 
     // kill_on_drop ensures the child is killed if we drop it (e.g. on timeout)
-    let child = Command::new("sh")
+    let child = Command::new("bash")
         .arg("-lc")
         .arg(script)
         .current_dir(workspace_path)
