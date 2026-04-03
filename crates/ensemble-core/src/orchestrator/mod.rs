@@ -290,19 +290,17 @@ impl Orchestrator {
 
     /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
     async fn dispatch_issue(&self, issue: &Issue, attempt: Option<u32>) {
-        let config = self.config.read().await;
-
-        // Build the step DAG from config
-        let dag = match build_dag(&config.steps) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    issue_id = %issue.id,
-                    error = %e,
-                    "failed to build step DAG, skipping dispatch"
-                );
-                return;
-            }
+        // Read config and build DAG atomically
+        let (dag, config_snapshot) = {
+            let config = self.config.read().await;
+            let dag = match build_dag(&config.steps) {
+                Ok(d) => d,
+                Err(e) => {
+                    warn!(issue_id = %issue.id, error = %e, "failed to build step DAG, skipping dispatch");
+                    return;
+                }
+            };
+            (dag, config.clone())
         };
 
         let cycle = attempt.unwrap_or(1);
@@ -335,6 +333,9 @@ impl Orchestrator {
                 .await;
             }
         }
+
+        // Suppress unused variable warning
+        let _ = config_snapshot;
     }
 
     /// Dispatch a single pipeline step: set tracker state if specified, spawn worker.
