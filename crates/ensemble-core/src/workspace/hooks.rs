@@ -28,7 +28,10 @@ pub async fn run_hook(
     let shell = if Command::new("bash").arg("--version").output().await.is_ok() {
         "bash"
     } else {
-        warn!(hook = hook_name, "bash not found, falling back to sh for hook execution");
+        warn!(
+            hook = hook_name,
+            "bash not found, falling back to sh for hook execution"
+        );
         "sh"
     };
 

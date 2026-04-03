@@ -10,7 +10,7 @@ interface YamlEditorProps {
   rawYaml: string;
   isRecoveryMode?: boolean;
   issues: ValidationIssue[];
-  onValidate?: (yaml: string) => void;
+  onValidate?: (yaml: string) => Promise<ValidationIssue[]>;
   onSave?: (yaml: string) => void;
   onReset?: () => void;
   isValidating?: boolean;
@@ -29,12 +29,17 @@ export default function YamlEditor({
 }: YamlEditorProps) {
   const [rawYaml, setRawYaml] = useState(initialYaml);
   const [hasChanges, setHasChanges] = useState(false);
+  const [validationIssues, setValidationIssues] = useState(issues);
 
   // Update state when initialYaml prop changes (e.g., after save)
   useEffect(() => {
     setRawYaml(initialYaml);
     setHasChanges(false);
   }, [initialYaml]);
+
+  useEffect(() => {
+    setValidationIssues(issues);
+  }, [issues]);
 
   const handleChange = (value: string) => {
     setRawYaml(value);
@@ -47,8 +52,10 @@ export default function YamlEditor({
     onReset?.();
   };
 
-  const handleValidate = () => {
-    onValidate?.(rawYaml);
+  const handleValidate = async () => {
+    if (!onValidate) return;
+    const nextIssues = await onValidate(rawYaml);
+    setValidationIssues(nextIssues);
   };
 
   const handleSave = () => {
@@ -79,8 +86,8 @@ export default function YamlEditor({
           />
         </div>
 
-        {issues.length > 0 && (
-          <ValidationPanel issues={issues} />
+        {validationIssues.length > 0 && (
+          <ValidationPanel issues={validationIssues} />
         )}
       </CardContent>
 
@@ -103,7 +110,7 @@ export default function YamlEditor({
         </div>
         <Button
           onClick={handleSave}
-          disabled={isValidating || isSaving || (isRecoveryMode && issues.length > 0)}
+          disabled={isValidating || isSaving || (isRecoveryMode && validationIssues.length > 0)}
         >
           {isSaving ? "Saving..." : "Save"}
         </Button>

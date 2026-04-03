@@ -51,7 +51,7 @@ fn main() {
         );
         println!("cargo:warning=Run `pnpm run codegen:spec` in crates/ensemble-ui/src-ui/ to generate it.");
         // Remove any stale assets so we don't embed an old UI
-        std::fs::remove_dir_all(&assets_dir).ok();
+        std::fs::remove_dir_all(assets_dir).ok();
         std::fs::create_dir_all(assets_dir).ok();
         return;
     }

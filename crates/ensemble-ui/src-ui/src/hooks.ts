@@ -125,14 +125,7 @@ export function useConfigStateQuery() {
 }
 
 export function useValidateYamlDraftMutation() {
-  const queryClient = useQueryClient();
-  return useValidateYaml({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
-      },
-    },
-  });
+  return useValidateYaml();
 }
 
 export function useSaveYamlDraftMutation() {

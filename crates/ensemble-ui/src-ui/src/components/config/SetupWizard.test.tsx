@@ -251,4 +251,89 @@ describe("SetupWizard", () => {
     expect(roleInputs[0]).toHaveValue("implement");
     expect(roleInputs[1]).toHaveValue("review");
   });
+
+  it("preserves both github repository and project number while editing", async () => {
+    const user = userEvent.setup();
+
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "",
+              project_number: null,
+              api_key_env: "GITHUB_TOKEN",
+              active_states: ["Todo", "In Progress"],
+              terminal_states: ["Done"],
+            },
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    const repoInput = await screen.findByLabelText("Repository");
+    const projectInput = screen.getByLabelText(/project number/i);
+
+    await user.type(repoInput, "owner/repo");
+    await user.type(projectInput, "42");
+
+    expect(repoInput).toHaveValue("owner/repo");
+    expect(projectInput).toHaveValue(42);
+  });
+
+  it("validates github setup with standard project state names", async () => {
+    const user = userEvent.setup();
+    const validateMock = vi.fn();
+
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key_env: "GITHUB_TOKEN",
+              active_states: ["Todo", "In Progress"],
+              terminal_states: ["Done"],
+            },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null }],
+            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+          },
+        });
+      }
+      if (url.includes("/api/v1/config/setup/validate")) {
+        validateMock(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          can_save: true,
+          checks: [{ label: "Tracker", passed: true, detail: "ok" }],
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+
+    await waitFor(() => {
+      expect(validateMock).toHaveBeenCalled();
+    });
+
+    expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.active_states).toEqual(["Todo", "In Progress"]);
+    expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.terminal_states).toEqual(["Done"]);
+  });
 });

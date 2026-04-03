@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -84,7 +84,7 @@ interface GuidedEditorProps {
   initialForm: GuidedForm;
   baseRawYaml: string;
   issues: ValidationIssue[];
-  onValidate: (form: GuidedForm, baseRawYaml: string) => Promise<void>;
+  onValidate: (form: GuidedForm, baseRawYaml: string) => Promise<ValidationIssue[]>;
   onSave: (form: GuidedForm, baseRawYaml: string) => Promise<void>;
   onReset: () => void;
 }
@@ -101,10 +101,15 @@ export default function GuidedEditor({
   const [isDirty, setIsDirty] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [displayedIssues, setDisplayedIssues] = useState<ValidationIssue[]>(issues);
   const [lastValidation, setLastValidation] = useState<{
     timestamp: Date;
     issues: ValidationIssue[];
   } | null>(null);
+
+  useEffect(() => {
+    setDisplayedIssues(issues);
+  }, [issues]);
 
   const handleFormChange = (updates: Partial<GuidedForm>) => {
     setForm((prev) => ({ ...prev, ...updates }));
@@ -114,10 +119,11 @@ export default function GuidedEditor({
   const handleValidate = async () => {
     setIsValidating(true);
     try {
-      await onValidate(form, baseRawYaml);
+      const nextIssues = await onValidate(form, baseRawYaml);
+      setDisplayedIssues(nextIssues);
       setLastValidation({
         timestamp: new Date(),
-        issues: issues,
+        issues: nextIssues,
       });
     } finally {
       setIsValidating(false);
@@ -140,7 +146,7 @@ export default function GuidedEditor({
     onReset();
   };
 
-  const hasErrors = issues.length > 0;
+  const hasErrors = displayedIssues.length > 0;
   const availableAgents: GuidedAgent[] = form.agents.map((a) => ({
     name: a.name,
     label: a.name,
@@ -201,7 +207,7 @@ export default function GuidedEditor({
                   Configuration Issues
                 </h3>
                 <ul className="mt-2 space-y-1 text-sm text-red-700 dark:text-red-300">
-                  {issues.map((issue, i) => (
+                  {displayedIssues.map((issue, i) => (
                     <li key={i}>
                       {issue.section && `${issue.section}: `}
                       {issue.message}

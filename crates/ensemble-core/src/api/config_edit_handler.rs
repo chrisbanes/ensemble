@@ -468,13 +468,14 @@ pub struct ValidateGuidedFormResponse {
     tag = "config"
 )]
 pub async fn validate_guided_form(
+    State(state): State<AppState>,
     Json(request): Json<ValidateGuidedFormRequest>,
 ) -> (StatusCode, Json<ValidateGuidedFormResponse>) {
     match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
         Ok(merged_yaml) => {
             // Parse and validate the merged YAML
             let draft = crate::config::draft::parse_raw_yaml(
-                std::path::PathBuf::from("config.yaml"),
+                state.config_runtime.config_path.clone(),
                 merged_yaml.clone(),
             );
 
