@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -82,6 +84,49 @@ pub enum AgentEvent {
     Malformed {
         line: String,
     },
+}
+
+impl AgentEvent {
+    /// Returns the event name for logging/state tracking.
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            AgentEvent::SessionStarted { .. } => "session_started",
+            AgentEvent::TurnStarted => "turn_started",
+            AgentEvent::TurnUpdate { .. } => "turn_update",
+            AgentEvent::TurnCompleted { .. } => "turn_completed",
+            AgentEvent::TurnFailed { .. } => "turn_failed",
+            AgentEvent::PermissionRequested { .. } => "permission_requested",
+            AgentEvent::PermissionResolved { .. } => "permission_resolved",
+            AgentEvent::Notification { .. } => "notification",
+            AgentEvent::OtherMessage { .. } => "other_message",
+            AgentEvent::Malformed { .. } => "malformed",
+        }
+    }
+
+    /// Returns the message content for state tracking, truncated to 200 chars.
+    pub fn message_for_state(&self) -> Option<Cow<'_, str>> {
+        match self {
+            AgentEvent::TurnUpdate { content } => Some(truncate_for_state(content)),
+            AgentEvent::TurnFailed { reason, .. } => Some(truncate_for_state(reason)),
+            AgentEvent::PermissionRequested { description, .. } => {
+                Some(truncate_for_state(description))
+            }
+            AgentEvent::Notification { message } => Some(truncate_for_state(message)),
+            AgentEvent::OtherMessage { raw } => Some(truncate_for_state(raw)),
+            AgentEvent::Malformed { line } => Some(truncate_for_state(line)),
+            _ => None,
+        }
+    }
+}
+
+fn truncate_for_state(value: &str) -> Cow<'_, str> {
+    const STATE_MESSAGE_LIMIT: usize = 200;
+
+    if value.chars().count() > STATE_MESSAGE_LIMIT {
+        Cow::Owned(value.chars().take(STATE_MESSAGE_LIMIT).collect())
+    } else {
+        Cow::Borrowed(value)
+    }
 }
 
 /// Events sent from worker tasks to the orchestrator.
@@ -287,5 +332,16 @@ mod tests {
         assert_eq!(parsed.input_tokens, 1000);
         assert_eq!(parsed.output_tokens, 500);
         assert_eq!(parsed.total_tokens, 1500);
+    }
+
+    #[test]
+    fn test_message_for_state_truncates_long_turn_updates() {
+        let event = AgentEvent::TurnUpdate {
+            content: "x".repeat(250),
+        };
+
+        let message = event.message_for_state().unwrap();
+
+        assert_eq!(message.len(), 200);
     }
 }

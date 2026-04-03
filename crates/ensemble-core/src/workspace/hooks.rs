@@ -1,5 +1,6 @@
 use crate::error::WorkspaceError;
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -8,10 +9,12 @@ use tracing::{info, warn};
 /// Max chars of stderr to include in hook error messages. Prevents oversized error
 /// strings from long-running hooks that dump large output on failure.
 const STDERR_TRUNCATE_LIMIT: usize = 500;
+static PREFERRED_SHELL: OnceLock<&'static str> = OnceLock::new();
 
 /// Run a shell hook script in the given workspace directory with a timeout.
 ///
-/// The script is executed via `sh -lc <script>` with cwd set to `workspace_path`.
+/// The script is executed via `bash -lc <script>` (falling back to `sh -lc` if
+/// bash is unavailable) with cwd set to `workspace_path`.
 /// Returns Ok(()) on success, Err on failure or timeout.
 pub async fn run_hook(
     hook_name: &str,
@@ -23,8 +26,17 @@ pub async fn run_hook(
 
     let duration = Duration::from_millis(timeout_ms);
 
+    // Try bash first, fall back to sh if unavailable
+    let shell = preferred_shell();
+    if shell == "sh" {
+        warn!(
+            hook = hook_name,
+            "bash not found, falling back to sh for hook execution"
+        );
+    }
+
     // kill_on_drop ensures the child is killed if we drop it (e.g. on timeout)
-    let child = Command::new("sh")
+    let child = Command::new(shell)
         .arg("-lc")
         .arg(script)
         .current_dir(workspace_path)
@@ -75,6 +87,15 @@ pub async fn run_hook(
             })
         }
     }
+}
+
+fn preferred_shell() -> &'static str {
+    PREFERRED_SHELL.get_or_init(|| if bash_in_path() { "bash" } else { "sh" })
+}
+
+fn bash_in_path() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file()))
 }
 
 /// Run a hook if configured; swallow errors for non-fatal hooks.

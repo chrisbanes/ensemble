@@ -45,8 +45,8 @@ const DEFAULT_GH_TRACKER: SetupTracker = {
   repository: "", 
   project_number: null,
   api_key_env: "GITHUB_TOKEN",
-  active_states: ["todo", "in_progress"],
-  terminal_states: ["done"],
+  active_states: ["Todo", "In Progress"],
+  terminal_states: ["Done"],
 };
 
 const DEFAULT_DRAFT: SetupDraft = {
@@ -259,7 +259,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               onChange={(e) => setDraft(prev => ({
                 ...prev,
                 tracker: { 
-                  ...DEFAULT_GH_TRACKER, 
+                  ...prev.tracker,
                   repository: e.target.value,
                 } as SetupTracker,
               }))}
@@ -275,7 +275,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               onChange={(e) => setDraft(prev => ({
                 ...prev,
                 tracker: { 
-                  ...DEFAULT_GH_TRACKER,
+                  ...prev.tracker,
                   project_number: e.target.value ? parseInt(e.target.value) : null,
                 } as SetupTracker,
               }))}
@@ -361,79 +361,83 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         <p className="text-sm text-muted-foreground">Loading available agents...</p>
       ) : (
         <>
-          {draft.agents.map((agent, index) => (
-            <div key={index} className="p-4 rounded-lg border space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="font-medium">Agent {index + 1}</span>
-                {draft.agents.length > 1 && (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => setDraft(prev => ({
-                      ...prev,
-                      agents: prev.agents.filter((_, i) => i !== index),
-                    }))}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                )}
-              </div>
-              
-              <div className="grid grid-cols-2 gap-3">
+          {(() => {
+            const discoveredAgents = agentsData?.data?.agents ?? [];
+
+            return draft.agents.map((agent, index) => (
+              <div key={index} className="p-4 rounded-lg border space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">Agent {index + 1}</span>
+                  {draft.agents.length > 1 && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setDraft(prev => ({
+                        ...prev,
+                        agents: prev.agents.filter((_, i) => i !== index),
+                      }))}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  )}
+                </div>
+                
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <label className="text-sm">Role</label>
+                    <Input
+                      value={agent.role}
+                      onChange={(e) => setDraft(prev => {
+                        const newAgents = [...prev.agents];
+                        newAgents[index] = { ...agent, role: e.target.value };
+                        return { ...prev, agents: newAgents };
+                      })}
+                      placeholder="e.g., implement, review"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-sm">Agent</label>
+                    <Select
+                      value={agent.acpx_agent}
+                      onValueChange={(value) => {
+                        if (value) {
+                          setDraft(prev => {
+                            const newAgents = [...prev.agents];
+                            newAgents[index] = { ...agent, acpx_agent: value };
+                            return { ...prev, agents: newAgents };
+                          });
+                        }
+                      }}
+                    >
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select agent" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {discoveredAgents.map((discoveredAgent: DiscoveredAgentInfo) => (
+                          <SelectItem key={discoveredAgent.name} value={discoveredAgent.name}>
+                            {discoveredAgent.label} ({discoveredAgent.version})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
                 <div className="space-y-2">
-                  <label className="text-sm">Role</label>
+                  <label className="text-sm">Model (optional)</label>
                   <Input
-                    value={agent.role}
+                    value={agent.model || ""}
                     onChange={(e) => setDraft(prev => {
                       const newAgents = [...prev.agents];
-                      newAgents[index] = { ...agent, role: e.target.value };
+                      newAgents[index] = { ...agent, model: e.target.value || null };
                       return { ...prev, agents: newAgents };
                     })}
-                    placeholder="e.g., implement, review"
+                    placeholder="e.g., gpt-4"
                   />
                 </div>
-                <div className="space-y-2">
-                  <label className="text-sm">Agent</label>
-                  <Select
-                    value={agent.acpx_agent}
-                    onValueChange={(value) => {
-                      if (value) {
-                        setDraft(prev => {
-                          const newAgents = [...prev.agents];
-                          newAgents[index] = { ...agent, acpx_agent: value };
-                          return { ...prev, agents: newAgents };
-                        });
-                      }
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select agent" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {agentsData?.data?.agents.map((discoveredAgent: DiscoveredAgentInfo) => (
-                        <SelectItem key={discoveredAgent.name} value={discoveredAgent.name}>
-                          {discoveredAgent.label} ({discoveredAgent.version})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
               </div>
-
-              <div className="space-y-2">
-                <label className="text-sm">Model (optional)</label>
-                <Input
-                  value={agent.model || ""}
-                  onChange={(e) => setDraft(prev => {
-                    const newAgents = [...prev.agents];
-                    newAgents[index] = { ...agent, model: e.target.value || null };
-                    return { ...prev, agents: newAgents };
-                  })}
-                  placeholder="e.g., gpt-4"
-                />
-              </div>
-            </div>
-          ))}
+            ));
+          })()}
 
           <Button
             variant="outline"

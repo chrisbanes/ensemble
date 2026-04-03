@@ -17,30 +17,30 @@ use events::{AgentEvent, WorkerEvent};
 
 use acp_client::{AcpSession, TurnResult};
 
+pub struct AgentRunRequest<'a> {
+    pub config: Arc<EnsembleConfig>,
+    pub issue: &'a Issue,
+    pub agent_name: &'a str,
+    pub step_name: &'a str,
+    pub attempt: Option<u32>,
+    pub workspace_path: &'a Path,
+    pub event_tx: mpsc::Sender<WorkerEvent>,
+}
+
 /// Trait for running an agent session against an issue.
 /// The orchestrator dispatches work through this trait.
 /// Implementations must send WorkerEvents via the channel during execution.
 #[async_trait]
 pub trait AgentRunner: Send + Sync {
-    async fn run(
-        &self,
-        issue: &Issue,
-        agent_name: &str,
-        step_name: &str,
-        attempt: Option<u32>,
-        workspace_path: &Path,
-        event_tx: mpsc::Sender<WorkerEvent>,
-    ) -> Result<(), AgentError>;
+    async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError>;
 }
 
 /// Real ACP agent runner that implements the full worker loop from SPEC.md Section 16.5.
-pub struct AcpAgentRunner {
-    pub config: Arc<RwLock<EnsembleConfig>>,
-}
+pub struct AcpAgentRunner;
 
 impl AcpAgentRunner {
-    pub fn new(config: Arc<RwLock<EnsembleConfig>>) -> Self {
-        Self { config }
+    pub fn new(_config: Arc<RwLock<EnsembleConfig>>) -> Self {
+        Self
     }
 
     /// Build the prompt for a given turn.
@@ -48,13 +48,13 @@ impl AcpAgentRunner {
     /// continuation turns use guidance text.
     async fn build_prompt(
         &self,
+        config: &EnsembleConfig,
         issue: &Issue,
         agent_name: &str,
         attempt: Option<u32>,
         turn_number: u32,
     ) -> Result<String, AgentError> {
         if turn_number == 1 {
-            let config = self.config.read().await;
             let agent_config =
                 config
                     .agents
@@ -135,24 +135,39 @@ fn resolve_agent_command(
             return cmd;
         }
         if let Some(ref executor) = ac.executor {
-            return executor.clone();
+            return shell_escape_command(executor);
         }
     }
-    default_command.to_string()
+    shell_escape_command(default_command)
+}
+
+fn shell_escape_command(command: &str) -> String {
+    let parts = shlex::split(command)
+        .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect());
+
+    if parts.is_empty() {
+        return shell_escape(command);
+    }
+
+    parts
+        .iter()
+        .map(|part| shell_escape(part))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[async_trait]
 impl AgentRunner for AcpAgentRunner {
-    async fn run(
-        &self,
-        issue: &Issue,
-        agent_name: &str,
-        step_name: &str,
-        attempt: Option<u32>,
-        workspace_path: &Path,
-        event_tx: mpsc::Sender<WorkerEvent>,
-    ) -> Result<(), AgentError> {
-        let config = self.config.read().await.clone();
+    async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError> {
+        let AgentRunRequest {
+            config,
+            issue,
+            agent_name,
+            step_name,
+            attempt,
+            workspace_path,
+            event_tx,
+        } = request;
 
         // 1. Run before_run hook
         if let Some(ref script) = config.hooks.before_run {
@@ -220,7 +235,7 @@ impl AgentRunner for AcpAgentRunner {
         let result = loop {
             // Build prompt for this turn
             let prompt = match self
-                .build_prompt(issue, agent_name, attempt, turn_number)
+                .build_prompt(config.as_ref(), issue, agent_name, attempt, turn_number)
                 .await
             {
                 Ok(p) => p,
@@ -306,6 +321,7 @@ impl AgentRunner for AcpAgentRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::parse_config;
 
     /// Mock agent runner for testing the orchestrator.
     pub struct MockAgentRunner {
@@ -315,15 +331,13 @@ mod tests {
 
     #[async_trait]
     impl AgentRunner for MockAgentRunner {
-        async fn run(
-            &self,
-            issue: &Issue,
-            _agent_name: &str,
-            step_name: &str,
-            _attempt: Option<u32>,
-            _workspace_path: &Path,
-            event_tx: mpsc::Sender<WorkerEvent>,
-        ) -> Result<(), AgentError> {
+        async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError> {
+            let AgentRunRequest {
+                issue,
+                step_name,
+                event_tx,
+                ..
+            } = request;
             // Simulate some work
             if self.delay_ms > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
@@ -368,6 +382,32 @@ mod tests {
         }
     }
 
+    fn test_config() -> Arc<EnsembleConfig> {
+        Arc::new(
+            parse_config(
+                r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo"]
+  terminal_states: ["Done"]
+agents:
+  builder:
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+agent:
+  command: echo test
+on_success: Done
+on_failure: Todo
+"#,
+            )
+            .unwrap(),
+        )
+    }
+
     #[tokio::test]
     async fn test_mock_agent_runner_success() {
         let runner = MockAgentRunner {
@@ -378,14 +418,15 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
 
         let result = runner
-            .run(
-                &test_issue(),
-                "builder",
-                "build",
-                None,
-                workspace.path(),
-                tx,
-            )
+            .run(AgentRunRequest {
+                config: test_config(),
+                issue: &test_issue(),
+                agent_name: "builder",
+                step_name: "build",
+                attempt: None,
+                workspace_path: workspace.path(),
+                event_tx: tx,
+            })
             .await;
 
         assert!(result.is_ok());
@@ -414,14 +455,15 @@ mod tests {
         let workspace = tempfile::TempDir::new().unwrap();
 
         let result = runner
-            .run(
-                &test_issue(),
-                "builder",
-                "build",
-                None,
-                workspace.path(),
-                tx,
-            )
+            .run(AgentRunRequest {
+                config: test_config(),
+                issue: &test_issue(),
+                agent_name: "builder",
+                step_name: "build",
+                attempt: None,
+                workspace_path: workspace.path(),
+                event_tx: tx,
+            })
             .await;
 
         assert!(result.is_err());
@@ -474,6 +516,20 @@ mod tests {
     #[test]
     fn test_resolve_agent_command_falls_back_to_default() {
         let cmd = resolve_agent_command(None, "default-cmd");
-        assert_eq!(cmd, "default-cmd");
+        assert_eq!(cmd, "'default-cmd'");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_escapes_executor_tokens() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: None,
+            model: None,
+            executor: Some("codex --profile prod; touch /tmp/pwned".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        assert_eq!(cmd, "'codex' '--profile' 'prod;' 'touch' '/tmp/pwned'");
     }
 }

@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use serde::Deserialize;
+use tracing::warn;
 
 /// The verdict returned by a review agent at the end of a pipeline step.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +75,7 @@ pub async fn resolve_verdict(acp_verdict: Option<&serde_json::Value>, workspace:
     }
 
     // 3. Default (no ACP verdict, no file).
+    warn!("no verdict source found for step, defaulting to Approve");
     Verdict::Approve
 }
 

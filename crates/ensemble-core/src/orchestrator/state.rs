@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::config::ensemble::EnsembleConfig;
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
@@ -36,6 +37,8 @@ pub struct OrchestratorState {
     pub agent_rate_limits: Option<RateLimitSnapshot>,
     /// Active pipeline runs: issue_id -> PipelineRun.
     pub pipeline_runs: HashMap<String, PipelineRun>,
+    /// Immutable config snapshot for each active pipeline run.
+    pub pipeline_configs: HashMap<String, std::sync::Arc<EnsembleConfig>>,
     /// Timestamp of the last orchestrator poll tick.
     pub last_tick_at: Option<DateTime<Utc>>,
 }
@@ -53,6 +56,7 @@ impl OrchestratorState {
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
+            pipeline_configs: HashMap::new(),
             last_tick_at: None,
         }
     }
@@ -125,6 +129,7 @@ impl OrchestratorState {
         self.claimed.remove(issue_id);
         self.running.remove(issue_id);
         self.retry_attempts.remove(issue_id);
+        self.pipeline_configs.remove(issue_id);
     }
 
     /// Update session metadata on a running entry.
@@ -227,8 +232,8 @@ impl OrchestratorState {
     }
 
     /// Get all running issue IDs.
-    pub fn running_issue_ids(&self) -> Vec<String> {
-        self.running.keys().cloned().collect()
+    pub fn running_issue_ids(&self) -> impl Iterator<Item = &str> {
+        self.running.keys().map(|k| k.as_str())
     }
 
     /// Get an immutable reference to a pipeline run.
@@ -242,13 +247,24 @@ impl OrchestratorState {
     }
 
     /// Insert a pipeline run for an issue.
-    pub fn insert_pipeline_run(&mut self, issue_id: &str, run: PipelineRun) {
+    pub fn insert_pipeline_run(
+        &mut self,
+        issue_id: &str,
+        run: PipelineRun,
+        config: std::sync::Arc<EnsembleConfig>,
+    ) {
         self.pipeline_runs.insert(issue_id.to_string(), run);
+        self.pipeline_configs.insert(issue_id.to_string(), config);
     }
 
     /// Remove and return a pipeline run.
     pub fn remove_pipeline_run(&mut self, issue_id: &str) -> Option<PipelineRun> {
+        self.pipeline_configs.remove(issue_id);
         self.pipeline_runs.remove(issue_id)
+    }
+
+    pub fn get_pipeline_config(&self, issue_id: &str) -> Option<&std::sync::Arc<EnsembleConfig>> {
+        self.pipeline_configs.get(issue_id)
     }
 }
 
@@ -445,7 +461,7 @@ mod tests {
         state.add_running(&test_issue("a", "Todo"), None);
         state.add_running(&test_issue("b", "Todo"), None);
 
-        let mut ids = state.running_issue_ids();
+        let mut ids: Vec<&str> = state.running_issue_ids().collect();
         ids.sort();
         assert_eq!(ids, vec!["a", "b"]);
     }

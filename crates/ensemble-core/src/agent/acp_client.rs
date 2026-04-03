@@ -547,17 +547,16 @@ impl AcpSession {
             reason: format!("json serialize error: {e}"),
         })?;
         debug!(msg = %line, "sending JSON-RPC");
+
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+
         self.stdin
-            .write_all(line.as_bytes())
+            .write_all(&buf)
             .await
             .map_err(|e| AgentError::IoError {
                 reason: format!("stdin write error: {e}"),
-            })?;
-        self.stdin
-            .write_all(b"\n")
-            .await
-            .map_err(|e| AgentError::IoError {
-                reason: format!("stdin write newline error: {e}"),
             })?;
         self.stdin.flush().await.map_err(|e| AgentError::IoError {
             reason: format!("stdin flush error: {e}"),

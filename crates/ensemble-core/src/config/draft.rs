@@ -69,14 +69,21 @@ pub fn load_config_state(path: &Path) -> Result<ConfigDocumentState, ConfigError
 
 pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
     let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&raw_yaml);
+    let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    load_dotenv(config_dir);
 
     match parsed {
         Ok(document) => {
             let typed: Result<EnsembleConfig, _> = serde_yaml::from_value(document.clone());
             match typed {
-                Ok(config) => {
+                Ok(mut config) => {
                     let mut report = validate_document(&document);
                     let mut config_valid = true;
+                    if let Err(e) = config.resolve_env_from(config_dir) {
+                        report.issues.push(config_error_to_validation_issue(e));
+                        config_valid = false;
+                    }
                     if let Err(e) = validate_config(&config) {
                         report.issues.push(pipeline_error_to_validation_issue(e));
                         config_valid = false;
@@ -133,6 +140,13 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
                 validation: report,
             }
         }
+    }
+}
+
+fn load_dotenv(config_dir: &Path) {
+    let env_path = config_dir.join(".env");
+    if env_path.exists() {
+        let _ = dotenvy::from_path(&env_path);
     }
 }
 
@@ -328,6 +342,16 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
     }
 }
 
+fn config_error_to_validation_issue(error: ConfigError) -> ValidationIssue {
+    ValidationIssue {
+        kind: ValidationIssueKind::Environment,
+        message: error.to_string(),
+        section: "config".to_string(),
+        field: None,
+        path: None,
+    }
+}
+
 pub fn save_raw_yaml_atomically(
     path: &Path,
     raw_yaml: &str,
@@ -412,6 +436,72 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.kind == ValidationIssueKind::Syntax));
+    }
+
+    #[test]
+    fn load_config_state_resolves_env_and_relative_paths_from_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let env_name = "ENSEMBLE_DRAFT_TEST_ROOT";
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("{env_name}=workspace-data\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+tracker:
+  kind: todo_file
+  path: tracker/issues.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: prompts/build.md
+steps:
+  - name: build
+    agent: builder
+repos:
+  - path: repos/app
+    branch: main
+workspace:
+  root: ${env_name}
+on_success: Done
+on_failure: Failed
+"#
+            ),
+        )
+        .unwrap();
+
+        let state = load_config_state(&path).unwrap();
+        let config = state.active_config.as_ref().unwrap();
+
+        assert_eq!(
+            config.tracker.path.as_deref(),
+            Some(dir.path().join("tracker/issues.md").as_path())
+        );
+        assert_eq!(
+            config.repos[0].path,
+            dir.path().join("repos/app").display().to_string()
+        );
+        assert_eq!(
+            config.workspace.root.as_deref(),
+            Some(dir.path().join("workspace-data").to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            config.agents["builder"].prompt_template.as_deref(),
+            Some(dir.path().join("prompts/build.md").as_path())
+        );
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
     }
 
     #[test]

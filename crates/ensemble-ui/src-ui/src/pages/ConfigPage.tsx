@@ -3,7 +3,7 @@ import type { ValidationIssue } from "@/generated/models";
 import SetupWizard from "@/components/config/SetupWizard";
 import YamlEditor from "@/components/config/YamlEditor";
 import GuidedEditor, { type GuidedForm } from "@/components/config/GuidedEditor";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Edit2, FileText, Settings } from "lucide-react";
@@ -13,6 +13,8 @@ export default function ConfigPage() {
   const [showSetupWizard, setShowSetupWizard] = useState(false);
   const [activeTab, setActiveTab] = useState<"guided" | "yaml">("guided");
   const [comparisonMode, setComparisonMode] = useState(false);
+  const [displayedIssues, setDisplayedIssues] = useState<ValidationIssue[]>([]);
+  const issues = data?.issues ?? [];
 
   const validateGuidedFormMutation = useValidateGuidedFormMutation();
   const saveGuidedFormMutation = useSaveGuidedFormMutation();
@@ -20,7 +22,9 @@ export default function ConfigPage() {
   const saveYamlMutation = useSaveYamlDraftMutation();
 
   const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string) => {
-    await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    const response = await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    setDisplayedIssues(response.data.issues);
+    return response.data.issues;
   };
 
   const handleSaveGuided = async (form: GuidedForm, baseRawYaml: string) => {
@@ -29,7 +33,9 @@ export default function ConfigPage() {
   };
 
   const handleValidateYaml = async (yaml: string) => {
-    await validateYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+    const response = await validateYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+    setDisplayedIssues(response.data.issues);
+    return response.data.issues;
   };
 
   const handleSaveYaml = async (yaml: string) => {
@@ -41,6 +47,10 @@ export default function ConfigPage() {
     // Reset handled internally by editors
   };
 
+  useEffect(() => {
+    setDisplayedIssues(issues);
+  }, [issues]);
+
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading configuration...</div>;
   }
@@ -51,10 +61,11 @@ export default function ConfigPage() {
 
   if (!data) return null;
 
-  const { state, issues, raw_yaml: rawYaml } = data;
+  const { state, raw_yaml: rawYaml } = data;
   const guidedForm = data.guided_form;
-  const hasIssues = issues.length > 0;
-  const isRunnable = state === "parsed" && data.active_config != null && !hasIssues;
+
+  const hasIssues = displayedIssues.length > 0;
+  const isEditable = state === "parsed";
 
   // Missing config - show setup mode
   if (state === "missing" || showSetupWizard) {
@@ -86,45 +97,34 @@ export default function ConfigPage() {
     );
   }
 
-  // Parsed with validation issues - show edit mode with validation
-  if (state === "parsed" && hasIssues) {
+  if (isEditable) {
     return (
       <div className="space-y-6">
         <h1 className="text-2xl font-bold">Configuration</h1>
         <Card>
           <CardContent className="p-6">
-            <div className="rounded-lg p-4 border bg-yellow-50 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-800">
-              <h2 className="text-lg font-semibold text-yellow-800 dark:text-yellow-200">Configuration Issues</h2>
-              <ul className="mt-2 space-y-2">
-                {issues.map((issue: ValidationIssue, i: number) => (
-                  <li key={i} className="text-sm text-red-600 dark:text-red-400">{issue.message}</li>
-                ))}
-              </ul>
-            </div>
-            <div className="mt-4 flex gap-2">
-              <Button variant="outline" onClick={() => setShowSetupWizard(true)}>
-                <Edit2 className="h-4 w-4 mr-2" />
-                Reconfigure
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    );
-  }
-
-  // Runnable config - show edit mode with full tabs
-  if (isRunnable) {
-    return (
-      <div className="space-y-6">
-        <h1 className="text-2xl font-bold">Configuration</h1>
-        <Card>
-          <CardContent className="p-6">
-            <div className="rounded-lg p-4 border bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800">
-              <h2 className="text-lg font-semibold text-green-800 dark:text-green-200">Configuration Editor</h2>
-              <p className="text-sm text-green-700 dark:text-green-300">
-                Configuration is valid and ready to use.
+            <div className={`rounded-lg p-4 border ${hasIssues
+              ? "bg-yellow-50 dark:bg-yellow-900/30 border-yellow-200 dark:border-yellow-800"
+              : "bg-green-50 dark:bg-green-900/30 border-green-200 dark:border-green-800"}`}>
+              <h2 className={`text-lg font-semibold ${hasIssues
+                ? "text-yellow-800 dark:text-yellow-200"
+                : "text-green-800 dark:text-green-200"}`}>
+                Configuration Editor
+              </h2>
+              <p className={`text-sm ${hasIssues
+                ? "text-yellow-700 dark:text-yellow-300"
+                : "text-green-700 dark:text-green-300"}`}>
+                {hasIssues
+                  ? "Configuration has validation issues. Fix them in guided or YAML mode and validate again before saving."
+                  : "Configuration is valid and ready to use."}
               </p>
+              {hasIssues && (
+                <ul className="mt-2 space-y-2">
+                  {displayedIssues.map((issue: ValidationIssue, i: number) => (
+                    <li key={i} className="text-sm text-red-600 dark:text-red-400">{issue.message}</li>
+                  ))}
+                </ul>
+              )}
             </div>
             <div className="mt-4 flex gap-2">
               <Button variant="outline" onClick={() => setShowSetupWizard(true)}>
@@ -167,7 +167,7 @@ export default function ConfigPage() {
                 <GuidedEditor
                   initialForm={guidedForm as GuidedForm}
                   baseRawYaml={rawYaml || ""}
-                  issues={issues}
+                  issues={displayedIssues}
                   onValidate={handleValidateGuided}
                   onSave={handleSaveGuided}
                   onReset={handleReset}
@@ -177,7 +177,7 @@ export default function ConfigPage() {
                 <YamlEditor
                   rawYaml={rawYaml}
                   isRecoveryMode={false}
-                  issues={issues}
+                  issues={displayedIssues}
                   onValidate={handleValidateYaml}
                   onSave={handleSaveYaml}
                   onReset={handleReset}
