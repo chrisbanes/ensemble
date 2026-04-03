@@ -213,7 +213,7 @@ pub async fn get_setup_agents(
     State(_state): State<AppState>,
 ) -> (StatusCode, Json<SetupAgentsResponse>) {
     // Discover available agents
-    match crate::config::setup::discover_available_agents() {
+    match crate::config::setup::discover_available_agents().await {
         Ok(agents) => {
             let agent_infos: Vec<DiscoveredAgentInfo> = agents
                 .into_iter()
@@ -267,7 +267,7 @@ pub async fn validate_setup(
     State(_state): State<AppState>,
     Json(request): Json<ValidateSetupRequest>,
 ) -> (StatusCode, Json<ValidateSetupResponse>) {
-    let checks = crate::config::setup::run_setup_checks(&request.setup);
+    let checks = crate::config::setup::run_setup_checks(&request.setup).await;
     let can_save = crate::config::setup::setup_can_save(&checks);
 
     let response = ValidateSetupResponse { checks, can_save };
@@ -302,7 +302,7 @@ pub async fn save_setup(
     let current = state.config_runtime.document_state.read().await.clone();
 
     // First validate the setup
-    let checks = crate::config::setup::run_setup_checks(&request.setup);
+    let checks = crate::config::setup::run_setup_checks(&request.setup).await;
     if !crate::config::setup::setup_can_save(&checks) {
         let mut response = ConfigStateResponse::from_state(&current);
         response.issues.push(ValidationIssue {
@@ -669,6 +669,8 @@ on_failure: Failed
                     role: "builder".to_string(),
                     acpx_agent: "claude".to_string(),
                     model: None,
+                    prompt: None,
+                    prompt_file: None,
                 }],
                 steps: vec![crate::config::setup::SetupStep {
                     name: "build".to_string(),
@@ -832,6 +834,8 @@ custom_root:
                     role: "builder".to_string(),
                     acpx_agent: "codex".to_string(),
                     model: Some("sonnet".to_string()),
+                    prompt: None,
+                    prompt_file: None,
                 }],
                 steps: vec![crate::config::setup::SetupStep {
                     name: "build".to_string(),

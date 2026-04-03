@@ -57,6 +57,8 @@ fn to_setup_request(
             role: a.role.clone(),
             acpx_agent: a.acpx_agent.clone(),
             model: a.model.clone(),
+            prompt: None,
+            prompt_file: None,
         })
         .collect();
 
@@ -502,6 +504,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),
@@ -538,6 +542,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),
@@ -567,6 +573,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),

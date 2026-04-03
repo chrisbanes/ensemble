@@ -3,7 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
-import { AlertCircle, Save, RotateCcw, Check } from "lucide-react";
+import { AlertCircle, Save, RotateCcw, Check, FileText } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import FileBrowser from "./FileBrowser";
 import WorkflowEditor from "./WorkflowEditor";
 import type { ValidationIssue } from "@/generated/models";
 
@@ -106,6 +108,7 @@ export default function GuidedEditor({
     timestamp: Date;
     issues: ValidationIssue[];
   } | null>(null);
+  const [trackerPathBrowserOpen, setTrackerPathBrowserOpen] = useState(false);
 
   useEffect(() => {
     setDisplayedIssues(issues);
@@ -231,24 +234,54 @@ export default function GuidedEditor({
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <label htmlFor="tracker-kind" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Kind</label>
-              <Input
-                id="tracker-kind"
+              <Select
                 value={form.tracker.kind}
-                onChange={(e) =>
+                onValueChange={(v: string | null) =>
                   handleFormChange({
-                    tracker: { ...form.tracker, kind: e.target.value },
+                    tracker: { ...form.tracker, kind: v ?? "todo_file" },
                   })
                 }
-              />
+              >
+                <SelectTrigger id="tracker-kind">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="todo_file">Todo File</SelectItem>
+                  <SelectItem value="github">GitHub Project</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
             <div className="space-y-2">
               <label htmlFor="tracker-path" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Path (optional)</label>
-              <Input
-                id="tracker-path"
-                value={form.tracker.path || ""}
-                onChange={(e) =>
+              <div className="flex gap-2">
+                <Input
+                  id="tracker-path"
+                  value={form.tracker.path || ""}
+                  onChange={(e) =>
+                    handleFormChange({
+                      tracker: { ...form.tracker, path: e.target.value || undefined },
+                    })
+                  }
+                  className="flex-1"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={() => setTrackerPathBrowserOpen(true)}
+                  title="Browse for file"
+                >
+                  <FileText className="h-4 w-4" />
+                </Button>
+              </div>
+              <FileBrowser
+                open={trackerPathBrowserOpen}
+                onOpenChange={setTrackerPathBrowserOpen}
+                mode="file"
+                title="Select Tracker File"
+                initialPath={form.tracker.path || "~"}
+                onSelect={(path) =>
                   handleFormChange({
-                    tracker: { ...form.tracker, path: e.target.value || undefined },
+                    tracker: { ...form.tracker, path },
                   })
                 }
               />

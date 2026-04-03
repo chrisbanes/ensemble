@@ -1,5 +1,6 @@
 use crate::api::{
-    config_edit_handler, config_handler, controls, conversation, handlers, history_handler, ws,
+    config_edit_handler, config_handler, controls, conversation, fs_handler, handlers,
+    history_handler, ws,
 };
 use crate::config::draft::ConfigDocumentState;
 use crate::observability::events::EventBus;
@@ -70,6 +71,7 @@ pub fn create_api_router(state: AppState) -> Router {
                 .patch(handlers::method_not_allowed),
         )
         .route("/history", get(history_handler::get_history))
+        .route("/fs/list", get(fs_handler::list_directory))
         .route("/config", get(config_handler::get_config))
         // Config YAML endpoints
         .route(

@@ -48,6 +48,8 @@ pub async fn run_validation(
             role: a.role.clone(),
             acpx_agent: a.acpx_agent.clone(),
             model: a.model.clone(),
+            prompt: None,
+            prompt_file: None,
         })
         .collect();
 
@@ -71,7 +73,7 @@ pub async fn run_validation(
     };
 
     // Run the shared setup checks
-    let checks = run_setup_checks(&request);
+    let checks = run_setup_checks(&request).await;
 
     let mut failures = 0;
     for check in &checks {

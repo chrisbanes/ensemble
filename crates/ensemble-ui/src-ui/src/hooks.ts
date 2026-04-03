@@ -4,6 +4,7 @@ import { useGetState, getGetStateQueryKey } from "./generated/api/state/state";
 import { useGetIssueDetail } from "./generated/api/issues/issues";
 import { useGetConfig } from "./generated/api/config/config";
 import { useGetHistory } from "./generated/api/history/history";
+import { useListDirectory } from "./generated/api/filesystem/filesystem";
 import {
   usePostRefresh,
   usePostStop,
@@ -225,3 +226,6 @@ export function useSaveGuidedFormMutation() {
     isPending: generatedMutation.isPending,
   };
 }
+
+// Re-export filesystem hook for convenience
+export { useListDirectory };

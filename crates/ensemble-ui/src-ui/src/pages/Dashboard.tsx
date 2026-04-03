@@ -1,4 +1,5 @@
-import { useStateQuery, useRefreshMutation, useRetryMutation, useNextPollCountdown } from "@/hooks";
+import { useStateQuery, useRefreshMutation, useRetryMutation, useNextPollCountdown, useConfigStateQuery } from "@/hooks";
+import { Navigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import RunningTable from "@/components/RunningTable";
@@ -6,6 +7,11 @@ import RetryQueue from "@/components/RetryQueue";
 import AgentTotals from "@/components/AgentTotals";
 
 export default function Dashboard() {
+  const { data: configState } = useConfigStateQuery();
+  if (configState?.state === "missing") {
+    return <Navigate to="/config" replace />;
+  }
+
   const { data, isLoading, isError, error } = useStateQuery();
   const refreshMutation = useRefreshMutation();
   const retryMutation = useRetryMutation();

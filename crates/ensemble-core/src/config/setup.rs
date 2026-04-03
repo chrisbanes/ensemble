@@ -49,6 +49,10 @@ pub struct SetupAgent {
     pub role: String,
     pub acpx_agent: String,
     pub model: Option<String>,
+    /// Inline prompt text (optional)
+    pub prompt: Option<String>,
+    /// Path to prompt template file (optional, maps to prompt_template in config)
+    pub prompt_file: Option<String>,
 }
 
 /// Pipeline step entry for setup.
@@ -234,15 +238,21 @@ pub fn write_setup_artifacts(
 }
 
 /// Run setup checks and return the results.
-pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
+pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     let mut checks = Vec::new();
 
     // Check acpx is installed
-    let acpx_ok = std::process::Command::new("acpx")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let acpx_ok = tokio::time::timeout(
+        tokio::time::Duration::from_secs(8),
+        tokio::process::Command::new("acpx")
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|o| o.status.success())
+    .unwrap_or(false);
     checks.push(SetupCheck {
         kind: SetupCheckKind::Environment,
         label: "acpx".to_string(),
@@ -319,11 +329,17 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
 
     // Check agents
     for agent in &request.agents {
-        let healthy = std::process::Command::new("acpx")
-            .args(["--agent", &agent.acpx_agent, "--version"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let healthy = tokio::time::timeout(
+            tokio::time::Duration::from_secs(8),
+            tokio::process::Command::new("acpx")
+                .args(["--agent", &agent.acpx_agent, "--version"])
+                .output(),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
         checks.push(SetupCheck {
             kind: SetupCheckKind::Environment,
@@ -472,7 +488,7 @@ pub fn merge_setup_request(
 }
 
 /// Discover available agents from the system.
-pub fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
+pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
     let known_agents: &[(&str, &str)] = &[
         ("claude", "Claude Code"),
         ("codex", "Codex CLI"),
@@ -490,8 +506,8 @@ pub fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> 
     let mut available = Vec::new();
 
     for (name, label) in known_agents {
-        if probe_agent(name) {
-            let version = get_agent_version(name);
+        if probe_agent(name).await {
+            let version = get_agent_version(name).await;
             available.push(DiscoveredAgent {
                 name: name.to_string(),
                 label: label.to_string(),
@@ -696,24 +712,34 @@ fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn probe_agent(name: &str) -> bool {
-    let output = std::process::Command::new("acpx")
-        .args(["--agent", name, "--version"])
-        .output();
+async fn probe_agent(name: &str) -> bool {
+    let timeout = tokio::time::Duration::from_secs(8);
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new("acpx")
+            .args(["--agent", name, "--version"])
+            .output()
+            .await
+    })
+    .await;
 
-    match output {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
+    match result {
+        Ok(Ok(o)) => o.status.success(),
+        _ => false,
     }
 }
 
-fn get_agent_version(name: &str) -> String {
-    let output = std::process::Command::new("acpx")
-        .args(["--agent", name, "--version"])
-        .output();
+async fn get_agent_version(name: &str) -> String {
+    let timeout = tokio::time::Duration::from_secs(8);
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new("acpx")
+            .args(["--agent", name, "--version"])
+            .output()
+            .await
+    })
+    .await;
 
-    match output {
-        Ok(o) if o.status.success() => {
+    match result {
+        Ok(Ok(o)) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if v.is_empty() {
                 String::new()
@@ -893,6 +919,8 @@ fn extract_agents(doc: &serde_yaml::Value) -> Result<Vec<SetupAgent>, ConfigErro
                         role: role.to_string(),
                         acpx_agent: acpx_agent.to_string(),
                         model,
+                        prompt: None,
+                        prompt_file: None,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1202,6 +1230,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "implement".to_string(),
@@ -1238,6 +1268,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("sonnet".to_string()),
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "implement".to_string(),
@@ -1276,6 +1308,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "implement".to_string(),
@@ -1415,6 +1449,8 @@ custom_section:
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("opus".to_string()),
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),
@@ -1471,6 +1507,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "codex".to_string(),
                 model: Some("sonnet".to_string()),
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),
@@ -1792,5 +1830,94 @@ on_failure: Failed
         assert_eq!(request.agents[0].model.as_deref(), Some("sonnet"));
         assert_eq!(request.steps.len(), 1);
         assert_eq!(request.steps[0].name, "build");
+    }
+
+    #[tokio::test]
+    async fn probe_agent_returns_true_when_acpx_succeeds() {
+        let result = probe_agent("claude").await;
+        assert!(result, "probe_agent should return true when acpx succeeds");
+    }
+
+    #[tokio::test]
+    async fn get_agent_version_returns_version_when_acpx_succeeds() {
+        let result = get_agent_version("claude").await;
+        assert!(
+            !result.is_empty(),
+            "get_agent_version should return version when acpx succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_wrapper_completes_before_timeout() {
+        let timeout = tokio::time::Duration::from_millis(500);
+        let result: Result<Result<std::process::Output, std::io::Error>, _> =
+            tokio::time::timeout(timeout, async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::default(),
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            })
+            .await;
+
+        assert!(result.is_ok(), "should complete before timeout");
+    }
+
+    #[tokio::test]
+    async fn timeout_wrapper_expires_on_slow_operation() {
+        let timeout = tokio::time::Duration::from_millis(50);
+        let result: Result<Result<std::process::Output, std::io::Error>, _> =
+            tokio::time::timeout(timeout, async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::default(),
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "timeout should expire before slow operation completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_agent_timeout_pattern_returns_false() {
+        let timeout = tokio::time::Duration::from_millis(50);
+        let result = tokio::time::timeout(timeout, async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::process::Command::new("true").output().await
+        })
+        .await;
+
+        let success = match result {
+            Ok(Ok(o)) => o.status.success(),
+            _ => false,
+        };
+        assert!(!success, "timeout should cause probe to return false");
+    }
+
+    #[tokio::test]
+    async fn get_agent_version_timeout_pattern_returns_empty() {
+        let timeout = tokio::time::Duration::from_millis(50);
+        let result = tokio::time::timeout(timeout, async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::process::Command::new("true").output().await
+        })
+        .await;
+
+        let version = match result {
+            Ok(Ok(o)) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+            _ => String::new(),
+        };
+        assert!(
+            version.is_empty(),
+            "timeout should cause version to return empty string"
+        );
     }
 }
