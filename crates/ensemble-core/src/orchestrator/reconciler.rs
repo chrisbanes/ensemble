@@ -84,8 +84,8 @@ pub fn determine_reconcile_action(
 pub async fn reconcile_tracker_states(
     state: &OrchestratorState,
     tracker: &dyn IssueTracker,
-    active_states: &[String],
-    terminal_states: &[String],
+    active_states_lower: &[String],
+    terminal_states_lower: &[String],
 ) -> ReconcileTrackerResult {
     let running_ids = state.running_issue_ids();
     if running_ids.is_empty() {
@@ -122,7 +122,7 @@ pub async fn reconcile_tracker_states(
             continue;
         }
 
-        match determine_reconcile_action(&issue, active_states, terminal_states) {
+        match determine_reconcile_action(&issue, active_states_lower, terminal_states_lower) {
             ReconcileAction::UpdateSnapshot(i) => {
                 debug!(
                     issue_id = %i.id,
