@@ -163,11 +163,13 @@ impl WorkspaceManager {
     /// and the final component is re-appended, preserving the intended semantics.
     fn validate_path_inside_root(&self, path: &Path) -> Result<(), WorkspaceError> {
         let canonical_root = self.root.canonicalize().unwrap_or_else(|e| {
-            warn!(
-                root = %self.root.display(),
-                error = %e,
-                "cannot canonicalize workspace root, falling back to non-canonical path check"
-            );
+            if self.root.exists() {
+                warn!(
+                    root = %self.root.display(),
+                    error = %e,
+                    "cannot canonicalize workspace root, falling back to non-canonical path check"
+                );
+            }
             self.root.clone()
         });
 

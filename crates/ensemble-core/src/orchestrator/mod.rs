@@ -13,7 +13,7 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
 use crate::agent::events::{AgentEvent, WorkerEvent, WorkerResult};
-use crate::agent::AgentRunner;
+use crate::agent::{AgentRunRequest, AgentRunner};
 use crate::config::ensemble::EnsembleConfig;
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{PipelineAction, PipelineRun};
@@ -296,10 +296,10 @@ impl Orchestrator {
 
     /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
     async fn dispatch_issue(&self, issue: &Issue, attempt: Option<u32>) {
-        let dag = {
+        let (dag, config_snapshot) = {
             let config = self.config.read().await;
             match build_dag(&config.steps) {
-                Ok(d) => d,
+                Ok(d) => (d, Arc::new(config.clone())),
                 Err(e) => {
                     warn!(issue_id = %issue.id, error = %e, "failed to build step DAG, skipping dispatch");
                     return;
@@ -321,7 +321,7 @@ impl Orchestrator {
         {
             let mut state = self.state.write().await;
             state.add_running(issue, attempt);
-            state.insert_pipeline_run(&issue.id, pipeline_run);
+            state.insert_pipeline_run(&issue.id, pipeline_run, Arc::clone(&config_snapshot));
         }
 
         // Process initial dispatch requests
@@ -333,6 +333,7 @@ impl Orchestrator {
                     &req.agent_name,
                     req.tracker_state.as_deref(),
                     attempt,
+                    Arc::clone(&config_snapshot),
                 )
                 .await;
             }
@@ -347,6 +348,7 @@ impl Orchestrator {
         agent_name: &str,
         tracker_state: Option<&str>,
         attempt: Option<u32>,
+        config_snapshot: Arc<EnsembleConfig>,
     ) {
         info!(
             issue_id = %issue.id,
@@ -388,8 +390,6 @@ impl Orchestrator {
         let runner = Arc::clone(&self.agent_runner);
         let workspace_mgr = Arc::clone(&self.workspace_mgr);
         let event_tx = self.worker_tx.clone();
-        let config = Arc::clone(&self.config);
-
         tokio::spawn(async move {
             // Prepare workspace
             let workspace_result = workspace_mgr
@@ -399,13 +399,12 @@ impl Orchestrator {
                 Ok(ws) => {
                     // Run after_create hook if newly created
                     if ws.created_now {
-                        let cfg = config.read().await;
-                        if let Some(ref script) = cfg.hooks.after_create {
+                        if let Some(ref script) = config_snapshot.hooks.after_create {
                             if let Err(e) = crate::workspace::hooks::run_hook(
                                 "after_create",
                                 script,
                                 &ws.base_path,
-                                cfg.hooks.timeout_ms,
+                                config_snapshot.hooks.timeout_ms,
                             )
                             .await
                             {
@@ -442,14 +441,15 @@ impl Orchestrator {
 
             // Run agent
             let result = runner
-                .run(
-                    &issue_clone,
-                    &agent_name_owned,
-                    &step_name_owned,
+                .run(AgentRunRequest {
+                    config: Arc::clone(&config_snapshot),
+                    issue: &issue_clone,
+                    agent_name: &agent_name_owned,
+                    step_name: &step_name_owned,
                     attempt,
-                    &workspace_path,
-                    event_tx.clone(),
-                )
+                    workspace_path: &workspace_path,
+                    event_tx: event_tx.clone(),
+                })
                 .await;
 
             let worker_result = match result {
@@ -570,18 +570,25 @@ impl Orchestrator {
 
                 // Drive the pipeline
                 let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
-                    Some(run.step_completed(step_name, verdict))
+                    Some((
+                        run.step_completed(step_name, verdict),
+                        state.get_pipeline_config(issue_id).cloned(),
+                    ))
                 } else {
                     warn!(issue_id = %issue_id, "no pipeline run found for worker exit");
                     None
                 };
 
-                if let Some(action) = pipeline_action {
+                if let Some((action, config_snapshot)) = pipeline_action {
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Need to drop state lock before dispatching
                             drop(state);
                             if let Some(ref issue) = issue_snapshot {
+                                let Some(config_snapshot) = config_snapshot else {
+                                    warn!(issue_id = %issue_id, "no config snapshot found for pipeline dispatch");
+                                    return;
+                                };
                                 for req in requests {
                                     self.dispatch_step(
                                         issue,
@@ -589,6 +596,7 @@ impl Orchestrator {
                                         &req.agent_name,
                                         req.tracker_state.as_deref(),
                                         None,
+                                        Arc::clone(&config_snapshot),
                                     )
                                     .await;
                                 }
@@ -832,19 +840,25 @@ mod tests {
     /// Mock agent runner that completes immediately.
     struct MockRunner {
         delay_ms: u64,
+        observed_commands: Option<Arc<RwLock<Vec<String>>>>,
     }
 
     #[async_trait]
     impl AgentRunner for MockRunner {
-        async fn run(
-            &self,
-            issue: &Issue,
-            _agent_name: &str,
-            step_name: &str,
-            _attempt: Option<u32>,
-            _workspace_path: &std::path::Path,
-            event_tx: mpsc::Sender<WorkerEvent>,
-        ) -> Result<(), AgentError> {
+        async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError> {
+            let AgentRunRequest {
+                config,
+                issue,
+                step_name,
+                event_tx,
+                ..
+            } = request;
+            if let Some(observed_commands) = &self.observed_commands {
+                observed_commands
+                    .write()
+                    .await
+                    .push(config.agent.command.clone());
+            }
             if self.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
             }
@@ -923,7 +937,10 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: issues.clone(),
         });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 10 });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 10,
+            observed_commands: None,
+        });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -948,7 +965,10 @@ agent:
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -969,7 +989,7 @@ agent:
             let mut pipeline_run2 = PipelineRun::new("1".to_string(), 1, dag2);
             pipeline_run2.start();
             pipeline_run2.mark_running("build", "session-1".to_string());
-            state.insert_pipeline_run("1", pipeline_run2);
+            state.insert_pipeline_run("1", pipeline_run2, Arc::new(cfg.clone()));
         }
 
         // Simulate worker exit
@@ -990,7 +1010,10 @@ agent:
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -1008,7 +1031,7 @@ agent:
 
             let mut state = orchestrator.state.write().await;
             state.add_running(&test_issue("1", "Todo"), Some(2));
-            state.insert_pipeline_run("1", pipeline_run);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
         }
 
         // Simulate worker failure
@@ -1039,7 +1062,10 @@ agent:
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -1103,7 +1129,10 @@ agent:
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![])); // empty — issue not found
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 0 });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -1147,7 +1176,10 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: issues.clone(),
         });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner { delay_ms: 10 });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 10,
+            observed_commands: None,
+        });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
@@ -1180,5 +1212,36 @@ agent:
                 "should have retry or be completed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_uses_config_snapshot_for_runner() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator =
+            Orchestrator::new(config.clone(), tracker, runner, workspace_mgr, shutdown_rx);
+        let issue = test_issue("1", "Todo");
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        {
+            let mut cfg = config.write().await;
+            cfg.agent.command = "echo changed".to_string();
+        }
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let commands = observed_commands.read().await;
+        assert_eq!(commands.as_slice(), &["echo test".to_string()]);
     }
 }

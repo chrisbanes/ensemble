@@ -90,17 +90,12 @@ pub async fn run_hook(
 }
 
 fn preferred_shell() -> &'static str {
-    PREFERRED_SHELL.get_or_init(|| {
-        if std::process::Command::new("bash")
-            .arg("--version")
-            .output()
-            .is_ok()
-        {
-            "bash"
-        } else {
-            "sh"
-        }
-    })
+    PREFERRED_SHELL.get_or_init(|| if bash_in_path() { "bash" } else { "sh" })
+}
+
+fn bash_in_path() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file()))
 }
 
 /// Run a hook if configured; swallow errors for non-fatal hooks.

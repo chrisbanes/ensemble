@@ -29,8 +29,6 @@ pub fn is_dispatch_eligible(
         return Some("missing issue state".to_string());
     }
 
-    let state_lower = issue.state.to_lowercase();
-
     // Must be in active states
     if !contains_state(active_states, &issue.state) {
         return Some(format!("state '{}' not in active states", issue.state));
@@ -67,7 +65,7 @@ pub fn is_dispatch_eligible(
     }
 
     // Blocker rule: Todo issues with non-terminal blockers are not eligible
-    if state_lower == "todo" && !issue.blocked_by.is_empty() {
+    if issue.state.eq_ignore_ascii_case("todo") && !issue.blocked_by.is_empty() {
         let has_non_terminal_blocker = issue.blocked_by.iter().any(|blocker| {
             if let Some(ref blocker_state) = blocker.state {
                 !contains_state(terminal_states, blocker_state)
