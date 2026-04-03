@@ -505,10 +505,7 @@ impl Orchestrator {
 
         // Handle special cases
         match &event {
-            AgentEvent::SessionStarted {
-                session_id,
-                agent_pid,
-            } => {
+            AgentEvent::SessionStarted { session_id, agent_pid } => {
                 state.update_session_info(issue_id, session_id, agent_pid.as_deref());
             }
             AgentEvent::TurnStarted => {

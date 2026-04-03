@@ -128,7 +128,6 @@ fn truncate_for_state(value: &str) -> Cow<'_, str> {
         Cow::Borrowed(value)
     }
 }
-
 /// Events sent from worker tasks to the orchestrator.
 #[derive(Debug)]
 pub enum WorkerEvent {
