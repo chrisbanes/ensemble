@@ -47,7 +47,6 @@ pub fn spa_router() -> axum::Router {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use ensemble_core::ui::normalize_spa_path;
 
     #[test]
