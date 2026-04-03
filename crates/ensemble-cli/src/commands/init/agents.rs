@@ -101,7 +101,9 @@ pub async fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<Ag
     }
 
     // Use shared discovery function
-    let discovered = discover_available_agents().map_err(|e| e.to_string())?;
+    let discovered = discover_available_agents()
+        .await
+        .map_err(|e| e.to_string())?;
 
     let available: Vec<String> = discovered.iter().map(|d| d.name.clone()).collect();
 

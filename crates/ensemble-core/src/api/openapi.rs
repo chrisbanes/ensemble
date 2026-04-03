@@ -25,6 +25,7 @@ use utoipa::OpenApi;
         crate::api::conversation::get_conversation_message,
         crate::api::controls::post_stop,
         crate::api::controls::post_retry,
+        crate::api::fs_handler::list_directory,
     ),
     components(schemas(
         // Snapshot types
@@ -98,6 +99,9 @@ use utoipa::OpenApi;
         // Conversation types
         crate::api::conversation::ConversationResponse,
         crate::api::conversation::ConversationMessage,
+        // Filesystem types
+        crate::api::fs_handler::ListResponse,
+        crate::api::fs_handler::FsEntry,
     )),
     tags(
         (name = "state", description = "Runtime state"),
@@ -106,6 +110,7 @@ use utoipa::OpenApi;
         (name = "history", description = "Completion history"),
         (name = "config", description = "Configuration"),
         (name = "conversation", description = "Agent conversation logs"),
+        (name = "filesystem", description = "File browser"),
     )
 )]
 pub struct ApiDoc;

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useGetSetupDefaults, useGetSetupAgents } from "@/generated/api/config/config";
 import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
+import FileBrowser from "./FileBrowser";
 import type { 
   SetupTracker, 
   SetupRepo, 
@@ -11,6 +12,7 @@ import type {
 } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { 
   Select,
@@ -19,7 +21,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Trash2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Plus, Trash2, CheckCircle2, AlertCircle, FolderOpen, FileText } from "lucide-react";
 
 type WizardStep = "tracker" | "repos" | "agents" | "workflow" | "validation";
 
@@ -52,7 +54,7 @@ const DEFAULT_GH_TRACKER: SetupTracker = {
 const DEFAULT_DRAFT: SetupDraft = {
   tracker: { ...DEFAULT_TODO_TRACKER },
   repos: [],
-  agents: [{ role: "implement", acpx_agent: "", model: null }],
+  agents: [{ role: "implement", acpx_agent: "", model: null, prompt: null, prompt_file: null }],
   steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
   onSuccess: "done",
   onFailure: "paused",
@@ -68,6 +70,18 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   const [repoPathInput, setRepoPathInput] = useState("");
   const [repoBranchInput, setRepoBranchInput] = useState("main");
   const hasVisitedWorkflow = useRef(false);
+
+  // File browser states
+  const [todoPathBrowserOpen, setTodoPathBrowserOpen] = useState(false);
+  const [repoPathBrowserOpen, setRepoPathBrowserOpen] = useState(false);
+  const [promptFileBrowserOpen, setPromptFileBrowserOpen] = useState(false);
+  const [activePromptAgentIndex, setActivePromptAgentIndex] = useState<number | null>(null);
+
+  // Custom agent tracking
+  const [customAgents, setCustomAgents] = useState<Record<number, boolean>>({});
+
+  // Prompt mode tracking for each agent (UI-only state)
+  const [promptModes, setPromptModes] = useState<Record<number, "inline" | "file">>({});
 
   const { data: defaultsData, isLoading: isLoadingDefaults } = useGetSetupDefaults({
     query: { enabled: true },
@@ -200,6 +214,10 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     }
   }, [draft.agents, currentStep]);
 
+  useEffect(() => {
+    hasVisitedWorkflow.current = false;
+  }, [draft.agents]);
+
   const handleTrackerKindChange = (value: TrackerKind) => {
     if (value === "todo_file") {
       setDraft(prev => ({
@@ -239,14 +257,36 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
       {draft.tracker.kind === "todo_file" ? (
         <div className="space-y-2">
           <label className="text-sm font-medium" htmlFor="todo-path">Path</label>
-          <Input
-            id="todo-path"
-            value={draft.tracker.path}
-            onChange={(e) => setDraft(prev => ({
+          <div className="flex gap-2">
+            <Input
+              id="todo-path"
+              value={draft.tracker.path}
+              onChange={(e) => setDraft(prev => ({
+                ...prev,
+                tracker: { kind: "todo_file", path: e.target.value },
+              }))}
+              placeholder="/path/to/todo.md"
+              className="flex-1"
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => setTodoPathBrowserOpen(true)}
+              title="Browse for file"
+            >
+              <FileText className="h-4 w-4" />
+            </Button>
+          </div>
+          <FileBrowser
+            open={todoPathBrowserOpen}
+            onOpenChange={setTodoPathBrowserOpen}
+            mode="file"
+            title="Select Todo File"
+            initialPath={draft.tracker.path || "~"}
+            onSelect={(path) => setDraft(prev => ({
               ...prev,
-              tracker: { kind: "todo_file", path: e.target.value },
+              tracker: { kind: "todo_file", path },
             }))}
-            placeholder="/path/to/todo.md"
           />
         </div>
       ) : (
@@ -276,7 +316,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                 ...prev,
                 tracker: { 
                   ...prev.tracker,
-                  project_number: e.target.value ? parseInt(e.target.value) : null,
+                  project_number: e.target.value ? parseInt(e.target.value, 10) : null,
                 } as SetupTracker,
               }))}
             />
@@ -310,7 +350,17 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
             }
           }}
           aria-label="Repository path"
+          className="flex-1"
         />
+        <Button
+          variant="outline"
+          size="icon"
+          onClick={() => setRepoPathBrowserOpen(true)}
+          title="Browse for directory"
+          aria-label="Browse for repository directory"
+        >
+          <FolderOpen className="h-4 w-4" />
+        </Button>
         <Input
           placeholder="Branch"
           value={repoBranchInput}
@@ -322,10 +372,20 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           variant="outline"
           size="icon"
           onClick={handleAddRepo}
+          aria-label="Add repository"
         >
           <Plus className="h-4 w-4" />
         </Button>
       </div>
+
+      <FileBrowser
+        open={repoPathBrowserOpen}
+        onOpenChange={setRepoPathBrowserOpen}
+        mode="directory"
+        title="Select Repository Directory"
+        initialPath={repoPathInput || "~"}
+        onSelect={(path) => setRepoPathInput(path)}
+      />
 
       {draft.repos.length === 0 ? (
         <p className="text-sm text-muted-foreground">No repositories added yet.</p>
@@ -361,90 +421,241 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         <p className="text-sm text-muted-foreground">Loading available agents...</p>
       ) : (
         <>
-          {(() => {
-            const discoveredAgents = agentsData?.data?.agents ?? [];
-
-            return draft.agents.map((agent, index) => (
-              <div key={index} className="p-4 rounded-lg border space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium">Agent {index + 1}</span>
-                  {draft.agents.length > 1 && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      onClick={() => setDraft(prev => ({
+          {draft.agents.map((agent, index) => {
+            const isCustom = customAgents[index] || (agent.acpx_agent && !agentsData?.data?.agents?.find((a: DiscoveredAgentInfo) => a.name === agent.acpx_agent));
+            const promptMode = promptModes[index] || "inline";
+            
+            return (
+            <div key={index} className="p-4 rounded-lg border space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-medium">Agent {index + 1}</span>
+                {draft.agents.length > 1 && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      setDraft(prev => ({
                         ...prev,
                         agents: prev.agents.filter((_, i) => i !== index),
-                      }))}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
-                  )}
-                </div>
-                
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <label className="text-sm">Role</label>
-                    <Input
-                      value={agent.role}
-                      onChange={(e) => setDraft(prev => {
-                        const newAgents = [...prev.agents];
-                        newAgents[index] = { ...agent, role: e.target.value };
-                        return { ...prev, agents: newAgents };
-                      })}
-                      placeholder="e.g., implement, review"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-sm">Agent</label>
-                    <Select
-                      value={agent.acpx_agent}
-                      onValueChange={(value) => {
-                        if (value) {
-                          setDraft(prev => {
-                            const newAgents = [...prev.agents];
-                            newAgents[index] = { ...agent, acpx_agent: value };
-                            return { ...prev, agents: newAgents };
-                          });
+                      }));
+                      setCustomAgents(prev => {
+                        const updated: Record<number, boolean> = {};
+                        for (const [k, v] of Object.entries(prev)) {
+                          const numK = Number(k);
+                          if (numK < index) updated[numK] = v;
+                          else if (numK > index) updated[numK - 1] = v;
                         }
-                      }}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select agent" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {discoveredAgents.map((discoveredAgent: DiscoveredAgentInfo) => (
-                          <SelectItem key={discoveredAgent.name} value={discoveredAgent.name}>
-                            {discoveredAgent.label} ({discoveredAgent.version})
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-
+                        return updated;
+                      });
+                      setPromptModes(prev => {
+                        const updated: Record<number, "inline" | "file"> = {};
+                        for (const [k, v] of Object.entries(prev)) {
+                          const numK = Number(k);
+                          if (numK < index) updated[numK] = v;
+                          else if (numK > index) updated[numK - 1] = v;
+                        }
+                        return updated;
+                      });
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                )}
+              </div>
+              
+              <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
-                  <label className="text-sm">Model (optional)</label>
+                  <label className="text-sm" htmlFor={`agent-role-${index}`}>Role</label>
                   <Input
-                    value={agent.model || ""}
+                    id={`agent-role-${index}`}
+                    value={agent.role}
                     onChange={(e) => setDraft(prev => {
                       const newAgents = [...prev.agents];
-                      newAgents[index] = { ...agent, model: e.target.value || null };
+                      newAgents[index] = { ...agent, role: e.target.value };
                       return { ...prev, agents: newAgents };
                     })}
-                    placeholder="e.g., gpt-4"
+                    placeholder="e.g., implement, review"
                   />
                 </div>
+                <div className="space-y-2">
+                  <label className="text-sm" htmlFor={`agent-select-${index}`}>Agent</label>
+                  <Select
+                    value={isCustom ? "__custom__" : agent.acpx_agent}
+                    onValueChange={(value) => {
+                      if (value === "__custom__") {
+                        setCustomAgents(prev => ({ ...prev, [index]: true }));
+                        setDraft(prev => {
+                          const newAgents = [...prev.agents];
+                          newAgents[index] = { ...agent, acpx_agent: "" };
+                          return { ...prev, agents: newAgents };
+                        });
+                      } else if (value) {
+                        setCustomAgents(prev => ({ ...prev, [index]: false }));
+                        setDraft(prev => {
+                          const newAgents = [...prev.agents];
+                          newAgents[index] = { ...agent, acpx_agent: value };
+                          return { ...prev, agents: newAgents };
+                        });
+                      }
+                    }}
+                  >
+                    <SelectTrigger id={`agent-select-${index}`}>
+                      <SelectValue placeholder="Select agent" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {agentsData?.data?.agents?.map((discoveredAgent: DiscoveredAgentInfo) => (
+                        <SelectItem key={discoveredAgent.name} value={discoveredAgent.name}>
+                          {discoveredAgent.label} ({discoveredAgent.version})
+                        </SelectItem>
+                      ))}
+                      <SelectItem value="__custom__">Custom...</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-            ));
-          })()}
+
+              {isCustom && (
+                <div className="space-y-2">
+                  <label className="text-sm">Custom Agent Name</label>
+                  <Input
+                    value={agent.acpx_agent}
+                    onChange={(e) => setDraft(prev => {
+                      const newAgents = [...prev.agents];
+                      newAgents[index] = { ...agent, acpx_agent: e.target.value };
+                      return { ...prev, agents: newAgents };
+                    })}
+                    placeholder="e.g., my-custom-agent"
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Custom agents are not validated — ensure this agent is installed and accessible via acpx.
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="text-sm" htmlFor={`agent-model-${index}`}>Model (optional)</label>
+                <Input
+                  id={`agent-model-${index}`}
+                  value={agent.model || ""}
+                  onChange={(e) => setDraft(prev => {
+                    const newAgents = [...prev.agents];
+                    newAgents[index] = { ...agent, model: e.target.value || null };
+                    return { ...prev, agents: newAgents };
+                  })}
+                  placeholder="e.g., gpt-4"
+                />
+              </div>
+
+              {/* Prompt Configuration */}
+              <div className="space-y-2 pt-2 border-t">
+                <label className="text-sm" htmlFor={`prompt-mode-${index}`}>Prompt Configuration</label>
+                <Select
+                  value={promptMode}
+                  onValueChange={(value) => {
+                    setPromptModes(prev => ({ ...prev, [index]: value as "inline" | "file" }));
+                    // Clear the other field when switching
+                    setDraft(prev => {
+                      const newAgents = [...prev.agents];
+                      newAgents[index] = { 
+                        ...agent, 
+                        prompt: value === "file" ? null : agent.prompt,
+                        prompt_file: value === "inline" ? null : agent.prompt_file,
+                      };
+                      return { ...prev, agents: newAgents };
+                    });
+                  }}
+                >
+                  <SelectTrigger id={`prompt-mode-${index}`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inline">Inline text</SelectItem>
+                    <SelectItem value="file">File path</SelectItem>
+                  </SelectContent>
+                </Select>
+
+                {promptMode === "inline" ? (
+                  <Textarea
+                    className="min-h-[100px]"
+                    placeholder="Enter prompt content..."
+                    value={agent.prompt || ""}
+                    onChange={(e) => setDraft(prev => {
+                      const newAgents = [...prev.agents];
+                      newAgents[index] = { ...agent, prompt: e.target.value };
+                      return { ...prev, agents: newAgents };
+                    })}
+                  />
+                ) : (
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="/path/to/prompt.liquid"
+                      value={agent.prompt_file || ""}
+                      onChange={(e) => setDraft(prev => {
+                        const newAgents = [...prev.agents];
+                        newAgents[index] = { ...agent, prompt_file: e.target.value };
+                        return { ...prev, agents: newAgents };
+                      })}
+                      className="flex-1"
+                    />
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      onClick={() => {
+                        setActivePromptAgentIndex(index);
+                        setPromptFileBrowserOpen(true);
+                      }}
+                      title="Browse for prompt file"
+                    >
+                      <FileText className="h-4 w-4" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+            );
+          })}
+
+          <FileBrowser
+            open={promptFileBrowserOpen}
+            onOpenChange={(open) => {
+              setPromptFileBrowserOpen(open);
+              if (!open) setActivePromptAgentIndex(null);
+            }}
+            mode="file"
+            title="Select Prompt File"
+            initialPath={activePromptAgentIndex !== null 
+              ? draft.agents[activePromptAgentIndex]?.prompt_file || "~" 
+              : "~"}
+            onSelect={(path) => {
+              if (
+                activePromptAgentIndex !== null
+                && activePromptAgentIndex >= 0
+                && activePromptAgentIndex < draft.agents.length
+              ) {
+                setDraft(prev => {
+                  const newAgents = [...prev.agents];
+                  const selectedAgent = newAgents[activePromptAgentIndex];
+                  if (!selectedAgent) {
+                    return prev;
+                  }
+                  newAgents[activePromptAgentIndex] = {
+                    ...selectedAgent,
+                    prompt_file: path,
+                  };
+                  return { ...prev, agents: newAgents };
+                });
+              }
+            }}
+          />
 
           <Button
             variant="outline"
-            onClick={() => setDraft(prev => ({
-              ...prev,
-              agents: [...prev.agents, { role: "agent", acpx_agent: "", model: null }],
-            }))}
+            onClick={() => {
+              setDraft(prev => ({
+                ...prev,
+                agents: [...prev.agents, { role: "agent", acpx_agent: "", model: null, prompt: null, prompt_file: null }],
+              }));
+            }}
           >
             <Plus className="h-4 w-4 mr-2" />
             Add Agent

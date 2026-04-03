@@ -2,6 +2,7 @@ pub mod config_edit_handler;
 pub mod config_handler;
 pub mod controls;
 pub mod conversation;
+pub mod fs_handler;
 pub mod handlers;
 pub mod history_handler;
 pub mod openapi;

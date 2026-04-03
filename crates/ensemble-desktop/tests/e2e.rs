@@ -105,7 +105,7 @@ tracker:
   path: TODO.md
 agents:
   coder:
-    model: claude-sonnet-4-20250514
+    model: test-model-fake
     prompt: "You are a helpful coding assistant."
     executor: local
 steps:
@@ -128,8 +128,7 @@ on_failure: "Failed"
         .spawn()
         .expect("Failed to launch app binary");
 
-    // Give the app a few seconds to initialize
-    std::thread::sleep(Duration::from_secs(3));
+    wait_for_startup(&mut child, Duration::from_secs(10)).expect("app should stay running");
 
     // Check if the process is still running
     let result = check_app_running(&mut child);
@@ -168,8 +167,7 @@ fn app_stays_running_when_config_missing() {
         .spawn()
         .expect("Failed to launch app binary");
 
-    // Give the app a few seconds to initialize the HTTP server
-    std::thread::sleep(Duration::from_secs(3));
+    wait_for_startup(&mut child, Duration::from_secs(10)).expect("app should stay running");
 
     // Check if the process is still running (it should be now!)
     let result = check_app_running_with_message(
@@ -234,6 +232,19 @@ fn binary_name() -> &'static str {
     } else {
         "ensemble-desktop"
     }
+}
+
+fn wait_for_startup(child: &mut std::process::Child, timeout: Duration) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return Err(format!("process exited early with status {status}"));
+        }
+
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(())
 }
 
 fn restore_env(key: &str, value: Option<std::ffi::OsString>) {

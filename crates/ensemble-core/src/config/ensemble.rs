@@ -49,7 +49,7 @@ fn default_max_cycles() -> u32 {
 }
 
 /// Tracker configuration: which issue tracker to use and how to connect to it.
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct TrackerConfig {
     pub kind: String,
     #[serde(default = "default_active_states")]
@@ -73,6 +73,22 @@ fn default_active_states() -> Vec<String> {
 
 fn default_terminal_states() -> Vec<String> {
     vec!["Done".to_string(), "Closed".to_string()]
+}
+
+impl std::fmt::Debug for TrackerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrackerConfig")
+            .field("kind", &self.kind)
+            .field("active_states", &self.active_states)
+            .field("terminal_states", &self.terminal_states)
+            .field("path", &self.path)
+            .field("endpoint", &self.endpoint)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("repository", &self.repository)
+            .field("project_number", &self.project_number)
+            .field("labels_filter", &self.labels_filter)
+            .finish()
+    }
 }
 
 /// Per-agent definition: which executor to use and what prompt to send.
@@ -253,31 +269,36 @@ impl Default for AgentRuntimeConfig {
 /// Resolve `$VAR_NAME` in a string value to its environment variable.
 /// Returns the literal string if it doesn't start with `$`.
 /// Returns None if the env var is empty or unset.
-fn resolve_env_var(value: &str) -> Option<String> {
+/// Falls back to `dotenv_map` when the env var is not in the process environment.
+fn resolve_env_var(value: &str, dotenv_map: &HashMap<String, String>) -> Option<String> {
     if let Some(var_name) = value.strip_prefix('$') {
         match std::env::var(var_name) {
             Ok(v) if !v.is_empty() => Some(v),
-            _ => None,
+            _ => dotenv_map.get(var_name).filter(|v| !v.is_empty()).cloned(),
         }
     } else {
         Some(value.to_string())
     }
 }
 
-/// Expand `~` to home directory in a path string.
-fn expand_tilde(path_str: &str) -> PathBuf {
-    if let Some(rest) = path_str.strip_prefix('~') {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(rest.strip_prefix('/').unwrap_or(rest));
-        }
-    }
-    PathBuf::from(path_str)
-}
-
 /// Resolve a path string: expand `$VAR` then `~`.
 /// Returns `None` if the path references an unset/empty env var.
-fn resolve_path(path_str: &str) -> Option<PathBuf> {
-    resolve_env_var(path_str).map(|resolved| expand_tilde(&resolved))
+fn resolve_path(path_str: &str, dotenv_map: &HashMap<String, String>) -> Option<PathBuf> {
+    resolve_env_var(path_str, dotenv_map)
+        .map(|resolved| PathBuf::from(shellexpand::tilde(&resolved).as_ref()))
+}
+
+/// Read a `.env` file into a local map without mutating the process environment.
+/// Best-effort: returns an empty map on any error.
+fn read_dotenv(path: &Path) -> HashMap<String, String> {
+    dotenvy::from_path_iter(path)
+        .ok()
+        .map(|iter| {
+            iter.filter_map(Result::ok)
+                .filter(|(_, value)| !value.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl EnsembleConfig {
@@ -289,9 +310,8 @@ impl EnsembleConfig {
     /// - `workspace.root`
     /// - `agents.*.prompt_template`
     /// - `repos[*].path`
-    pub fn resolve_env(&mut self) {
-        self.resolve_env_from(Path::new("."))
-            .expect("CWD should always be available");
+    pub fn resolve_env(&mut self) -> Result<(), crate::error::ConfigError> {
+        self.resolve_env_from(Path::new("."), &HashMap::new())
     }
 
     /// Resolve environment variables and rebase relative paths from the config directory.
@@ -300,13 +320,17 @@ impl EnsembleConfig {
     /// 1. Resolves `$VAR` and `~` in all path fields
     /// 2. Rebase relative paths to be relative to the config directory
     /// 3. Sets default TODO path for todo_file tracker if not specified
-    pub fn resolve_env_from(&mut self, config_dir: &Path) -> Result<(), crate::error::ConfigError> {
+    pub fn resolve_env_from(
+        &mut self,
+        config_dir: &Path,
+        dotenv_map: &HashMap<String, String>,
+    ) -> Result<(), crate::error::ConfigError> {
         // tracker.api_key: $VAR resolution
         if let Some(ref raw) = self.tracker.api_key {
-            self.tracker.api_key = resolve_env_var(raw);
-        } else {
-            // Try canonical env var
-            self.tracker.api_key = resolve_env_var("$GITHUB_TOKEN");
+            self.tracker.api_key = resolve_env_var(raw, dotenv_map);
+        } else if self.tracker.kind == "github" {
+            // Only auto-resolve $GITHUB_TOKEN for github tracker
+            self.tracker.api_key = resolve_env_var("$GITHUB_TOKEN", dotenv_map);
         }
 
         // tracker.path: $VAR + ~ expansion, with default for todo_file
@@ -316,7 +340,7 @@ impl EnsembleConfig {
 
         if let Some(ref path) = self.tracker.path {
             let path_str = path.to_string_lossy();
-            let resolved = resolve_path(&path_str);
+            let resolved = resolve_path(&path_str, dotenv_map);
             self.tracker.path = resolved.map(|p| {
                 if p.is_absolute() {
                     p
@@ -328,7 +352,7 @@ impl EnsembleConfig {
 
         // workspace.root: $VAR + ~ expansion + rebase
         if let Some(ref root) = self.workspace.root {
-            let resolved = resolve_path(root);
+            let resolved = resolve_path(root, dotenv_map);
             self.workspace.root = resolved.map(|p| {
                 let final_path = if p.is_absolute() {
                     p
@@ -342,7 +366,7 @@ impl EnsembleConfig {
         // repos[*].path: $VAR + ~ expansion + rebase
         for repo in &mut self.repos {
             let path_str = &repo.path;
-            if let Some(resolved) = resolve_path(path_str) {
+            if let Some(resolved) = resolve_path(path_str, dotenv_map) {
                 let final_path = if resolved.is_absolute() {
                     resolved
                 } else {
@@ -356,7 +380,7 @@ impl EnsembleConfig {
         for agent in self.agents.values_mut() {
             if let Some(ref path) = agent.prompt_template {
                 let path_str = path.to_string_lossy();
-                let resolved = resolve_path(&path_str);
+                let resolved = resolve_path(&path_str, dotenv_map);
                 agent.prompt_template = resolved.map(|p| {
                     if p.is_absolute() {
                         p
@@ -379,12 +403,7 @@ impl EnsembleConfig {
 /// 3. Resolves environment variables and rebases relative paths from the config directory
 pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::error::ConfigError> {
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-
-    // Load .env from config directory (best-effort, don't fail if missing)
-    let env_path = config_dir.join(".env");
-    if env_path.exists() {
-        let _ = dotenvy::from_path(&env_path);
-    }
+    let dotenv_map = read_dotenv(&config_dir.join(".env"));
 
     let content = std::fs::read_to_string(path).map_err(|_| {
         crate::error::ConfigError::MissingConfigFile {
@@ -392,7 +411,7 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
         }
     })?;
     let mut config = parse_config(&content)?;
-    config.resolve_env_from(config_dir)?;
+    config.resolve_env_from(config_dir, &dotenv_map)?;
     Ok(config)
 }
 
@@ -728,7 +747,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         assert_eq!(config.tracker.api_key.as_deref(), Some("secret123"));
         std::env::remove_var("ENSEMBLE_TEST_KEY_2B");
     }
@@ -753,7 +772,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         assert_eq!(config.tracker.api_key, None);
         std::env::remove_var("ENSEMBLE_EMPTY_2B");
     }
@@ -776,7 +795,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(
             config.tracker.path.unwrap(),
@@ -914,7 +933,7 @@ workspace:
   root: ~/workspaces
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         let home = std::env::var("HOME").unwrap();
         let expected = format!("{}/workspaces", home);
         assert_eq!(config.workspace.root.as_deref(), Some(expected.as_str()));
@@ -992,7 +1011,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         assert_eq!(config.repos[0].path, "/test/repo");
         std::env::remove_var("ENSEMBLE_TEST_REPO");
     }
@@ -1017,7 +1036,7 @@ on_success: Done
 on_failure: Failed
 "#;
         let mut config = parse_config(yaml).unwrap();
-        config.resolve_env();
+        config.resolve_env().unwrap();
         let home = std::env::var("HOME").unwrap();
         assert_eq!(config.repos[0].path, format!("{}/projects/myrepo", home));
     }
@@ -1126,6 +1145,60 @@ on_failure: Failed
         // Process env var should take precedence over .env
         assert_eq!(config.tracker.api_key.as_deref(), Some("from-process"));
 
+        std::env::remove_var("GITHUB_TOKEN");
+    }
+
+    #[test]
+    fn test_load_config_uses_sibling_dotenv_without_mutating_process_env() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "GITHUB_TOKEN=from-dotenv\n").unwrap();
+        std::env::remove_var("GITHUB_TOKEN");
+
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let config = load_config(&dir.path().join("config.yaml")).unwrap();
+        assert_eq!(config.tracker.api_key.as_deref(), Some("from-dotenv"));
+        assert!(std::env::var("GITHUB_TOKEN").is_err());
+    }
+
+    #[test]
+    fn test_resolve_env_does_not_fallback_to_github_token_for_non_github_tracker() {
+        std::env::set_var("GITHUB_TOKEN", "from-process");
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let mut config = parse_config(yaml).unwrap();
+        config.resolve_env().unwrap();
+
+        assert_eq!(config.tracker.api_key, None);
         std::env::remove_var("GITHUB_TOKEN");
     }
 }

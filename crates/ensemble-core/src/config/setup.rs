@@ -49,6 +49,10 @@ pub struct SetupAgent {
     pub role: String,
     pub acpx_agent: String,
     pub model: Option<String>,
+    /// Inline prompt text (optional)
+    pub prompt: Option<String>,
+    /// Path to prompt template file (optional, maps to prompt_template in config)
+    pub prompt_file: Option<String>,
 }
 
 /// Pipeline step entry for setup.
@@ -234,15 +238,21 @@ pub fn write_setup_artifacts(
 }
 
 /// Run setup checks and return the results.
-pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
+pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     let mut checks = Vec::new();
 
     // Check acpx is installed
-    let acpx_ok = std::process::Command::new("acpx")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let acpx_ok = tokio::time::timeout(
+        tokio::time::Duration::from_secs(8),
+        tokio::process::Command::new("acpx")
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .map(|o| o.status.success())
+    .unwrap_or(false);
     checks.push(SetupCheck {
         kind: SetupCheckKind::Environment,
         label: "acpx".to_string(),
@@ -285,16 +295,22 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     // Check repos
     for repo in &request.repos {
         let exists = repo.path.join(".git").exists();
-        let branch_ok = std::process::Command::new("git")
-            .args([
-                "rev-parse",
-                "--verify",
-                &format!("refs/heads/{}", repo.branch),
-            ])
-            .current_dir(&repo.path)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let branch_ok = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new("git")
+                .args([
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/heads/{}", repo.branch),
+                ])
+                .current_dir(&repo.path)
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) => output.status.success(),
+            _ => false,
+        };
 
         let passed = exists && branch_ok;
         let detail = if passed {
@@ -319,11 +335,17 @@ pub fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
 
     // Check agents
     for agent in &request.agents {
-        let healthy = std::process::Command::new("acpx")
-            .args(["--agent", &agent.acpx_agent, "--version"])
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let healthy = tokio::time::timeout(
+            tokio::time::Duration::from_secs(8),
+            tokio::process::Command::new("acpx")
+                .args(["--agent", &agent.acpx_agent, "--version"])
+                .output(),
+        )
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .map(|o| o.status.success())
+        .unwrap_or(false);
 
         checks.push(SetupCheck {
             kind: SetupCheckKind::Environment,
@@ -472,7 +494,7 @@ pub fn merge_setup_request(
 }
 
 /// Discover available agents from the system.
-pub fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
+pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
     let known_agents: &[(&str, &str)] = &[
         ("claude", "Claude Code"),
         ("codex", "Codex CLI"),
@@ -490,8 +512,8 @@ pub fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> 
     let mut available = Vec::new();
 
     for (name, label) in known_agents {
-        if probe_agent(name) {
-            let version = get_agent_version(name);
+        if probe_agent(name).await {
+            let version = get_agent_version(name).await;
             available.push(DiscoveredAgent {
                 name: name.to_string(),
                 label: label.to_string(),
@@ -510,23 +532,32 @@ pub async fn discover_agent_capabilities(agent: &str) -> AgentCapabilities {
 
 // --- Internal helper functions ---
 
-fn generate_yaml(request: &SetupRequest) -> String {
-    let mut yaml = String::new();
-
-    // Tracker section
-    yaml.push_str("tracker:\n");
+/// Build a tracker YAML mapping from a setup request.
+/// Shared between `generate_yaml` and `update_yaml_from_request`.
+fn build_tracker_mapping(request: &SetupRequest) -> serde_yaml::Mapping {
+    let mut tracker_map = serde_yaml::Mapping::new();
     match &request.tracker {
         SetupTracker::TodoFile { path } => {
-            yaml.push_str("  kind: todo_file\n");
-            yaml.push_str(&format!("  path: {}\n", path.display()));
-            yaml.push_str("  active_states:\n");
-            yaml.push_str("    - Todo\n");
-            yaml.push_str("    - In Progress\n");
-            yaml.push_str("  terminal_states:\n");
-            yaml.push_str(&format!("    - {}\n", request.on_success));
+            tracker_map.insert("kind".into(), serde_yaml::Value::String("todo_file".into()));
+            tracker_map.insert(
+                "path".into(),
+                serde_yaml::Value::String(path.display().to_string()),
+            );
+            tracker_map.insert(
+                "active_states".into(),
+                serde_yaml::Value::Sequence(vec![
+                    serde_yaml::Value::String("Todo".into()),
+                    serde_yaml::Value::String("In Progress".into()),
+                ]),
+            );
+            let mut terminals = vec![serde_yaml::Value::String(request.on_success.clone())];
             if request.on_failure != request.on_success {
-                yaml.push_str(&format!("    - {}\n", request.on_failure));
+                terminals.push(serde_yaml::Value::String(request.on_failure.clone()));
             }
+            tracker_map.insert(
+                "terminal_states".into(),
+                serde_yaml::Value::Sequence(terminals),
+            );
         }
         SetupTracker::GitHub {
             repository,
@@ -536,67 +567,156 @@ fn generate_yaml(request: &SetupRequest) -> String {
             terminal_states,
             ..
         } => {
-            yaml.push_str("  kind: github\n");
-            yaml.push_str(&format!("  repository: {}\n", repository));
-            yaml.push_str(&format!("  api_key: ${}\n", api_key_env));
+            tracker_map.insert("kind".into(), serde_yaml::Value::String("github".into()));
+            tracker_map.insert(
+                "repository".into(),
+                serde_yaml::Value::String(repository.clone()),
+            );
+            tracker_map.insert(
+                "api_key".into(),
+                serde_yaml::Value::String(format!("${}", api_key_env)),
+            );
             if let Some(n) = project_number {
-                yaml.push_str(&format!("  project_number: {}\n", n));
+                tracker_map.insert(
+                    "project_number".into(),
+                    serde_yaml::Value::Number((*n).into()),
+                );
             }
-            yaml.push_str("  active_states:\n");
-            for s in active_states {
-                yaml.push_str(&format!("    - {}\n", s));
-            }
-            yaml.push_str("  terminal_states:\n");
-            for s in terminal_states {
-                yaml.push_str(&format!("    - {}\n", s));
-            }
+            tracker_map.insert(
+                "active_states".into(),
+                serde_yaml::Value::Sequence(
+                    active_states
+                        .iter()
+                        .map(|s| serde_yaml::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
+            tracker_map.insert(
+                "terminal_states".into(),
+                serde_yaml::Value::Sequence(
+                    terminal_states
+                        .iter()
+                        .map(|s| serde_yaml::Value::String(s.clone()))
+                        .collect(),
+                ),
+            );
         }
     }
+    tracker_map
+}
+
+fn generate_yaml(request: &SetupRequest) -> String {
+    let mut doc = serde_yaml::Mapping::new();
+
+    // Tracker section
+    doc.insert(
+        "tracker".into(),
+        serde_yaml::Value::Mapping(build_tracker_mapping(request)),
+    );
 
     // Repos section
     if !request.repos.is_empty() {
-        yaml.push_str("\nrepos:\n");
-        for repo in &request.repos {
-            yaml.push_str(&format!("  - path: {}\n", repo.path.display()));
-            yaml.push_str(&format!("    branch: {}\n", repo.branch));
-        }
+        let repos_seq: Vec<serde_yaml::Value> = request
+            .repos
+            .iter()
+            .map(|repo| {
+                let mut repo_map = serde_yaml::Mapping::new();
+                repo_map.insert(
+                    "path".into(),
+                    serde_yaml::Value::String(repo.path.display().to_string()),
+                );
+                repo_map.insert(
+                    "branch".into(),
+                    serde_yaml::Value::String(repo.branch.clone()),
+                );
+                serde_yaml::Value::Mapping(repo_map)
+            })
+            .collect();
+        doc.insert("repos".into(), serde_yaml::Value::Sequence(repos_seq));
     }
 
     // Agents section
-    yaml.push_str("\nagents:\n");
+    let mut agents_map = serde_yaml::Mapping::new();
     for agent in &request.agents {
-        yaml.push_str(&format!("  {}:\n", agent.role));
-        yaml.push_str(&format!("    acpx_agent: {}\n", agent.acpx_agent));
+        let mut agent_map = serde_yaml::Mapping::new();
+        agent_map.insert(
+            "acpx_agent".into(),
+            serde_yaml::Value::String(agent.acpx_agent.clone()),
+        );
         if let Some(ref model) = agent.model {
-            yaml.push_str(&format!("    model: {}\n", model));
+            agent_map.insert("model".into(), serde_yaml::Value::String(model.clone()));
         }
-        yaml.push_str(&format!(
-            "    prompt_template: templates/{}.liquid\n",
-            find_step_for_agent(&agent.role, &request.steps)
-        ));
+        // Emit prompt or prompt_template based on agent config
+        // If both are set, prompt takes precedence and prompt_file is silently ignored
+        if let Some(ref prompt) = agent.prompt {
+            agent_map.insert("prompt".into(), serde_yaml::Value::String(prompt.clone()));
+        } else if let Some(ref prompt_file) = agent.prompt_file {
+            agent_map.insert(
+                "prompt_template".into(),
+                serde_yaml::Value::String(prompt_file.clone()),
+            );
+        } else {
+            let template_path = format!(
+                "templates/{}.liquid",
+                find_step_for_agent(&agent.role, &request.steps)
+            );
+            agent_map.insert(
+                "prompt_template".into(),
+                serde_yaml::Value::String(template_path),
+            );
+        }
+        agents_map.insert(
+            agent.role.clone().into(),
+            serde_yaml::Value::Mapping(agent_map),
+        );
     }
+    doc.insert("agents".into(), serde_yaml::Value::Mapping(agents_map));
 
     // Steps section
-    yaml.push_str("\nsteps:\n");
-    for step in &request.steps {
-        yaml.push_str(&format!("  - name: {}\n", step.name));
-        yaml.push_str(&format!("    agent: {}\n", step.agent_role));
-        if !step.depends.is_empty() {
-            yaml.push_str("    depends:\n");
-            for dep in &step.depends {
-                yaml.push_str(&format!("      - {}\n", dep));
+    let steps_seq: Vec<serde_yaml::Value> = request
+        .steps
+        .iter()
+        .map(|step| {
+            let mut step_map = serde_yaml::Mapping::new();
+            step_map.insert("name".into(), serde_yaml::Value::String(step.name.clone()));
+            step_map.insert(
+                "agent".into(),
+                serde_yaml::Value::String(step.agent_role.clone()),
+            );
+            if !step.depends.is_empty() {
+                step_map.insert(
+                    "depends".into(),
+                    serde_yaml::Value::Sequence(
+                        step.depends
+                            .iter()
+                            .map(|d| serde_yaml::Value::String(d.clone()))
+                            .collect(),
+                    ),
+                );
             }
-        }
-        if let Some(ref state) = step.tracker_state {
-            yaml.push_str(&format!("    tracker_state: {}\n", state));
-        }
-    }
+            if let Some(ref state) = step.tracker_state {
+                step_map.insert(
+                    "tracker_state".into(),
+                    serde_yaml::Value::String(state.clone()),
+                );
+            }
+            serde_yaml::Value::Mapping(step_map)
+        })
+        .collect();
+    doc.insert("steps".into(), serde_yaml::Value::Sequence(steps_seq));
 
     // Transitions
-    yaml.push_str(&format!("\non_success: {}\n", request.on_success));
-    yaml.push_str(&format!("on_failure: {}\n", request.on_failure));
+    doc.insert(
+        "on_success".into(),
+        serde_yaml::Value::String(request.on_success.clone()),
+    );
+    doc.insert(
+        "on_failure".into(),
+        serde_yaml::Value::String(request.on_failure.clone()),
+    );
 
-    yaml
+    serde_yaml::to_string(&serde_yaml::Value::Mapping(doc))
+        .unwrap_or_else(|e| panic!("failed to serialize YAML: {e}"))
 }
 
 /// Generate a template for the given step name.
@@ -696,24 +816,34 @@ fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn probe_agent(name: &str) -> bool {
-    let output = std::process::Command::new("acpx")
-        .args(["--agent", name, "--version"])
-        .output();
+async fn probe_agent(name: &str) -> bool {
+    let timeout = tokio::time::Duration::from_secs(8);
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new("acpx")
+            .args(["--agent", name, "--version"])
+            .output()
+            .await
+    })
+    .await;
 
-    match output {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
+    match result {
+        Ok(Ok(o)) => o.status.success(),
+        _ => false,
     }
 }
 
-fn get_agent_version(name: &str) -> String {
-    let output = std::process::Command::new("acpx")
-        .args(["--agent", name, "--version"])
-        .output();
+async fn get_agent_version(name: &str) -> String {
+    let timeout = tokio::time::Duration::from_secs(8);
+    let result = tokio::time::timeout(timeout, async {
+        tokio::process::Command::new("acpx")
+            .args(["--agent", name, "--version"])
+            .output()
+            .await
+    })
+    .await;
 
-    match output {
-        Ok(o) if o.status.success() => {
+    match result {
+        Ok(Ok(o)) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if v.is_empty() {
                 String::new()
@@ -729,9 +859,10 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let session_name = "ensemble-probe";
 
     // Create session
-    let output = std::process::Command::new("acpx")
+    let output = tokio::process::Command::new("acpx")
         .args([agent_name, "sessions", "ensure", "--name", session_name])
-        .output();
+        .output()
+        .await;
 
     let session_id = match output {
         Ok(ref o) if o.status.success() => {
@@ -749,23 +880,25 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let caps = read_session_capabilities(&session_id).await;
 
     // Close session (best-effort)
-    let _ = std::process::Command::new("acpx")
+    let _ = tokio::process::Command::new("acpx")
         .args([agent_name, "sessions", "close", session_name])
-        .output();
+        .output()
+        .await;
 
     caps
 }
 
 async fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
-    let acpx_dir = dirs::home_dir()
-        .map(|h| h.join(".acpx").join("sessions"))
-        .unwrap_or_default();
+    let Some(home) = dirs::home_dir() else {
+        return AgentCapabilities::default();
+    };
+    let acpx_dir = home.join(".acpx").join("sessions");
 
     let session_file = acpx_dir.join(format!("{}.json", session_id));
 
     // Wait for the session file to appear and become parseable
     for _ in 0..20 {
-        if let Ok(content) = std::fs::read_to_string(&session_file) {
+        if let Ok(content) = tokio::fs::read_to_string(&session_file).await {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                 // Once the acpx object is present, return whatever we have.
                 if json.get("acpx").is_some() {
@@ -889,10 +1022,20 @@ fn extract_agents(doc: &serde_yaml::Value) -> Result<Vec<SetupAgent>, ConfigErro
                         .get("model")
                         .and_then(|m| m.as_str())
                         .map(String::from);
+                    let prompt = config
+                        .get("prompt")
+                        .and_then(|p| p.as_str())
+                        .map(String::from);
+                    let prompt_file = config
+                        .get("prompt_template")
+                        .and_then(|p| p.as_str())
+                        .map(String::from);
                     Some(SetupAgent {
                         role: role.to_string(),
                         acpx_agent: acpx_agent.to_string(),
                         model,
+                        prompt,
+                        prompt_file,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -957,13 +1100,14 @@ fn update_yaml_from_request(
             reason: "document is not a mapping".to_string(),
         })?;
 
-    // Update tracker section
+    // Update tracker section — build fresh from request, preserving unknown keys
     let existing_tracker_mapping = mapping
         .get("tracker")
         .and_then(|value| value.as_mapping())
         .cloned()
         .unwrap_or_default();
     let mut tracker_mapping = existing_tracker_mapping;
+    // Remove setup-managed keys before reinserting
     for key in [
         "kind",
         "path",
@@ -975,76 +1119,10 @@ fn update_yaml_from_request(
     ] {
         tracker_mapping.remove(serde_yaml::Value::String(key.to_string()));
     }
-    match &request.tracker {
-        SetupTracker::TodoFile { path } => {
-            tracker_mapping.insert(
-                "kind".into(),
-                serde_yaml::Value::String("todo_file".to_string()),
-            );
-            tracker_mapping.insert(
-                "path".into(),
-                serde_yaml::Value::String(path.display().to_string()),
-            );
-            tracker_mapping.insert(
-                "active_states".into(),
-                serde_yaml::Value::Sequence(vec![
-                    serde_yaml::Value::String("Todo".to_string()),
-                    serde_yaml::Value::String("In Progress".to_string()),
-                ]),
-            );
-            tracker_mapping.insert(
-                "terminal_states".into(),
-                serde_yaml::Value::Sequence(vec![
-                    serde_yaml::Value::String(request.on_success.clone()),
-                    serde_yaml::Value::String(request.on_failure.clone()),
-                ]),
-            );
-        }
-        SetupTracker::GitHub {
-            repository,
-            project_number,
-            api_key_env,
-            active_states,
-            terminal_states,
-            ..
-        } => {
-            tracker_mapping.insert(
-                "kind".into(),
-                serde_yaml::Value::String("github".to_string()),
-            );
-            tracker_mapping.insert(
-                "repository".into(),
-                serde_yaml::Value::String(repository.clone()),
-            );
-            tracker_mapping.insert(
-                "api_key".into(),
-                serde_yaml::Value::String(format!("${}", api_key_env)),
-            );
-            if let Some(n) = project_number {
-                tracker_mapping.insert(
-                    "project_number".into(),
-                    serde_yaml::Value::Number(serde_yaml::Number::from(*n)),
-                );
-            }
-            tracker_mapping.insert(
-                "active_states".into(),
-                serde_yaml::Value::Sequence(
-                    active_states
-                        .iter()
-                        .map(|s| serde_yaml::Value::String(s.clone()))
-                        .collect(),
-                ),
-            );
-            tracker_mapping.insert(
-                "terminal_states".into(),
-                serde_yaml::Value::Sequence(
-                    terminal_states
-                        .iter()
-                        .map(|s| serde_yaml::Value::String(s.clone()))
-                        .collect(),
-                ),
-            );
-        }
+    // Merge in fresh tracker data (shared with generate_yaml)
+    let new_tracker = build_tracker_mapping(request);
+    for (key, value) in new_tracker {
+        tracker_mapping.insert(key, value);
     }
     mapping.insert(
         "tracker".into(),
@@ -1071,7 +1149,8 @@ fn update_yaml_from_request(
         mapping.insert("repos".into(), serde_yaml::Value::Sequence(repos_seq));
     }
 
-    // Update agents section
+    // Update agents section — replace entirely with request data (authoritative),
+    // but preserve unknown fields within each retained agent entry.
     let existing_agents = mapping
         .get("agents")
         .and_then(|value| value.as_mapping())
@@ -1094,11 +1173,21 @@ fn update_yaml_from_request(
         if let Some(ref model) = agent.model {
             agent_config.insert("model".into(), serde_yaml::Value::String(model.clone()));
         }
-        let template_name = find_step_for_agent(&agent.role, &request.steps);
-        agent_config.insert(
-            "prompt_template".into(),
-            serde_yaml::Value::String(format!("templates/{}.liquid", template_name)),
-        );
+        // Emit prompt or prompt_template based on agent config
+        if let Some(ref prompt) = agent.prompt {
+            agent_config.insert("prompt".into(), serde_yaml::Value::String(prompt.clone()));
+        } else if let Some(ref prompt_file) = agent.prompt_file {
+            agent_config.insert(
+                "prompt_template".into(),
+                serde_yaml::Value::String(prompt_file.clone()),
+            );
+        } else {
+            let template_name = find_step_for_agent(&agent.role, &request.steps);
+            agent_config.insert(
+                "prompt_template".into(),
+                serde_yaml::Value::String(format!("templates/{}.liquid", template_name)),
+            );
+        }
         agents_map.insert(
             serde_yaml::Value::String(agent.role.clone()),
             serde_yaml::Value::Mapping(agent_config),
@@ -1106,13 +1195,15 @@ fn update_yaml_from_request(
     }
     mapping.insert("agents".into(), serde_yaml::Value::Mapping(agents_map));
 
-    // Update steps section
+    // Update steps section — merge request steps into existing, preserving untouched steps
     let existing_steps = mapping
         .get("steps")
         .and_then(|value| value.as_sequence())
         .cloned()
         .unwrap_or_default();
-    let steps_seq: Vec<serde_yaml::Value> = request
+    let request_step_names: std::collections::HashSet<&str> =
+        request.steps.iter().map(|s| s.name.as_str()).collect();
+    let mut steps_seq: Vec<serde_yaml::Value> = request
         .steps
         .iter()
         .map(|s| {
@@ -1149,6 +1240,16 @@ fn update_yaml_from_request(
             serde_yaml::Value::Mapping(step_map)
         })
         .collect();
+    // Append existing steps not covered by the request
+    for existing in &existing_steps {
+        if let Some(map) = existing.as_mapping() {
+            if let Some(name) = map.get("name").and_then(|v| v.as_str()) {
+                if !request_step_names.contains(name) {
+                    steps_seq.push(existing.clone());
+                }
+            }
+        }
+    }
     mapping.insert("steps".into(), serde_yaml::Value::Sequence(steps_seq));
 
     // Update transitions
@@ -1202,6 +1303,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "implement".to_string(),
@@ -1238,6 +1341,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("sonnet".to_string()),
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "implement".to_string(),
@@ -1276,6 +1381,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "implement".to_string(),
@@ -1327,6 +1434,177 @@ on_failure: Failed
         assert_eq!(request.steps.len(), 1);
         assert_eq!(request.steps[0].name, "build");
         assert_eq!(request.on_success, "Done");
+    }
+
+    #[test]
+    fn build_setup_artifacts_emits_inline_prompt() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: Some("Build it.".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        // Verify YAML is valid and contains the prompt
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let agents = parsed.get("agents").unwrap().as_mapping().unwrap();
+        let builder = agents.get("builder").unwrap().as_mapping().unwrap();
+        assert_eq!(
+            builder.get("prompt").unwrap().as_str().unwrap(),
+            "Build it."
+        );
+        assert!(builder.get("prompt_template").is_none());
+    }
+
+    #[test]
+    fn build_setup_artifacts_emits_prompt_template() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: None,
+                prompt_file: Some("templates/custom.liquid".to_string()),
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let agents = parsed.get("agents").unwrap().as_mapping().unwrap();
+        let builder = agents.get("builder").unwrap().as_mapping().unwrap();
+        assert_eq!(
+            builder.get("prompt_template").unwrap().as_str().unwrap(),
+            "templates/custom.liquid"
+        );
+        assert!(builder.get("prompt").is_none());
+    }
+
+    #[test]
+    fn build_setup_artifacts_prompt_with_special_chars() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: Some("Build it: use #hashtags and \"quotes\"".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        // Should be properly quoted so YAML parses correctly
+        let reparsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let agents = reparsed.get("agents").unwrap().as_mapping().unwrap();
+        let builder = agents.get("builder").unwrap().as_mapping().unwrap();
+        let prompt = builder.get("prompt").unwrap().as_str().unwrap();
+        assert_eq!(prompt, "Build it: use #hashtags and \"quotes\"");
+    }
+
+    #[test]
+    fn build_setup_artifacts_prompt_takes_precedence_over_prompt_file() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: Some("Inline prompt".to_string()),
+                prompt_file: Some("templates/ignored.liquid".to_string()),
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let agents = parsed.get("agents").unwrap().as_mapping().unwrap();
+        let builder = agents.get("builder").unwrap().as_mapping().unwrap();
+        assert_eq!(
+            builder.get("prompt").unwrap().as_str().unwrap(),
+            "Inline prompt"
+        );
+        assert!(builder.get("prompt_template").is_none());
+    }
+
+    #[test]
+    fn extract_setup_defaults_from_yaml_with_prompt_file() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: templates/custom.liquid
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = extract_setup_defaults(yaml).unwrap();
+
+        assert_eq!(request.agents.len(), 1);
+        assert_eq!(request.agents[0].role, "builder");
+        assert_eq!(
+            request.agents[0].prompt_file,
+            Some("templates/custom.liquid".to_string())
+        );
+        assert_eq!(request.agents[0].prompt, None);
     }
 
     #[test]
@@ -1415,6 +1693,8 @@ custom_section:
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("opus".to_string()),
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),
@@ -1471,6 +1751,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "codex".to_string(),
                 model: Some("sonnet".to_string()),
+                prompt: None,
+                prompt_file: None,
             }],
             steps: vec![SetupStep {
                 name: "build".to_string(),
@@ -1792,5 +2074,258 @@ on_failure: Failed
         assert_eq!(request.agents[0].model.as_deref(), Some("sonnet"));
         assert_eq!(request.steps.len(), 1);
         assert_eq!(request.steps[0].name, "build");
+    }
+
+    #[tokio::test]
+    async fn timeout_wrapper_completes_before_timeout() {
+        let timeout = tokio::time::Duration::from_millis(500);
+        let result: Result<Result<std::process::Output, std::io::Error>, _> =
+            tokio::time::timeout(timeout, async {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::default(),
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            })
+            .await;
+
+        assert!(result.is_ok(), "should complete before timeout");
+    }
+
+    #[tokio::test]
+    async fn timeout_wrapper_expires_on_slow_operation() {
+        let timeout = tokio::time::Duration::from_millis(50);
+        let result: Result<Result<std::process::Output, std::io::Error>, _> =
+            tokio::time::timeout(timeout, async {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                Ok(std::process::Output {
+                    status: std::process::ExitStatus::default(),
+                    stdout: vec![],
+                    stderr: vec![],
+                })
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "timeout should expire before slow operation completes"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_agent_timeout_pattern_returns_false() {
+        let timeout = tokio::time::Duration::from_millis(50);
+        let result = tokio::time::timeout(timeout, async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::process::Command::new("true").output().await
+        })
+        .await;
+
+        let success = match result {
+            Ok(Ok(o)) => o.status.success(),
+            _ => false,
+        };
+        assert!(!success, "timeout should cause probe to return false");
+    }
+
+    #[tokio::test]
+    async fn get_agent_version_timeout_pattern_returns_empty() {
+        let timeout = tokio::time::Duration::from_millis(50);
+        let result = tokio::time::timeout(timeout, async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            tokio::process::Command::new("true").output().await
+        })
+        .await;
+
+        let version = match result {
+            Ok(Ok(o)) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+            _ => String::new(),
+        };
+        assert!(
+            version.is_empty(),
+            "timeout should cause version to return empty string"
+        );
+    }
+
+    #[test]
+    fn merge_replaces_agents_authoritatively() {
+        let existing_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+  reviewer:
+    acpx_agent: codex
+    prompt: "Review it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: Some("opus".to_string()),
+                prompt: None,
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = merge_setup_request(Some(existing_yaml), &request).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let agents = parsed.get("agents").unwrap().as_mapping().unwrap();
+
+        // builder should be updated with new model
+        let builder = agents.get("builder").unwrap().as_mapping().unwrap();
+        assert_eq!(builder.get("model").unwrap().as_str().unwrap(), "opus");
+
+        // reviewer should NOT be preserved (not in request — authoritative replacement)
+        assert!(
+            agents.get("reviewer").is_none(),
+            "reviewer should be removed since it's not in the request"
+        );
+        assert_eq!(agents.len(), 1, "only builder should remain in agents");
+    }
+
+    #[test]
+    fn merge_preserves_existing_steps_not_in_request() {
+        let existing_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+steps:
+  - name: build
+    agent: builder
+  - name: review
+    agent: reviewer
+    custom_field: keep
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: None,
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: Some("In Progress".to_string()),
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = merge_setup_request(Some(existing_yaml), &request).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let steps = parsed.get("steps").unwrap().as_sequence().unwrap();
+
+        // Should have both build (updated) and review (preserved)
+        assert_eq!(steps.len(), 2);
+
+        // build step should be updated
+        let build = steps
+            .iter()
+            .find(|s| s.get("name").and_then(|n| n.as_str()) == Some("build"))
+            .unwrap();
+        assert_eq!(
+            build.get("tracker_state").unwrap().as_str().unwrap(),
+            "In Progress"
+        );
+
+        // review step should be preserved with custom field
+        let review = steps
+            .iter()
+            .find(|s| s.get("name").and_then(|n| n.as_str()) == Some("review"))
+            .unwrap();
+        assert_eq!(
+            review.get("custom_field").unwrap().as_str().unwrap(),
+            "keep"
+        );
+    }
+
+    #[test]
+    fn merge_deduplicates_terminal_states_when_equal() {
+        let existing_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Done
+"#;
+
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                prompt: None,
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Done".to_string(),
+        };
+
+        let artifacts = merge_setup_request(Some(existing_yaml), &request).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&artifacts.raw_yaml).unwrap();
+        let tracker = parsed.get("tracker").unwrap().as_mapping().unwrap();
+        let terminal_states = tracker
+            .get("terminal_states")
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+
+        // Should have only one "Done" entry, not two
+        assert_eq!(terminal_states.len(), 1);
+        assert_eq!(terminal_states[0].as_str().unwrap(), "Done");
     }
 }

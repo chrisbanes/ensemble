@@ -9,11 +9,8 @@ use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
 /// Helper to convert Option<T> to serde_yaml::Value
-fn opt_to_value<T: Into<serde_yaml::Value>>(opt: Option<T>) -> serde_yaml::Value {
-    match opt {
-        Some(v) => v.into(),
-        None => serde_yaml::Value::Null,
-    }
+fn opt_to_value<T: Into<serde_yaml::Value>>(opt: Option<T>) -> Option<serde_yaml::Value> {
+    opt.map(|v| v.into())
 }
 
 /// Guided form representation for structured config editing.
@@ -249,25 +246,54 @@ pub fn apply_guided_form(
         }
     };
 
-    // Update tracker section
-    let tracker_mapping = get_or_create_mapping(mapping, "tracker");
-    replace_known_fields(
-        tracker_mapping,
-        [
-            ("kind", form.tracker.kind.clone().into()),
-            ("path", opt_to_value(form.tracker.path.clone())),
-            ("repository", opt_to_value(form.tracker.repository.clone())),
-            ("project_number", opt_to_value(form.tracker.project_number)),
-            ("api_key", opt_to_value(form.tracker.api_key.clone())),
-            ("endpoint", opt_to_value(form.tracker.endpoint.clone())),
-            ("active_states", form.tracker.active_states.clone().into()),
-            (
-                "terminal_states",
-                form.tracker.terminal_states.clone().into(),
-            ),
-            ("labels_filter", form.tracker.labels_filter.clone().into()),
-        ],
-    );
+    // Update tracker section — merge into existing mapping to preserve unknown fields
+    let tracker_val = mapping
+        .entry("tracker".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut tm) = *tracker_val {
+        tm.insert("kind".into(), form.tracker.kind.clone().into());
+        if let Some(v) = opt_to_value(form.tracker.path.clone()) {
+            tm.insert("path".into(), v);
+        } else {
+            tm.remove("path");
+        }
+        if let Some(v) = opt_to_value(form.tracker.repository.clone()) {
+            tm.insert("repository".into(), v);
+        } else {
+            tm.remove("repository");
+        }
+        if let Some(v) = opt_to_value(form.tracker.project_number) {
+            tm.insert("project_number".into(), v);
+        } else {
+            tm.remove("project_number");
+        }
+        if let Some(v) = opt_to_value(form.tracker.api_key.clone()) {
+            tm.insert("api_key".into(), v);
+        } else {
+            tm.remove("api_key");
+        }
+        if let Some(v) = opt_to_value(form.tracker.endpoint.clone()) {
+            tm.insert("endpoint".into(), v);
+        } else {
+            tm.remove("endpoint");
+        }
+        tm.insert(
+            "active_states".into(),
+            form.tracker.active_states.clone().into(),
+        );
+        tm.insert(
+            "terminal_states".into(),
+            form.tracker.terminal_states.clone().into(),
+        );
+        if form.tracker.kind == "github" {
+            tm.insert(
+                "labels_filter".into(),
+                form.tracker.labels_filter.clone().into(),
+            );
+        } else {
+            tm.remove("labels_filter");
+        }
+    }
 
     // Update repos section
     let repos_seq: Vec<serde_yaml::Value> = form
@@ -287,34 +313,55 @@ pub fn apply_guided_form(
             repo_mapping.into()
         })
         .collect();
-    mapping.insert("repos".into(), repos_seq.into());
+    if !repos_seq.is_empty() {
+        mapping.insert("repos".into(), repos_seq.into());
+    } else {
+        mapping.remove("repos");
+    }
 
-    // Update agents section
-    let existing_agents = mapping
-        .get("agents")
-        .and_then(serde_yaml::Value::as_mapping)
-        .cloned()
-        .unwrap_or_default();
-    let agents_mapping = serde_yaml::Mapping::from_iter(form.agents.iter().map(|a| {
-        let mut agent_mapping = existing_agents
-            .get(serde_yaml::Value::String(a.name.clone()))
-            .and_then(serde_yaml::Value::as_mapping)
-            .cloned()
-            .unwrap_or_default();
-        replace_known_fields(
-            &mut agent_mapping,
-            [
-                ("executor", opt_to_value(a.executor.clone())),
-                ("model", opt_to_value(a.model.clone())),
-                ("acpx_agent", opt_to_value(a.acpx_agent.clone())),
-                ("prompt", opt_to_value(a.prompt.clone())),
-                ("prompt_template", opt_to_value(a.prompt_template.clone())),
-                ("reasoning_level", opt_to_value(a.reasoning_level.clone())),
-            ],
-        );
-        (a.name.clone().into(), agent_mapping.into())
-    }));
-    mapping.insert("agents".into(), agents_mapping.into());
+    // Update agents section — merge into existing mappings to preserve unknown fields
+    let agents_val = mapping
+        .entry("agents".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut agents_map) = *agents_val {
+        for a in &form.agents {
+            let agent_val = agents_map
+                .entry(a.name.clone().into())
+                .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+            if let serde_yaml::Value::Mapping(ref mut am) = *agent_val {
+                if let Some(v) = opt_to_value(a.executor.clone()) {
+                    am.insert("executor".into(), v);
+                } else {
+                    am.remove("executor");
+                }
+                if let Some(v) = opt_to_value(a.model.clone()) {
+                    am.insert("model".into(), v);
+                } else {
+                    am.remove("model");
+                }
+                if let Some(v) = opt_to_value(a.acpx_agent.clone()) {
+                    am.insert("acpx_agent".into(), v);
+                } else {
+                    am.remove("acpx_agent");
+                }
+                if let Some(v) = opt_to_value(a.prompt.clone()) {
+                    am.insert("prompt".into(), v);
+                } else {
+                    am.remove("prompt");
+                }
+                if let Some(v) = opt_to_value(a.prompt_template.clone()) {
+                    am.insert("prompt_template".into(), v);
+                } else {
+                    am.remove("prompt_template");
+                }
+                if let Some(v) = opt_to_value(a.reasoning_level.clone()) {
+                    am.insert("reasoning_level".into(), v);
+                } else {
+                    am.remove("reasoning_level");
+                }
+            }
+        }
+    }
 
     // Update steps section
     let steps_seq: Vec<serde_yaml::Value> = form
@@ -343,79 +390,104 @@ pub fn apply_guided_form(
         .collect();
     mapping.insert("steps".into(), steps_seq.into());
 
-    // Update runtime settings
-    replace_known_fields(
-        get_or_create_mapping(mapping, "concurrency"),
-        [
-            (
-                "max_concurrent_agents",
-                form.runtime.concurrency.max_concurrent_agents.into(),
-            ),
-            (
-                "max_step_parallelism",
-                form.runtime.concurrency.max_step_parallelism.into(),
-            ),
-        ],
-    );
+    // Update concurrency
+    let concurrency_val = mapping
+        .entry("concurrency".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut cm) = *concurrency_val {
+        cm.insert(
+            "max_concurrent_agents".into(),
+            form.runtime.concurrency.max_concurrent_agents.into(),
+        );
+        cm.insert(
+            "max_step_parallelism".into(),
+            form.runtime.concurrency.max_step_parallelism.into(),
+        );
+    }
 
-    replace_known_fields(
-        get_or_create_mapping(mapping, "polling"),
-        [("interval_ms", form.runtime.polling.interval_ms.into())],
-    );
+    // Update polling
+    let polling_val = mapping
+        .entry("polling".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut pm) = *polling_val {
+        pm.insert(
+            "interval_ms".into(),
+            form.runtime.polling.interval_ms.into(),
+        );
+    }
 
-    replace_known_fields(
-        get_or_create_mapping(mapping, "workspace"),
-        [("root", opt_to_value(form.runtime.workspace.root.clone()))],
-    );
+    // Update workspace
+    let workspace_val = mapping
+        .entry("workspace".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut wm) = *workspace_val {
+        if let Some(v) = opt_to_value(form.runtime.workspace.root.clone()) {
+            wm.insert("root".into(), v);
+        } else {
+            wm.remove("root");
+        }
+    }
 
-    replace_known_fields(
-        get_or_create_mapping(mapping, "hooks"),
-        [
-            (
-                "after_create",
-                opt_to_value(form.runtime.hooks.after_create.clone()),
-            ),
-            (
-                "before_run",
-                opt_to_value(form.runtime.hooks.before_run.clone()),
-            ),
-            (
-                "after_run",
-                opt_to_value(form.runtime.hooks.after_run.clone()),
-            ),
-            (
-                "before_remove",
-                opt_to_value(form.runtime.hooks.before_remove.clone()),
-            ),
-            ("timeout_ms", form.runtime.hooks.timeout_ms.into()),
-        ],
-    );
+    // Update hooks
+    let hooks_val = mapping
+        .entry("hooks".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut hm) = *hooks_val {
+        if let Some(v) = opt_to_value(form.runtime.hooks.after_create.clone()) {
+            hm.insert("after_create".into(), v);
+        } else {
+            hm.remove("after_create");
+        }
+        if let Some(v) = opt_to_value(form.runtime.hooks.before_run.clone()) {
+            hm.insert("before_run".into(), v);
+        } else {
+            hm.remove("before_run");
+        }
+        if let Some(v) = opt_to_value(form.runtime.hooks.after_run.clone()) {
+            hm.insert("after_run".into(), v);
+        } else {
+            hm.remove("after_run");
+        }
+        if let Some(v) = opt_to_value(form.runtime.hooks.before_remove.clone()) {
+            hm.insert("before_remove".into(), v);
+        } else {
+            hm.remove("before_remove");
+        }
+        hm.insert("timeout_ms".into(), form.runtime.hooks.timeout_ms.into());
+    }
 
-    replace_known_fields(
-        get_or_create_mapping(mapping, "agent"),
-        [
-            ("max_turns", form.runtime.agent.max_turns.into()),
-            (
-                "max_retry_backoff_ms",
-                form.runtime.agent.max_retry_backoff_ms.into(),
-            ),
-            ("command", form.runtime.agent.command.clone().into()),
-            (
-                "session_mode",
-                form.runtime.agent.session_mode.clone().into(),
-            ),
-            (
-                "permission_policy",
-                form.runtime.agent.permission_policy.clone().into(),
-            ),
-            ("turn_timeout_ms", form.runtime.agent.turn_timeout_ms.into()),
-            ("read_timeout_ms", form.runtime.agent.read_timeout_ms.into()),
-            (
-                "stall_timeout_ms",
-                form.runtime.agent.stall_timeout_ms.into(),
-            ),
-        ],
-    );
+    // Update agent runtime
+    let agent_val = mapping
+        .entry("agent".into())
+        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if let serde_yaml::Value::Mapping(ref mut am) = *agent_val {
+        am.insert("max_turns".into(), form.runtime.agent.max_turns.into());
+        am.insert(
+            "max_retry_backoff_ms".into(),
+            form.runtime.agent.max_retry_backoff_ms.into(),
+        );
+        am.insert("command".into(), form.runtime.agent.command.clone().into());
+        am.insert(
+            "session_mode".into(),
+            form.runtime.agent.session_mode.clone().into(),
+        );
+        am.insert(
+            "permission_policy".into(),
+            form.runtime.agent.permission_policy.clone().into(),
+        );
+        am.insert(
+            "turn_timeout_ms".into(),
+            form.runtime.agent.turn_timeout_ms.into(),
+        );
+        am.insert(
+            "read_timeout_ms".into(),
+            form.runtime.agent.read_timeout_ms.into(),
+        );
+        am.insert(
+            "stall_timeout_ms".into(),
+            form.runtime.agent.stall_timeout_ms.into(),
+        );
+    }
 
     // Update max_cycles
     mapping.insert("max_cycles".into(), form.runtime.max_cycles.into());
@@ -436,28 +508,16 @@ pub fn apply_guided_form(
     })
 }
 
-fn get_or_create_mapping<'a>(
-    mapping: &'a mut serde_yaml::Mapping,
-    key: &str,
-) -> &'a mut serde_yaml::Mapping {
-    let value = mapping
-        .entry(serde_yaml::Value::String(key.to_string()))
-        .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
-    if !matches!(value, serde_yaml::Value::Mapping(_)) {
-        *value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    }
-    match value {
-        serde_yaml::Value::Mapping(inner) => inner,
-        _ => unreachable!(),
-    }
-}
-
 fn replace_known_fields<const N: usize>(
     mapping: &mut serde_yaml::Mapping,
     fields: [(&str, serde_yaml::Value); N],
 ) {
     for (key, value) in fields {
-        mapping.insert(key.into(), value);
+        if value.is_null() {
+            mapping.remove(key);
+        } else {
+            mapping.insert(key.into(), value);
+        }
     }
 }
 
@@ -588,41 +648,85 @@ on_failure: Failed
     }
 
     #[test]
-    fn apply_guided_form_preserves_unknown_nested_fields_in_managed_sections() {
-        let mut form = guided_form_with_workspace_root("/tmp/ws");
-        form.repos = vec![GuidedRepoForm {
-            path: "new-repo".to_string(),
-            branch: "main".to_string(),
-            git_remote: "origin".to_string(),
-        }];
-
+    fn apply_guided_form_preserves_unknown_fields_in_sections() {
         let raw = r#"
 tracker:
   kind: todo_file
-  path: old.md
-  custom_tracker_field: keep-me
-repos:
-  - path: old-repo
-    branch: old-branch
-    custom_repo_field: keep-me
+  custom_tracker_field: "keep me"
 agents:
   builder:
     acpx_agent: claude
-    prompt: old prompt
-    custom_agent_field: keep-me
+    prompt: hello
+    custom_agent_field: 42
 steps:
   - name: implement
     agent: builder
-    custom_step_field: keep-me
+concurrency:
+  max_concurrent_agents: 4
+  max_step_parallelism: 2
+  custom_concurrency_field: true
 on_success: Done
 on_failure: Failed
 "#;
 
-        let merged = apply_guided_form(raw, &form).unwrap();
+        let merged = apply_guided_form(raw, &guided_form_with_workspace_root("/tmp/ws")).unwrap();
+        assert!(merged.contains("custom_tracker_field: keep me"));
+        assert!(merged.contains("custom_agent_field: 42"));
+        assert!(merged.contains("custom_concurrency_field: true"));
+    }
 
-        assert!(merged.contains("custom_tracker_field: keep-me"));
-        assert!(merged.contains("custom_repo_field: keep-me"));
-        assert!(merged.contains("custom_agent_field: keep-me"));
-        assert!(merged.contains("custom_step_field: keep-me"));
+    #[test]
+    fn apply_guided_form_omits_none_fields() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: /some/path
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: hello
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = guided_form_with_workspace_root("/tmp/ws");
+        // form.tracker.path is None, so the existing path should be removed
+        let merged = apply_guided_form(raw, &form).unwrap();
+        // Parse back and check path is gone
+        let val: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let tracker = val.get("tracker").unwrap().as_mapping().unwrap();
+        assert!(
+            !tracker.contains_key("path"),
+            "path should be removed when form value is None"
+        );
+    }
+
+    #[test]
+    fn apply_guided_form_skips_labels_filter_for_todo_file() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: hello
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = guided_form_with_workspace_root("/tmp/ws");
+        let merged = apply_guided_form(raw, &form).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let tracker = val.get("tracker").unwrap().as_mapping().unwrap();
+        assert!(
+            !tracker.contains_key("labels_filter"),
+            "labels_filter should not be written for todo_file tracker"
+        );
     }
 }

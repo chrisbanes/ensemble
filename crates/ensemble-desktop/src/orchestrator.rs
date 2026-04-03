@@ -22,7 +22,7 @@ use crate::error::DesktopError;
 pub struct DesktopOrchestrator {
     pub state: Arc<RwLock<OrchestratorState>>,
     pub event_bus: EventBus,
-    pub config_path: String,
+    pub config_path: PathBuf,
 }
 
 impl DesktopOrchestrator {
@@ -30,7 +30,7 @@ impl DesktopOrchestrator {
     ///
     /// This validates the config and builds the DAG, returning an error
     /// if the config is invalid.
-    pub async fn new(config_path: PathBuf) -> Result<Self, DesktopError> {
+    pub async fn new(config_path: PathBuf, event_bus: EventBus) -> Result<Self, DesktopError> {
         info!(config_path = %config_path.display(), "Initializing desktop orchestrator from config.yaml");
 
         // Load config
@@ -54,8 +54,8 @@ impl DesktopOrchestrator {
 
         Ok(Self {
             state,
-            event_bus: EventBus::new(),
-            config_path: config_path.display().to_string(),
+            event_bus,
+            config_path,
         })
     }
 
@@ -106,7 +106,7 @@ on_failure: Failed
         let mut file = std::fs::File::create(&config_path).unwrap();
         file.write_all(valid_config.as_bytes()).unwrap();
 
-        let orchestrator = DesktopOrchestrator::new(config_path).await;
+        let orchestrator = DesktopOrchestrator::new(config_path, EventBus::new()).await;
         assert!(orchestrator.is_ok());
     }
 
@@ -125,7 +125,7 @@ steps: []
         let mut file = std::fs::File::create(&config_path).unwrap();
         file.write_all(invalid_config.as_bytes()).unwrap();
 
-        let orchestrator = DesktopOrchestrator::new(config_path).await;
+        let orchestrator = DesktopOrchestrator::new(config_path, EventBus::new()).await;
         assert!(orchestrator.is_err());
     }
 }

@@ -87,6 +87,7 @@ export default function YamlEditor({
             onChange={handleChange}
             basicSetup={{ lineNumbers: true, foldGutter: true }}
             className="text-sm"
+            height="480px"
           />
         </div>
 
@@ -114,7 +115,7 @@ export default function YamlEditor({
         </div>
         <Button
           onClick={handleSave}
-          disabled={isValidating || isSaving || (isRecoveryMode && validationIssues.length > 0)}
+          disabled={isValidating || isSaving || issues.length > 0}
         >
           {isSaving ? "Saving..." : "Save"}
         </Button>

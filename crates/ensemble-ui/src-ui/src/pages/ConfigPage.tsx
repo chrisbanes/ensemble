@@ -1,12 +1,55 @@
 import { useConfigStateQuery, useValidateGuidedFormMutation, useSaveGuidedFormMutation, useValidateYamlDraftMutation, useSaveYamlDraftMutation } from "@/hooks";
+import type { GuidedConfigForm } from "@/generated/models";
 import type { ValidationIssue } from "@/generated/models";
 import SetupWizard from "@/components/config/SetupWizard";
 import YamlEditor from "@/components/config/YamlEditor";
 import GuidedEditor, { type GuidedForm } from "@/components/config/GuidedEditor";
-import { useEffect, useState } from "react";
+import { useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Edit2, FileText, Settings } from "lucide-react";
+
+function toGuidedForm(form: GuidedConfigForm): GuidedForm {
+  return {
+    tracker: {
+      ...form.tracker,
+      path: form.tracker.path ?? undefined,
+      repository: form.tracker.repository ?? undefined,
+      project_number: form.tracker.project_number ?? undefined,
+      api_key: form.tracker.api_key ?? undefined,
+      endpoint: form.tracker.endpoint ?? undefined,
+    },
+    repos: form.repos.map((repo) => ({ ...repo })),
+    agents: form.agents.map((agent) => ({
+      ...agent,
+      acpx_agent: agent.acpx_agent ?? undefined,
+      executor: agent.executor ?? undefined,
+      model: agent.model ?? undefined,
+      prompt: agent.prompt ?? undefined,
+      prompt_template: agent.prompt_template ?? undefined,
+      reasoning_level: agent.reasoning_level ?? undefined,
+    })),
+    steps: form.steps.map((step) => ({
+      ...step,
+      tracker_state: step.tracker_state ?? undefined,
+    })),
+    runtime: {
+      ...form.runtime,
+      workspace: {
+        ...form.runtime.workspace,
+        root: form.runtime.workspace.root ?? undefined,
+      },
+      hooks: {
+        ...form.runtime.hooks,
+        after_create: form.runtime.hooks.after_create ?? undefined,
+        before_run: form.runtime.hooks.before_run ?? undefined,
+        after_run: form.runtime.hooks.after_run ?? undefined,
+        before_remove: form.runtime.hooks.before_remove ?? undefined,
+      },
+    },
+    transitions: { ...form.transitions },
+  };
+}
 
 export default function ConfigPage() {
   const { data, isLoading, isError, refetch } = useConfigStateQuery();
@@ -21,35 +64,31 @@ export default function ConfigPage() {
   const validateYamlMutation = useValidateYamlDraftMutation();
   const saveYamlMutation = useSaveYamlDraftMutation();
 
-  const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string) => {
+  const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string): Promise<ValidationIssue[]> => {
     const response = await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
     setDisplayedIssues(response.data.issues);
+    await refetch();
     return response.data.issues;
   };
 
   const handleSaveGuided = async (form: GuidedForm, baseRawYaml: string) => {
     await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    setDisplayedIssues([]);
     await refetch();
   };
 
-  const handleValidateYaml = async (yaml: string) => {
+  const handleValidateYaml = async (yaml: string): Promise<ValidationIssue[]> => {
     const response = await validateYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
     setDisplayedIssues(response.data.issues);
+    await refetch();
     return response.data.issues;
   };
 
   const handleSaveYaml = async (yaml: string) => {
     await saveYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+    setDisplayedIssues([]);
     await refetch();
   };
-
-  const handleReset = () => {
-    // Reset handled internally by editors
-  };
-
-  useEffect(() => {
-    setDisplayedIssues(issues);
-  }, [issues]);
 
   if (isLoading) {
     return <div className="text-center py-12 text-muted-foreground">Loading configuration...</div>;
@@ -63,9 +102,14 @@ export default function ConfigPage() {
 
   const { state, raw_yaml: rawYaml } = data;
   const guidedForm = data.guided_form;
+  const memoizedForm = useMemo(
+    () => (guidedForm ? toGuidedForm(guidedForm) : null),
+    [guidedForm]
+  );
 
-  const hasIssues = displayedIssues.length > 0;
+  const hasIssues = (displayedIssues.length > 0 || issues.length > 0);
   const isEditable = state === "parsed";
+  const bannerIssues = displayedIssues.length > 0 ? displayedIssues : issues;
 
   // Missing config - show setup mode
   if (state === "missing" || showSetupWizard) {
@@ -91,7 +135,9 @@ export default function ConfigPage() {
           issues={issues}
           onValidate={handleValidateYaml}
           onSave={handleSaveYaml}
-          onReset={handleReset}
+          onReset={() => {
+            void refetch();
+          }}
         />
       </div>
     );
@@ -120,7 +166,7 @@ export default function ConfigPage() {
               </p>
               {hasIssues && (
                 <ul className="mt-2 space-y-2">
-                  {displayedIssues.map((issue: ValidationIssue, i: number) => (
+                  {bannerIssues.map((issue: ValidationIssue, i: number) => (
                     <li key={i} className="text-sm text-red-600 dark:text-red-400">{issue.message}</li>
                   ))}
                 </ul>
@@ -163,14 +209,16 @@ export default function ConfigPage() {
               </button>
             </div>
             <div className="mt-4">
-              {activeTab === "guided" && guidedForm && (
+              {activeTab === "guided" && memoizedForm && (
                 <GuidedEditor
-                  initialForm={guidedForm as GuidedForm}
+                  initialForm={memoizedForm}
                   baseRawYaml={rawYaml || ""}
                   issues={displayedIssues}
                   onValidate={handleValidateGuided}
                   onSave={handleSaveGuided}
-                  onReset={handleReset}
+                  onReset={() => {
+                    void refetch();
+                  }}
                 />
               )}
               {activeTab === "yaml" && rawYaml && (
@@ -180,7 +228,9 @@ export default function ConfigPage() {
                   issues={displayedIssues}
                   onValidate={handleValidateYaml}
                   onSave={handleSaveYaml}
-                  onReset={handleReset}
+                  onReset={() => {
+                    void refetch();
+                  }}
                 />
               )}
             </div>
