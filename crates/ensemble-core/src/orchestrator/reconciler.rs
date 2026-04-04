@@ -255,20 +255,7 @@ mod tests {
     use async_trait::async_trait;
 
     fn test_issue(id: &str, state: &str) -> Issue {
-        Issue {
-            id: id.to_string(),
-            identifier: format!("repo#{id}"),
-            title: format!("Issue {id}"),
-            description: None,
-            priority: Some(2),
-            state: state.to_string(),
-            branch_name: None,
-            url: None,
-            labels: vec![],
-            blocked_by: vec![],
-            created_at: Some(Utc::now()),
-            updated_at: None,
-        }
+        crate::tracker::model::test_helpers::test_issue(id, state)
     }
 
     fn default_active() -> Vec<String> {

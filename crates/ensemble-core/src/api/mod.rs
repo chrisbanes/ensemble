@@ -1,3 +1,4 @@
+pub mod bootstrap;
 pub mod config_edit_handler;
 pub mod config_handler;
 pub mod controls;
@@ -8,4 +9,6 @@ pub mod history_handler;
 pub mod interactions;
 pub mod openapi;
 pub mod router;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 pub mod ws;

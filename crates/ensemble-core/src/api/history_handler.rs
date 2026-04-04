@@ -25,56 +25,30 @@ pub async fn get_history(
 ) -> impl IntoResponse {
     match read_history(&state.history_path, &query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(e) => {
-            let error = crate::api::handlers::ApiError::new(
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::api::handlers::api_error(
                 "history_read_error",
-                &format!("failed to read history: {}", e),
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::to_value(error).unwrap()),
-            )
-                .into_response()
-        }
+                format!("failed to read history: {}", e),
+            ),
+        )
+            .into_response(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router::{AppState, ConfigRuntime};
-    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::history::model::{HistoryRecord, TokenTotals};
     use crate::history::writer::HistoryWriter;
-    use crate::observability::events::EventBus;
-    use crate::orchestrator::state::OrchestratorState;
     use chrono::Utc;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     fn build_app_state(history_path: PathBuf) -> AppState {
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path,
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.history_path = history_path;
+        app_state
     }
 
     fn sample_record(identifier: &str) -> HistoryRecord {

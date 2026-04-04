@@ -10,6 +10,10 @@ repository.workspace = true
 name = "ensemble"
 path = "src/main.rs"
 
+[features]
+default = ["open-config-dir"]
+open-config-dir = ["dep:opener"]
+
 [dependencies]
 ensemble-core = { path = "../ensemble-core" }
 tokio = { workspace = true }
@@ -24,6 +28,7 @@ rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
+opener = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

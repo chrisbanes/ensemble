@@ -36,6 +36,8 @@ pub enum ConfigError {
     RelativeDesktopOverride { path: String },
     #[error("config directory path must be a directory, not a file: {path}")]
     NotADirectory { path: String },
+    #[error("config read failed for '{path}': {reason}")]
+    ConfigReadError { path: String, reason: String },
     #[error("path expansion failed for '{path}': {reason}")]
     PathExpansionError { path: String, reason: String },
     #[error("config write rejected: {reason}")]

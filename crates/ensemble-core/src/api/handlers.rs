@@ -22,6 +22,11 @@ pub struct ApiErrorDetail {
     pub message: String,
 }
 
+pub(crate) fn api_error(code: &str, message: impl Into<String>) -> Json<ApiError> {
+    let message = message.into();
+    Json(ApiError::new(code, &message))
+}
+
 impl ApiError {
     pub fn new(code: &str, message: &str) -> Self {
         Self {
@@ -80,9 +85,7 @@ pub async fn get_issue_detail(
     drop(lock);
 
     match detail {
-        Some(detail) => {
-            (StatusCode::OK, Json(serde_json::to_value(detail).unwrap())).into_response()
-        }
+        Some(detail) => (StatusCode::OK, Json(detail)).into_response(),
         None => {
             let error = ApiError::new(
                 "issue_not_found",
@@ -91,11 +94,7 @@ pub async fn get_issue_detail(
                     identifier
                 ),
             );
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::to_value(error).unwrap()),
-            )
-                .into_response()
+            (StatusCode::NOT_FOUND, Json(error)).into_response()
         }
     }
 }
@@ -137,29 +136,24 @@ pub async fn post_refresh(State(state): State<AppState>) -> (StatusCode, Json<Re
 
 /// Handler for unsupported HTTP methods on defined routes.
 /// Returns 405 Method Not Allowed with a JSON error envelope.
-pub async fn method_not_allowed() -> (StatusCode, Json<serde_json::Value>) {
-    let error = ApiError::new(
-        "method_not_allowed",
-        "this HTTP method is not supported on this endpoint",
-    );
+pub async fn method_not_allowed() -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::METHOD_NOT_ALLOWED,
-        Json(serde_json::to_value(error).unwrap()),
+        api_error(
+            "method_not_allowed",
+            "this HTTP method is not supported on this endpoint",
+        ),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router::{AppState, ConfigRuntime};
-    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
-    use crate::observability::events::EventBus;
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
-    use std::path::PathBuf;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     fn test_issue() -> Issue {
         Issue {
@@ -225,53 +219,13 @@ mod tests {
         state.agent_totals.total_tokens = 7400;
         state.agent_totals.seconds_running = 120.5;
 
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(tokio::sync::RwLock::new(state));
+        app_state
     }
 
     fn build_empty_state() -> AppState {
-        let state = OrchestratorState::new(30000, 10);
-
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        app_state_with_document_state(parsed_document_state())
     }
 
     #[tokio::test]
@@ -349,9 +303,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_method_not_allowed_response() {
-        let (status, _) = method_not_allowed().await;
+    async fn method_not_allowed_returns_json_api_error() {
+        let (status, Json(body)) = method_not_allowed().await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body.error.code, "method_not_allowed");
+    }
+
+    #[test]
+    fn api_error_helper_returns_json_api_error() {
+        let Json(body) = api_error("issue_not_found", "no such issue");
+        assert_eq!(body.error.code, "issue_not_found");
+        assert_eq!(body.error.message, "no such issue");
     }
 
     #[tokio::test]

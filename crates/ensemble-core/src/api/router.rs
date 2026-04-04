@@ -9,7 +9,7 @@ use crate::orchestrator::state::OrchestratorState;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -161,42 +161,19 @@ pub fn create_api_router(state: AppState) -> Router {
 
 /// Fallback handler for unmatched API routes. Returns a JSON 404.
 async fn api_not_found() -> impl IntoResponse {
-    let error = handlers::ApiError::new("not_found", "API endpoint not found");
     (
         StatusCode::NOT_FOUND,
-        Json(serde_json::to_value(error).unwrap()),
+        handlers::api_error("not_found", "API endpoint not found"),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
 
     fn test_app_state() -> AppState {
-        use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
-
-        let state = OrchestratorState::new(30000, 10);
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
-            document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        app_state_with_document_state(parsed_document_state())
     }
 
     #[test]

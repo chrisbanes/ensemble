@@ -887,8 +887,16 @@ impl GithubTracker {
 
 /// Parse "owner/repo" into (owner, repo).
 fn parse_owner_repo(repository: &str) -> Result<(String, String), TrackerError> {
-    let parts: Vec<&str> = repository.splitn(2, '/').collect();
-    if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+    let (owner, repo) =
+        repository
+            .split_once('/')
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "invalid repository format '{}', expected 'owner/repo'",
+                    repository
+                ),
+            })?;
+    if owner.is_empty() || repo.is_empty() {
         return Err(TrackerError::UnexpectedPayload {
             reason: format!(
                 "invalid repository format '{}', expected 'owner/repo'",
@@ -896,7 +904,7 @@ fn parse_owner_repo(repository: &str) -> Result<(String, String), TrackerError> 
             ),
         });
     }
-    Ok((parts[0].to_string(), parts[1].to_string()))
+    Ok((owner.to_string(), repo.to_string()))
 }
 
 /// Extract lowercased labels from a GitHub issue node.

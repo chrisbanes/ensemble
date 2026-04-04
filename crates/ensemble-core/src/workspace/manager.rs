@@ -4,7 +4,6 @@ use crate::tracker::model::sanitize_workspace_key;
 use crate::workspace::coordinator::{WorktreeCoordinator, WorktreeInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 /// Result of preparing a workspace for an issue.
 pub struct WorkspaceResult {
@@ -162,36 +161,18 @@ impl WorkspaceManager {
     /// When `path` does not yet exist (pre-creation), its parent is canonicalized
     /// and the final component is re-appended, preserving the intended semantics.
     fn validate_path_inside_root(&self, path: &Path) -> Result<(), WorkspaceError> {
-        let canonical_root = self.root.canonicalize().unwrap_or_else(|e| {
-            if self.root.exists() {
-                warn!(
-                    root = %self.root.display(),
-                    error = %e,
-                    "cannot canonicalize workspace root, falling back to non-canonical path check"
-                );
-            }
-            self.root.clone()
-        });
+        let canonical_root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
 
         let canonical_path = if path.exists() {
-            path.canonicalize().unwrap_or_else(|e| {
-                warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "cannot canonicalize path, falling back to non-canonical check"
-                );
-                path.to_path_buf()
-            })
+            path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
         } else if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
-            let canonical_parent = parent.canonicalize().unwrap_or_else(|e| {
-                warn!(
-                    parent = %parent.display(),
-                    error = %e,
-                    "cannot canonicalize parent path, falling back to non-canonical check"
-                );
-                parent.to_path_buf()
-            });
-            canonical_parent.join(file_name)
+            parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf())
+                .join(file_name)
         } else {
             path.to_path_buf()
         };

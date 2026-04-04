@@ -3,7 +3,7 @@
 
 use chrono::Utc;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
-use ensemble_core::config::draft::ConfigDocumentState;
+use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
 use ensemble_core::interaction::model::{
     InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
 };
@@ -11,10 +11,46 @@ use ensemble_core::interaction::store::InteractionStore;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
+
+const MINIMAL_CONFIG: &str = "tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed";
+
+fn parsed_document_state(config_path: PathBuf) -> ConfigDocumentState {
+    ConfigDocumentState {
+        path: config_path,
+        kind: ConfigStateKind::Parsed,
+        raw_yaml: Some(MINIMAL_CONFIG.to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config(MINIMAL_CONFIG).unwrap()),
+        validation: DraftValidationReport::default(),
+    }
+}
+
+fn build_app_state(
+    temp_dir: &TempDir,
+    orchestrator_state: OrchestratorState,
+    document_state: ConfigDocumentState,
+) -> AppState {
+    AppState {
+        orchestrator_state: Arc::new(RwLock::new(orchestrator_state)),
+        refresh_requested: Arc::new(tokio::sync::Notify::new()),
+        workspace_root: temp_dir
+            .path()
+            .join("ensemble_workspaces")
+            .display()
+            .to_string(),
+        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
+        event_bus: EventBus::new(),
+        config_runtime: ConfigRuntime {
+            config_path: document_state.path.clone(),
+            document_state: Arc::new(RwLock::new(document_state)),
+        },
+    }
+}
 
 fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
     Issue {
@@ -80,30 +116,7 @@ fn build_populated_app_state() -> (AppState, TempDir) {
     state.agent_totals.seconds_running = 120.5;
 
     let config_path = temp_dir.path().join("ensemble_test_config.yaml");
-    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-        path: config_path.clone(),
-        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
-        raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
-        document: None,
-        active_config: Some(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-        validation: ensemble_core::config::draft::DraftValidationReport::default(),
-    }));
-
-    let app_state = AppState {
-        orchestrator_state: Arc::new(RwLock::new(state)),
-        refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: temp_dir
-            .path()
-            .join("ensemble_workspaces")
-            .display()
-            .to_string(),
-        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
-        event_bus: EventBus::new(),
-        config_runtime: ConfigRuntime {
-            config_path,
-            document_state,
-        },
-    };
+    let app_state = build_app_state(&temp_dir, state, parsed_document_state(config_path));
     (app_state, temp_dir)
 }
 
@@ -365,26 +378,8 @@ async fn test_get_state_empty_system() {
     let state = OrchestratorState::new(30000, 10);
 
     let config_path = temp_dir.path().join("ensemble_test_config.yaml");
-    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-        path: config_path.clone(),
-        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
-        raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
-        document: None,
-        active_config: Some(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-        validation: ensemble_core::config::draft::DraftValidationReport::default(),
-    }));
-
-    let app_state = AppState {
-        orchestrator_state: Arc::new(RwLock::new(state)),
-        refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
-        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
-        event_bus: EventBus::new(),
-        config_runtime: ConfigRuntime {
-            config_path,
-            document_state,
-        },
-    };
+    let mut app_state = build_app_state(&temp_dir, state, parsed_document_state(config_path));
+    app_state.workspace_root = temp_dir.path().join("workspaces").display().to_string();
 
     let base_url = start_test_server(app_state).await;
     let client = reqwest::Client::new();
@@ -415,26 +410,8 @@ fn build_empty_app_state() -> (AppState, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
     let config_path = temp_dir.path().join("ensemble_test_config.yaml");
-    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-        path: config_path.clone(),
-        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
-        raw_yaml: Some("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed".to_string()),
-        document: None,
-        active_config: Some(ensemble_core::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-        validation: ensemble_core::config::draft::DraftValidationReport::default(),
-    }));
-
-    let app_state = AppState {
-        orchestrator_state: Arc::new(RwLock::new(state)),
-        refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
-        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
-        event_bus: EventBus::new(),
-        config_runtime: ConfigRuntime {
-            config_path,
-            document_state,
-        },
-    };
+    let mut app_state = build_app_state(&temp_dir, state, parsed_document_state(config_path));
+    app_state.workspace_root = temp_dir.path().join("workspaces").display().to_string();
     (app_state, temp_dir)
 }
 
@@ -463,26 +440,16 @@ fn build_app_state_without_config() -> (AppState, TempDir) {
     let temp_dir = TempDir::new().unwrap();
     let state = OrchestratorState::new(30000, 10);
     let config_path = temp_dir.path().join("nonexistent_config.yaml");
-    let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+    let document_state = ConfigDocumentState {
         path: config_path.clone(),
-        kind: ensemble_core::config::draft::ConfigStateKind::Missing,
+        kind: ConfigStateKind::Missing,
         raw_yaml: None,
         document: None,
         active_config: None,
-        validation: ensemble_core::config::draft::DraftValidationReport::default(),
-    }));
-
-    let app_state = AppState {
-        orchestrator_state: Arc::new(RwLock::new(state)),
-        refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: temp_dir.path().join("workspaces").display().to_string(),
-        history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
-        event_bus: EventBus::new(),
-        config_runtime: ConfigRuntime {
-            config_path,
-            document_state,
-        },
+        validation: DraftValidationReport::default(),
     };
+    let mut app_state = build_app_state(&temp_dir, state, document_state);
+    app_state.workspace_root = temp_dir.path().join("workspaces").display().to_string();
     (app_state, temp_dir)
 }
 
@@ -524,7 +491,7 @@ async fn test_setup_defaults_extract_from_parseable_raw_yaml() {
     let (state, _temp_dir) = build_app_state_without_config();
     *state.config_runtime.document_state.write().await = ConfigDocumentState {
         path: state.config_runtime.config_path.clone(),
-        kind: ensemble_core::config::draft::ConfigStateKind::Parsed,
+        kind: ConfigStateKind::Parsed,
         raw_yaml: Some(
             r#"
 tracker:
@@ -552,7 +519,7 @@ on_failure: Failed
         ),
         document: None,
         active_config: None,
-        validation: ensemble_core::config::draft::DraftValidationReport::default(),
+        validation: DraftValidationReport::default(),
     };
 
     let base_url = start_test_server(state).await;

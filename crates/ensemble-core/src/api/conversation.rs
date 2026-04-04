@@ -1,4 +1,4 @@
-use crate::api::handlers::ApiError;
+use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::tracker::model::sanitize_workspace_key;
 use axum::extract::{Path, Query, State};
@@ -6,6 +6,51 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::path::{Path as FsPath, PathBuf};
+
+fn conversation_path(workspace_root: &str, workspace_key: &str) -> PathBuf {
+    PathBuf::from(workspace_root)
+        .join(workspace_key)
+        .join(".ensemble")
+        .join("conversation.jsonl")
+}
+
+async fn read_conversation_file(path: &FsPath) -> Result<Option<String>, std::io::Error> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_conversation_messages(
+    contents: &str,
+) -> Result<Vec<ConversationMessage>, serde_json::Error> {
+    contents.lines().map(serde_json::from_str).collect()
+}
+
+async fn load_conversation_messages(
+    path: &FsPath,
+) -> Result<Option<Vec<ConversationMessage>>, ApiError> {
+    let Some(contents) = read_conversation_file(path).await.map_err(|e| {
+        ApiError::new(
+            "conversation_read_error",
+            &format!("failed to read conversation: {e}"),
+        )
+    })?
+    else {
+        return Ok(None);
+    };
+
+    let messages = parse_conversation_messages(&contents).map_err(|e| {
+        ApiError::new(
+            "conversation_parse_error",
+            &format!("failed to parse conversation: {e}"),
+        )
+    })?;
+
+    Ok(Some(messages))
+}
 
 /// Query parameters for conversation pagination.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
@@ -63,58 +108,34 @@ pub async fn get_conversation(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "invalid_identifier",
-                        "identifier cannot be sanitized to a workspace key",
-                    ))
-                    .unwrap(),
+                api_error(
+                    "invalid_identifier",
+                    "identifier cannot be sanitized to a workspace key",
                 ),
             )
                 .into_response();
         }
     };
 
-    let conversation_path = std::path::PathBuf::from(&state.workspace_root)
-        .join(&workspace_key)
-        .join(".ensemble")
-        .join("conversation.jsonl");
+    let conversation_path = conversation_path(&state.workspace_root, &workspace_key);
 
-    let contents = match tokio::fs::read_to_string(&conversation_path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    let all_messages = match load_conversation_messages(&conversation_path).await {
+        Ok(Some(messages)) => messages,
+        Ok(None) => {
             return (
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(ConversationResponse {
-                        messages: vec![],
-                        total: 0,
-                        next_cursor: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ConversationResponse {
+                    messages: vec![],
+                    total: 0,
+                    next_cursor: None,
+                }),
             )
                 .into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_read_error",
-                        &format!("failed to read conversation: {}", e),
-                    ))
-                    .unwrap(),
-                ),
-            )
-                .into_response();
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
         }
     };
-
-    let all_messages: Vec<ConversationMessage> = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
 
     let total = all_messages.len();
     let cursor = query.cursor.unwrap_or(0);
@@ -131,14 +152,11 @@ pub async fn get_conversation(
 
     (
         StatusCode::OK,
-        Json(
-            serde_json::to_value(ConversationResponse {
-                messages: page,
-                total,
-                next_cursor,
-            })
-            .unwrap(),
-        ),
+        Json(ConversationResponse {
+            messages: page,
+            total,
+            next_cursor,
+        }),
     )
         .into_response()
 }
@@ -169,68 +187,43 @@ pub async fn get_conversation_message(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "invalid_identifier",
-                        "identifier cannot be sanitized to a workspace key",
-                    ))
-                    .unwrap(),
+                api_error(
+                    "invalid_identifier",
+                    "identifier cannot be sanitized to a workspace key",
                 ),
             )
                 .into_response();
         }
     };
 
-    let conversation_path = std::path::PathBuf::from(&state.workspace_root)
-        .join(&workspace_key)
-        .join(".ensemble")
-        .join("conversation.jsonl");
+    let conversation_path = conversation_path(&state.workspace_root, &workspace_key);
 
-    let contents = match tokio::fs::read_to_string(&conversation_path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    let messages = match load_conversation_messages(&conversation_path).await {
+        Ok(Some(messages)) => messages,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_not_found",
-                        "no conversation file found for this issue",
-                    ))
-                    .unwrap(),
+                api_error(
+                    "conversation_not_found",
+                    "no conversation file found for this issue",
                 ),
             )
                 .into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_read_error",
-                        &format!("failed to read conversation: {}", e),
-                    ))
-                    .unwrap(),
-                ),
-            )
-                .into_response();
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
         }
     };
 
-    let message = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<ConversationMessage>(line).ok())
-        .find(|m| m.index == index);
+    let message = messages.into_iter().find(|m| m.index == index);
 
     match message {
-        Some(msg) => (StatusCode::OK, Json(serde_json::to_value(msg).unwrap())).into_response(),
+        Some(msg) => (StatusCode::OK, Json(msg)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(ApiError::new(
-                    "message_not_found",
-                    &format!("no message at index {}", index),
-                ))
-                .unwrap(),
+            api_error(
+                "message_not_found",
+                format!("no message at index {}", index),
             ),
         )
             .into_response(),
@@ -240,6 +233,124 @@ pub async fn get_conversation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
+    use crate::tracker::model::sanitize_workspace_key;
+    use axum::body::to_bytes;
+    use tempfile::TempDir;
+
+    fn test_app_state(workspace_root: String) -> AppState {
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.workspace_root = workspace_root;
+        app_state
+    }
+
+    async fn write_conversation_file(root: &std::path::Path, contents: &str) {
+        let workspace_key = sanitize_workspace_key("my-repo#42").unwrap();
+        let path = conversation_path(root.to_str().unwrap(), &workspace_key);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, contents).await.unwrap();
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[test]
+    fn conversation_path_uses_workspace_root_and_key() {
+        let path = conversation_path("/tmp/workspaces", "my-repo-42");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/workspaces")
+                .join("my-repo-42")
+                .join(".ensemble")
+                .join("conversation.jsonl")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_conversation_file_returns_none_for_missing_file() {
+        let tempdir = TempDir::new().unwrap();
+        let path = tempdir.path().join("missing.jsonl");
+
+        let contents = read_conversation_file(&path).await.unwrap();
+
+        assert!(contents.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_conversation_returns_empty_result_when_file_is_missing() {
+        let tempdir = TempDir::new().unwrap();
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(ConversationQuery::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_message_returns_not_found_when_file_is_missing() {
+        let tempdir = TempDir::new().unwrap();
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation_message(State(state), Path(("my-repo#42".to_string(), 0)))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_returns_internal_error_for_malformed_jsonl() {
+        let tempdir = TempDir::new().unwrap();
+        write_conversation_file(tempdir.path(), "{invalid json}\n").await;
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(ConversationQuery::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "conversation_parse_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed to parse conversation:"));
+    }
+
+    #[tokio::test]
+    async fn get_conversation_message_returns_error_for_malformed_jsonl() {
+        let tempdir = TempDir::new().unwrap();
+        write_conversation_file(tempdir.path(), "{invalid json}\n").await;
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation_message(State(state), Path(("my-repo#42".to_string(), 0)))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "conversation_parse_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed to parse conversation:"));
+    }
 
     #[test]
     fn test_conversation_message_deserialize() {
@@ -251,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn test_conversation_response_serialize() {
+    fn conversation_response_serializes_total_and_next_cursor() {
         let response = ConversationResponse {
             messages: vec![],
             total: 0,
@@ -260,5 +371,11 @@ mod tests {
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["total"], 0);
         assert!(json["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn parse_conversation_messages_returns_error_for_malformed_jsonl() {
+        let error = parse_conversation_messages("{invalid json}\n").unwrap_err();
+        assert!(error.is_syntax());
     }
 }
