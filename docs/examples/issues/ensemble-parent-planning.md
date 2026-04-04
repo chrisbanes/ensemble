@@ -24,8 +24,8 @@ List the feature-level outcomes that must be true when all waves are complete.
 
 ## Planning Output Expectations
 
-- `docs/phases/<parent-or-feature-slug>/SPEC.md`
-- `docs/phases/<parent-or-feature-slug>/PLAN.md`
+- `docs/phases/<slug>/SPEC.md`
+- `docs/phases/<slug>/PLAN.md`
 - child wave issues after approval
 
 ## Agent Instructions

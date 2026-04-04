@@ -1,15 +1,15 @@
-# GSD Parent Planning Prompt
+# SDD Parent Planning Prompt
 
 Use this prompt when an agent is planning from a parent GitHub issue.
 
 ```text
-You are working on a parent planning issue for Ensemble's GSD-style workflow.
+You are working on a parent planning issue for Ensemble's SDD workflow.
 
 Your job is to act as the planning agent for the whole feature, not the execution agent for a single wave.
 
 Required behavior:
 - Read the parent issue, repository context, and any linked design docs.
-- Produce or update `docs/phases/<parent-or-feature-slug>/SPEC.md` and `docs/phases/<parent-or-feature-slug>/PLAN.md`.
+- Produce or update `docs/phases/<slug>/SPEC.md` and `docs/phases/<slug>/PLAN.md`.
 - Decompose the approved plan into execution waves.
 - Avoid clarifying-question loops unless blocked.
 - Wait for finalized approval before creating child issues.

@@ -111,7 +111,7 @@ Use durable docs under one feature-specific directory:
 - `docs/phases/<slug>/SPEC.md`
 - `docs/phases/<slug>/PLAN.md`
 - `docs/phases/<slug>/verification/WAVE-<n>.md`
-- optional `docs/phases/<slug>/HANDOFF.md`
+- optional `docs/phases/<slug>/HANDOFF.md` — captures decisions, context, and open questions when handing off between planning and execution agents or between waves
 
 This keeps detailed decomposition and verification in git while leaving tracker issues as operational summaries.
 
@@ -179,10 +179,22 @@ Poor fit for autonomous execution:
 
 ## Worked Example
 
-Planning issue: `Add issue templates and planning workflow`
+Planning issue: `Add dark mode to the dashboard UI`
 
-- Wave 1: write workflow documentation, issue templates, prompt examples, and board rules
-- Wave 2: run the workflow on a real planning issue and polish anything confusing
+- Wave 1: write `docs/phases/dark-mode/SPEC.md` (design tokens, component inventory, accessibility requirements) and `docs/phases/dark-mode/PLAN.md` (implementation order, testing strategy)
+- Wave 2: implement theme provider and token system, update core layout components, add verification screenshots
+- Wave 3: update remaining dashboard widgets, add user preference persistence, end-to-end test suite
+
+Each wave links to the approved spec and plan. Wave 2 cannot start until Wave 1 artifacts are approved and merged. Wave 3 depends on Wave 2's theme provider being on `main`.
+
+## Migrating From GSD Workflow
+
+If you previously used the GSD-style workflow guide, the core mechanics are unchanged. Key differences:
+
+- **Terminology**: "parent/child" is now "planning/execution" — the states and transitions are the same
+- **Human interaction**: v1 now has first-class interaction requests through Ensemble's UI/API rather than relying on tracker comments as the input channel
+- **Authority**: Interaction records and durable resume state are now the source of truth; tracker state and comments are best-effort mirrors
+- **Examples**: Some example files still carry `gsd-` prefixes (prompts, board rules). These remain functionally valid and are being renamed incrementally
 
 ## See Also
 
