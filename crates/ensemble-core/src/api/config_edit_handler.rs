@@ -714,12 +714,76 @@ mod tests {
     use super::*;
     use crate::api::router::ConfigRuntime;
     use crate::config::draft::{ConfigStateKind, DraftValidationReport};
+    use axum::body::Body;
+    use axum::response::IntoResponse;
+    use futures_util::StreamExt;
+    use std::io::Write;
     use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use std::sync::Mutex;
     use tempfile::TempDir;
     use tokio::sync::RwLock;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars.iter().map(|&key| (key, std::env::var(key).ok())).collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    struct PathGuard {
+        _guard: EnvGuard,
+    }
+
+    impl PathGuard {
+        fn with_fake_acpx(script_body: &str) -> (Self, tempfile::TempDir) {
+            let guard = EnvGuard::lock(&["HOME", "PATH"]);
+            let temp_dir = tempfile::tempdir().unwrap();
+            let script_path = temp_dir.path().join("acpx");
+            let mut script = std::fs::File::create(&script_path).unwrap();
+            writeln!(script, "#!/bin/sh").unwrap();
+            write!(script, "{script_body}").unwrap();
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&script_path, perms).unwrap();
+            }
+
+            std::env::set_var("PATH", temp_dir.path());
+
+            (Self { _guard: guard }, temp_dir)
+        }
+    }
 
     fn test_app_state() -> (AppState, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -981,6 +1045,39 @@ on_failure: Failed
         assert!(!response.has_existing_config);
         assert_eq!(response.defaults["tracker"]["kind"], "todo_file");
         assert!(response.defaults.get("has_existing_config").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_setup_agents_stream_emits_discovered_agent_version() {
+        let script = r#"
+if [ "$1" = "--agent" ] && [ "$2" = "claude" ] && [ "$3" = "--version" ]; then
+  printf 'claude 9.9.9\n'
+  exit 0
+fi
+
+exit 1
+"#;
+        let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
+        std::env::set_var("HOME", temp_dir.path());
+        let (state, _app_temp_dir) = test_app_state();
+
+        let response = get_setup_agents_stream(axum::extract::State(state))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "text/event-stream"
+        );
+
+        let body = response.into_body();
+        let mut stream = Body::into_data_stream(body);
+        let first_chunk = stream.next().await.unwrap().unwrap();
+        let event_text = String::from_utf8(first_chunk.to_vec()).unwrap();
+
+        assert!(event_text.contains("claude"));
+        assert!(event_text.contains("claude 9.9.9"));
     }
 
     #[tokio::test]

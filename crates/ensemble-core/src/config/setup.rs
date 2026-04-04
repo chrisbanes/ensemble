@@ -783,6 +783,10 @@ pub(crate) fn find_step_for_agent(role: &str, steps: &[SetupStep]) -> String {
 }
 
 fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
+    build_setup_dag(steps).map(|_| ())
+}
+
+fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag, ConfigError> {
     if steps.is_empty() {
         return Err(ConfigError::EmptyPipeline);
     }
@@ -798,7 +802,7 @@ fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
         })
         .collect();
 
-    build_dag(&step_configs).map(|_| ()).map_err(|error| ConfigError::ConfigParseError {
+    build_dag(&step_configs).map_err(|error| ConfigError::ConfigParseError {
         reason: error.to_string(),
     })
 }
@@ -1891,6 +1895,41 @@ on_failure: Failed
 
         let error = validate_dag(&steps).unwrap_err();
         assert!(error.to_string().contains("unknown step"));
+    }
+
+    #[test]
+    fn build_setup_dag_preserves_multiple_explicit_root_steps() {
+        let steps = vec![
+            SetupStep {
+                name: "lint".into(),
+                agent_role: "linter".into(),
+                depends: vec![],
+                tracker_state: None,
+            },
+            SetupStep {
+                name: "build".into(),
+                agent_role: "builder".into(),
+                depends: vec![],
+                tracker_state: None,
+            },
+            SetupStep {
+                name: "test".into(),
+                agent_role: "tester".into(),
+                depends: vec!["lint".into(), "build".into()],
+                tracker_state: None,
+            },
+        ];
+
+        let dag = build_setup_dag(&steps).unwrap();
+        let roots = crate::pipeline::dag::root_steps(&dag);
+        let lint = dag.steps.iter().find(|step| step.name == "lint").unwrap();
+        let build = dag.steps.iter().find(|step| step.name == "build").unwrap();
+
+        assert_eq!(roots.len(), 2);
+        assert!(roots.contains(&"lint"));
+        assert!(roots.contains(&"build"));
+        assert!(lint.depends.is_empty());
+        assert!(build.depends.is_empty());
     }
 
     #[test]
