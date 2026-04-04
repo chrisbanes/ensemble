@@ -245,6 +245,7 @@ mod tests {
             identifier: issue.identifier.clone(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "build".to_string(),
+            retry_attempt: None,
             requested_at: Utc::now(),
         });
 

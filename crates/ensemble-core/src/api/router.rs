@@ -1,3 +1,4 @@
+use crate::api::interactions;
 use crate::api::{
     config_edit_handler, config_handler, controls, conversation, fs_handler, handlers,
     history_handler, ws,
@@ -71,6 +72,19 @@ pub fn create_api_router(state: AppState) -> Router {
                 .patch(handlers::method_not_allowed),
         )
         .route("/history", get(history_handler::get_history))
+        .route("/interactions", get(interactions::list_open_interactions))
+        .route(
+            "/interactions/{id}",
+            get(interactions::get_interaction_by_id),
+        )
+        .route(
+            "/interactions/{id}/respond",
+            post(interactions::respond_to_interaction),
+        )
+        .route(
+            "/interactions/{id}/cancel",
+            post(interactions::cancel_interaction),
+        )
         .route("/fs/list", get(fs_handler::list_directory))
         .route("/config", get(config_handler::get_config))
         // Config YAML endpoints
@@ -116,6 +130,7 @@ pub fn create_api_router(state: AppState) -> Router {
         )
         .route("/{identifier}/stop", post(controls::post_stop))
         .route("/{identifier}/retry", post(controls::post_retry))
+        .route("/issues/{identifier}/resume", post(controls::post_resume))
         .route(
             "/{identifier}",
             get(handlers::get_issue_detail)

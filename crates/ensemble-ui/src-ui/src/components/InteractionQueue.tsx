@@ -1,0 +1,82 @@
+import { Link } from "react-router-dom";
+import type { InteractionRequest } from "@/generated/models";
+import { Badge } from "@/components/ui/badge";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
+interface InteractionQueueProps {
+  interactions: InteractionRequest[];
+}
+
+function formatAge(requestedAt: string): string {
+  const ms = Date.now() - new Date(requestedAt).getTime();
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s ago`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+export default function InteractionQueue({ interactions }: InteractionQueueProps) {
+  if (interactions.length === 0) {
+    return (
+      <div className="text-center py-8 text-muted-foreground">
+        No pending interaction requests.
+      </div>
+    );
+  }
+
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Issue</TableHead>
+          <TableHead>Kind</TableHead>
+          <TableHead>Title</TableHead>
+          <TableHead>Mode</TableHead>
+          <TableHead>Step</TableHead>
+          <TableHead>Age</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {interactions.map((interaction) => (
+          <TableRow key={interaction.id}>
+            <TableCell>
+              <Link
+                to={`/issue/${encodeURIComponent(interaction.issue_identifier)}`}
+                className="text-primary hover:underline font-medium"
+              >
+                {interaction.issue_identifier}
+              </Link>
+            </TableCell>
+            <TableCell className="text-muted-foreground capitalize">
+              {interaction.kind}
+            </TableCell>
+            <TableCell className="font-medium">{interaction.title}</TableCell>
+            <TableCell>
+              <Badge variant={interaction.blocking ? "secondary" : "outline"}>
+                {interaction.blocking ? "Blocking" : "Info"}
+              </Badge>
+            </TableCell>
+            <TableCell className="text-muted-foreground">{interaction.step_name}</TableCell>
+            <TableCell className="text-muted-foreground">
+              {formatAge(interaction.requested_at)}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}

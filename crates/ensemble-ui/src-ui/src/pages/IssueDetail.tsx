@@ -1,18 +1,28 @@
 import { useState, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import { useIssueDetailQuery, useStopMutation, useRetryMutation } from "@/hooks";
+import {
+  useIssueDetailQuery,
+  useStopMutation,
+  useRetryMutation,
+  useInteractionDetailQuery,
+  useRespondToInteractionMutation,
+  useCancelInteractionMutation,
+  useResumeIssueMutation,
+} from "@/hooks";
 import { connectWs } from "@/ws";
 import type { WsStatus } from "@/ws";
 import type { WsEventData, WsPipelineEvent } from "@/ws-types";
 import { isCompletionEvent, normalizePipelineEvent } from "@/ws-events";
 import { addNotification, requestPermissionIfNeeded } from "@/notifications";
+import type { InteractionResponseBody } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import EventTimeline from "@/components/EventTimeline";
 import ConversationViewer from "@/components/ConversationViewer";
+import InteractionPanel from "@/components/InteractionPanel";
 
 function triggerNotification(event: WsPipelineEvent, identifier: string) {
   const detail = event.detail ?? event.event_type;
@@ -35,8 +45,13 @@ function formatTokens(n: number): string {
 export default function IssueDetail() {
   const { identifier = "" } = useParams<{ identifier: string }>();
   const { data, isLoading, isError, error } = useIssueDetailQuery(identifier);
+  const interactionId = data?.current_interaction?.interaction_request_id ?? "";
+  const { data: interaction } = useInteractionDetailQuery(interactionId);
   const stopMutation = useStopMutation();
   const retryMutation = useRetryMutation();
+  const respondMutation = useRespondToInteractionMutation(identifier);
+  const cancelMutation = useCancelInteractionMutation(identifier);
+  const resumeMutation = useResumeIssueMutation(identifier);
 
   const [events, setEvents] = useState<WsEventData[]>([]);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
@@ -148,6 +163,26 @@ export default function IssueDetail() {
           <h3 className="text-sm font-medium text-red-800 dark:text-red-200">Last Error</h3>
           <p className="mt-1 text-sm text-red-700 dark:text-red-300">{data.last_error}</p>
         </div>
+      )}
+
+      {interaction && (
+        <section>
+          <h2 className="text-lg font-semibold mb-3">Interaction</h2>
+          <Card className="p-4">
+            <InteractionPanel
+              interaction={interaction}
+              issueIdentifier={identifier}
+              onRespond={(payload: InteractionResponseBody) =>
+                respondMutation.mutate({ id: interaction.id, data: payload })
+              }
+              onCancel={() => cancelMutation.mutate({ id: interaction.id })}
+              onResume={() => resumeMutation.mutate({ identifier })}
+              isResponding={respondMutation.isPending}
+              isCancelling={cancelMutation.isPending}
+              isResuming={resumeMutation.isPending}
+            />
+          </Card>
+        </section>
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

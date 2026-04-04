@@ -4,12 +4,17 @@
 use chrono::Utc;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::ConfigDocumentState;
+use ensemble_core::interaction::model::{
+    InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+};
+use ensemble_core::interaction::store::InteractionStore;
 use ensemble_core::observability::events::EventBus;
-use ensemble_core::orchestrator::state::OrchestratorState;
+use ensemble_core::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::RwLock;
+use tokio::time::{timeout, Duration};
 
 fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
     Issue {
@@ -100,6 +105,45 @@ fn build_populated_app_state() -> (AppState, TempDir) {
         },
     };
     (app_state, temp_dir)
+}
+
+fn test_interaction(id: &str, issue_id: &str, issue_identifier: &str) -> InteractionRequest {
+    InteractionRequest {
+        id: id.to_string(),
+        schema_version: 1,
+        issue_id: issue_id.to_string(),
+        issue_identifier: issue_identifier.to_string(),
+        pipeline_cycle: 1,
+        completed_steps: vec!["build".to_string()],
+        step_name: "review".to_string(),
+        agent_name: "reviewer".to_string(),
+        step_depends: vec!["build".to_string()],
+        step_tracker_state: Some("In Review".to_string()),
+        kind: InteractionKind::Question,
+        status: InteractionStatus::Open,
+        blocking: true,
+        awaiting_resume: true,
+        title: "Need clarification".to_string(),
+        body: "Pick a deployment target".to_string(),
+        options: vec!["staging".to_string(), "production".to_string()],
+        artifacts: vec!["docs/spec.md".to_string()],
+        response: None,
+        requested_at: Utc::now(),
+        resolved_at: None,
+    }
+}
+
+async fn create_interaction(app_state: &AppState, interaction: InteractionRequest) {
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    InteractionStore::new(config_dir)
+        .create(interaction)
+        .await
+        .unwrap();
 }
 
 /// Start an axum test server and return the base URL.
@@ -522,4 +566,217 @@ on_failure: Failed
     assert_eq!(json["defaults"]["tracker"]["kind"], "github");
     assert_eq!(json["defaults"]["repos"][0]["branch"], "main");
     assert_eq!(json["defaults"]["agents"][0]["role"], "builder");
+}
+
+#[tokio::test]
+async fn list_open_interactions() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-open", "NODE_789", "my-repo#77"),
+    )
+    .await;
+
+    let resolved = test_interaction("interaction-resolved", "NODE_790", "my-repo#78");
+    create_interaction(&app_state, resolved).await;
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    InteractionStore::new(config_dir)
+        .resolve(
+            "interaction-resolved",
+            InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Use staging".to_string(),
+                selected_option: Some("staging".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let base_url = start_test_server(app_state).await;
+    let response = reqwest::get(format!("{}/api/v1/interactions", base_url))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let json: serde_json::Value = response.json().await.unwrap();
+    let interactions = json.as_array().unwrap();
+    assert_eq!(interactions.len(), 1);
+    assert_eq!(interactions[0]["id"], "interaction-open");
+    assert_eq!(interactions[0]["status"], "open");
+}
+
+#[tokio::test]
+async fn get_interaction_by_id() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-detail", "NODE_789", "my-repo#77"),
+    )
+    .await;
+
+    let base_url = start_test_server(app_state).await;
+    let response = reqwest::get(format!(
+        "{}/api/v1/interactions/interaction-detail",
+        base_url
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["id"], "interaction-detail");
+    assert_eq!(json["issue_identifier"], "my-repo#77");
+    assert_eq!(json["kind"], "question");
+}
+
+#[tokio::test]
+async fn respond_to_question_marks_interaction_resolved() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-respond", "NODE_789", "my-repo#77"),
+    )
+    .await;
+
+    let base_url = start_test_server(app_state.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/api/v1/interactions/interaction-respond/respond",
+            base_url
+        ))
+        .json(&serde_json::json!({
+            "kind": "question",
+            "response_schema_version": 1,
+            "text": "Use staging",
+            "selected_option": "staging"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let stored = InteractionStore::new(config_dir)
+        .get("interaction-respond")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, InteractionStatus::Resolved);
+    assert!(stored.response.is_some());
+}
+
+#[tokio::test]
+async fn cancel_interaction_returns_conflict_when_already_resolved() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-cancel", "NODE_789", "my-repo#77"),
+    )
+    .await;
+
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    InteractionStore::new(config_dir)
+        .resolve(
+            "interaction-cancel",
+            InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Use staging".to_string(),
+                selected_option: Some("staging".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+    let base_url = start_test_server(app_state).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!(
+            "{}/api/v1/interactions/interaction-cancel/cancel",
+            base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 409);
+
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["error"]["code"], "already_resolved");
+}
+
+#[tokio::test]
+async fn resume_blocked_issue_requeues_issue() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    let notify = app_state.refresh_requested.clone();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-resume", "NODE_789", "my-repo#77"),
+    )
+    .await;
+
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    InteractionStore::new(config_dir)
+        .resolve(
+            "interaction-resume",
+            InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Use staging".to_string(),
+                selected_option: Some("staging".to_string()),
+            },
+        )
+        .await
+        .unwrap();
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_789".to_string(),
+            identifier: "my-repo#77".to_string(),
+            interaction_request_id: "interaction-resume".to_string(),
+            step_name: "review".to_string(),
+            retry_attempt: Some(1),
+            requested_at: Utc::now(),
+        });
+    }
+
+    let notified = notify.notified();
+    let base_url = start_test_server(app_state.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%2377/resume", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    timeout(Duration::from_secs(1), notified).await.unwrap();
+
+    let state = app_state.orchestrator_state.read().await;
+    assert!(state.is_waiting_on_human("NODE_789"));
+    assert!(state.is_claimed("NODE_789"));
+    assert!(state.is_resume_requested("NODE_789"));
 }

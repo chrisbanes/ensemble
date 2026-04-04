@@ -38,16 +38,16 @@ impl InteractionStore {
     ) -> Result<InteractionRequest, InteractionError> {
         let _guard = self.create_mutex.lock().await;
 
-        if interaction.blocking && interaction.status == InteractionStatus::Open {
-            if self
+        if interaction.blocking
+            && interaction.status == InteractionStatus::Open
+            && self
                 .current_open_blocking_for_issue(&interaction.issue_id)
                 .await?
                 .is_some_and(|existing| existing.id != interaction.id)
-            {
-                return Err(InteractionError::OpenBlockingInteractionExists {
-                    issue_id: interaction.issue_id.clone(),
-                });
-            }
+        {
+            return Err(InteractionError::OpenBlockingInteractionExists {
+                issue_id: interaction.issue_id.clone(),
+            });
         }
 
         self.write_new_interaction(&interaction).await?;
@@ -153,7 +153,10 @@ impl InteractionStore {
         Ok(interaction)
     }
 
-    pub async fn clear_waiting_state(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
+    pub async fn clear_waiting_state(
+        &self,
+        id: &str,
+    ) -> Result<InteractionRequest, InteractionError> {
         let interaction = self
             .get(id)
             .await?
@@ -161,7 +164,9 @@ impl InteractionStore {
 
         match interaction.status {
             InteractionStatus::Open => self.cancel(id).await,
-            InteractionStatus::Resolved | InteractionStatus::Cancelled => self.mark_resumed(id).await,
+            InteractionStatus::Resolved | InteractionStatus::Cancelled => {
+                self.mark_resumed(id).await
+            }
         }
     }
 

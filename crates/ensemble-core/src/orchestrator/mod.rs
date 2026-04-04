@@ -32,6 +32,24 @@ use scheduler::{
 };
 use state::{OrchestratorState, WaitingOnHumanEntry};
 
+struct StepDispatchContext<'a> {
+    step_name: &'a str,
+    agent_name: &'a str,
+    tracker_state: Option<&'a str>,
+    attempt: Option<u32>,
+    interaction_response: Option<InteractionResponseEnvelope>,
+    workspace_path: std::path::PathBuf,
+}
+
+struct InteractionRequestContext {
+    step_name: String,
+    agent_name: String,
+    pipeline_cycle: u32,
+    completed_steps: Vec<String>,
+    step_depends: Vec<String>,
+    step_tracker_state: Option<String>,
+}
+
 /// The main orchestrator that manages the poll-dispatch-reconcile loop.
 pub struct Orchestrator {
     state: Arc<RwLock<OrchestratorState>>,
@@ -302,6 +320,32 @@ impl Orchestrator {
         // 4. Sort by dispatch priority
         sort_for_dispatch(&mut candidates);
 
+        let resume_candidates = {
+            let state = self.state.read().await;
+            candidates
+                .iter()
+                .filter(|issue| state.is_resume_requested(&issue.id))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        for issue in resume_candidates {
+            match self.resume_blocked_issue(&issue).await {
+                Ok(()) => {
+                    let mut state = self.state.write().await;
+                    state.clear_resume_request(&issue.id);
+                }
+                Err(error) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        issue_identifier = %issue.identifier,
+                        error = %error,
+                        "failed to process explicit resume request"
+                    );
+                }
+            }
+        }
+
         // 5. Dispatch eligible issues while slots remain
         for issue in &candidates {
             {
@@ -361,51 +405,51 @@ impl Orchestrator {
         // Process initial dispatch requests
         if let PipelineAction::Dispatch(requests) = action {
             for req in requests {
-                let workspace_path = match self
-                    .prepare_step_workspace(issue, &config_snapshot)
-                    .await
-                {
-                    Ok(path) => path,
-                    Err(error) => {
-                        warn!(
-                            issue_id = %issue.id,
-                            step = %req.step_name,
-                            error = %error,
-                            "failed to prepare step workspace"
-                        );
-                        let mut state = self.state.write().await;
-                        if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
-                            run.step_failed(&req.step_name, error.to_string());
-                        }
-                        if let Some(entry) = state.remove_running(&issue.id) {
-                            state.add_runtime_seconds(&entry);
-                            schedule_failure_retry(
-                                &mut state,
-                                &issue.id,
-                                &entry.identifier,
-                                next_attempt(entry.retry_attempt),
-                                config_snapshot.agent.max_retry_backoff_ms,
-                                config_snapshot.max_cycles,
-                                &error.to_string(),
+                let workspace_path =
+                    match self.prepare_step_workspace(issue, &config_snapshot).await {
+                        Ok(path) => path,
+                        Err(error) => {
+                            warn!(
+                                issue_id = %issue.id,
+                                step = %req.step_name,
+                                error = %error,
+                                "failed to prepare step workspace"
                             );
+                            let mut state = self.state.write().await;
+                            if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
+                                run.step_failed(&req.step_name, error.to_string());
+                            }
+                            if let Some(entry) = state.remove_running(&issue.id) {
+                                state.add_runtime_seconds(&entry);
+                                schedule_failure_retry(
+                                    &mut state,
+                                    &issue.id,
+                                    &entry.identifier,
+                                    next_attempt(entry.retry_attempt),
+                                    config_snapshot.agent.max_retry_backoff_ms,
+                                    config_snapshot.max_cycles,
+                                    &error.to_string(),
+                                );
+                            }
+                            state.remove_pipeline_run(&issue.id);
+                            return;
                         }
-                        state.remove_pipeline_run(&issue.id);
-                        return;
-                    }
-                };
+                    };
 
                 let _ = self
                     .dispatch_step(
-                    issue,
-                    &req.step_name,
-                    &req.agent_name,
-                    req.tracker_state.as_deref(),
-                    attempt,
-                    Arc::clone(&config_snapshot),
-                    None,
-                    workspace_path,
-                )
-                .await;
+                        issue,
+                        Arc::clone(&config_snapshot),
+                        StepDispatchContext {
+                            step_name: &req.step_name,
+                            agent_name: &req.agent_name,
+                            tracker_state: req.tracker_state.as_deref(),
+                            attempt,
+                            interaction_response: None,
+                            workspace_path,
+                        },
+                    )
+                    .await;
             }
         }
     }
@@ -415,7 +459,10 @@ impl Orchestrator {
         issue: &Issue,
         config_snapshot: &Arc<EnsembleConfig>,
     ) -> Result<std::path::PathBuf, EnsembleError> {
-        let workspace = self.workspace_mgr.prepare_workspace(&issue.identifier).await?;
+        let workspace = self
+            .workspace_mgr
+            .prepare_workspace(&issue.identifier)
+            .await?;
 
         if workspace.created_now {
             if let Some(ref script) = config_snapshot.hooks.after_create {
@@ -439,24 +486,19 @@ impl Orchestrator {
     async fn dispatch_step(
         &self,
         issue: &Issue,
-        step_name: &str,
-        agent_name: &str,
-        tracker_state: Option<&str>,
-        attempt: Option<u32>,
         config_snapshot: Arc<EnsembleConfig>,
-        interaction_response: Option<InteractionResponseEnvelope>,
-        workspace_path: std::path::PathBuf,
+        dispatch: StepDispatchContext<'_>,
     ) -> Result<(), EnsembleError> {
         info!(
             issue_id = %issue.id,
             identifier = %issue.identifier,
-            step = step_name,
-            agent = agent_name,
+            step = dispatch.step_name,
+            agent = dispatch.agent_name,
             "dispatching pipeline step"
         );
 
         // Set tracker state if specified by the step
-        if let Some(state_name) = tracker_state {
+        if let Some(state_name) = dispatch.tracker_state {
             if self.tracker.supports_writes() {
                 if let Err(e) = self.tracker.set_issue_state(&issue.id, state_name).await {
                     warn!(
@@ -474,20 +516,24 @@ impl Orchestrator {
             let mut state = self.state.write().await;
             if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
                 run.mark_running(
-                    step_name,
-                    format!("{}-{}-{}", issue.id, step_name, agent_name),
+                    dispatch.step_name,
+                    format!(
+                        "{}-{}-{}",
+                        issue.id, dispatch.step_name, dispatch.agent_name
+                    ),
                 );
             }
         }
 
         // Spawn worker task
         let issue_clone = issue.clone();
-        let step_name_owned = step_name.to_string();
-        let agent_name_owned = agent_name.to_string();
-        let interaction_response = interaction_response.clone();
+        let step_name_owned = dispatch.step_name.to_string();
+        let agent_name_owned = dispatch.agent_name.to_string();
+        let interaction_response = dispatch.interaction_response.clone();
         let runner = Arc::clone(&self.agent_runner);
         let event_tx = self.worker_tx.clone();
-        let workspace_path = workspace_path.clone();
+        let workspace_path = dispatch.workspace_path.clone();
+        let attempt = dispatch.attempt;
         tokio::spawn(async move {
             // Run agent
             let result = runner
@@ -656,7 +702,8 @@ impl Orchestrator {
                                             );
 
                                             let mut state = self.state.write().await;
-                                            if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                                            if let Some(run) = state.get_pipeline_run_mut(issue_id)
+                                            {
                                                 run.step_failed(&req.step_name, error.to_string());
                                             }
                                             if let Some(entry) = state.remove_running(issue_id) {
@@ -678,16 +725,18 @@ impl Orchestrator {
 
                                     let _ = self
                                         .dispatch_step(
-                                        issue,
-                                        &req.step_name,
-                                        &req.agent_name,
-                                        req.tracker_state.as_deref(),
-                                        None,
-                                        Arc::clone(&config_snapshot),
-                                        None,
-                                        workspace_path,
-                                    )
-                                    .await;
+                                            issue,
+                                            Arc::clone(&config_snapshot),
+                                            StepDispatchContext {
+                                                step_name: &req.step_name,
+                                                agent_name: &req.agent_name,
+                                                tracker_state: req.tracker_state.as_deref(),
+                                                attempt: None,
+                                                interaction_response: None,
+                                                workspace_path,
+                                            },
+                                        )
+                                        .await;
                                 }
                             }
                         }
@@ -845,7 +894,7 @@ impl Orchestrator {
             reason: format!("missing running issue snapshot for blocked issue {issue_id}"),
         })?;
 
-        let (agent_name, pipeline_cycle, completed_steps, step_depends, step_tracker_state) = {
+        let interaction_context = {
             let state = self.state.read().await;
             let config =
                 state
@@ -868,33 +917,25 @@ impl Orchestrator {
             let completed_steps = config
                 .steps
                 .iter()
-                .filter_map(|candidate| {
+                .filter(|candidate| {
                     matches!(
                         run.step_states.get(&candidate.name),
                         Some(crate::pipeline::engine::StepState::Passed)
                     )
-                    .then(|| candidate.name.clone())
                 })
+                .map(|candidate| candidate.name.clone())
                 .collect();
-            (
-                step.agent.clone(),
-                run.cycle,
+            InteractionRequestContext {
+                step_name: step_name.to_string(),
+                agent_name: step.agent.clone(),
+                pipeline_cycle: run.cycle,
                 completed_steps,
-                step.depends.clone().unwrap_or_default(),
-                step.tracker_state.clone(),
-            )
+                step_depends: step.depends.clone().unwrap_or_default(),
+                step_tracker_state: step.tracker_state.clone(),
+            }
         };
 
-        let interaction = build_interaction_request(
-            issue,
-            step_name,
-            &agent_name,
-            pipeline_cycle,
-            completed_steps,
-            step_depends,
-            step_tracker_state,
-            request.clone(),
-        );
+        let interaction = build_interaction_request(issue, interaction_context, request.clone());
         self.interaction_store.create(interaction.clone()).await?;
 
         let mut state = self.state.write().await;
@@ -904,6 +945,11 @@ impl Orchestrator {
         let has_running_steps = state
             .get_pipeline_run(issue_id)
             .is_some_and(Self::pipeline_has_running_steps);
+
+        let retry_attempt = state
+            .running
+            .get(issue_id)
+            .and_then(|entry| entry.retry_attempt);
 
         if !has_running_steps {
             if let Some(entry) = state.remove_running(issue_id) {
@@ -915,6 +961,7 @@ impl Orchestrator {
             identifier: issue.identifier.clone(),
             interaction_request_id: interaction.id,
             step_name: step_name.to_string(),
+            retry_attempt,
             requested_at: interaction.requested_at,
         });
 
@@ -941,6 +988,7 @@ impl Orchestrator {
                 identifier: interaction.issue_identifier.clone(),
                 interaction_request_id: interaction.id.clone(),
                 step_name: interaction.step_name.clone(),
+                retry_attempt: Some(interaction.pipeline_cycle.max(1)),
                 requested_at: interaction.requested_at,
             });
         }
@@ -1013,6 +1061,7 @@ impl Orchestrator {
                 identifier: issue.identifier.clone(),
                 interaction_request_id: interaction.id.clone(),
                 step_name: interaction.step_name.clone(),
+                retry_attempt: Some(interaction.pipeline_cycle.max(1)),
                 requested_at: interaction.requested_at,
             });
         }
@@ -1166,7 +1215,10 @@ impl Orchestrator {
 
         if !current_config.agents.contains_key(&current_step.agent) {
             return Err(AgentError::PromptError {
-                reason: format!("blocked step agent '{}' no longer exists", current_step.agent),
+                reason: format!(
+                    "blocked step agent '{}' no longer exists",
+                    current_step.agent
+                ),
             }
             .into());
         }
@@ -1236,13 +1288,15 @@ impl Orchestrator {
 
         self.dispatch_step(
             issue,
-            &current_step.name,
-            &current_step.agent,
-            current_step.tracker_state.as_deref(),
-            Some(attempt),
             Arc::clone(&current_config),
-            Some(interaction_response),
-            workspace_path,
+            StepDispatchContext {
+                step_name: &current_step.name,
+                agent_name: &current_step.agent,
+                tracker_state: current_step.tracker_state.as_deref(),
+                attempt: Some(attempt),
+                interaction_response: Some(interaction_response),
+                workspace_path,
+            },
         )
         .await?;
 
@@ -1349,12 +1403,7 @@ impl Orchestrator {
 
 fn build_interaction_request(
     issue: &Issue,
-    step_name: &str,
-    agent_name: &str,
-    pipeline_cycle: u32,
-    completed_steps: Vec<String>,
-    step_depends: Vec<String>,
-    step_tracker_state: Option<String>,
+    context: InteractionRequestContext,
     request: InteractionRequestDraft,
 ) -> crate::interaction::InteractionRequest {
     let requested_at = Utc::now();
@@ -1362,18 +1411,18 @@ fn build_interaction_request(
         id: format!(
             "interaction-{}-{}-{}",
             sanitize_interaction_fragment(&issue.id),
-            sanitize_interaction_fragment(step_name),
+            sanitize_interaction_fragment(&context.step_name),
             requested_at.timestamp_millis()
         ),
         schema_version: request.schema_version,
         issue_id: issue.id.clone(),
         issue_identifier: issue.identifier.clone(),
-        pipeline_cycle,
-        completed_steps,
-        step_name: step_name.to_string(),
-        agent_name: agent_name.to_string(),
-        step_depends,
-        step_tracker_state,
+        pipeline_cycle: context.pipeline_cycle,
+        completed_steps: context.completed_steps,
+        step_name: context.step_name,
+        agent_name: context.agent_name,
+        step_depends: context.step_depends,
+        step_tracker_state: context.step_tracker_state,
         kind: request.kind,
         status: InteractionStatus::Open,
         blocking: request.blocking,
@@ -1404,6 +1453,7 @@ mod tests {
     use crate::interaction::{
         InteractionKind, InteractionResponse, InteractionStatus, InteractionStore,
     };
+    use crate::pipeline::verdict::Verdict;
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
 
@@ -2095,7 +2145,7 @@ agent:
         {
             let cfg = config.read().await;
             let dag = build_dag(&cfg.steps).unwrap();
-            let pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
             pipeline_run.mark_running("build", "session-build".to_string());
             pipeline_run.mark_running("docs", "session-docs".to_string());
@@ -2164,6 +2214,7 @@ agent:
             let dag = build_dag(&cfg.steps).unwrap();
             let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
+            pipeline_run.step_completed("build", Verdict::Approve);
             pipeline_run.step_blocked_on_human("review", "interaction-1".to_string());
             pipeline_run.mark_running("docs", "session-docs".to_string());
 
@@ -2174,6 +2225,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "review".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
             state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
@@ -2225,6 +2277,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
             "interaction-1".to_string()
@@ -2277,6 +2330,92 @@ agent:
         let state = orchestrator.state.read().await;
         assert!(state.is_running("1"));
         assert!(!state.is_waiting_on_human("1"));
+    }
+
+    #[tokio::test]
+    async fn explicit_resume_request_requeues_resolved_blocked_issue_on_tick() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: issues.clone(),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let interaction_id = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.step_blocked_on_human("build", "interaction-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            state.add_claimed("1");
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                retry_attempt: None,
+                requested_at: Utc::now(),
+            });
+            state.queue_resume("1");
+            "interaction-1".to_string()
+        };
+
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: interaction_id.clone(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Resolved,
+                blocking: true,
+                awaiting_resume: true,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: Some(InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: Some("staging".to_string()),
+                }),
+                requested_at: Utc::now(),
+                resolved_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(!state.is_resume_requested("1"));
     }
 
     #[tokio::test]
@@ -2550,7 +2689,7 @@ agent:
         {
             let cfg = config.read().await;
             let dag = build_dag(&cfg.steps).unwrap();
-            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            let pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
 
             let mut state = orchestrator.state.write().await;
@@ -2561,6 +2700,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
         }
@@ -2653,6 +2793,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-2".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: Some(1),
                 requested_at: Utc::now(),
             });
         }
@@ -2747,6 +2888,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
         }
@@ -2839,6 +2981,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
         }
@@ -2890,7 +3033,9 @@ agent:
         let error = orchestrator
             .resume_blocked_issue(&test_issue("1", "Todo"))
             .await
-            .expect_err("resume should fail when current config no longer contains the blocked step");
+            .expect_err(
+                "resume should fail when current config no longer contains the blocked step",
+            );
 
         assert!(error.to_string().contains("build"));
 
@@ -2939,6 +3084,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
         }
@@ -2991,6 +3137,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
         }
@@ -3138,6 +3285,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: Some(1),
                 requested_at: Utc::now(),
             });
         }
@@ -3225,6 +3373,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                retry_attempt: Some(1),
                 requested_at: Utc::now(),
             });
         }
@@ -3275,6 +3424,7 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "missing-step".to_string(),
+                retry_attempt: None,
                 requested_at: Utc::now(),
             });
         }
