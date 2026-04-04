@@ -52,6 +52,19 @@ async fn run_git(
         })
 }
 
+fn ensure_git_success(
+    output: std::process::Output,
+    _command: &str,
+    error: impl FnOnce(String) -> WorktreeError,
+) -> Result<std::process::Output, WorktreeError> {
+    if output.status.success() {
+        Ok(output)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(error(stderr))
+    }
+}
+
 /// Create a worktree with a new branch, optionally based on a start point.
 ///
 /// If `start_point` is provided (e.g. "main"), the new branch is created from
@@ -91,23 +104,20 @@ pub async fn create_worktree(
     }
 
     let command_label = git_command_label(&args);
-    let output = run_git(repo_path, &args, command_label).await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure_git_success(run_git(repo_path, &args, command_label).await?, "git worktree add", |stderr| {
         error!(stderr = %stderr, "Git worktree add command failed");
 
         if stderr.contains("already exists") {
-            return Err(WorktreeError::AlreadyExists {
+            WorktreeError::AlreadyExists {
                 path: worktree_path.to_string(),
-            });
+            }
+        } else {
+            WorktreeError::CreationFailed {
+                repo: repo_path.to_string(),
+                reason: stderr,
+            }
         }
-
-        return Err(WorktreeError::CreationFailed {
-            repo: repo_path.to_string(),
-            reason: stderr.to_string(),
-        });
-    }
+    })?;
 
     debug!(worktree_path = %worktree_path, "Worktree created successfully");
     Ok(())
@@ -129,16 +139,14 @@ pub async fn attach_worktree(
     );
 
     let args = ["worktree", "add", worktree_path, branch];
-    let output = run_git(repo_path, &args, git_command_label(&args)).await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    ensure_git_success(run_git(repo_path, &args, git_command_label(&args)).await?, "git worktree add", |stderr| {
         error!(stderr = %stderr, "Git worktree attach failed");
-        return Err(WorktreeError::CreationFailed {
+
+        WorktreeError::CreationFailed {
             repo: repo_path.to_string(),
-            reason: stderr.to_string(),
-        });
-    }
+            reason: stderr,
+        }
+    })?;
 
     debug!(worktree_path = %worktree_path, "Worktree attached successfully");
     Ok(())
@@ -153,16 +161,15 @@ pub async fn worktree_exists(repo_path: &str, worktree_path: &str) -> Result<boo
 
     let args = ["worktree", "list", "--porcelain"];
     let command = git_command_label(&args);
-    let output = run_git(repo_path, &args, command.clone()).await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let error_command = command.clone();
+    let output = ensure_git_success(run_git(repo_path, &args, command.clone()).await?, &command, |stderr| {
         error!(stderr = %stderr, "Git worktree list command failed");
-        return Err(WorktreeError::GitCommandFailed {
-            command,
-            reason: stderr.to_string(),
-        });
-    }
+
+        WorktreeError::GitCommandFailed {
+            command: error_command,
+            reason: stderr,
+        }
+    })?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let worktree_path_normalized = Path::new(worktree_path)
@@ -253,16 +260,15 @@ pub async fn remove_worktree(
 
     let args = ["worktree", "remove", "--force", worktree_path];
     let command = git_command_label(&args);
-    let output = run_git(repo_path, &args, command.clone()).await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let error_command = command.clone();
+    ensure_git_success(run_git(repo_path, &args, command.clone()).await?, &command, |stderr| {
         error!(stderr = %stderr, "Git worktree remove command failed");
-        return Err(WorktreeError::GitCommandFailed {
-            command,
-            reason: stderr.to_string(),
-        });
-    }
+
+        WorktreeError::GitCommandFailed {
+            command: error_command,
+            reason: stderr,
+        }
+    })?;
 
     debug!(worktree_path = %worktree_path, "Worktree removed successfully");
 
@@ -308,16 +314,15 @@ pub async fn pull_worktree(
 
     let args = ["pull", remote, branch];
     let command = git_command_label(&args);
-    let output = run_git(worktree_path, &args, command.clone()).await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let error_command = command.clone();
+    ensure_git_success(run_git(worktree_path, &args, command.clone()).await?, &command, |stderr| {
         error!(stderr = %stderr, "Git pull command failed");
-        return Err(WorktreeError::GitCommandFailed {
-            command,
-            reason: stderr.to_string(),
-        });
-    }
+
+        WorktreeError::GitCommandFailed {
+            command: error_command,
+            reason: stderr,
+        }
+    })?;
 
     debug!(worktree_path = %worktree_path, "Pull completed successfully");
     Ok(())
@@ -326,8 +331,27 @@ pub async fn pull_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::process::ExitStatusExt;
     use tempfile::TempDir;
     use tokio::fs;
+
+    fn assert_git_command_failed(error: WorktreeError, expected_command: &str) {
+        match error {
+            WorktreeError::GitCommandFailed { command, reason } => {
+                assert_eq!(command, expected_command);
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected GitCommandFailed, got {other:?}"),
+        }
+    }
+
+    fn test_output(status: i32, stderr: &[u8]) -> std::process::Output {
+        std::process::Output {
+            status: std::process::ExitStatus::from_raw(status),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        }
+    }
 
     #[test]
     fn test_sanitize_branch_name_basic() {
@@ -379,6 +403,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_ensure_git_success_returns_output_when_command_succeeds() {
+        let output = test_output(0, b"");
+        let result = ensure_git_success(output, "git status", |reason| {
+            WorktreeError::GitCommandFailed {
+                command: "unexpected".to_string(),
+                reason,
+            }
+        })
+        .expect("successful status should pass through");
+
+        assert!(result.status.success());
+    }
+
+    #[test]
+    fn test_ensure_git_success_maps_stderr_to_git_command_failed() {
+        let output = test_output(256, b"fatal: not a git repository\n");
+        let error = ensure_git_success(output, "git worktree list --porcelain", |reason| {
+            WorktreeError::GitCommandFailed {
+                command: "git worktree list --porcelain".to_string(),
+                reason,
+            }
+        })
+        .expect_err("non-zero status should fail");
+
+        assert_git_command_failed(error, "git worktree list --porcelain");
+    }
+
     #[tokio::test]
     async fn test_run_git_maps_spawn_failures_to_git_command_failed() {
         let repo_path = "/definitely/missing/repo/path";
@@ -386,13 +438,7 @@ mod tests {
             .await
             .expect_err("missing current_dir should fail");
 
-        match error {
-            WorktreeError::GitCommandFailed { command, reason } => {
-                assert_eq!(command, "git status");
-                assert!(!reason.is_empty());
-            }
-            other => panic!("expected GitCommandFailed, got {other:?}"),
-        }
+        assert_git_command_failed(error, "git status");
     }
 
     #[tokio::test]
@@ -402,13 +448,7 @@ mod tests {
             .await
             .expect_err("missing repo should fail");
 
-        match error {
-            WorktreeError::GitCommandFailed { command, reason } => {
-                assert_eq!(command, "git rev-parse --verify refs/heads/feature");
-                assert!(!reason.is_empty());
-            }
-            other => panic!("expected GitCommandFailed, got {other:?}"),
-        }
+        assert_git_command_failed(error, "git rev-parse --verify refs/heads/feature");
     }
 
     #[tokio::test]
@@ -419,13 +459,7 @@ mod tests {
             .await
             .expect_err("removing the main worktree should fail");
 
-        match error {
-            WorktreeError::GitCommandFailed { command, reason } => {
-                assert_eq!(command, format!("git worktree remove --force {repo_path}"));
-                assert!(!reason.is_empty());
-            }
-            other => panic!("expected GitCommandFailed, got {other:?}"),
-        }
+        assert_git_command_failed(error, &format!("git worktree remove --force {repo_path}"));
     }
 
     async fn init_test_repo() -> TempDir {
