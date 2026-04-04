@@ -65,6 +65,24 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 ```
 
+## Pre-push checklist
+
+Before pushing commits, ensure all checks pass locally:
+
+```sh
+# Rust code
+cargo test --workspace --exclude ensemble-desktop
+cargo clippy --workspace --exclude ensemble-desktop -- -D warnings
+cargo fmt --all -- --check
+
+# Frontend code (if you modified UI files)
+cd crates/ensemble-ui/src-ui
+pnpm test
+pnpm run build
+```
+
+CI will run these checks on your PR; failures block merge.
+
 ## CI
 
 GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, test, clippy, fmt. All must pass. `RUSTFLAGS=-Dwarnings` is set globally — treat warnings as errors.
