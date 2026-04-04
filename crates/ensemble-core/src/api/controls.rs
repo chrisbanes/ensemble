@@ -1,6 +1,7 @@
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::orchestrator::state::OrchestratorState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
