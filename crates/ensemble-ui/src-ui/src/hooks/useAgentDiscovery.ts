@@ -93,7 +93,7 @@ export function useAgentDiscovery(options: UseAgentDiscoveryOptions = {}): UseAg
   }, [enabled, cleanup]);
 
   useEffect(() => {
-    const cleanupFn = startDiscovery();
+    startDiscovery();
     return () => {
       cleanup();
     };
