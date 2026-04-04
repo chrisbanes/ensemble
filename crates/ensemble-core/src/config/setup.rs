@@ -1,3 +1,4 @@
+use crate::config::ensemble::resolve_relative_to_base;
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -1309,11 +1310,7 @@ pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathB
     let expanded = shellexpand::tilde(&expanded).into_owned();
     let expanded_path = PathBuf::from(expanded);
 
-    Ok(if expanded_path.is_relative() {
-        base_dir.join(expanded_path)
-    } else {
-        expanded_path
-    })
+    Ok(resolve_relative_to_base(&expanded_path, base_dir))
 }
 
 #[cfg(test)]
@@ -2029,6 +2026,28 @@ on_failure: Failed
 
         assert!(tmpdir.path().join("env-dir/TODO.md").exists());
         assert!(!tmpdir.path().join("$ENSEMBLE_TODO_PATH").exists());
+    }
+
+    #[test]
+    fn resolve_relative_to_base_joins_relative_paths() {
+        let resolved =
+            crate::config::ensemble::resolve_relative_to_base(
+                Path::new("tracker/issues.md"),
+                Path::new("/tmp/config"),
+            );
+
+        assert_eq!(resolved, PathBuf::from("/tmp/config/tracker/issues.md"));
+    }
+
+    #[test]
+    fn resolve_relative_to_base_preserves_absolute_paths() {
+        let resolved =
+            crate::config::ensemble::resolve_relative_to_base(
+                Path::new("/tmp/already-absolute"),
+                Path::new("/tmp/config"),
+            );
+
+        assert_eq!(resolved, PathBuf::from("/tmp/already-absolute"));
     }
 
     #[test]

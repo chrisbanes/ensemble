@@ -327,6 +327,14 @@ fn resolve_path(path_str: &str, dotenv_map: &HashMap<String, String>) -> Option<
         .map(|resolved| PathBuf::from(shellexpand::tilde(&resolved).as_ref()))
 }
 
+pub(crate) fn resolve_relative_to_base(path: &Path, base_dir: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    }
+}
+
 /// Read a `.env` file into a local map without mutating the process environment.
 /// Best-effort: returns an empty map on any error.
 pub(crate) fn read_dotenv(path: &Path) -> HashMap<String, String> {
@@ -380,24 +388,14 @@ impl EnsembleConfig {
         if let Some(ref path) = self.tracker.path {
             let path_str = path.to_string_lossy();
             let resolved = resolve_path(&path_str, dotenv_map);
-            self.tracker.path = resolved.map(|p| {
-                if p.is_absolute() {
-                    p
-                } else {
-                    config_dir.join(p)
-                }
-            });
+            self.tracker.path = resolved.map(|p| resolve_relative_to_base(&p, config_dir));
         }
 
         // workspace.root: $VAR + ~ expansion + rebase
         if let Some(ref root) = self.workspace.root {
             let resolved = resolve_path(root, dotenv_map);
             self.workspace.root = resolved.map(|p| {
-                let final_path = if p.is_absolute() {
-                    p
-                } else {
-                    config_dir.join(p)
-                };
+                let final_path = resolve_relative_to_base(&p, config_dir);
                 final_path.to_string_lossy().into_owned()
             });
         }
@@ -406,11 +404,7 @@ impl EnsembleConfig {
         for repo in &mut self.repos {
             let path_str = &repo.path;
             if let Some(resolved) = resolve_path(path_str, dotenv_map) {
-                let final_path = if resolved.is_absolute() {
-                    resolved
-                } else {
-                    config_dir.join(resolved)
-                };
+                let final_path = resolve_relative_to_base(&resolved, config_dir);
                 repo.path = final_path.to_string_lossy().into_owned();
             }
         }
@@ -420,13 +414,7 @@ impl EnsembleConfig {
             if let Some(ref path) = agent.prompt_template {
                 let path_str = path.to_string_lossy();
                 let resolved = resolve_path(&path_str, dotenv_map);
-                agent.prompt_template = resolved.map(|p| {
-                    if p.is_absolute() {
-                        p
-                    } else {
-                        config_dir.join(p)
-                    }
-                });
+                agent.prompt_template = resolved.map(|p| resolve_relative_to_base(&p, config_dir));
             }
         }
 
@@ -511,6 +499,50 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const ENV_VARS: &[&str] = &[
+        "GITHUB_TOKEN",
+        "ENSEMBLE_TEST_KEY_2B",
+        "ENSEMBLE_EMPTY_2B",
+        "ENSEMBLE_TEST_REPO",
+    ];
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn minimal_yaml() -> &'static str {
         r#"
@@ -782,6 +814,20 @@ human_interaction:
     }
 
     #[test]
+    fn env_guard_restores_tracked_vars() {
+        std::env::set_var("GITHUB_TOKEN", "before");
+
+        {
+            let _env = EnvGuard::lock(ENV_VARS);
+            assert!(std::env::var("GITHUB_TOKEN").is_err());
+            std::env::set_var("GITHUB_TOKEN", "during");
+        }
+
+        assert_eq!(std::env::var("GITHUB_TOKEN").as_deref(), Ok("before"));
+        std::env::remove_var("GITHUB_TOKEN");
+    }
+
+    #[test]
     fn test_load_config_missing_file() {
         let result = load_config(std::path::Path::new("/nonexistent/ensemble.yaml"));
         assert!(result.is_err());
@@ -791,6 +837,22 @@ human_interaction:
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn resolve_relative_to_base_joins_relative_paths() {
+        let resolved =
+            resolve_relative_to_base(Path::new("tracker/issues.md"), Path::new("/tmp/config"));
+
+        assert_eq!(resolved, PathBuf::from("/tmp/config/tracker/issues.md"));
+    }
+
+    #[test]
+    fn resolve_relative_to_base_preserves_absolute_paths() {
+        let resolved =
+            resolve_relative_to_base(Path::new("/tmp/already-absolute"), Path::new("/tmp/config"));
+
+        assert_eq!(resolved, PathBuf::from("/tmp/already-absolute"));
     }
 
     #[test]
@@ -846,6 +908,7 @@ on_failure: Failed
 
     #[test]
     fn test_resolve_env_api_key() {
+        let _env = EnvGuard::lock(ENV_VARS);
         std::env::set_var("ENSEMBLE_TEST_KEY_2B", "secret123");
         let yaml = r#"
 tracker:
@@ -871,6 +934,7 @@ on_failure: Failed
 
     #[test]
     fn test_resolve_env_empty_var_is_none() {
+        let _env = EnvGuard::lock(ENV_VARS);
         std::env::set_var("ENSEMBLE_EMPTY_2B", "");
         let yaml = r#"
 tracker:
@@ -1109,6 +1173,7 @@ on_failure: Failed
 
     #[test]
     fn test_resolve_env_repos_path() {
+        let _env = EnvGuard::lock(ENV_VARS);
         std::env::set_var("ENSEMBLE_TEST_REPO", "/test/repo");
         let yaml = r#"
 tracker:
@@ -1234,6 +1299,7 @@ on_failure: Failed
 
     #[test]
     fn test_load_config_loads_sibling_dotenv_without_overriding_existing_env() {
+        let _env = EnvGuard::lock(ENV_VARS);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".env"), "GITHUB_TOKEN=from-dotenv\n").unwrap();
         std::env::set_var("GITHUB_TOKEN", "from-process");
@@ -1267,6 +1333,7 @@ on_failure: Failed
 
     #[test]
     fn test_load_config_uses_sibling_dotenv_without_mutating_process_env() {
+        let _env = EnvGuard::lock(ENV_VARS);
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join(".env"), "GITHUB_TOKEN=from-dotenv\n").unwrap();
         std::env::remove_var("GITHUB_TOKEN");
@@ -1297,6 +1364,7 @@ on_failure: Failed
 
     #[test]
     fn test_resolve_env_does_not_fallback_to_github_token_for_non_github_tracker() {
+        let _env = EnvGuard::lock(ENV_VARS);
         std::env::set_var("GITHUB_TOKEN", "from-process");
         let yaml = r#"
 tracker:

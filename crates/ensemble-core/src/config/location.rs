@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::config::ensemble::resolve_relative_to_base;
 use crate::error::ConfigError;
 
 #[derive(Debug)]
@@ -24,11 +25,11 @@ pub fn resolve_config_dir_for_cli(
 ) -> Result<ResolvedConfigDir, ConfigError> {
     let config_dir = if let Some(cli) = cli_override {
         let expanded = expand_override_path(cli)?;
-        cwd.join(expanded)
+        resolve_relative_to_base(&expanded, cwd)
     } else if let Some(env) = env_override {
         let env_path = PathBuf::from(env);
         let expanded = expand_override_path(&env_path)?;
-        cwd.join(expanded)
+        resolve_relative_to_base(&expanded, cwd)
     } else {
         default_config_dir()?
     };
@@ -247,5 +248,25 @@ mod tests {
     fn test_default_todo_state_path_errors_without_home_dir() {
         let err = default_todo_state_path_from_optional_home(None).unwrap_err();
         assert!(err.to_string().contains("home"));
+    }
+
+    #[test]
+    fn resolve_relative_to_base_joins_relative_paths() {
+        let resolved = crate::config::ensemble::resolve_relative_to_base(
+            Path::new("tracker/issues.md"),
+            Path::new("/tmp/config"),
+        );
+
+        assert_eq!(resolved, PathBuf::from("/tmp/config/tracker/issues.md"));
+    }
+
+    #[test]
+    fn resolve_relative_to_base_preserves_absolute_paths() {
+        let resolved = crate::config::ensemble::resolve_relative_to_base(
+            Path::new("/tmp/already-absolute"),
+            Path::new("/tmp/config"),
+        );
+
+        assert_eq!(resolved, PathBuf::from("/tmp/already-absolute"));
     }
 }
