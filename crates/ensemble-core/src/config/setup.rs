@@ -246,6 +246,7 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         tokio::time::Duration::from_secs(8),
         tokio::process::Command::new("acpx")
             .arg("--version")
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -339,6 +340,7 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
             tokio::time::Duration::from_secs(8),
             tokio::process::Command::new("acpx")
                 .args(["--agent", &agent.acpx_agent, "--version"])
+                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -842,6 +844,7 @@ pub async fn probe_agent(name: &str) -> bool {
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
             .args(["--agent", name, "--version"])
+            .kill_on_drop(true)
             .output()
             .await
     })
@@ -859,6 +862,7 @@ pub async fn get_agent_version(name: &str) -> String {
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
             .args(["--agent", name, "--version"])
+            .kill_on_drop(true)
             .output()
             .await
     })
@@ -883,6 +887,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     // Create session
     let output = tokio::process::Command::new("acpx")
         .args([agent_name, "sessions", "ensure", "--name", session_name])
+        .kill_on_drop(true)
         .output()
         .await;
 
@@ -904,6 +909,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     // Close session (best-effort)
     let _ = tokio::process::Command::new("acpx")
         .args([agent_name, "sessions", "close", session_name])
+        .kill_on_drop(true)
         .output()
         .await;
 
