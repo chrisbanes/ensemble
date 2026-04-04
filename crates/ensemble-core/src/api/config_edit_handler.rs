@@ -142,16 +142,30 @@ fn config_state_json(state: &ConfigDocumentState) -> Json<ConfigStateResponse> {
     Json(ConfigStateResponse::from_state(state))
 }
 
-/// Build an error response from a config error.
-fn build_error_response(current: &ConfigDocumentState, error: &ConfigError) -> ConfigStateResponse {
-    let mut response = ConfigStateResponse::from_state(current);
+fn push_config_issue(response: &mut ConfigStateResponse, section: &str, message: String) {
     response.issues.push(ValidationIssue {
         kind: crate::config::draft::ValidationIssueKind::Config,
-        message: format!("Save failed: {}", error),
-        section: "save".to_string(),
+        message,
+        section: section.to_string(),
         field: None,
         path: None,
     });
+}
+
+fn current_error_json(
+    current: &ConfigDocumentState,
+    section: &str,
+    message: String,
+) -> Json<ConfigStateResponse> {
+    let mut response = ConfigStateResponse::from_state(current);
+    push_config_issue(&mut response, section, message);
+    Json(response)
+}
+
+/// Build an error response from a config error.
+fn build_error_response(current: &ConfigDocumentState, error: &ConfigError) -> ConfigStateResponse {
+    let mut response = ConfigStateResponse::from_state(current);
+    push_config_issue(&mut response, "save", format!("Save failed: {}", error));
     response
 }
 
@@ -162,14 +176,28 @@ fn config_error_json(
     Json(build_error_response(current, error))
 }
 
+fn replace_document_state(
+    doc_state: &mut ConfigDocumentState,
+    load_state: impl FnOnce() -> Result<ConfigDocumentState, ConfigError>,
+) -> Result<ConfigStateResponse, ConfigError> {
+    let new_state = load_state()?;
+    *doc_state = new_state.clone();
+    Ok(ConfigStateResponse::from_state(&new_state))
+}
+
 fn replace_document_state_from_yaml(
     doc_state: &mut ConfigDocumentState,
     config_path: &Path,
     raw_yaml: &str,
 ) -> Result<ConfigStateResponse, ConfigError> {
-    let new_state = save_raw_yaml_atomically(config_path, raw_yaml)?;
-    *doc_state = new_state.clone();
-    Ok(ConfigStateResponse::from_state(&new_state))
+    replace_document_state(doc_state, || save_raw_yaml_atomically(config_path, raw_yaml))
+}
+
+fn reload_document_state(
+    doc_state: &mut ConfigDocumentState,
+    config_path: &Path,
+) -> Result<ConfigStateResponse, ConfigError> {
+    replace_document_state(doc_state, || crate::config::draft::load_config_state(config_path))
 }
 
 /// POST /api/v1/config/yaml/validate
@@ -464,15 +492,10 @@ where
     let checks = run_checks(request.setup.clone()).await;
     if !crate::config::setup::setup_can_save(&checks) {
         let doc_state = state.config_runtime.document_state.read().await;
-        let mut response = ConfigStateResponse::from_state(&doc_state);
-        response.issues.push(ValidationIssue {
-            kind: crate::config::draft::ValidationIssueKind::Config,
-            message: "Setup validation failed".to_string(),
-            section: "setup".to_string(),
-            field: None,
-            path: None,
-        });
-        return (StatusCode::BAD_REQUEST, Json(response));
+        return (
+            StatusCode::BAD_REQUEST,
+            current_error_json(&doc_state, "setup", "Setup validation failed".to_string()),
+        );
     }
 
     let mut doc_state = state.config_runtime.document_state.write().await;
@@ -491,15 +514,10 @@ where
         .unwrap_or_else(|| std::path::Path::new("."));
 
     match crate::config::setup::write_setup_artifacts(root, &request.setup, &artifacts) {
-        Ok(()) => {
-            match crate::config::draft::load_config_state(&state.config_runtime.config_path) {
-                Ok(new_state) => {
-                    *doc_state = new_state.clone();
-                    (StatusCode::OK, config_state_json(&new_state))
-                }
-                Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
-            }
-        }
+        Ok(()) => match reload_document_state(&mut doc_state, &state.config_runtime.config_path) {
+            Ok(response) => (StatusCode::OK, Json(response)),
+            Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
+        },
         Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     }
 }
@@ -686,15 +704,10 @@ pub async fn save_guided_form(
         match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
             Ok(yaml) => yaml,
             Err(e) => {
-                let mut response = ConfigStateResponse::from_state(&doc_state);
-                response.issues.push(crate::config::draft::ValidationIssue {
-                    kind: crate::config::draft::ValidationIssueKind::Config,
-                    message: format!("Form merge failed: {}", e),
-                    section: "form".to_string(),
-                    field: None,
-                    path: None,
-                });
-                return (StatusCode::BAD_REQUEST, Json(response));
+                return (
+                    StatusCode::BAD_REQUEST,
+                    current_error_json(&doc_state, "save", format!("Form merge failed: {}", e)),
+                )
             }
         };
 
@@ -1287,12 +1300,19 @@ on_failure: Failed
     }
 
     #[tokio::test]
-    async fn test_save_yaml_and_save_guided_form_share_invalid_save_response_shape() {
+    async fn save_yaml_and_save_guided_form_return_same_error_issue_shape() {
         let (state, _temp_dir) = test_app_state();
         let base_yaml = r#"
 tracker:
-  kind: todo_file
-  path: TODO.md
+  kind: github
+  repository: acme/repo
+  project_number: 9
+  api_key: ghp_secret123
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
 agents:
   builder:
     acpx_agent: claude
@@ -1305,8 +1325,15 @@ on_failure: Failed
 "#;
         let invalid_yaml = r#"
 tracker:
-  kind: todo_file
-  path: TODO.md
+  kind: github
+  repository: acme/repo
+  project_number: 9
+  api_key: ghp_secret123
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
 agents:
   builder:
     acpx_agent: claude
@@ -1333,11 +1360,11 @@ on_failure: Failed
 
         let form = crate::config::form::GuidedConfigForm {
             tracker: crate::config::form::GuidedTrackerForm {
-                kind: "todo_file".to_string(),
+                kind: "github".to_string(),
                 path: None,
-                repository: None,
-                project_number: None,
-                api_key: None,
+                repository: Some("acme/repo".to_string()),
+                project_number: Some(9),
+                api_key: Some("ghp_secret123".to_string()),
                 endpoint: None,
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],
@@ -1408,6 +1435,94 @@ on_failure: Failed
         assert!(!form_response.issues.is_empty());
         assert_eq!(yaml_response.issues.last().unwrap().section, "save");
         assert_eq!(form_response.issues.last().unwrap().section, "save");
+        assert_eq!(
+            yaml_response.issues.last().unwrap().kind,
+            form_response.issues.last().unwrap().kind
+        );
+        assert!(yaml_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
+        assert!(form_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
+        assert!(
+            !yaml_response
+                .raw_yaml
+                .as_ref()
+                .unwrap()
+                .contains("ghp_secret123")
+        );
+        assert!(
+            !form_response
+                .raw_yaml
+                .as_ref()
+                .unwrap()
+                .contains("ghp_secret123")
+        );
+        assert_eq!(yaml_response.config_path, form_response.config_path);
+    }
+
+    #[tokio::test]
+    async fn save_setup_reloads_document_state_after_writing_artifacts() {
+        let (state, temp_dir) = test_app_state();
+        let request = SaveSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::GitHub {
+                    repository: "acme/repo".to_string(),
+                    project_number: Some(9),
+                    api_key_env: "GITHUB_TOKEN".to_string(),
+                    api_token: Some("ghp_secret123".to_string()),
+                    active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                    terminal_states: vec!["Done".to_string()],
+                },
+                repos: vec![],
+                agents: vec![crate::config::setup::SetupAgent {
+                    role: "builder".to_string(),
+                    acpx_agent: "claude".to_string(),
+                    model: Some("sonnet".to_string()),
+                    prompt: None,
+                    prompt_file: None,
+                }],
+                steps: vec![crate::config::setup::SetupStep {
+                    name: "build".to_string(),
+                    agent_role: "builder".to_string(),
+                    depends: vec![],
+                    tracker_state: Some("In Progress".to_string()),
+                }],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (status, Json(response)) =
+            save_setup(axum::extract::State(state.clone()), Json(request)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response.state, "parsed");
+        assert!(temp_dir.path().join(".env").exists());
+        assert!(response.raw_yaml.as_ref().unwrap().contains("$GITHUB_TOKEN"));
+        assert!(
+            !response
+                .raw_yaml
+                .as_ref()
+                .unwrap()
+                .contains("ghp_secret123")
+        );
+        let tracker = &response.active_config.as_ref().unwrap().tracker;
+        assert_eq!(tracker.repository.as_deref(), Some("acme/repo"));
+        assert_eq!(tracker.project_number, Some(9));
+        assert_eq!(tracker.api_key.as_deref(), Some("ghp_secret123"));
+
+        let persisted_state = state.config_runtime.document_state.read().await;
+        let disk_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert_eq!(persisted_state.raw_yaml.as_deref(), Some(disk_yaml.as_str()));
+        assert_eq!(
+            response.raw_yaml.as_deref().map(str::trim_end),
+            persisted_state.raw_yaml.as_deref().map(str::trim_end)
+        );
+        assert_eq!(
+            persisted_state
+                .active_config
+                .as_ref()
+                .and_then(|config| config.tracker.api_key.clone()),
+            Some("ghp_secret123".to_string())
+        );
     }
 
     #[test]
