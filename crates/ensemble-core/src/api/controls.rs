@@ -4,6 +4,7 @@ use crate::interaction::{InteractionStatus, InteractionStore};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::Json;
 use serde::Serialize;
 
@@ -69,6 +70,14 @@ fn try_signal_stop(state: &OrchestratorState, issue_id: &str) -> StopSignalStatu
     StopSignalStatus::Sent
 }
 
+fn issue_error_response(
+    status: StatusCode,
+    code: &str,
+    message: impl Into<String>,
+) -> Response {
+    (status, api_error(code, message)).into_response()
+}
+
 /// Response for a successful stop operation.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StopResponse {
@@ -128,67 +137,49 @@ pub async fn post_stop(
     let issue_id = match find_issue_presence(&lock, &identifier) {
         IssuePresence::Running(id) => id,
         IssuePresence::Retrying(_) => {
-            return (
+            return issue_error_response(
                 StatusCode::CONFLICT,
-                api_error(
-                    "not_running",
-                    format!(
-                        "issue '{}' is retrying, not running — use retry endpoint instead",
-                        identifier
-                    ),
+                "not_running",
+                format!(
+                    "issue '{}' is retrying, not running — use retry endpoint instead",
+                    identifier
                 ),
-            )
-                .into_response();
+            );
         }
         IssuePresence::Missing => {
-            return (
+            return issue_error_response(
                 StatusCode::NOT_FOUND,
-                api_error(
-                    "issue_not_found",
-                    format!(
-                        "no running or retrying issue with identifier '{}'",
-                        identifier
-                    ),
-                ),
-            )
-                .into_response();
+                "issue_not_found",
+                format!("no running or retrying issue with identifier '{}'", identifier),
+            );
         }
     };
 
     match try_signal_stop(&lock, &issue_id) {
         StopSignalStatus::Sent => {}
         StopSignalStatus::MissingPid => {
-            return (
+            return issue_error_response(
                 StatusCode::CONFLICT,
-                api_error(
-                    "stop_unavailable",
-                    format!("issue '{}' has no active agent PID to stop", identifier),
-                ),
-            )
-                .into_response();
+                "stop_unavailable",
+                format!("issue '{}' has no active agent PID to stop", identifier),
+            );
         }
         StopSignalStatus::InvalidPid => {
-            return (
+            return issue_error_response(
                 StatusCode::CONFLICT,
-                api_error(
-                    "stop_unavailable",
-                    format!(
-                        "issue '{}' has an invalid agent PID and could not be stopped",
-                        identifier
-                    ),
+                "stop_unavailable",
+                format!(
+                    "issue '{}' has an invalid agent PID and could not be stopped",
+                    identifier
                 ),
-            )
-                .into_response();
+            );
         }
         StopSignalStatus::SignalFailed => {
-            return (
+            return issue_error_response(
                 StatusCode::CONFLICT,
-                api_error(
-                    "stop_failed",
-                    format!("failed to stop running issue '{}'", identifier),
-                ),
-            )
-                .into_response();
+                "stop_failed",
+                format!("failed to stop running issue '{}'", identifier),
+            );
         }
     }
 
@@ -240,30 +231,21 @@ pub async fn post_retry(
     let issue_id = match find_issue_presence(&lock, &identifier) {
         IssuePresence::Retrying(id) => id,
         IssuePresence::Running(_) => {
-            return (
+            return issue_error_response(
                 StatusCode::CONFLICT,
-                api_error(
-                    "not_retrying",
-                    format!(
-                        "issue '{}' is currently running — use stop endpoint to interrupt",
-                        identifier
-                    ),
+                "not_retrying",
+                format!(
+                    "issue '{}' is currently running — use stop endpoint to interrupt",
+                    identifier
                 ),
-            )
-                .into_response();
+            );
         }
         IssuePresence::Missing => {
-            return (
+            return issue_error_response(
                 StatusCode::NOT_FOUND,
-                api_error(
-                    "issue_not_found",
-                    format!(
-                        "no running or retrying issue with identifier '{}'",
-                        identifier
-                    ),
-                ),
-            )
-                .into_response();
+                "issue_not_found",
+                format!("no running or retrying issue with identifier '{}'", identifier),
+            );
         }
     };
 
@@ -439,10 +421,14 @@ pub async fn post_resume(
 mod tests {
     use super::*;
     use crate::api::router::{AppState, ConfigRuntime};
+    use crate::config::ensemble::StepConfig;
     use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
     use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
+    use crate::pipeline::dag::build_dag;
+    use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
+    use axum::body::to_bytes;
     use std::path::PathBuf;
     use std::process::{Child, Command};
     use std::sync::Arc;
@@ -525,20 +511,40 @@ mod tests {
         Command::new("sleep").arg("30").spawn().unwrap()
     }
 
+    fn test_pipeline_run() -> PipelineRun {
+        let dag = build_dag(&[StepConfig {
+            name: "build".to_string(),
+            agent: "build".to_string(),
+            depends: None,
+            tracker_state: None,
+        }])
+        .unwrap();
+
+        PipelineRun::new("NODE_123".to_string(), 1, dag)
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     fn build_app_state_with_running_pid(agent_pid: Option<&str>) -> AppState {
         let mut state = OrchestratorState::new(30000, 10);
         state.add_running(&test_issue(), None);
         state.update_session_info("NODE_123", "session-123", agent_pid);
 
         let config_path = PathBuf::from("ensemble.yaml");
+        let active_config = crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap();
         let document_state = Arc::new(RwLock::new(ConfigDocumentState {
             path: config_path.clone(),
             kind: ConfigStateKind::Parsed,
             raw_yaml: None,
             document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            active_config: Some(active_config.clone()),
             validation: DraftValidationReport::default(),
         }));
+
+        state.insert_pipeline_run("NODE_123", test_pipeline_run(), Arc::new(active_config));
 
         AppState {
             orchestrator_state: Arc::new(RwLock::new(state)),
@@ -650,9 +656,17 @@ mod tests {
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
 
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "stop_unavailable");
+        assert_eq!(
+            body["error"]["message"],
+            "issue 'my-repo#42' has an invalid agent PID and could not be stopped"
+        );
+
         let lock = state.orchestrator_state.read().await;
         assert!(lock.running.contains_key("NODE_123"));
         assert!(lock.is_claimed("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_some());
     }
 
     #[tokio::test]

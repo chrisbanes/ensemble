@@ -29,6 +29,26 @@ fn parse_conversation_messages(
     contents.lines().map(serde_json::from_str).collect()
 }
 
+async fn load_conversation_messages(path: &FsPath) -> Result<Option<Vec<ConversationMessage>>, ApiError> {
+    let Some(contents) = read_conversation_file(path).await.map_err(|e| {
+        ApiError::new(
+            "conversation_read_error",
+            &format!("failed to read conversation: {e}"),
+        )
+    })? else {
+        return Ok(None);
+    };
+
+    let messages = parse_conversation_messages(&contents).map_err(|e| {
+        ApiError::new(
+            "conversation_parse_error",
+            &format!("failed to parse conversation: {e}"),
+        )
+    })?;
+
+    Ok(Some(messages))
+}
+
 /// Query parameters for conversation pagination.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct ConversationQuery {
@@ -96,8 +116,8 @@ pub async fn get_conversation(
 
     let conversation_path = conversation_path(&state.workspace_root, &workspace_key);
 
-    let contents = match read_conversation_file(&conversation_path).await {
-        Ok(Some(contents)) => contents,
+    let all_messages = match load_conversation_messages(&conversation_path).await {
+        Ok(Some(messages)) => messages,
         Ok(None) => {
             return (
                 StatusCode::OK,
@@ -109,29 +129,8 @@ pub async fn get_conversation(
             )
                 .into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                api_error(
-                    "conversation_read_error",
-                    format!("failed to read conversation: {}", e),
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    let all_messages = match parse_conversation_messages(&contents) {
-        Ok(messages) => messages,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                api_error(
-                    "conversation_parse_error",
-                    format!("failed to parse conversation: {}", error),
-                ),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
         }
     };
 
@@ -196,8 +195,8 @@ pub async fn get_conversation_message(
 
     let conversation_path = conversation_path(&state.workspace_root, &workspace_key);
 
-    let contents = match read_conversation_file(&conversation_path).await {
-        Ok(Some(contents)) => contents,
+    let messages = match load_conversation_messages(&conversation_path).await {
+        Ok(Some(messages)) => messages,
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
@@ -205,32 +204,11 @@ pub async fn get_conversation_message(
                     "conversation_not_found",
                     "no conversation file found for this issue",
                 ),
-            )
-                .into_response();
+                )
+                    .into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                api_error(
-                    "conversation_read_error",
-                    format!("failed to read conversation: {}", e),
-                ),
-            )
-                .into_response();
-        }
-    };
-
-    let messages = match parse_conversation_messages(&contents) {
-        Ok(messages) => messages,
         Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                api_error(
-                    "conversation_parse_error",
-                    format!("failed to parse conversation: {}", error),
-                ),
-            )
-                .into_response();
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
         }
     };
 
@@ -254,6 +232,7 @@ mod tests {
     use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::sanitize_workspace_key;
+    use axum::body::to_bytes;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -290,6 +269,11 @@ mod tests {
             .await
             .unwrap();
         tokio::fs::write(path, contents).await.unwrap();
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
     }
 
     #[test]
@@ -343,7 +327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_conversation_returns_error_for_malformed_jsonl() {
+    async fn get_conversation_returns_internal_error_for_malformed_jsonl() {
         let tempdir = TempDir::new().unwrap();
         write_conversation_file(tempdir.path(), "{invalid json}\n").await;
         let state = test_app_state(tempdir.path().display().to_string());
@@ -357,6 +341,13 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "conversation_parse_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed to parse conversation:"));
     }
 
     #[tokio::test]
