@@ -62,6 +62,11 @@ fn try_signal_stop(state: &OrchestratorState, issue_id: &str) -> StopSignalStatu
         return StopSignalStatus::InvalidPid;
     }
 
+    signal_stop(pid, issue_id)
+}
+
+#[cfg(unix)]
+fn signal_stop(pid: i32, issue_id: &str) -> StopSignalStatus {
     let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
     if rc == -1 {
         tracing::warn!(pid, issue_id = %issue_id, "failed to send SIGTERM");
@@ -69,6 +74,11 @@ fn try_signal_stop(state: &OrchestratorState, issue_id: &str) -> StopSignalStatu
     }
 
     StopSignalStatus::Sent
+}
+
+#[cfg(not(unix))]
+fn signal_stop(_pid: i32, _issue_id: &str) -> StopSignalStatus {
+    StopSignalStatus::SignalFailed
 }
 
 fn issue_error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
