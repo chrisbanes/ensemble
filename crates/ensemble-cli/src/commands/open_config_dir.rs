@@ -55,73 +55,43 @@ pub async fn execute(args: OpenConfigDirArgs) -> ExitCode {
 }
 
 /// Open a path in the system file manager
-#[cfg(target_os = "macos")]
 fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
-    use std::process::Command;
-
-    let status = Command::new("open")
-        .arg(path)
-        .status()
-        .map_err(|e| format!("failed to execute open command: {}", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "open command failed with status: {:?}",
-            status.code()
-        ))
-    }
+    open_in_system_file_manager_with(path, open_path)
 }
 
-/// Open a path in the system file manager
-#[cfg(target_os = "windows")]
-fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
-    use std::process::Command;
-
-    let status = Command::new("explorer")
-        .arg(path)
-        .status()
-        .map_err(|e| format!("failed to execute explorer command: {}", e))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "explorer command failed with status: {:?}",
-            status.code()
-        ))
-    }
+fn open_in_system_file_manager_with<E>(
+    path: &std::path::Path,
+    open: impl FnOnce(&std::path::Path) -> Result<(), E>,
+) -> Result<(), String>
+where
+    E: std::fmt::Display,
+{
+    map_open_result(open(path))
 }
 
-/// Open a path in the system file manager
-#[cfg(target_os = "linux")]
-fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
-    use std::process::Command;
+fn open_path(path: &std::path::Path) -> Result<(), opener::OpenError> {
+    opener::open(path)
+}
 
-    // Try xdg-open first, then fallback to common file managers
-    let result = Command::new("xdg-open").arg(path).status();
-
-    match result {
-        Ok(status) if status.success() => return Ok(()),
-        _ => {}
-    }
-
-    // Fallback to nautilus (GNOME) or dolphin (KDE)
-    for cmd in ["nautilus", "dolphin", "thunar", "nemo"] {
-        if let Ok(status) = Command::new(cmd).arg(path).status() {
-            if status.success() {
-                return Ok(());
-            }
-        }
-    }
-
-    Err("failed to open file manager. Please install xdg-open or a file manager (nautilus, dolphin, thunar, or nemo)".to_string())
+fn map_open_result<E>(result: Result<(), E>) -> Result<(), String>
+where
+    E: std::fmt::Display,
+{
+    result.map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct FakeOpenError(&'static str);
+
+    impl std::fmt::Display for FakeOpenError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
 
     #[test]
     fn test_open_config_dir_args() {
@@ -135,5 +105,27 @@ mod tests {
     fn test_open_config_dir_args_none() {
         let args = OpenConfigDirArgs { config_dir: None };
         assert!(args.config_dir.is_none());
+    }
+
+    #[test]
+    fn map_open_result_returns_ok_on_success() {
+        assert_eq!(map_open_result::<FakeOpenError>(Ok(())), Ok(()));
+    }
+
+    #[test]
+    fn map_open_result_formats_open_errors() {
+        assert_eq!(
+            map_open_result(Err(FakeOpenError("launcher missing"))),
+            Err("launcher missing".to_string())
+        );
+    }
+
+    #[test]
+    fn open_in_system_file_manager_maps_errors_from_open_call() {
+        let result = open_in_system_file_manager_with(PathBuf::from("/tmp/test").as_path(), |_| {
+            Err(FakeOpenError("launcher missing"))
+        });
+
+        assert_eq!(result, Err("launcher missing".to_string()));
     }
 }

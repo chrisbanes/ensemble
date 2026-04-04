@@ -169,6 +169,13 @@ fn default_max_step_parallelism() -> u32 {
     2
 }
 
+pub fn default_workspace_root() -> String {
+    std::env::temp_dir()
+        .join("ensemble_workspaces")
+        .display()
+        .to_string()
+}
+
 impl Default for ConcurrencyConfig {
     fn default() -> Self {
         Self {
@@ -322,7 +329,7 @@ fn resolve_path(path_str: &str, dotenv_map: &HashMap<String, String>) -> Option<
 
 /// Read a `.env` file into a local map without mutating the process environment.
 /// Best-effort: returns an empty map on any error.
-fn read_dotenv(path: &Path) -> HashMap<String, String> {
+pub(crate) fn read_dotenv(path: &Path) -> HashMap<String, String> {
     dotenvy::from_path_iter(path)
         .ok()
         .map(|iter| {
@@ -437,10 +444,14 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let dotenv_map = read_dotenv(&config_dir.join(".env"));
 
-    let content = std::fs::read_to_string(path).map_err(|_| {
-        crate::error::ConfigError::MissingConfigFile {
+    let content = std::fs::read_to_string(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => crate::error::ConfigError::MissingConfigFile {
             path: path.display().to_string(),
-        }
+        },
+        _ => crate::error::ConfigError::PathExpansionError {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        },
     })?;
     let mut config = parse_config(&content)?;
     config.resolve_env_from(config_dir, &dotenv_map)?;
@@ -761,12 +772,38 @@ human_interaction:
     }
 
     #[test]
+    fn default_workspace_root_uses_temp_dir_ensemble_workspaces() {
+        let expected = std::env::temp_dir()
+            .join("ensemble_workspaces")
+            .display()
+            .to_string();
+
+        assert_eq!(default_workspace_root(), expected);
+    }
+
+    #[test]
     fn test_load_config_missing_file() {
         let result = load_config(std::path::Path::new("/nonexistent/ensemble.yaml"));
         assert!(result.is_err());
         match result.unwrap_err() {
             crate::error::ConfigError::MissingConfigFile { path } => {
                 assert!(path.contains("ensemble.yaml"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_load_config_preserves_non_not_found_read_errors() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = load_config(dir.path());
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            crate::error::ConfigError::PathExpansionError { path, reason } => {
+                assert_eq!(path, dir.path().display().to_string());
+                assert!(!reason.is_empty());
             }
             other => panic!("unexpected error: {other:?}"),
         }

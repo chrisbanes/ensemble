@@ -9,16 +9,12 @@
 //! API surface and UI assets.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
-use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
-use ensemble_core::config::draft::load_config_state;
-use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
-use ensemble_core::config::ensemble::{ConcurrencyConfig, PollingConfig};
+use ensemble_core::api::bootstrap::build_app_state;
+use ensemble_core::api::router::create_api_router;
+use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::observability::events::EventBus;
-use ensemble_core::orchestrator::state::OrchestratorState;
 
 use crate::embedded_ui::spa_router;
 use crate::error::DesktopError;
@@ -58,26 +54,16 @@ pub async fn start_desktop_server(
         "Starting desktop HTTP server"
     );
 
-    // Load config state - may be missing, syntax error, or parsed
-    let document_state = match load_config_state(&config_path) {
-        Ok(state) => state,
-        Err(e) => {
-            error!(error = %e, path = %config_path.display(), "Failed to load config state");
-            ConfigDocumentState {
-                path: config_path.clone(),
-                kind: ConfigStateKind::Missing,
-                raw_yaml: None,
-                document: None,
-                active_config: None,
-                validation: DraftValidationReport::default(),
-            }
-        }
-    };
+    let document_state = load_config_document_or_missing(&config_path);
+    let prepared = build_app_state(config_path.clone(), document_state, event_bus);
 
-    // Determine if we have a runnable config
-    let has_runnable_config = document_state.active_config.is_some();
-
-    if has_runnable_config {
+    if prepared.has_runnable_config {
+        let document_state = prepared
+            .app_state
+            .config_runtime
+            .document_state
+            .read()
+            .await;
         let config = document_state.active_config.as_ref().unwrap();
         info!(
             tracker_kind = %config.tracker.kind,
@@ -86,31 +72,22 @@ pub async fn start_desktop_server(
             "Config loaded successfully - orchestrator can run"
         );
     } else {
+        let config_kind = {
+            prepared
+                .app_state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .kind
+                .clone()
+        };
         warn!(
-            config_state = ?document_state.kind,
+            config_state = ?config_kind,
             "No valid config found - serving UI in setup mode"
         );
     }
-
-    // Create orchestrator state (only if we have runnable config)
-    let orchestrator_state = create_orchestrator_state(&document_state);
-    let refresh_notify = Arc::new(tokio::sync::Notify::new());
-
-    // Build app state for API
-    let workspace_root = determine_workspace_root(&document_state);
-    let history_path = std::path::PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
-
-    let app_state = AppState {
-        orchestrator_state: orchestrator_state.clone(),
-        refresh_requested: refresh_notify.clone(),
-        workspace_root,
-        history_path,
-        event_bus,
-        config_runtime: ConfigRuntime {
-            config_path,
-            document_state: Arc::new(RwLock::new(document_state)),
-        },
-    };
+    let app_state = prepared.app_state;
 
     // Create combined router: API routes + SPA fallback
     let api_router = create_api_router(app_state);
@@ -153,47 +130,6 @@ pub async fn start_desktop_server(
         url: server_url,
         shutdown: Some(shutdown_tx),
     })
-}
-
-/// Create orchestrator state from config, using defaults if no config available.
-fn create_orchestrator_state(
-    document_state: &ConfigDocumentState,
-) -> Arc<RwLock<OrchestratorState>> {
-    if let Some(ref config) = document_state.active_config {
-        Arc::new(RwLock::new(OrchestratorState::new(
-            config.polling.interval_ms,
-            config.concurrency.max_concurrent_agents,
-        )))
-    } else {
-        let polling = PollingConfig::default();
-        let concurrency = ConcurrencyConfig::default();
-        Arc::new(RwLock::new(OrchestratorState::new(
-            polling.interval_ms,
-            concurrency.max_concurrent_agents,
-        )))
-    }
-}
-
-/// Determine workspace root from config, using default temp directory if unavailable.
-fn determine_workspace_root(document_state: &ConfigDocumentState) -> String {
-    if let Some(ref config) = document_state.active_config {
-        config
-            .workspace
-            .root
-            .as_deref()
-            .map(|s| s.to_string())
-            .unwrap_or_else(default_workspace_path)
-    } else {
-        default_workspace_path()
-    }
-}
-
-/// Get the default workspace path in temp directory.
-fn default_workspace_path() -> String {
-    std::env::temp_dir()
-        .join("ensemble_workspaces")
-        .display()
-        .to_string()
 }
 
 #[cfg(test)]

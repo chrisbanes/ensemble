@@ -56,6 +56,10 @@ pub struct OrchestratorState {
     pub pipeline_configs: HashMap<String, std::sync::Arc<EnsembleConfig>>,
     /// Timestamp of the last orchestrator poll tick.
     pub last_tick_at: Option<DateTime<Utc>>,
+    /// Cached lowercase active states for efficient dispatch checking.
+    pub active_states_lower: Vec<String>,
+    /// Cached lowercase terminal states for efficient dispatch checking.
+    pub terminal_states_lower: Vec<String>,
 }
 
 impl OrchestratorState {
@@ -75,7 +79,25 @@ impl OrchestratorState {
             pipeline_runs: HashMap::new(),
             pipeline_configs: HashMap::new(),
             last_tick_at: None,
+            active_states_lower: Vec::new(),
+            terminal_states_lower: Vec::new(),
         }
+    }
+
+    /// Initialize the cached lowercase state lists from config.
+    pub fn init_state_lists(&mut self, config: &EnsembleConfig) {
+        self.active_states_lower = config
+            .tracker
+            .active_states
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
+        self.terminal_states_lower = config
+            .tracker
+            .terminal_states
+            .iter()
+            .map(|s| s.to_lowercase())
+            .collect();
     }
 
     /// Add a running entry for a dispatched issue.
@@ -323,20 +345,7 @@ mod tests {
     use super::*;
 
     fn test_issue(id: &str, state: &str) -> Issue {
-        Issue {
-            id: id.to_string(),
-            identifier: format!("repo#{id}"),
-            title: format!("Issue {id}"),
-            description: None,
-            priority: Some(2),
-            state: state.to_string(),
-            branch_name: None,
-            url: None,
-            labels: vec![],
-            blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
-        }
+        crate::tracker::model::test_helpers::test_issue(id, state)
     }
 
     #[test]

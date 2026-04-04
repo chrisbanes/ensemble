@@ -1,4 +1,4 @@
-use crate::config::ensemble::{validate_config, EnsembleConfig};
+use crate::config::ensemble::{read_dotenv, validate_config, EnsembleConfig};
 use crate::error::{ConfigError, PipelineError};
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
@@ -43,19 +43,23 @@ pub struct ConfigDocumentState {
     pub validation: DraftValidationReport,
 }
 
+pub fn missing_config_state(path: PathBuf) -> ConfigDocumentState {
+    ConfigDocumentState {
+        path,
+        kind: ConfigStateKind::Missing,
+        raw_yaml: None,
+        document: None,
+        active_config: None,
+        validation: DraftValidationReport::default(),
+    }
+}
+
 pub fn load_config_state(path: &Path) -> Result<ConfigDocumentState, ConfigError> {
     let raw_yaml = match std::fs::read_to_string(path) {
         Ok(content) => content,
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                return Ok(ConfigDocumentState {
-                    path: path.to_path_buf(),
-                    kind: ConfigStateKind::Missing,
-                    raw_yaml: None,
-                    document: None,
-                    active_config: None,
-                    validation: DraftValidationReport::default(),
-                });
+                return Ok(missing_config_state(path.to_path_buf()));
             }
             return Err(ConfigError::PathExpansionError {
                 path: path.display().to_string(),
@@ -67,11 +71,20 @@ pub fn load_config_state(path: &Path) -> Result<ConfigDocumentState, ConfigError
     Ok(parse_raw_yaml(path.to_path_buf(), raw_yaml))
 }
 
+pub fn load_config_document_or_missing(path: &Path) -> ConfigDocumentState {
+    match load_config_state(path) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(error = %error, path = %path.display(), "failed to load config state");
+            missing_config_state(path.to_path_buf())
+        }
+    }
+}
+
 pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
     let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&raw_yaml);
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
-
-    load_dotenv(config_dir);
+    let dotenv_map = read_dotenv(&config_dir.join(".env"));
 
     match parsed {
         Ok(document) => {
@@ -80,7 +93,7 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
                 Ok(mut config) => {
                     let mut report = validate_document(&document);
                     let mut config_valid = true;
-                    if let Err(e) = config.resolve_env_from(config_dir, &Default::default()) {
+                    if let Err(e) = config.resolve_env_from(config_dir, &dotenv_map) {
                         report.issues.push(config_error_to_validation_issue(e));
                         config_valid = false;
                     }
@@ -140,13 +153,6 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
                 validation: report,
             }
         }
-    }
-}
-
-fn load_dotenv(config_dir: &Path) {
-    let env_path = config_dir.join(".env");
-    if env_path.exists() {
-        let _ = dotenvy::from_path(&env_path);
     }
 }
 
@@ -422,6 +428,28 @@ mod tests {
     }
 
     #[test]
+    fn missing_config_state_has_missing_kind_and_no_active_config() {
+        let path = PathBuf::from("/tmp/config.yaml");
+        let state = missing_config_state(path.clone());
+
+        assert_eq!(state.path, path);
+        assert_eq!(state.kind, ConfigStateKind::Missing);
+        assert!(state.active_config.is_none());
+        assert!(state.raw_yaml.is_none());
+    }
+
+    #[test]
+    fn load_config_document_or_missing_returns_missing_state_on_load_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = load_config_document_or_missing(dir.path());
+
+        assert_eq!(state.path, dir.path());
+        assert_eq!(state.kind, ConfigStateKind::Missing);
+        assert!(state.raw_yaml.is_none());
+        assert!(state.active_config.is_none());
+    }
+
+    #[test]
     fn load_config_state_preserves_raw_yaml_for_syntax_errors() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -502,6 +530,54 @@ on_failure: Failed
         unsafe {
             std::env::remove_var(env_name);
         }
+    }
+
+    #[test]
+    fn parse_raw_yaml_uses_sibling_dotenv_without_mutating_process_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let env_name = "ENSEMBLE_DRAFT_TEST_DOTENV_ONLY";
+
+        unsafe {
+            std::env::remove_var(env_name);
+        }
+
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("{env_name}=workspace-data\n"),
+        )
+        .unwrap();
+
+        let raw = format!(
+            r#"
+tracker:
+  kind: todo_file
+  path: tracker/issues.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt_template: prompts/build.md
+steps:
+  - name: build
+    agent: builder
+repos:
+  - path: repos/app
+    branch: main
+workspace:
+  root: ${env_name}
+on_success: Done
+on_failure: Failed
+"#
+        );
+
+        let state = parse_raw_yaml(path, raw);
+        let config = state.active_config.as_ref().unwrap();
+
+        assert_eq!(
+            config.workspace.root.as_deref(),
+            Some(dir.path().join("workspace-data").to_string_lossy().as_ref())
+        );
+        assert!(std::env::var(env_name).is_err());
     }
 
     #[test]

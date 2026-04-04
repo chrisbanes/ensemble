@@ -6,6 +6,28 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::path::{Path as FsPath, PathBuf};
+
+fn conversation_path(workspace_root: &str, workspace_key: &str) -> PathBuf {
+    PathBuf::from(workspace_root)
+        .join(workspace_key)
+        .join(".ensemble")
+        .join("conversation.jsonl")
+}
+
+async fn read_conversation_file(path: &FsPath) -> Result<Option<String>, std::io::Error> {
+    match tokio::fs::read_to_string(path).await {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn parse_conversation_messages(
+    contents: &str,
+) -> Result<Vec<ConversationMessage>, serde_json::Error> {
+    contents.lines().map(serde_json::from_str).collect()
+}
 
 /// Query parameters for conversation pagination.
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
@@ -75,14 +97,11 @@ pub async fn get_conversation(
         }
     };
 
-    let conversation_path = std::path::PathBuf::from(&state.workspace_root)
-        .join(&workspace_key)
-        .join(".ensemble")
-        .join("conversation.jsonl");
+    let conversation_path = conversation_path(&state.workspace_root, &workspace_key);
 
-    let contents = match tokio::fs::read_to_string(&conversation_path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    let contents = match read_conversation_file(&conversation_path).await {
+        Ok(Some(contents)) => contents,
+        Ok(None) => {
             return (
                 StatusCode::OK,
                 Json(
@@ -111,10 +130,22 @@ pub async fn get_conversation(
         }
     };
 
-    let all_messages: Vec<ConversationMessage> = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
+    let all_messages = match parse_conversation_messages(&contents) {
+        Ok(messages) => messages,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "conversation_parse_error",
+                        &format!("failed to parse conversation: {}", error),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
 
     let total = all_messages.len();
     let cursor = query.cursor.unwrap_or(0);
@@ -181,14 +212,11 @@ pub async fn get_conversation_message(
         }
     };
 
-    let conversation_path = std::path::PathBuf::from(&state.workspace_root)
-        .join(&workspace_key)
-        .join(".ensemble")
-        .join("conversation.jsonl");
+    let conversation_path = conversation_path(&state.workspace_root, &workspace_key);
 
-    let contents = match tokio::fs::read_to_string(&conversation_path).await {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+    let contents = match read_conversation_file(&conversation_path).await {
+        Ok(Some(contents)) => contents,
+        Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(
@@ -216,10 +244,24 @@ pub async fn get_conversation_message(
         }
     };
 
-    let message = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<ConversationMessage>(line).ok())
-        .find(|m| m.index == index);
+    let messages = match parse_conversation_messages(&contents) {
+        Ok(messages) => messages,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "conversation_parse_error",
+                        &format!("failed to parse conversation: {}", error),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    let message = messages.into_iter().find(|m| m.index == index);
 
     match message {
         Some(msg) => (StatusCode::OK, Json(serde_json::to_value(msg).unwrap())).into_response(),
@@ -240,6 +282,128 @@ pub async fn get_conversation_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::router::{AppState, ConfigRuntime};
+    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+    use crate::observability::events::EventBus;
+    use crate::orchestrator::state::OrchestratorState;
+    use crate::tracker::model::sanitize_workspace_key;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    fn test_app_state(workspace_root: String) -> AppState {
+        let config_path = PathBuf::from("ensemble.yaml");
+        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+            path: config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            validation: DraftValidationReport::default(),
+        }));
+
+        AppState {
+            orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
+            refresh_requested: Arc::new(tokio::sync::Notify::new()),
+            workspace_root,
+            history_path: PathBuf::from("/tmp/history.jsonl"),
+            event_bus: EventBus::new(),
+            config_runtime: ConfigRuntime {
+                config_path,
+                document_state,
+            },
+        }
+    }
+
+    async fn write_conversation_file(root: &std::path::Path, contents: &str) {
+        let workspace_key = sanitize_workspace_key("my-repo#42").unwrap();
+        let path = conversation_path(root.to_str().unwrap(), &workspace_key);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(path, contents).await.unwrap();
+    }
+
+    #[test]
+    fn conversation_path_uses_workspace_root_and_key() {
+        let path = conversation_path("/tmp/workspaces", "my-repo-42");
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/workspaces")
+                .join("my-repo-42")
+                .join(".ensemble")
+                .join("conversation.jsonl")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_conversation_file_returns_none_for_missing_file() {
+        let tempdir = TempDir::new().unwrap();
+        let path = tempdir.path().join("missing.jsonl");
+
+        let contents = read_conversation_file(&path).await.unwrap();
+
+        assert!(contents.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_conversation_returns_empty_result_when_file_is_missing() {
+        let tempdir = TempDir::new().unwrap();
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(ConversationQuery::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_message_returns_not_found_when_file_is_missing() {
+        let tempdir = TempDir::new().unwrap();
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation_message(State(state), Path(("my-repo#42".to_string(), 0)))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_returns_error_for_malformed_jsonl() {
+        let tempdir = TempDir::new().unwrap();
+        write_conversation_file(tempdir.path(), "{invalid json}\n").await;
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(ConversationQuery::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn get_conversation_message_returns_error_for_malformed_jsonl() {
+        let tempdir = TempDir::new().unwrap();
+        write_conversation_file(tempdir.path(), "{invalid json}\n").await;
+        let state = test_app_state(tempdir.path().display().to_string());
+
+        let response = get_conversation_message(State(state), Path(("my-repo#42".to_string(), 0)))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     #[test]
     fn test_conversation_message_deserialize() {
@@ -260,5 +424,11 @@ mod tests {
         let json = serde_json::to_value(&response).unwrap();
         assert_eq!(json["total"], 0);
         assert!(json["next_cursor"].is_null());
+    }
+
+    #[test]
+    fn parse_conversation_messages_returns_error_for_malformed_jsonl() {
+        let error = parse_conversation_messages("{invalid json}\n").unwrap_err();
+        assert!(error.is_syntax());
     }
 }

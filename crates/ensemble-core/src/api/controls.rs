@@ -7,6 +7,68 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Serialize;
 
+#[derive(Debug, PartialEq, Eq)]
+enum IssuePresence {
+    Running(String),
+    Retrying(String),
+    Missing,
+}
+
+enum StopSignalStatus {
+    Sent,
+    MissingPid,
+    InvalidPid,
+    SignalFailed,
+}
+
+fn find_issue_presence(state: &OrchestratorState, identifier: &str) -> IssuePresence {
+    if let Some(issue_id) = state
+        .running
+        .values()
+        .find(|entry| entry.identifier == identifier)
+        .map(|entry| entry.issue_id.clone())
+    {
+        return IssuePresence::Running(issue_id);
+    }
+
+    if let Some(issue_id) = state
+        .retry_attempts
+        .values()
+        .find(|entry| entry.identifier == identifier)
+        .map(|entry| entry.issue_id.clone())
+    {
+        return IssuePresence::Retrying(issue_id);
+    }
+
+    IssuePresence::Missing
+}
+
+fn try_signal_stop(state: &OrchestratorState, issue_id: &str) -> StopSignalStatus {
+    let Some(entry) = state.running.get(issue_id) else {
+        return StopSignalStatus::SignalFailed;
+    };
+
+    let Some(pid_str) = entry.agent_pid.as_deref() else {
+        return StopSignalStatus::MissingPid;
+    };
+
+    let Ok(pid) = pid_str.parse::<i32>() else {
+        return StopSignalStatus::InvalidPid;
+    };
+
+    if pid <= 0 {
+        return StopSignalStatus::InvalidPid;
+    }
+
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if rc == -1 {
+        tracing::warn!(pid, issue_id = %issue_id, "failed to send SIGTERM");
+        return StopSignalStatus::SignalFailed;
+    }
+
+    StopSignalStatus::Sent
+}
+
 /// Response for a successful stop operation.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct StopResponse {
@@ -63,39 +125,25 @@ pub async fn post_stop(
 ) -> impl IntoResponse {
     let mut lock = state.orchestrator_state.write().await;
 
-    // Find the running entry by identifier
-    let issue_id = lock
-        .running
-        .values()
-        .find(|e| e.identifier == identifier)
-        .map(|e| e.issue_id.clone());
-
-    let issue_id = match issue_id {
-        Some(id) => id,
-        None => {
-            // Check if it's retrying instead
-            let is_retrying = lock
-                .retry_attempts
-                .values()
-                .any(|e| e.identifier == identifier);
-
-            if is_retrying {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(
-                        serde_json::to_value(ApiError::new(
-                            "not_running",
-                            &format!(
-                                "issue '{}' is retrying, not running — use retry endpoint instead",
-                                identifier
-                            ),
-                        ))
-                        .unwrap(),
-                    ),
-                )
-                    .into_response();
-            }
-
+    let issue_id = match find_issue_presence(&lock, &identifier) {
+        IssuePresence::Running(id) => id,
+        IssuePresence::Retrying(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "not_running",
+                        &format!(
+                            "issue '{}' is retrying, not running — use retry endpoint instead",
+                            identifier
+                        ),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        IssuePresence::Missing => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(
@@ -113,19 +161,49 @@ pub async fn post_stop(
         }
     };
 
-    // Attempt to send SIGTERM to the agent process
-    if let Some(entry) = lock.running.get(&issue_id) {
-        if let Some(ref pid_str) = entry.agent_pid {
-            if let Ok(pid) = pid_str.parse::<i32>() {
-                if pid > 0 {
-                    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
-                    if rc == -1 {
-                        tracing::warn!(pid, issue_id = %issue_id, "failed to send SIGTERM");
-                    }
-                } else {
-                    tracing::warn!(pid, issue_id = %issue_id, "skipping SIGTERM for non-positive PID");
-                }
-            }
+    match try_signal_stop(&lock, &issue_id) {
+        StopSignalStatus::Sent => {}
+        StopSignalStatus::MissingPid => {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "stop_unavailable",
+                        &format!("issue '{}' has no active agent PID to stop", identifier),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        StopSignalStatus::InvalidPid => {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "stop_unavailable",
+                        &format!(
+                            "issue '{}' has an invalid agent PID and could not be stopped",
+                            identifier
+                        ),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        StopSignalStatus::SignalFailed => {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "stop_failed",
+                        &format!("failed to stop running issue '{}'", identifier),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
         }
     }
 
@@ -177,36 +255,25 @@ pub async fn post_retry(
 ) -> impl IntoResponse {
     let mut lock = state.orchestrator_state.write().await;
 
-    // Find the retry entry by identifier
-    let issue_id = lock
-        .retry_attempts
-        .values()
-        .find(|e| e.identifier == identifier)
-        .map(|e| e.issue_id.clone());
-
-    let issue_id = match issue_id {
-        Some(id) => id,
-        None => {
-            // Check if it's running instead
-            let is_running = lock.running.values().any(|e| e.identifier == identifier);
-
-            if is_running {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(
-                        serde_json::to_value(ApiError::new(
-                            "not_retrying",
-                            &format!(
-                                "issue '{}' is currently running — use stop endpoint to interrupt",
-                                identifier
-                            ),
-                        ))
-                        .unwrap(),
-                    ),
-                )
-                    .into_response();
-            }
-
+    let issue_id = match find_issue_presence(&lock, &identifier) {
+        IssuePresence::Retrying(id) => id,
+        IssuePresence::Running(_) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "not_retrying",
+                        &format!(
+                            "issue '{}' is currently running — use stop endpoint to interrupt",
+                            identifier
+                        ),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        IssuePresence::Missing => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(
@@ -404,8 +471,38 @@ mod tests {
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry};
     use std::path::PathBuf;
+    use std::process::{Child, Command};
     use std::sync::Arc;
+    use std::time::Duration;
     use tokio::sync::RwLock;
+
+    #[test]
+    fn find_issue_presence_reports_running_retrying_and_missing() {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.add_running(&test_issue(), None);
+        state.add_retry(RetryEntry {
+            issue_id: "NODE_456".to_string(),
+            identifier: "my-repo#99".to_string(),
+            attempt: 2,
+            due_at_ms: 999999,
+            error: Some("timeout".to_string()),
+        });
+
+        match find_issue_presence(&state, "my-repo#42") {
+            IssuePresence::Running(issue_id) => assert_eq!(issue_id, "NODE_123"),
+            other => panic!("expected running issue, got {other:?}"),
+        }
+
+        match find_issue_presence(&state, "my-repo#99") {
+            IssuePresence::Retrying(issue_id) => assert_eq!(issue_id, "NODE_456"),
+            other => panic!("expected retrying issue, got {other:?}"),
+        }
+
+        assert!(matches!(
+            find_issue_presence(&state, "missing#1"),
+            IssuePresence::Missing
+        ));
+    }
 
     fn test_issue() -> Issue {
         Issue {
@@ -427,6 +524,38 @@ mod tests {
     fn build_app_state_with_running() -> AppState {
         let mut state = OrchestratorState::new(30000, 10);
         state.add_running(&test_issue(), None);
+
+        let config_path = PathBuf::from("ensemble.yaml");
+        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
+            path: config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
+            validation: DraftValidationReport::default(),
+        }));
+
+        AppState {
+            orchestrator_state: Arc::new(RwLock::new(state)),
+            refresh_requested: Arc::new(tokio::sync::Notify::new()),
+            workspace_root: "/tmp/workspaces".to_string(),
+            history_path: PathBuf::from("/tmp/history.jsonl"),
+            event_bus: EventBus::new(),
+            config_runtime: ConfigRuntime {
+                config_path,
+                document_state,
+            },
+        }
+    }
+
+    fn spawn_sleep_process() -> Child {
+        Command::new("sleep").arg("30").spawn().unwrap()
+    }
+
+    fn build_app_state_with_running_pid(agent_pid: Option<&str>) -> AppState {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.add_running(&test_issue(), None);
+        state.update_session_info("NODE_123", "session-123", agent_pid);
 
         let config_path = PathBuf::from("ensemble.yaml");
         let document_state = Arc::new(RwLock::new(ConfigDocumentState {
@@ -486,7 +615,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_running_issue() {
+        let mut child = spawn_sleep_process();
         let state = build_app_state_with_running();
+        {
+            let mut lock = state.orchestrator_state.write().await;
+            lock.update_session_info("NODE_123", "session-123", Some(&child.id().to_string()));
+        }
+
         let response = post_stop(State(state.clone()), Path("my-repo#42".to_string())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -495,6 +630,16 @@ mod tests {
         let lock = state.orchestrator_state.read().await;
         assert!(lock.running.is_empty());
         assert!(!lock.is_claimed("NODE_123"));
+
+        for _ in 0..20 {
+            if child.try_wait().unwrap().is_some() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
+        let _ = child.kill();
+        panic!("child process did not exit after SIGTERM");
     }
 
     #[tokio::test]
@@ -511,6 +656,42 @@ mod tests {
         let response = post_stop(State(state), Path("my-repo#99".to_string())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_stop_running_issue_without_pid_returns_conflict_and_keeps_state() {
+        let state = build_app_state_with_running_pid(None);
+        let response = post_stop(State(state.clone()), Path("my-repo#42".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.running.contains_key("NODE_123"));
+        assert!(lock.is_claimed("NODE_123"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_running_issue_with_invalid_pid_returns_conflict_and_keeps_state() {
+        let state = build_app_state_with_running_pid(Some("not-a-pid"));
+        let response = post_stop(State(state.clone()), Path("my-repo#42".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.running.contains_key("NODE_123"));
+        assert!(lock.is_claimed("NODE_123"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_running_issue_when_sigterm_fails_returns_conflict_and_keeps_state() {
+        let state = build_app_state_with_running_pid(Some("999999"));
+        let response = post_stop(State(state.clone()), Path("my-repo#42".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.running.contains_key("NODE_123"));
+        assert!(lock.is_claimed("NODE_123"));
     }
 
     #[tokio::test]

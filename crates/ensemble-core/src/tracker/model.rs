@@ -1,6 +1,28 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
+pub mod test_helpers {
+    use super::*;
+
+    pub fn test_issue(id: &str, state: &str) -> Issue {
+        Issue {
+            id: id.to_string(),
+            identifier: format!("repo#{id}"),
+            title: format!("Issue {id}"),
+            description: None,
+            priority: Some(2),
+            state: state.to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: Some(chrono::Utc::now()),
+            updated_at: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
@@ -86,6 +108,7 @@ pub fn sanitize_workspace_key(identifier: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::test_helpers::test_issue;
     use super::*;
 
     #[test]

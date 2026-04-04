@@ -108,6 +108,7 @@ impl Orchestrator {
             let mut state = self.state.write().await;
             state.poll_interval_ms = config.polling.interval_ms;
             state.max_concurrent_agents = config.concurrency.max_concurrent_agents;
+            state.init_state_lists(&config);
         }
 
         // Startup terminal workspace cleanup
@@ -182,6 +183,17 @@ impl Orchestrator {
 
     /// Handle a poll tick: reconcile, validate, fetch, dispatch.
     async fn handle_tick(&self) {
+        // Initialize state lists lazily (for tests that don't call run())
+        {
+            let state = self.state.read().await;
+            if state.active_states_lower.is_empty() {
+                drop(state);
+                let config = self.config.read().await;
+                let mut state = self.state.write().await;
+                state.init_state_lists(&config);
+            }
+        }
+
         // Record tick timestamp for poll countdown
         {
             let mut state = self.state.write().await;
@@ -192,20 +204,11 @@ impl Orchestrator {
 
         // Pre-compute lowercase state lists once per tick
         let (active_lower, terminal_lower) = {
-            let config = self.config.read().await;
-            let active_lower: Vec<String> = config
-                .tracker
-                .active_states
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect();
-            let terminal_lower: Vec<String> = config
-                .tracker
-                .terminal_states
-                .iter()
-                .map(|s| s.to_lowercase())
-                .collect();
-            (active_lower, terminal_lower)
+            let state = self.state.read().await;
+            (
+                state.active_states_lower.clone(),
+                state.terminal_states_lower.clone(),
+            )
         };
 
         // 1. Reconcile stalled runs
@@ -1533,20 +1536,7 @@ mod tests {
     }
 
     fn test_issue(id: &str, state: &str) -> Issue {
-        Issue {
-            id: id.to_string(),
-            identifier: format!("repo#{id}"),
-            title: format!("Issue {id}"),
-            description: None,
-            priority: Some(2),
-            state: state.to_string(),
-            branch_name: None,
-            url: None,
-            labels: vec![],
-            blocked_by: vec![],
-            created_at: Some(Utc::now()),
-            updated_at: None,
-        }
+        crate::tracker::model::test_helpers::test_issue(id, state)
     }
 
     fn make_config() -> EnsembleConfig {

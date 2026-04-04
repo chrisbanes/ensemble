@@ -8,6 +8,8 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
+use std::path::Path;
 use tracing::warn;
 
 /// Redact literal secret values from YAML text.
@@ -19,22 +21,77 @@ fn redact_secrets(yaml: &str) -> String {
         .map(|line| {
             let trimmed = line.trim_start();
             let indent = &line[..line.len() - trimmed.len()];
-            let lower = trimmed.to_lowercase();
-            for &key in &secret_keys {
-                let prefix = format!("{key}:");
-                let prefix_eq = format!("{key}=");
-                if lower.starts_with(&prefix) || lower.starts_with(&prefix_eq) {
-                    let sep_pos = trimmed.find(':').or_else(|| trimmed.find('=')).unwrap();
-                    let value = trimmed[sep_pos + 1..].trim();
-                    if !value.starts_with('$') {
-                        return format!("{}{} \"[REDACTED]\"", indent, &trimmed[..sep_pos + 1]);
-                    }
-                }
-            }
-            line.to_string()
+            format!("{indent}{}", redact_secret_in_line(trimmed, &secret_keys))
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn redact_secret_in_line(line: &str, keys: &[&str]) -> String {
+    let mut redacted = line.to_string();
+
+    for &key in keys {
+        for delimiter in [":", "="] {
+            let pattern = format!("{key}{delimiter}");
+            let mut search_from = 0;
+
+            while let Some(relative_start) = redacted[search_from..].to_lowercase().find(&pattern) {
+                let start = search_from + relative_start;
+                let prefix_start = redacted[..start]
+                    .char_indices()
+                    .last()
+                    .filter(|(_, ch)| !matches!(ch, ' ' | '{' | ',' | '-'));
+
+                if prefix_start.is_some() {
+                    search_from = start + pattern.len();
+                    continue;
+                }
+
+                let value_start = start + pattern.len();
+                let value = &redacted[value_start..];
+                let value_trimmed = value.trim_start();
+                let leading_ws = value.len() - value_trimmed.len();
+                let suffix_offset = value_trimmed
+                    .find([',', '}'])
+                    .unwrap_or(value_trimmed.len());
+                let candidate_value = &value_trimmed[..suffix_offset].trim_end();
+                if is_env_var_reference(candidate_value) {
+                    search_from = value_start + leading_ws + 1;
+                    continue;
+                }
+
+                let replace_start = value_start + leading_ws;
+                let replace_end = replace_start + suffix_offset;
+                redacted.replace_range(replace_start..replace_end, "\"[REDACTED]\"");
+                search_from = replace_start + "\"[REDACTED]\"".len();
+            }
+        }
+    }
+
+    redacted
+}
+
+fn is_env_var_reference(value: &str) -> bool {
+    value.starts_with('$')
+        || value
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .is_some_and(|value| value.starts_with('$'))
+}
+
+fn redact_guided_form_secrets(
+    mut guided_form: crate::config::form::GuidedConfigForm,
+) -> crate::config::form::GuidedConfigForm {
+    if guided_form
+        .tracker
+        .api_key
+        .as_deref()
+        .is_some_and(|value| !value.starts_with('$'))
+    {
+        guided_form.tracker.api_key = Some("[REDACTED]".to_string());
+    }
+
+    guided_form
 }
 
 /// Request to validate YAML content.
@@ -67,7 +124,8 @@ impl ConfigStateResponse {
         let guided_form = state
             .raw_yaml
             .as_ref()
-            .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok());
+            .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok())
+            .map(redact_guided_form_secrets);
 
         Self {
             state: state_str.to_string(),
@@ -78,6 +136,10 @@ impl ConfigStateResponse {
             guided_form,
         }
     }
+}
+
+fn config_state_json(state: &ConfigDocumentState) -> Json<ConfigStateResponse> {
+    Json(ConfigStateResponse::from_state(state))
 }
 
 /// Build an error response from a config error.
@@ -91,6 +153,23 @@ fn build_error_response(current: &ConfigDocumentState, error: &ConfigError) -> C
         path: None,
     });
     response
+}
+
+fn config_error_json(
+    current: &ConfigDocumentState,
+    error: &ConfigError,
+) -> Json<ConfigStateResponse> {
+    Json(build_error_response(current, error))
+}
+
+fn replace_document_state_from_yaml(
+    doc_state: &mut ConfigDocumentState,
+    config_path: &Path,
+    raw_yaml: &str,
+) -> Result<ConfigStateResponse, ConfigError> {
+    let new_state = save_raw_yaml_atomically(config_path, raw_yaml)?;
+    *doc_state = new_state.clone();
+    Ok(ConfigStateResponse::from_state(&new_state))
 }
 
 /// POST /api/v1/config/yaml/validate
@@ -111,8 +190,7 @@ pub async fn validate_yaml(
     Json(request): Json<ValidateYamlRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
     let draft = parse_raw_yaml(state.config_runtime.config_path.clone(), request.raw_yaml);
-    let response = ConfigStateResponse::from_state(&draft);
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, config_state_json(&draft))
 }
 
 /// Request to save YAML content.
@@ -141,16 +219,13 @@ pub async fn save_yaml(
 ) -> (StatusCode, Json<ConfigStateResponse>) {
     let mut doc_state = state.config_runtime.document_state.write().await;
 
-    match save_raw_yaml_atomically(&state.config_runtime.config_path, &request.raw_yaml) {
-        Ok(new_state) => {
-            *doc_state = new_state.clone();
-            let response = ConfigStateResponse::from_state(&new_state);
-            (StatusCode::OK, Json(response))
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(build_error_response(&doc_state, &e)),
-        ),
+    match replace_document_state_from_yaml(
+        &mut doc_state,
+        &state.config_runtime.config_path,
+        &request.raw_yaml,
+    ) {
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     }
 }
 
@@ -191,13 +266,7 @@ pub async fn get_setup_defaults(
     } else if let Some(ref config) = doc_state.active_config {
         (setup_defaults_from_active_config(config), true)
     } else {
-        // Return empty defaults
-        let defaults = serde_json::json!({
-            "tracker": { "kind": "todo_file" },
-            "has_existing_config": false,
-        });
-
-        (defaults, false)
+        (default_setup_defaults(), false)
     };
 
     let response = SetupDefaultsResponse {
@@ -380,11 +449,24 @@ pub async fn save_setup(
     State(state): State<AppState>,
     Json(request): Json<SaveSetupRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
-    let mut doc_state = state.config_runtime.document_state.write().await;
+    save_setup_with_checks(state, request, |setup| async move {
+        crate::config::setup::run_setup_checks(&setup).await
+    })
+    .await
+}
 
-    // First validate the setup
-    let checks = crate::config::setup::run_setup_checks(&request.setup).await;
+async fn save_setup_with_checks<CheckFn, CheckFuture>(
+    state: AppState,
+    request: SaveSetupRequest,
+    run_checks: CheckFn,
+) -> (StatusCode, Json<ConfigStateResponse>)
+where
+    CheckFn: FnOnce(crate::config::setup::SetupRequest) -> CheckFuture,
+    CheckFuture: Future<Output = Vec<crate::config::setup::SetupCheck>>,
+{
+    let checks = run_checks(request.setup.clone()).await;
     if !crate::config::setup::setup_can_save(&checks) {
+        let doc_state = state.config_runtime.document_state.read().await;
         let mut response = ConfigStateResponse::from_state(&doc_state);
         response.issues.push(ValidationIssue {
             kind: crate::config::draft::ValidationIssueKind::Config,
@@ -396,17 +478,13 @@ pub async fn save_setup(
         return (StatusCode::BAD_REQUEST, Json(response));
     }
 
+    let mut doc_state = state.config_runtime.document_state.write().await;
     let artifacts = match crate::config::setup::merge_setup_request(
         doc_state.raw_yaml.as_deref(),
         &request.setup,
     ) {
         Ok(artifacts) => artifacts,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(build_error_response(&doc_state, &e)),
-            )
-        }
+        Err(e) => return (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     };
 
     let root = state
@@ -420,26 +498,18 @@ pub async fn save_setup(
             match crate::config::draft::load_config_state(&state.config_runtime.config_path) {
                 Ok(new_state) => {
                     *doc_state = new_state.clone();
-                    let response = ConfigStateResponse::from_state(&new_state);
-                    (StatusCode::OK, Json(response))
+                    (StatusCode::OK, config_state_json(&new_state))
                 }
-                Err(e) => (
-                    StatusCode::BAD_REQUEST,
-                    Json(build_error_response(&doc_state, &e)),
-                ),
+                Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
             }
         }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(build_error_response(&doc_state, &e)),
-        ),
+        Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     }
 }
 
 fn default_setup_defaults() -> serde_json::Value {
     serde_json::json!({
         "tracker": { "kind": "todo_file" },
-        "has_existing_config": false,
     })
 }
 
@@ -632,19 +702,13 @@ pub async fn save_guided_form(
         };
 
     // Now save the merged YAML using the same path as save_yaml
-    match crate::config::draft::save_raw_yaml_atomically(
+    match replace_document_state_from_yaml(
+        &mut doc_state,
         &state.config_runtime.config_path,
         &merged_yaml,
     ) {
-        Ok(new_state) => {
-            *doc_state = new_state.clone();
-            let response = ConfigStateResponse::from_state(&new_state);
-            (StatusCode::OK, Json(response))
-        }
-        Err(e) => (
-            StatusCode::BAD_REQUEST,
-            Json(build_error_response(&doc_state, &e)),
-        ),
+        Ok(response) => (StatusCode::OK, Json(response)),
+        Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     }
 }
 
@@ -729,6 +793,43 @@ on_failure: Failed
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response.state, "parsed");
         assert!(response.active_config.is_some());
+    }
+
+    #[test]
+    fn test_config_state_response_redacts_guided_form_literal_api_key() {
+        let config_path = PathBuf::from("/tmp/config.yaml");
+        let state = parse_raw_yaml(
+            config_path,
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 9
+  api_key: ghp_secret123
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#
+            .to_string(),
+        );
+
+        let response = ConfigStateResponse::from_state(&state);
+
+        let guided_form = response.guided_form.unwrap();
+        assert_eq!(guided_form.tracker.repository.as_deref(), Some("acme/repo"));
+        assert_eq!(guided_form.tracker.project_number, Some(9));
+        assert_eq!(guided_form.tracker.api_key.as_deref(), Some("[REDACTED]"));
+        assert!(response.raw_yaml.unwrap().contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -874,6 +975,76 @@ on_failure: Failed
     }
 
     #[tokio::test]
+    async fn test_get_setup_defaults_without_existing_config_keeps_flag_only_at_top_level() {
+        let (state, _temp_dir) = test_app_state();
+
+        let (status, Json(response)) = get_setup_defaults(axum::extract::State(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(!response.has_existing_config);
+        assert_eq!(response.defaults["tracker"]["kind"], "todo_file");
+        assert!(response.defaults.get("has_existing_config").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_save_setup_does_not_hold_document_lock_while_validating() {
+        let (state, _temp_dir) = test_app_state();
+        let request = SaveSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::TodoFile {
+                    path: PathBuf::from("TODO.md"),
+                },
+                repos: vec![],
+                agents: vec![],
+                steps: vec![],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+        let validation_started = Arc::new(tokio::sync::Notify::new());
+        let release_validation = Arc::new(tokio::sync::Notify::new());
+
+        let save_task = {
+            let state = state.clone();
+            let validation_started = validation_started.clone();
+            let release_validation = release_validation.clone();
+            tokio::spawn(async move {
+                save_setup_with_checks(state, request, move |_| {
+                    let validation_started = validation_started.clone();
+                    let release_validation = release_validation.clone();
+                    async move {
+                        validation_started.notify_one();
+                        release_validation.notified().await;
+                        vec![crate::config::setup::SetupCheck {
+                            kind: crate::config::setup::SetupCheckKind::Config,
+                            label: "stub".to_string(),
+                            passed: false,
+                            detail: "blocked".to_string(),
+                        }]
+                    }
+                })
+                .await
+            })
+        };
+
+        validation_started.notified().await;
+
+        let lock_attempt = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            state.config_runtime.document_state.read(),
+        )
+        .await;
+
+        release_validation.notify_one();
+        let _ = save_task.await.unwrap();
+
+        assert!(
+            lock_attempt.is_ok(),
+            "document_state lock should remain available during setup validation"
+        );
+    }
+
+    #[tokio::test]
     async fn test_save_setup_uses_merge_and_writes_full_artifact_set() {
         let (state, temp_dir) = test_app_state();
         let existing_yaml = r#"
@@ -966,6 +1137,186 @@ custom_root:
     }
 
     #[test]
+    fn test_config_error_json_adds_save_issue_to_current_state_shape() {
+        let config_path = PathBuf::from("/tmp/config.yaml");
+        let current = parse_raw_yaml(
+            config_path.clone(),
+            "tracker:\n  kind: todo_file\nagents: [".to_string(),
+        );
+        let error = ConfigError::ConfigWriteFailed {
+            reason: "disk full".to_string(),
+        };
+
+        let Json(response) = config_error_json(&current, &error);
+
+        assert_eq!(response.state, "syntax_error");
+        assert_eq!(response.config_path, config_path.display().to_string());
+        assert!(!response.issues.is_empty());
+        assert_eq!(response.issues.last().unwrap().section, "save");
+        assert!(response
+            .issues
+            .last()
+            .unwrap()
+            .message
+            .contains("Save failed: config write failed: disk full"));
+    }
+
+    #[tokio::test]
+    async fn test_replace_document_state_from_yaml_updates_doc_state_for_valid_yaml() {
+        let (state, _temp_dir) = test_app_state();
+        let mut doc_state = state.config_runtime.document_state.write().await;
+        let raw_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let response = replace_document_state_from_yaml(
+            &mut doc_state,
+            &state.config_runtime.config_path,
+            raw_yaml,
+        )
+        .unwrap();
+
+        assert_eq!(response.state, "parsed");
+        assert_eq!(doc_state.kind, ConfigStateKind::Parsed);
+        assert_eq!(doc_state.raw_yaml.as_deref(), Some(raw_yaml));
+    }
+
+    #[tokio::test]
+    async fn test_save_yaml_and_save_guided_form_share_invalid_save_response_shape() {
+        let (state, _temp_dir) = test_app_state();
+        let base_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let invalid_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: missing
+on_success: Done
+on_failure: Failed
+"#
+        .to_string();
+        *state.config_runtime.document_state.write().await = parse_raw_yaml(
+            state.config_runtime.config_path.clone(),
+            base_yaml.to_string(),
+        );
+
+        let (yaml_status, Json(yaml_response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: invalid_yaml.clone(),
+            }),
+        )
+        .await;
+
+        let form = crate::config::form::GuidedConfigForm {
+            tracker: crate::config::form::GuidedTrackerForm {
+                kind: "todo_file".to_string(),
+                path: None,
+                repository: None,
+                project_number: None,
+                api_key: None,
+                endpoint: None,
+                active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec![],
+            },
+            repos: vec![],
+            agents: vec![crate::config::form::GuidedAgentForm {
+                name: "builder".to_string(),
+                executor: None,
+                model: None,
+                acpx_agent: Some("claude".to_string()),
+                prompt: Some("Build it.".to_string()),
+                prompt_template: None,
+                reasoning_level: None,
+            }],
+            steps: vec![crate::config::form::GuidedStepForm {
+                name: "build".to_string(),
+                agent: "missing".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            runtime: crate::config::form::GuidedRuntimeForm {
+                max_cycles: 3,
+                concurrency: crate::config::form::GuidedConcurrencyForm {
+                    max_concurrent_agents: 4,
+                    max_step_parallelism: 2,
+                },
+                polling: crate::config::form::GuidedPollingForm { interval_ms: 30000 },
+                workspace: crate::config::form::GuidedWorkspaceForm { root: None },
+                hooks: crate::config::form::GuidedHooksForm {
+                    after_create: None,
+                    before_run: None,
+                    after_run: None,
+                    before_remove: None,
+                    timeout_ms: 60000,
+                },
+                agent: crate::config::form::GuidedAgentRuntimeForm {
+                    max_turns: 20,
+                    max_retry_backoff_ms: 300000,
+                    command: "claude-code".to_string(),
+                    session_mode: "code".to_string(),
+                    permission_policy: "auto_approve_all".to_string(),
+                    turn_timeout_ms: 3600000,
+                    read_timeout_ms: 5000,
+                    stall_timeout_ms: 300000,
+                },
+            },
+            transitions: crate::config::form::GuidedTransitionForm {
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (form_status, Json(form_response)) = save_guided_form(
+            axum::extract::State(state),
+            Json(SaveGuidedFormRequest {
+                base_raw_yaml: base_yaml.to_string(),
+                form,
+            }),
+        )
+        .await;
+
+        assert_eq!(yaml_status, StatusCode::BAD_REQUEST);
+        assert_eq!(form_status, StatusCode::BAD_REQUEST);
+        assert_eq!(yaml_response.state, "parsed");
+        assert_eq!(form_response.state, "parsed");
+        assert!(!yaml_response.issues.is_empty());
+        assert!(!form_response.issues.is_empty());
+        assert_eq!(yaml_response.issues.last().unwrap().section, "save");
+        assert_eq!(form_response.issues.last().unwrap().section, "save");
+    }
+
+    #[test]
     fn redact_secrets_redacts_literal_api_key() {
         let yaml = "tracker:\n  kind: github\n  api_key: ghp_secret123";
         let redacted = redact_secrets(yaml);
@@ -979,6 +1330,21 @@ custom_root:
         let redacted = redact_secrets(yaml);
         assert!(redacted.contains("$GITHUB_TOKEN"));
         assert!(!redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_preserves_quoted_env_var_reference() {
+        let yaml = "tracker:\n  api_key: \"$GITHUB_TOKEN\"";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("\"$GITHUB_TOKEN\""));
+        assert!(!redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_does_not_panic_on_unterminated_quoted_value() {
+        let yaml = "tracker:\n  api_key: \"";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("[REDACTED]"));
     }
 
     #[test]
@@ -1011,5 +1377,44 @@ custom_root:
         let yaml = "tracker:\n  api_key: ghp_secret";
         let redacted = redact_secrets(yaml);
         assert!(redacted.starts_with("tracker:\n  api_key:"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_inline_yaml_mapping_values() {
+        let yaml = "tracker: { api_key: ghp_secret123, kind: github }";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("api_key: \"[REDACTED]\""));
+        assert!(!redacted.contains("ghp_secret123"));
+        assert!(redacted.contains("kind: github"));
+    }
+
+    #[test]
+    fn redact_secrets_preserves_quoted_env_var_reference_in_inline_mapping() {
+        let yaml = "tracker: { api_key: \"$GITHUB_TOKEN\", kind: github }";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("api_key: \"$GITHUB_TOKEN\""));
+        assert!(!redacted.contains("[REDACTED]"));
+        assert!(redacted.contains("kind: github"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_multiple_inline_secrets_on_same_line() {
+        let yaml = "tracker: { api_key: ghp_x, token: abc, kind: github }";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("api_key: \"[REDACTED]\""));
+        assert!(redacted.contains("token: \"[REDACTED]\""));
+        assert!(!redacted.contains("ghp_x"));
+        assert!(!redacted.contains("abc"));
+        assert!(redacted.contains("kind: github"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_sequence_item_key_values() {
+        let yaml = "secrets:\n  - token: abc123\n  - password: hunter2";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("- token: \"[REDACTED]\""));
+        assert!(redacted.contains("- password: \"[REDACTED]\""));
+        assert!(!redacted.contains("abc123"));
+        assert!(!redacted.contains("hunter2"));
     }
 }
