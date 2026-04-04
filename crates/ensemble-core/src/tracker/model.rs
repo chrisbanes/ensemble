@@ -108,7 +108,6 @@ pub fn sanitize_workspace_key(identifier: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::test_helpers::test_issue;
     use super::*;
 
     #[test]
