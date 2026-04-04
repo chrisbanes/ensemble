@@ -79,6 +79,8 @@ use utoipa::OpenApi;
         crate::config::ensemble::WorkspaceConfig,
         crate::config::ensemble::HooksConfig,
         crate::config::ensemble::AgentRuntimeConfig,
+        crate::config::ensemble::HumanInteractionConfig,
+        crate::config::ensemble::HumanResumeMode,
         // Guided form types
         crate::config::form::GuidedConfigForm,
         crate::config::form::GuidedTrackerForm,
@@ -124,6 +126,8 @@ mod tests {
         let spec = ApiDoc::openapi().to_pretty_json().unwrap();
         assert!(spec.contains("\"openapi\":"));
         assert!(spec.contains("Ensemble API"));
+        assert!(spec.contains("HumanInteractionConfig"));
+        assert!(spec.contains("HumanResumeMode"));
     }
 
     #[test]

@@ -3,6 +3,8 @@ use std::borrow::Cow;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::interaction::InteractionKind;
+
 /// Token usage reported by the ACP agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
@@ -150,6 +152,7 @@ pub enum WorkerEvent {
 #[derive(Debug, Clone)]
 pub enum WorkerResult {
     Success,
+    BlockedOnHuman { request: InteractionRequestDraft },
     Failed { error: String },
 }
 
@@ -157,6 +160,20 @@ impl WorkerResult {
     pub fn is_success(&self) -> bool {
         matches!(self, WorkerResult::Success)
     }
+}
+
+/// Draft interaction request emitted by an agent in `.ensemble/interaction-request.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionRequestDraft {
+    pub schema_version: u32,
+    pub kind: InteractionKind,
+    pub blocking: bool,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
 }
 
 /// JSON-RPC 2.0 message types for ACP protocol parsing.
@@ -244,10 +261,37 @@ mod tests {
     #[test]
     fn test_worker_result_is_success() {
         assert!(WorkerResult::Success.is_success());
+        assert!(!WorkerResult::BlockedOnHuman {
+            request: InteractionRequestDraft {
+                schema_version: 1,
+                kind: InteractionKind::Question,
+                blocking: true,
+                title: "Need input".to_string(),
+                body: "Pick an environment".to_string(),
+                options: vec!["staging".to_string()],
+                artifacts: vec![],
+            }
+        }
+        .is_success());
         assert!(!WorkerResult::Failed {
             error: "boom".to_string()
         }
         .is_success());
+    }
+
+    #[test]
+    fn test_interaction_request_draft_deserialization_defaults_collections() {
+        let draft: InteractionRequestDraft = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "kind": "question",
+            "blocking": true,
+            "title": "Need input",
+            "body": "Which environment?"
+        }))
+        .unwrap();
+
+        assert_eq!(draft.options, Vec::<String>::new());
+        assert_eq!(draft.artifacts, Vec::<String>::new());
     }
 
     #[test]

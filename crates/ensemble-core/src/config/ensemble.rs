@@ -28,7 +28,39 @@ pub struct EnsembleConfig {
     #[serde(default)]
     pub agent: AgentRuntimeConfig,
     #[serde(default)]
+    pub human_interaction: HumanInteractionConfig,
+    #[serde(default)]
     pub push_strategy: PushStrategy,
+}
+
+/// Runtime configuration for blocked-on-human interaction handling.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, utoipa::ToSchema)]
+pub struct HumanInteractionConfig {
+    #[serde(default = "default_human_interaction_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_resume_mode: HumanResumeMode,
+}
+
+fn default_human_interaction_enabled() -> bool {
+    true
+}
+
+impl Default for HumanInteractionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_human_interaction_enabled(),
+            default_resume_mode: HumanResumeMode::Manual,
+        }
+    }
+}
+
+/// Default resume behavior for resolved human interactions.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HumanResumeMode {
+    #[default]
+    Manual,
 }
 
 /// A repository to be managed by the workspace (path + branch).
@@ -678,6 +710,54 @@ on_failure: Failed
         assert_eq!(config.tracker.active_states, vec!["Todo", "In Progress"]);
         assert_eq!(config.tracker.terminal_states, vec!["Done", "Closed"]);
         assert!(config.tracker.labels_filter.is_empty());
+
+        // HumanInteractionConfig defaults
+        assert!(config.human_interaction.enabled);
+        assert_eq!(
+            config.human_interaction.default_resume_mode,
+            HumanResumeMode::Manual
+        );
+    }
+
+    #[test]
+    fn parses_human_interaction_defaults() {
+        let config = parse_config(minimal_yaml()).unwrap();
+
+        assert!(config.human_interaction.enabled);
+        assert_eq!(
+            config.human_interaction.default_resume_mode,
+            HumanResumeMode::Manual
+        );
+    }
+
+    #[test]
+    fn parses_manual_resume_mode_from_yaml() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+human_interaction:
+  enabled: true
+  default_resume_mode: manual
+"#;
+
+        let config = parse_config(yaml).unwrap();
+
+        assert!(config.human_interaction.enabled);
+        assert_eq!(
+            config.human_interaction.default_resume_mode,
+            HumanResumeMode::Manual
+        );
     }
 
     #[test]

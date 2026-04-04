@@ -5,15 +5,17 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
 use crate::config::ensemble::EnsembleConfig;
-use crate::config::template::render_prompt;
+use crate::config::template::render_prompt_with_interaction_response;
 use crate::error::AgentError;
+use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
-use events::{AgentEvent, WorkerEvent};
+use events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 
 use acp_client::{AcpSession, TurnResult};
 
@@ -23,6 +25,7 @@ pub struct AgentRunRequest<'a> {
     pub agent_name: &'a str,
     pub step_name: &'a str,
     pub attempt: Option<u32>,
+    pub(crate) interaction_response: Option<InteractionResponseEnvelope>,
     pub workspace_path: &'a Path,
     pub event_tx: mpsc::Sender<WorkerEvent>,
 }
@@ -32,7 +35,7 @@ pub struct AgentRunRequest<'a> {
 /// Implementations must send WorkerEvents via the channel during execution.
 #[async_trait]
 pub trait AgentRunner: Send + Sync {
-    async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError>;
+    async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError>;
 }
 
 /// Real ACP agent runner that implements the full worker loop from SPEC.md Section 16.5.
@@ -52,6 +55,7 @@ impl AcpAgentRunner {
         issue: &Issue,
         agent_name: &str,
         attempt: Option<u32>,
+        workspace_path: &Path,
         turn_number: u32,
     ) -> Result<String, AgentError> {
         if turn_number == 1 {
@@ -83,7 +87,17 @@ impl AcpAgentRunner {
                 });
             };
 
-            render_prompt(&template_str, issue, attempt).map_err(|e| AgentError::PromptError {
+            let interaction_response = load_interaction_response(workspace_path).await?;
+
+            render_prompt_with_interaction_response(
+                &template_str,
+                issue,
+                attempt,
+                interaction_response
+                    .as_ref()
+                    .map(|response| &response.response),
+            )
+            .map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
             })
         } else {
@@ -95,6 +109,141 @@ impl AcpAgentRunner {
                 issue.identifier, turn_number
             ))
         }
+    }
+
+    async fn prepare_workspace(
+        &self,
+        workspace_path: &Path,
+        interaction_response: Option<&InteractionResponseEnvelope>,
+    ) -> Result<(), AgentError> {
+        remove_ensemble_file(workspace_path, "interaction-request.json").await?;
+
+        if let Some(interaction_response) = interaction_response {
+            write_interaction_response_file(workspace_path, interaction_response).await?;
+        } else {
+            remove_ensemble_file(workspace_path, "interaction-response.json").await?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct InteractionResponseEnvelope {
+    schema_version: u32,
+    interaction_id: String,
+    kind: crate::interaction::InteractionKind,
+    response: InteractionResponse,
+    resolved_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl InteractionResponseEnvelope {
+    pub(crate) fn new(
+        schema_version: u32,
+        interaction_id: String,
+        kind: crate::interaction::InteractionKind,
+        response: InteractionResponse,
+        resolved_at: chrono::DateTime<chrono::Utc>,
+    ) -> Self {
+        Self {
+            schema_version,
+            interaction_id,
+            kind,
+            response,
+            resolved_at,
+        }
+    }
+}
+
+async fn load_interaction_response(
+    workspace_path: &Path,
+) -> Result<Option<InteractionResponseEnvelope>, AgentError> {
+    let path = workspace_path
+        .join(".ensemble")
+        .join("interaction-response.json");
+
+    match tokio::fs::read_to_string(&path).await {
+        Ok(contents) => {
+            serde_json::from_str(&contents)
+                .map(Some)
+                .map_err(|e| AgentError::PromptError {
+                    reason: format!("failed to parse .ensemble/interaction-response.json: {e}"),
+                })
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AgentError::IoError {
+            reason: format!("failed to read .ensemble/interaction-response.json: {e}"),
+        }),
+    }
+}
+
+async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
+    let interaction_path = workspace_path
+        .join(".ensemble")
+        .join("interaction-request.json");
+
+    let interaction_request = match tokio::fs::read_to_string(&interaction_path).await {
+        Ok(contents) => match serde_json::from_str::<InteractionRequestDraft>(&contents) {
+            Ok(request) => Some(request),
+            Err(error) => {
+                return WorkerResult::Failed {
+                    error: format!("failed to parse .ensemble/interaction-request.json: {error}"),
+                }
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return WorkerResult::Failed {
+                error: format!("failed to read .ensemble/interaction-request.json: {error}"),
+            }
+        }
+    };
+
+    let verdict_path = workspace_path.join(".ensemble").join("verdict.json");
+    let verdict_exists = tokio::fs::try_exists(&verdict_path).await.unwrap_or(false);
+
+    match interaction_request {
+        Some(_) if verdict_exists => WorkerResult::Failed {
+            error:
+                "agent produced both .ensemble/interaction-request.json and .ensemble/verdict.json"
+                    .to_string(),
+        },
+        Some(request) => WorkerResult::BlockedOnHuman { request },
+        None => WorkerResult::Success,
+    }
+}
+
+async fn write_interaction_response_file(
+    workspace_path: &Path,
+    response: &InteractionResponseEnvelope,
+) -> Result<(), AgentError> {
+    let ensemble_dir = workspace_path.join(".ensemble");
+    tokio::fs::create_dir_all(&ensemble_dir)
+        .await
+        .map_err(|e| AgentError::IoError {
+            reason: format!("failed to create .ensemble directory: {e}"),
+        })?;
+
+    let contents = serde_json::to_vec_pretty(response).map_err(|e| AgentError::IoError {
+        reason: format!("failed to serialize interaction response: {e}"),
+    })?;
+
+    tokio::fs::write(ensemble_dir.join("interaction-response.json"), contents)
+        .await
+        .map_err(|e| AgentError::IoError {
+            reason: format!("failed to write .ensemble/interaction-response.json: {e}"),
+        })
+}
+
+async fn remove_ensemble_file(workspace_path: &Path, filename: &str) -> Result<(), AgentError> {
+    let path = workspace_path.join(".ensemble").join(filename);
+
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AgentError::IoError {
+            reason: format!("failed to remove {}: {error}", path.display()),
+        }),
     }
 }
 
@@ -158,16 +307,20 @@ fn shell_escape_command(command: &str) -> String {
 
 #[async_trait]
 impl AgentRunner for AcpAgentRunner {
-    async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError> {
+    async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
         let AgentRunRequest {
             config,
             issue,
             agent_name,
             step_name,
             attempt,
+            interaction_response,
             workspace_path,
             event_tx,
         } = request;
+
+        self.prepare_workspace(workspace_path, interaction_response.as_ref())
+            .await?;
 
         // 1. Run before_run hook
         if let Some(ref script) = config.hooks.before_run {
@@ -235,7 +388,14 @@ impl AgentRunner for AcpAgentRunner {
         let result = loop {
             // Build prompt for this turn
             let prompt = match self
-                .build_prompt(config.as_ref(), issue, agent_name, attempt, turn_number)
+                .build_prompt(
+                    config.as_ref(),
+                    issue,
+                    agent_name,
+                    attempt,
+                    workspace_path,
+                    turn_number,
+                )
                 .await
             {
                 Ok(p) => p,
@@ -314,7 +474,9 @@ impl AgentRunner for AcpAgentRunner {
         // Kill agent process
         session.kill().await;
 
-        result
+        result?;
+
+        Ok(detect_worker_result(workspace_path).await)
     }
 }
 
@@ -322,6 +484,7 @@ impl AgentRunner for AcpAgentRunner {
 mod tests {
     use super::*;
     use crate::config::ensemble::parse_config;
+    use crate::interaction::{InteractionKind, InteractionResponse};
 
     /// Mock agent runner for testing the orchestrator.
     pub struct MockAgentRunner {
@@ -331,7 +494,7 @@ mod tests {
 
     #[async_trait]
     impl AgentRunner for MockAgentRunner {
-        async fn run(&self, request: AgentRunRequest<'_>) -> Result<(), AgentError> {
+        async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
             let AgentRunRequest {
                 issue,
                 step_name,
@@ -356,7 +519,7 @@ mod tests {
                 .await;
 
             if self.should_succeed {
-                Ok(())
+                Ok(WorkerResult::Success)
             } else {
                 Err(AgentError::TurnFailed {
                     reason: "mock failure".to_string(),
@@ -424,12 +587,13 @@ on_failure: Todo
                 agent_name: "builder",
                 step_name: "build",
                 attempt: None,
+                interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
             })
             .await;
 
-        assert!(result.is_ok());
+        assert!(matches!(result, Ok(WorkerResult::Success)));
 
         let evt = rx.try_recv().unwrap();
         match evt {
@@ -461,6 +625,7 @@ on_failure: Todo
                 agent_name: "builder",
                 step_name: "build",
                 attempt: None,
+                interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
             })
@@ -468,6 +633,345 @@ on_failure: Todo
 
         assert!(result.is_err());
         assert!(matches!(result, Err(AgentError::TurnFailed { .. })));
+    }
+
+    async fn write_workspace_file(workspace: &tempfile::TempDir, name: &str, contents: &str) {
+        let ensemble_dir = workspace.path().join(".ensemble");
+        tokio::fs::create_dir_all(&ensemble_dir).await.unwrap();
+        tokio::fs::write(ensemble_dir.join(name), contents)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn detects_interaction_request_file_and_returns_blocked_result() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "interaction-request.json",
+            r#"{
+  "schema_version": 1,
+  "kind": "question",
+  "blocking": true,
+  "title": "Choose target environment",
+  "body": "Need a target environment.",
+  "options": ["staging", "production"],
+  "artifacts": ["docs/SPEC.md"]
+}"#,
+        )
+        .await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        match result {
+            WorkerResult::BlockedOnHuman { request } => {
+                assert_eq!(request.kind, InteractionKind::Question);
+                assert_eq!(request.title, "Choose target environment");
+            }
+            other => panic!("expected blocked result, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prefers_interaction_request_over_approve_reject_verdict_mix() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "interaction-request.json",
+            r#"{
+  "schema_version": 1,
+  "kind": "approval",
+  "blocking": true,
+  "title": "Approve deploy",
+  "body": "Ready to deploy"
+}"#,
+        )
+        .await;
+        write_workspace_file(&workspace, "verdict.json", r#"{"verdict":"approve"}"#).await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        assert!(matches!(
+            result,
+            WorkerResult::Failed { error }
+                if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_malformed_interaction_request_file_with_failure_result() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(&workspace, "interaction-request.json", "not json").await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        assert!(matches!(
+            result,
+            WorkerResult::Failed { error }
+                if error.contains("failed to parse .ensemble/interaction-request.json")
+        ));
+    }
+
+    #[tokio::test]
+    async fn detects_interaction_request_without_parsing_malformed_verdict_file() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "interaction-request.json",
+            r#"{
+  "schema_version": 1,
+  "kind": "question",
+  "blocking": true,
+  "title": "Need input",
+  "body": "Which environment?"
+}"#,
+        )
+        .await;
+        write_workspace_file(&workspace, "verdict.json", "not valid json").await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        assert!(matches!(
+            result,
+            WorkerResult::Failed { error }
+                if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
+        ));
+    }
+
+    #[tokio::test]
+    async fn writes_interaction_response_file_before_resume_prompt_render() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let response = InteractionResponseEnvelope {
+            schema_version: 1,
+            interaction_id: "int_123".to_string(),
+            kind: InteractionKind::Question,
+            response: InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Use staging".to_string(),
+                selected_option: Some("staging".to_string()),
+            },
+            resolved_at: chrono::Utc::now(),
+        };
+
+        write_interaction_response_file(workspace.path(), &response)
+            .await
+            .unwrap();
+
+        AcpAgentRunner
+            .build_prompt(
+                test_config().as_ref(),
+                &test_issue(),
+                "builder",
+                None,
+                workspace.path(),
+                1,
+            )
+            .await
+            .unwrap();
+
+        let loaded = load_interaction_response(workspace.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.interaction_id, "int_123");
+        match loaded.response {
+            InteractionResponse::Question { text, .. } => assert_eq!(text, "Use staging"),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn acp_runner_prepares_interaction_response_file_from_request_payload() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let response = InteractionResponseEnvelope {
+            schema_version: 1,
+            interaction_id: "int_runtime".to_string(),
+            kind: InteractionKind::Question,
+            response: InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Use staging".to_string(),
+                selected_option: Some("staging".to_string()),
+            },
+            resolved_at: chrono::Utc::now(),
+        };
+
+        AcpAgentRunner
+            .prepare_workspace(workspace.path(), Some(&response))
+            .await
+            .unwrap();
+
+        let loaded = load_interaction_response(workspace.path()).await.unwrap();
+        assert_eq!(loaded, Some(response));
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_removes_stale_interaction_response_for_fresh_run() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_interaction_response_file(
+            workspace.path(),
+            &InteractionResponseEnvelope {
+                schema_version: 1,
+                interaction_id: "int_stale".to_string(),
+                kind: InteractionKind::Question,
+                response: InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "stale".to_string(),
+                    selected_option: None,
+                },
+                resolved_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        AcpAgentRunner
+            .prepare_workspace(workspace.path(), None)
+            .await
+            .unwrap();
+
+        let loaded = load_interaction_response(workspace.path()).await.unwrap();
+        assert_eq!(loaded, None);
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_removes_stale_interaction_request_before_run() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "interaction-request.json",
+            r#"{
+  "schema_version": 1,
+  "kind": "question",
+  "blocking": true,
+  "title": "Stale request",
+  "body": "Should not leak"
+}"#,
+        )
+        .await;
+
+        AcpAgentRunner
+            .prepare_workspace(workspace.path(), None)
+            .await
+            .unwrap();
+
+        let result = detect_worker_result(workspace.path()).await;
+        assert!(matches!(result, WorkerResult::Success));
+    }
+
+    #[tokio::test]
+    async fn build_prompt_includes_interaction_response_context() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let config = Arc::new(
+            parse_config(
+                r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo"]
+  terminal_states: ["Done"]
+agents:
+  builder:
+    prompt: "{{ interaction_response.kind }}: {{ interaction_response.text }}"
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+agent:
+  command: echo test
+on_success: Done
+on_failure: Todo
+"#,
+            )
+            .unwrap(),
+        );
+        write_interaction_response_file(
+            workspace.path(),
+            &InteractionResponseEnvelope {
+                schema_version: 1,
+                interaction_id: "int_456".to_string(),
+                kind: InteractionKind::Question,
+                response: InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: None,
+                },
+                resolved_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let prompt = AcpAgentRunner
+            .build_prompt(
+                config.as_ref(),
+                &test_issue(),
+                "builder",
+                Some(2),
+                workspace.path(),
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(prompt, "question: Use staging");
+    }
+
+    #[tokio::test]
+    async fn write_and_load_interaction_response_file_round_trips() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let response = InteractionResponseEnvelope {
+            schema_version: 1,
+            interaction_id: "int_roundtrip".to_string(),
+            kind: InteractionKind::Question,
+            response: InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Use staging".to_string(),
+                selected_option: Some("staging".to_string()),
+            },
+            resolved_at: chrono::Utc::now(),
+        };
+
+        write_interaction_response_file(workspace.path(), &response)
+            .await
+            .unwrap();
+
+        let loaded = load_interaction_response(workspace.path()).await.unwrap();
+        assert_eq!(loaded, Some(response));
+    }
+
+    #[tokio::test]
+    async fn build_prompt_without_template_reference_still_succeeds_with_response_file() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_interaction_response_file(
+            workspace.path(),
+            &InteractionResponseEnvelope {
+                schema_version: 1,
+                interaction_id: "int_789".to_string(),
+                kind: InteractionKind::Question,
+                response: InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: None,
+                },
+                resolved_at: chrono::Utc::now(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let prompt = AcpAgentRunner
+            .build_prompt(
+                test_config().as_ref(),
+                &test_issue(),
+                "builder",
+                None,
+                workspace.path(),
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(prompt, "hi");
     }
 
     #[test]

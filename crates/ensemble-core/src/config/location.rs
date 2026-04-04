@@ -13,6 +13,10 @@ pub fn config_path_for_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("config.yaml")
 }
 
+pub fn interactions_state_dir(config_dir: &Path) -> PathBuf {
+    config_dir.join("state").join("interactions")
+}
+
 pub fn resolve_config_dir_for_cli(
     cli_override: Option<&Path>,
     env_override: Option<OsString>,
@@ -133,6 +137,15 @@ mod tests {
     fn test_config_path_for_dir_appends_config_yaml() {
         let dir = PathBuf::from("/tmp/ensemble-config");
         assert_eq!(config_path_for_dir(&dir), dir.join("config.yaml"));
+    }
+
+    #[test]
+    fn test_interactions_state_dir_uses_state_interactions_directory() {
+        let dir = PathBuf::from("/tmp/ensemble-config");
+        assert_eq!(
+            interactions_state_dir(&dir),
+            dir.join("state").join("interactions")
+        );
     }
 
     #[test]

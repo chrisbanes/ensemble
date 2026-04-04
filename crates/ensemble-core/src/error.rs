@@ -14,6 +14,8 @@ pub enum EnsembleError {
     Pipeline(#[from] PipelineError),
     #[error(transparent)]
     Agent(#[from] AgentError),
+    #[error(transparent)]
+    Interaction(#[from] crate::interaction::error::InteractionError),
 }
 
 #[derive(Debug, Error)]

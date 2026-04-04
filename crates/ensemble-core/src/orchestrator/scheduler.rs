@@ -82,6 +82,57 @@ pub fn is_dispatch_eligible(
     None
 }
 
+/// Check if an explicitly requested resume dispatch may proceed.
+///
+/// This bypasses the normal claimed-issue filter so resolved waiting issues can
+/// be redispatched while still remaining claimed by the orchestrator.
+pub fn is_resume_dispatch_eligible(
+    issue: &Issue,
+    state: &OrchestratorState,
+    active_states: &[String],
+    terminal_states: &[String],
+    max_concurrent_by_state: &HashMap<String, u32>,
+) -> Option<String> {
+    if !state.is_waiting_on_human(&issue.id) {
+        return Some("issue is not waiting on human".to_string());
+    }
+
+    // Must have required fields.
+    if issue.id.is_empty() {
+        return Some("missing issue id".to_string());
+    }
+    if issue.identifier.is_empty() {
+        return Some("missing issue identifier".to_string());
+    }
+    if issue.title.is_empty() {
+        return Some("missing issue title".to_string());
+    }
+    if issue.state.is_empty() {
+        return Some("missing issue state".to_string());
+    }
+
+    if !contains_state(active_states, &issue.state) {
+        return Some(format!("state '{}' not in active states", issue.state));
+    }
+    if contains_state(terminal_states, &issue.state) {
+        return Some(format!("state '{}' is terminal", issue.state));
+    }
+    if state.is_running(&issue.id) {
+        return Some("already running".to_string());
+    }
+    if state.completed.contains(&issue.id) {
+        return Some("already completed".to_string());
+    }
+    if available_global_slots(state) == 0 {
+        return Some("no global slots available".to_string());
+    }
+    if available_state_slots(state, max_concurrent_by_state, &issue.state) == 0 {
+        return Some(format!("no slots available for state '{}'", issue.state));
+    }
+
+    None
+}
+
 fn contains_state(states: &[String], needle: &str) -> bool {
     states
         .iter()
@@ -183,6 +234,40 @@ mod tests {
             &HashMap::new(),
         );
         assert!(result.is_none(), "expected eligible, got: {:?}", result);
+    }
+
+    #[test]
+    fn resumed_waiting_issue_is_dispatch_eligible_even_while_claimed() {
+        let mut state = OrchestratorState::new(30000, 10);
+        let issue = test_issue("1", "Todo");
+        state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            interaction_request_id: "interaction-1".to_string(),
+            step_name: "build".to_string(),
+            requested_at: Utc::now(),
+        });
+
+        let normal = is_dispatch_eligible(
+            &issue,
+            &state,
+            &default_active(),
+            &default_terminal(),
+            &HashMap::new(),
+        );
+        assert_eq!(normal.as_deref(), Some("already claimed"));
+
+        let resumed = is_resume_dispatch_eligible(
+            &issue,
+            &state,
+            &default_active(),
+            &default_terminal(),
+            &HashMap::new(),
+        );
+        assert!(
+            resumed.is_none(),
+            "expected resume eligibility, got: {resumed:?}"
+        );
     }
 
     #[test]
