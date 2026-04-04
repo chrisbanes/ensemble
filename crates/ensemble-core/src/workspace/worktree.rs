@@ -1,7 +1,10 @@
 use crate::error::WorktreeError;
 use std::path::Path;
+use std::sync::OnceLock;
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
+
+static GIT_BINARY: OnceLock<&'static str> = OnceLock::new();
 
 /// Sanitize an issue identifier for use in git branch names.
 ///
@@ -38,7 +41,7 @@ async fn run_git(
     command_label: impl Into<String>,
 ) -> Result<std::process::Output, WorktreeError> {
     let command = command_label.into();
-    Command::new("git")
+    Command::new(git_binary())
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -50,6 +53,18 @@ async fn run_git(
                 reason: error.to_string(),
             }
         })
+}
+
+fn git_binary() -> &'static str {
+    GIT_BINARY.get_or_init(|| {
+        for git in ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"] {
+            if Path::new(git).is_file() {
+                return git;
+            }
+        }
+
+        "git"
+    })
 }
 
 fn ensure_git_success(
@@ -224,7 +239,7 @@ pub async fn remove_orphaned_worktree(
     );
 
     // Try git worktree prune first to clean stale entries
-    let _ = Command::new("git")
+    let _ = Command::new(git_binary())
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output()
@@ -342,8 +357,45 @@ pub async fn pull_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
     use tokio::fs;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[cfg(unix)]
     fn assert_git_command_failed(error: WorktreeError, expected_command: &str) {
@@ -451,6 +503,31 @@ mod tests {
             .expect_err("missing current_dir should fail");
 
         assert_git_command_failed(error, "git status");
+    }
+
+    #[test]
+    fn test_git_binary_works_with_missing_path() {
+        let _env = EnvGuard::lock(&["PATH"]);
+        std::env::set_var("PATH", "/definitely/missing");
+
+        assert!(std::path::Path::new(git_binary()).is_file() || git_binary() == "git");
+    }
+
+    #[tokio::test]
+    async fn test_run_git_uses_resolved_binary_when_path_is_missing() {
+        let _env = EnvGuard::lock(&["PATH"]);
+        std::env::set_var("PATH", "/definitely/missing");
+
+        let repo = TempDir::new().unwrap();
+        let output = run_git(
+            repo.path().to_string_lossy().as_ref(),
+            &["--version"],
+            "git --version",
+        )
+        .await
+        .expect("resolved git binary should still run");
+
+        assert!(output.status.success());
     }
 
     #[cfg(unix)]

@@ -28,7 +28,7 @@ pub async fn run_hook(
 
     // Try bash first, fall back to sh if unavailable
     let shell = preferred_shell();
-    if shell == "sh" {
+    if shell.ends_with("/sh") || shell == "sh" {
         warn!(
             hook = hook_name,
             "bash not found, falling back to sh for hook execution"
@@ -90,12 +90,21 @@ pub async fn run_hook(
 }
 
 fn preferred_shell() -> &'static str {
-    PREFERRED_SHELL.get_or_init(|| if bash_in_path() { "bash" } else { "sh" })
-}
+    PREFERRED_SHELL.get_or_init(|| {
+        for shell in ["/bin/bash", "/usr/bin/bash"] {
+            if Path::new(shell).is_file() {
+                return shell;
+            }
+        }
 
-fn bash_in_path() -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("bash").is_file()))
+        for shell in ["/bin/sh", "/usr/bin/sh"] {
+            if Path::new(shell).is_file() {
+                return shell;
+            }
+        }
+
+        "sh"
+    })
 }
 
 /// Run a hook if configured; swallow errors for non-fatal hooks.
@@ -114,7 +123,44 @@ pub async fn run_hook_best_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     fn setup() -> TempDir {
         TempDir::new().unwrap()
@@ -149,8 +195,19 @@ mod tests {
     #[tokio::test]
     async fn test_hook_timeout() {
         let dir = setup();
-        let result = run_hook("test_hook", "sleep 10", dir.path(), 100).await;
+        let result = run_hook("test_hook", "while :; do :; done", dir.path(), 100).await;
         assert!(matches!(result, Err(WorkspaceError::HookTimedOut { .. })));
+    }
+
+    #[tokio::test]
+    async fn test_hook_success_with_missing_path_still_uses_resolved_shell() {
+        let _env = EnvGuard::lock(&["PATH"]);
+        std::env::set_var("PATH", "/definitely/missing");
+
+        let dir = setup();
+        let result = run_hook("test_hook", "true", dir.path(), 5000).await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
