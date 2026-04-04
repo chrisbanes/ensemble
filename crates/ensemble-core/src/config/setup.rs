@@ -1,6 +1,6 @@
 use crate::config::ensemble::{resolve_relative_to_base, StepConfig};
-use crate::pipeline::dag::build_dag;
 use crate::error::ConfigError;
+use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -1303,7 +1303,10 @@ mod tests {
     impl EnvGuard {
         fn lock(vars: &[&'static str]) -> Self {
             let guard = ENV_LOCK.lock().unwrap();
-            let saved = vars.iter().map(|&key| (key, std::env::var(key).ok())).collect();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
             for &key in vars {
                 std::env::remove_var(key);
             }
@@ -2124,22 +2127,20 @@ on_failure: Failed
 
     #[test]
     fn resolve_relative_to_base_joins_relative_paths() {
-        let resolved =
-            crate::config::ensemble::resolve_relative_to_base(
-                Path::new("tracker/issues.md"),
-                Path::new("/tmp/config"),
-            );
+        let resolved = crate::config::ensemble::resolve_relative_to_base(
+            Path::new("tracker/issues.md"),
+            Path::new("/tmp/config"),
+        );
 
         assert_eq!(resolved, PathBuf::from("/tmp/config/tracker/issues.md"));
     }
 
     #[test]
     fn resolve_relative_to_base_preserves_absolute_paths() {
-        let resolved =
-            crate::config::ensemble::resolve_relative_to_base(
-                Path::new("/tmp/already-absolute"),
-                Path::new("/tmp/config"),
-            );
+        let resolved = crate::config::ensemble::resolve_relative_to_base(
+            Path::new("/tmp/already-absolute"),
+            Path::new("/tmp/config"),
+        );
 
         assert_eq!(resolved, PathBuf::from("/tmp/already-absolute"));
     }

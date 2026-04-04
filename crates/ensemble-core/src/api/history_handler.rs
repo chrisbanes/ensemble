@@ -25,16 +25,14 @@ pub async fn get_history(
 ) -> impl IntoResponse {
     match read_history(&state.history_path, &query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(e) => {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                crate::api::handlers::api_error(
-                    "history_read_error",
-                    format!("failed to read history: {}", e),
-                ),
-            )
-                .into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::api::handlers::api_error(
+                "history_read_error",
+                format!("failed to read history: {}", e),
+            ),
+        )
+            .into_response(),
     }
 }
 

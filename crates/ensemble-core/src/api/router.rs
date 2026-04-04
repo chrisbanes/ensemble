@@ -161,7 +161,10 @@ pub fn create_api_router(state: AppState) -> Router {
 
 /// Fallback handler for unmatched API routes. Returns a JSON 404.
 async fn api_not_found() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, handlers::api_error("not_found", "API endpoint not found"))
+    (
+        StatusCode::NOT_FOUND,
+        handlers::api_error("not_found", "API endpoint not found"),
+    )
 }
 
 #[cfg(test)]

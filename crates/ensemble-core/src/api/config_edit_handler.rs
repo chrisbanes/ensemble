@@ -190,14 +190,18 @@ fn replace_document_state_from_yaml(
     config_path: &Path,
     raw_yaml: &str,
 ) -> Result<ConfigStateResponse, ConfigError> {
-    replace_document_state(doc_state, || save_raw_yaml_atomically(config_path, raw_yaml))
+    replace_document_state(doc_state, || {
+        save_raw_yaml_atomically(config_path, raw_yaml)
+    })
 }
 
 fn reload_document_state(
     doc_state: &mut ConfigDocumentState,
     config_path: &Path,
 ) -> Result<ConfigStateResponse, ConfigError> {
-    replace_document_state(doc_state, || crate::config::draft::load_config_state(config_path))
+    replace_document_state(doc_state, || {
+        crate::config::draft::load_config_state(config_path)
+    })
 }
 
 /// POST /api/v1/config/yaml/validate
@@ -746,7 +750,10 @@ mod tests {
     impl EnvGuard {
         fn lock(vars: &[&'static str]) -> Self {
             let guard = ENV_LOCK.lock().unwrap();
-            let saved = vars.iter().map(|&key| (key, std::env::var(key).ok())).collect();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
             for &key in vars {
                 std::env::remove_var(key);
             }
@@ -1059,7 +1066,10 @@ exit 1
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
-            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "text/event-stream"
         );
 
@@ -1380,17 +1390,22 @@ on_failure: Failed
         assert_eq!(form_status, StatusCode::BAD_REQUEST);
         assert_eq!(form_response.state, "parsed");
         assert!(!form_response.issues.is_empty());
-        assert!(form_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
-        assert!(
-            !form_response
-                .raw_yaml
-                .as_ref()
-                .unwrap()
-                .contains("ghp_secret123")
-        );
+        assert!(form_response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("[REDACTED]"));
+        assert!(!form_response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("ghp_secret123"));
         let issue = form_response.issues.last().unwrap();
         assert_eq!(issue.section, "form");
-        assert_eq!(issue.kind, crate::config::draft::ValidationIssueKind::Config);
+        assert_eq!(
+            issue.kind,
+            crate::config::draft::ValidationIssueKind::Config
+        );
         assert!(issue.message.contains("Form merge failed"));
     }
 
@@ -1536,22 +1551,26 @@ on_failure: Failed
         assert_eq!(yaml_issue.kind, form_issue.kind);
         assert_eq!(yaml_issue.message, form_issue.message);
 
-        assert!(yaml_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
-        assert!(form_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
-        assert!(
-            !yaml_response
-                .raw_yaml
-                .as_ref()
-                .unwrap()
-                .contains("ghp_secret123")
-        );
-        assert!(
-            !form_response
-                .raw_yaml
-                .as_ref()
-                .unwrap()
-                .contains("ghp_secret123")
-        );
+        assert!(yaml_response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("[REDACTED]"));
+        assert!(form_response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("[REDACTED]"));
+        assert!(!yaml_response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("ghp_secret123"));
+        assert!(!form_response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("ghp_secret123"));
         assert_eq!(yaml_response.config_path, form_response.config_path);
     }
 
@@ -1593,14 +1612,16 @@ on_failure: Failed
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response.state, "parsed");
         assert!(temp_dir.path().join(".env").exists());
-        assert!(response.raw_yaml.as_ref().unwrap().contains("$GITHUB_TOKEN"));
-        assert!(
-            !response
-                .raw_yaml
-                .as_ref()
-                .unwrap()
-                .contains("ghp_secret123")
-        );
+        assert!(response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("$GITHUB_TOKEN"));
+        assert!(!response
+            .raw_yaml
+            .as_ref()
+            .unwrap()
+            .contains("ghp_secret123"));
         let tracker = &response.active_config.as_ref().unwrap().tracker;
         assert_eq!(tracker.repository.as_deref(), Some("acme/repo"));
         assert_eq!(tracker.project_number, Some(9));
@@ -1608,7 +1629,10 @@ on_failure: Failed
 
         let persisted_state = state.config_runtime.document_state.read().await;
         let disk_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
-        assert_eq!(persisted_state.raw_yaml.as_deref(), Some(disk_yaml.as_str()));
+        assert_eq!(
+            persisted_state.raw_yaml.as_deref(),
+            Some(disk_yaml.as_str())
+        );
         assert_eq!(
             response.raw_yaml.as_deref().map(str::trim_end),
             persisted_state.raw_yaml.as_deref().map(str::trim_end)

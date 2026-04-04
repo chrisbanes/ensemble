@@ -29,13 +29,16 @@ fn parse_conversation_messages(
     contents.lines().map(serde_json::from_str).collect()
 }
 
-async fn load_conversation_messages(path: &FsPath) -> Result<Option<Vec<ConversationMessage>>, ApiError> {
+async fn load_conversation_messages(
+    path: &FsPath,
+) -> Result<Option<Vec<ConversationMessage>>, ApiError> {
     let Some(contents) = read_conversation_file(path).await.map_err(|e| {
         ApiError::new(
             "conversation_read_error",
             &format!("failed to read conversation: {e}"),
         )
-    })? else {
+    })?
+    else {
         return Ok(None);
     };
 
@@ -204,8 +207,8 @@ pub async fn get_conversation_message(
                     "conversation_not_found",
                     "no conversation file found for this issue",
                 ),
-                )
-                    .into_response();
+            )
+                .into_response();
         }
         Err(error) => {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
@@ -218,7 +221,10 @@ pub async fn get_conversation_message(
         Some(msg) => (StatusCode::OK, Json(msg)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            api_error("message_not_found", format!("no message at index {}", index)),
+            api_error(
+                "message_not_found",
+                format!("no message at index {}", index),
+            ),
         )
             .into_response(),
     }

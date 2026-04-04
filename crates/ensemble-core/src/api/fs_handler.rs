@@ -1,9 +1,9 @@
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
-use axum::response::Response;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -81,10 +81,7 @@ pub async fn list_directory(
     response.into_response()
 }
 
-async fn list_directory_inner(
-    path_str: String,
-    home_dir: PathBuf,
-) -> Response {
+async fn list_directory_inner(path_str: String, home_dir: PathBuf) -> Response {
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<FsEntry>, (StatusCode, ApiError)> {
             // Expand ~ to home directory

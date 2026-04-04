@@ -38,7 +38,11 @@ fn build_app_state(
     AppState {
         orchestrator_state: Arc::new(RwLock::new(orchestrator_state)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
-        workspace_root: temp_dir.path().join("ensemble_workspaces").display().to_string(),
+        workspace_root: temp_dir
+            .path()
+            .join("ensemble_workspaces")
+            .display()
+            .to_string(),
         history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {

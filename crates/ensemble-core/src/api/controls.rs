@@ -70,11 +70,7 @@ fn try_signal_stop(state: &OrchestratorState, issue_id: &str) -> StopSignalStatu
     StopSignalStatus::Sent
 }
 
-fn issue_error_response(
-    status: StatusCode,
-    code: &str,
-    message: impl Into<String>,
-) -> Response {
+fn issue_error_response(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
     (status, api_error(code, message)).into_response()
 }
 
@@ -150,7 +146,10 @@ pub async fn post_stop(
             return issue_error_response(
                 StatusCode::NOT_FOUND,
                 "issue_not_found",
-                format!("no running or retrying issue with identifier '{}'", identifier),
+                format!(
+                    "no running or retrying issue with identifier '{}'",
+                    identifier
+                ),
             );
         }
     };
@@ -244,7 +243,10 @@ pub async fn post_retry(
             return issue_error_response(
                 StatusCode::NOT_FOUND,
                 "issue_not_found",
-                format!("no running or retrying issue with identifier '{}'", identifier),
+                format!(
+                    "no running or retrying issue with identifier '{}'",
+                    identifier
+                ),
             );
         }
     };
