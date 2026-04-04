@@ -246,6 +246,7 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
         tokio::time::Duration::from_secs(8),
         tokio::process::Command::new("acpx")
             .arg("--version")
+            .kill_on_drop(true)
             .output(),
     )
     .await
@@ -339,6 +340,7 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
             tokio::time::Duration::from_secs(8),
             tokio::process::Command::new("acpx")
                 .args(["--agent", &agent.acpx_agent, "--version"])
+                .kill_on_drop(true)
                 .output(),
         )
         .await
@@ -493,32 +495,52 @@ pub fn merge_setup_request(
     }
 }
 
+/// List of known agents that can be discovered.
+pub const KNOWN_AGENTS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("codex", "Codex CLI"),
+    ("gemini", "Gemini CLI"),
+    ("amp", "Amp"),
+    ("aider", "Aider"),
+    ("goose", "Goose"),
+    ("copilot", "GitHub Copilot"),
+    ("droid", "Factory Droid"),
+    ("cursor", "Cursor Agent"),
+    ("qwen", "Qwen Code"),
+    ("opencode", "OpenCode"),
+];
+
 /// Discover available agents from the system.
+/// Probes run concurrently with a 15-second overall timeout.
+/// Returns partial results as they complete, even if timeout is reached.
 pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
-    let known_agents: &[(&str, &str)] = &[
-        ("claude", "Claude Code"),
-        ("codex", "Codex CLI"),
-        ("gemini", "Gemini CLI"),
-        ("amp", "Amp"),
-        ("aider", "Aider"),
-        ("goose", "Goose"),
-        ("copilot", "GitHub Copilot"),
-        ("droid", "Factory Droid"),
-        ("cursor", "Cursor Agent"),
-        ("qwen", "Qwen Code"),
-        ("opencode", "OpenCode"),
-    ];
+    use futures::stream::FuturesUnordered;
+    use futures::StreamExt;
 
     let mut available = Vec::new();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
 
-    for (name, label) in known_agents {
-        if probe_agent(name).await {
-            let version = get_agent_version(name).await;
-            available.push(DiscoveredAgent {
-                name: name.to_string(),
-                label: label.to_string(),
-                version,
-            });
+    // Create a FuturesUnordered to collect results as they complete
+    let mut probe_tasks: FuturesUnordered<_> = KNOWN_AGENTS
+        .iter()
+        .map(|(name, label)| async move {
+            if probe_agent(name).await {
+                let version = get_agent_version(name).await;
+                Some(DiscoveredAgent {
+                    name: name.to_string(),
+                    label: label.to_string(),
+                    version,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Collect results as they complete, with a deadline
+    while let Ok(Some(result)) = tokio::time::timeout_at(deadline, probe_tasks.next()).await {
+        if let Some(agent) = result {
+            available.push(agent);
         }
     }
 
@@ -816,11 +838,13 @@ fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
     Ok(())
 }
 
-async fn probe_agent(name: &str) -> bool {
+/// Probe whether an agent is available.
+pub async fn probe_agent(name: &str) -> bool {
     let timeout = tokio::time::Duration::from_secs(8);
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
             .args(["--agent", name, "--version"])
+            .kill_on_drop(true)
             .output()
             .await
     })
@@ -832,11 +856,13 @@ async fn probe_agent(name: &str) -> bool {
     }
 }
 
-async fn get_agent_version(name: &str) -> String {
+/// Get the version of an agent.
+pub async fn get_agent_version(name: &str) -> String {
     let timeout = tokio::time::Duration::from_secs(8);
     let result = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
             .args(["--agent", name, "--version"])
+            .kill_on_drop(true)
             .output()
             .await
     })
@@ -861,6 +887,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     // Create session
     let output = tokio::process::Command::new("acpx")
         .args([agent_name, "sessions", "ensure", "--name", session_name])
+        .kill_on_drop(true)
         .output()
         .await;
 
@@ -882,6 +909,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     // Close session (best-effort)
     let _ = tokio::process::Command::new("acpx")
         .args([agent_name, "sessions", "close", session_name])
+        .kill_on_drop(true)
         .output()
         .await;
 

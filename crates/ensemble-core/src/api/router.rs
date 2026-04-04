@@ -89,6 +89,10 @@ pub fn create_api_router(state: AppState) -> Router {
             get(config_edit_handler::get_setup_agents),
         )
         .route(
+            "/config/setup/agents/stream",
+            get(config_edit_handler::get_setup_agents_stream),
+        )
+        .route(
             "/config/setup/validate",
             post(config_edit_handler::validate_setup),
         )

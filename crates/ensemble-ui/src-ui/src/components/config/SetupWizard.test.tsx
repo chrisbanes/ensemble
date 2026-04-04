@@ -12,9 +12,54 @@ function jsonResponse(data: unknown) {
   } as Response);
 }
 
+// Mock EventSource for SSE-based agent discovery
+class MockEventSource {
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onopen: (() => void) | null = null;
+  readyState = 0;
+
+  constructor(_url: string) {
+    // Simulate connection opening
+    setTimeout(() => {
+      this.readyState = 1;
+      this.onopen?.();
+    }, 0);
+
+    // Simulate receiving agents after a short delay
+    setTimeout(() => {
+      if (this.onmessage) {
+        // Send mock agents one by one to simulate progressive discovery
+        const mockAgents = [
+          { name: "builder", label: "Builder Agent", version: "1.0.0" },
+          { name: "reviewer", label: "Reviewer Agent", version: "1.0.0" },
+        ];
+        mockAgents.forEach((agent, index) => {
+          setTimeout(() => {
+            if (this.onmessage) {
+              this.onmessage({ data: JSON.stringify(agent) });
+            }
+          }, index * 50);
+        });
+
+        // Close connection after sending all agents
+        setTimeout(() => {
+          this.readyState = 2;
+          this.onerror?.();
+        }, mockAgents.length * 50 + 10);
+      }
+    }, 10);
+  }
+
+  close() {
+    this.readyState = 2;
+  }
+}
+
 describe("SetupWizard", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.stubGlobal("EventSource", MockEventSource);
   });
 
   it("renders in create mode by default", async () => {
@@ -80,14 +125,6 @@ describe("SetupWizard", () => {
         return jsonResponse({
           has_existing_config: false,
           defaults: {},
-        });
-      }
-      if (url.includes("/api/v1/config/setup/agents")) {
-        return jsonResponse({
-          agents: [
-            { name: "builder", label: "Builder Agent", version: "1.0.0" },
-            { name: "reviewer", label: "Reviewer Agent", version: "1.0.0" },
-          ],
         });
       }
       if (url.includes("/api/v1/config/setup/validate")) {
@@ -202,14 +239,6 @@ describe("SetupWizard", () => {
           },
         });
       }
-      if (url.includes("/api/v1/config/setup/agents")) {
-        return jsonResponse({
-          agents: [
-            { name: "builder", label: "Builder Agent", version: "1.0.0" },
-            { name: "reviewer", label: "Reviewer Agent", version: "1.0.0" },
-          ],
-        });
-      }
       return jsonResponse({});
     }));
 
@@ -235,10 +264,11 @@ describe("SetupWizard", () => {
     expect(screen.getByText("/existing/repo/path1")).toBeInTheDocument();
     expect(screen.getByText("/existing/repo/path2")).toBeInTheDocument();
 
-    // Navigate to Agents step and verify agents are pre-filled
+    // Navigate to Agents step and wait for discovery to complete
     await user.click(screen.getByRole("button", { name: /next/i }));
     await waitFor(() => {
-      expect(screen.queryByText(/loading available agents/i)).not.toBeInTheDocument();
+      // Wait for the discovery to complete and agents to appear
+      expect(screen.getByText(/found \d+ agent/i)).toBeInTheDocument();
     });
 
     // Check that agent roles are pre-filled

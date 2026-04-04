@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from "react";
-import { useGetSetupDefaults, useGetSetupAgents } from "@/generated/api/config/config";
+import { useGetSetupDefaults } from "@/generated/api/config/config";
 import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
+import { useAgentDiscovery } from "@/hooks/useAgentDiscovery";
 import FileBrowser from "./FileBrowser";
-import type { 
-  SetupTracker, 
-  SetupRepo, 
-  SetupAgent, 
+import type {
+  SetupTracker,
+  SetupRepo,
+  SetupAgent,
   SetupStep,
   DiscoveredAgentInfo,
   SetupCheck,
@@ -87,8 +88,13 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     query: { enabled: true },
   });
   
-  const { data: agentsData, isLoading: isLoadingAgents } = useGetSetupAgents({
-    query: { enabled: currentStep === "agents" },
+  // Use progressive agent discovery via SSE
+  const {
+    agents: discoveredAgents,
+    isLoading: isLoadingAgents,
+    isError: isAgentsError,
+  } = useAgentDiscovery({
+    enabled: currentStep === "agents"
   });
 
   const validateMutation = useValidateSetupMutation();
@@ -417,12 +423,48 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
 
   const renderAgentsStep = () => (
     <div className="space-y-4">
-      {isLoadingAgents ? (
-        <p className="text-sm text-muted-foreground">Loading available agents...</p>
+      {isLoadingAgents && discoveredAgents.length === 0 ? (
+        <div className="space-y-2">
+          <p className="text-sm text-muted-foreground">Discovering available agents...</p>
+          <div className="h-2 bg-gray-200 rounded-full overflow-hidden">
+            <div className="h-full bg-primary animate-pulse w-1/3" />
+          </div>
+        </div>
+      ) : isAgentsError && discoveredAgents.length === 0 ? (
+        <div className="p-4 rounded-lg border border-red-200 bg-red-50">
+          <div className="flex items-center gap-2">
+            <AlertCircle className="h-5 w-5 text-red-600" />
+            <span className="font-medium text-red-800">Failed to load agents</span>
+          </div>
+          <p className="text-sm text-red-700 mt-2">
+            Could not discover available agents. Make sure acpx is installed and accessible.
+          </p>
+        </div>
       ) : (
         <>
+          {/* Show progress while still discovering */}
+          {isLoadingAgents && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <div className="w-2 h-2 bg-primary rounded-full animate-pulse" />
+              <span>Found {discoveredAgents.length} agent{discoveredAgents.length !== 1 ? 's' : ''}...</span>
+            </div>
+          )}
+          
+          {discoveredAgents.length === 0 && !isLoadingAgents && (
+            <div className="p-4 rounded-lg border border-yellow-200 bg-yellow-50">
+              <div className="flex items-center gap-2">
+                <AlertCircle className="h-5 w-5 text-yellow-600" />
+                <span className="font-medium text-yellow-800">No agents found</span>
+              </div>
+              <p className="text-sm text-yellow-700 mt-2">
+                No coding agents were discovered. Make sure acpx is installed and agents are configured.
+              </p>
+            </div>
+          )}
+          
           {draft.agents.map((agent, index) => {
-            const isCustom = customAgents[index] || (agent.acpx_agent && !agentsData?.data?.agents?.find((a: DiscoveredAgentInfo) => a.name === agent.acpx_agent));
+            const hasDiscoveredMatch = !!(agent.acpx_agent && discoveredAgents.find((a: DiscoveredAgentInfo) => a.name === agent.acpx_agent));
+            const isCustom = customAgents[index] || (!!agent.acpx_agent && !isLoadingAgents && !hasDiscoveredMatch);
             const promptMode = promptModes[index] || "inline";
             
             return (
@@ -503,9 +545,9 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                       <SelectValue placeholder="Select agent" />
                     </SelectTrigger>
                     <SelectContent>
-                      {agentsData?.data?.agents?.map((discoveredAgent: DiscoveredAgentInfo) => (
+                      {discoveredAgents.map((discoveredAgent: DiscoveredAgentInfo) => (
                         <SelectItem key={discoveredAgent.name} value={discoveredAgent.name}>
-                          {discoveredAgent.label} ({discoveredAgent.version})
+                          {discoveredAgent.label} {discoveredAgent.version && `(${discoveredAgent.version})`}
                         </SelectItem>
                       ))}
                       <SelectItem value="__custom__">Custom...</SelectItem>

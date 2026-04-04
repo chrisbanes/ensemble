@@ -262,6 +262,62 @@ pub async fn get_setup_agents(
     }
 }
 
+/// GET /api/v1/config/setup/agents/stream
+///
+/// Returns discovered agents as a Server-Sent Events stream.
+/// Each agent is sent as it's discovered, allowing progressive UI updates.
+#[utoipa::path(
+    get,
+    path = "/api/v1/config/setup/agents/stream",
+    operation_id = "getSetupAgentsStream",
+    responses(
+        (status = 200, description = "Stream of discovered agents", body = String)
+    ),
+    tag = "config"
+)]
+pub async fn get_setup_agents_stream(
+    State(_state): State<AppState>,
+) -> impl axum::response::IntoResponse {
+    use axum::response::sse::{Event, Sse};
+
+    let stream = async_stream::stream! {
+        let mut probe_tasks = tokio::task::JoinSet::new();
+
+        // Spawn concurrent probe tasks for all known agents
+        for (name, label) in crate::config::setup::KNOWN_AGENTS {
+            let name = name.to_string();
+            let label = label.to_string();
+            probe_tasks.spawn(async move {
+                if crate::config::setup::probe_agent(&name).await {
+                    let version = crate::config::setup::get_agent_version(&name).await;
+                    Some(DiscoveredAgentInfo {
+                        name,
+                        label,
+                        version,
+                    })
+                } else {
+                    None
+                }
+            });
+        }
+
+        // Stream results as they complete (order depends on which probes finish first)
+        while let Some(join_result) = probe_tasks.join_next().await {
+            if let Ok(Some(agent)) = join_result {
+                if let Ok(json) = serde_json::to_string(&agent) {
+                    yield Ok::<_, std::convert::Infallible>(Event::default().data(json));
+                }
+            }
+        }
+    };
+
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(1))
+            .text("keep-alive"),
+    )
+}
+
 /// Request to validate a setup configuration.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ValidateSetupRequest {
