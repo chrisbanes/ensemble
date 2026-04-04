@@ -57,7 +57,11 @@ async fn run_git(
 
 fn git_binary() -> &'static str {
     GIT_BINARY.get_or_init(|| {
-        for git in ["/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"] {
+        for git in [
+            "/usr/bin/git",
+            "/usr/local/bin/git",
+            "/opt/homebrew/bin/git",
+        ] {
             if Path::new(git).is_file() {
                 return git;
             }
