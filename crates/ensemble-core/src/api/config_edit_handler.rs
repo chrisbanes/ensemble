@@ -357,16 +357,13 @@ pub async fn get_setup_agents_stream(
             let name = name.to_string();
             let label = label.to_string();
             probe_tasks.spawn(async move {
-                if crate::config::setup::probe_agent(&name).await {
-                    let version = crate::config::setup::get_agent_version(&name).await;
-                    Some(DiscoveredAgentInfo {
+                crate::config::setup::probe_agent(&name)
+                    .await
+                    .map(|version| DiscoveredAgentInfo {
                         name,
                         label,
                         version,
                     })
-                } else {
-                    None
-                }
             });
         }
 

@@ -1,4 +1,5 @@
-use crate::config::ensemble::resolve_relative_to_base;
+use crate::config::ensemble::{resolve_relative_to_base, StepConfig};
+use crate::pipeline::dag::build_dag;
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -524,18 +525,7 @@ pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigE
     // Create a FuturesUnordered to collect results as they complete
     let mut probe_tasks: FuturesUnordered<_> = KNOWN_AGENTS
         .iter()
-        .map(|(name, label)| async move {
-            if probe_agent(name).await {
-                let version = get_agent_version(name).await;
-                Some(DiscoveredAgent {
-                    name: name.to_string(),
-                    label: label.to_string(),
-                    version,
-                })
-            } else {
-                None
-            }
-        })
+        .map(|(name, label)| discover_agent(name, label))
         .collect();
 
     // Collect results as they complete, with a deadline
@@ -546,6 +536,14 @@ pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigE
     }
 
     Ok(available)
+}
+
+async fn discover_agent(name: &str, label: &str) -> Option<DiscoveredAgent> {
+    probe_agent(name).await.map(|version| DiscoveredAgent {
+        name: name.to_string(),
+        label: label.to_string(),
+        version,
+    })
 }
 
 /// Discover capabilities for a specific agent.
@@ -785,101 +783,45 @@ pub(crate) fn find_step_for_agent(role: &str, steps: &[SetupStep]) -> String {
 }
 
 fn validate_dag(steps: &[SetupStep]) -> Result<(), ConfigError> {
-    use std::collections::{HashMap, HashSet, VecDeque};
-
     if steps.is_empty() {
         return Err(ConfigError::EmptyPipeline);
     }
 
-    let names: HashSet<&str> = steps.iter().map(|s| s.name.as_str()).collect();
-    let mut in_degree: HashMap<&str, usize> = HashMap::new();
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-
-    for step in steps {
-        in_degree.entry(step.name.as_str()).or_insert(0);
-        for dep in &step.depends {
-            if !names.contains(dep.as_str()) {
-                return Err(ConfigError::ConfigParseError {
-                    reason: format!("step '{}' depends on unknown step '{}'", step.name, dep),
-                });
-            }
-            adj.entry(dep.as_str())
-                .or_default()
-                .push(step.name.as_str());
-            *in_degree.entry(step.name.as_str()).or_insert(0) += 1;
-        }
-    }
-
-    let mut queue: VecDeque<&str> = in_degree
+    let step_configs: Vec<StepConfig> = steps
         .iter()
-        .filter(|(_, &deg)| deg == 0)
-        .map(|(&name, _)| name)
+        .map(|step| StepConfig {
+            name: step.name.clone(),
+            agent: step.agent_role.clone(),
+            // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
+            depends: Some(step.depends.clone()),
+            tracker_state: step.tracker_state.clone(),
+        })
         .collect();
 
-    let mut visited = 0;
-    while let Some(node) = queue.pop_front() {
-        visited += 1;
-        if let Some(deps) = adj.get(node) {
-            for &next in deps {
-                let deg = in_degree.get_mut(next).unwrap();
-                *deg -= 1;
-                if *deg == 0 {
-                    queue.push_back(next);
-                }
-            }
-        }
-    }
-
-    if visited != steps.len() {
-        return Err(ConfigError::ConfigParseError {
-            reason: "cycle detected in step dependencies".to_string(),
-        });
-    }
-
-    Ok(())
+    build_dag(&step_configs).map(|_| ()).map_err(|error| ConfigError::ConfigParseError {
+        reason: error.to_string(),
+    })
 }
 
-/// Probe whether an agent is available.
-pub async fn probe_agent(name: &str) -> bool {
+/// Probe an agent and return its version when available.
+pub async fn probe_agent(name: &str) -> Option<String> {
     let timeout = tokio::time::Duration::from_secs(8);
-    let result = tokio::time::timeout(timeout, async {
+    let output = tokio::time::timeout(timeout, async {
         tokio::process::Command::new("acpx")
             .args(["--agent", name, "--version"])
             .kill_on_drop(true)
             .output()
             .await
     })
-    .await;
+    .await
+    .ok()?
+    .ok()?;
 
-    match result {
-        Ok(Ok(o)) => o.status.success(),
-        _ => false,
+    if !output.status.success() {
+        return None;
     }
-}
 
-/// Get the version of an agent.
-pub async fn get_agent_version(name: &str) -> String {
-    let timeout = tokio::time::Duration::from_secs(8);
-    let result = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new("acpx")
-            .args(["--agent", name, "--version"])
-            .kill_on_drop(true)
-            .output()
-            .await
-    })
-    .await;
-
-    match result {
-        Ok(Ok(o)) if o.status.success() => {
-            let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if v.is_empty() {
-                String::new()
-            } else {
-                v
-            }
-        }
-        _ => String::new(),
-    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
@@ -1316,11 +1258,38 @@ pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const ENV_VARS: &[&str] = &["HOME", "ENSEMBLE_TODO_PATH"];
+
+    struct PathGuard {
+        _guard: EnvGuard,
+    }
+
+    impl PathGuard {
+        fn with_fake_acpx(script_body: &str) -> (Self, tempfile::TempDir) {
+            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TODO_PATH", "PATH"]);
+            let temp_dir = tempfile::tempdir().unwrap();
+            let script_path = temp_dir.path().join("acpx");
+            let mut script = std::fs::File::create(&script_path).unwrap();
+            writeln!(script, "#!/bin/sh").unwrap();
+            write!(script, "{script_body}").unwrap();
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o755);
+                std::fs::set_permissions(&script_path, perms).unwrap();
+            }
+
+            std::env::set_var("PATH", temp_dir.path());
+
+            (Self { _guard: guard }, temp_dir)
+        }
+    }
 
     struct EnvGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -1912,6 +1881,19 @@ on_failure: Failed
     }
 
     #[test]
+    fn validate_dag_reports_unknown_dependency_via_pipeline_builder() {
+        let steps = vec![SetupStep {
+            name: "build".into(),
+            agent_role: "builder".into(),
+            depends: vec!["missing".into()],
+            tracker_state: None,
+        }];
+
+        let error = validate_dag(&steps).unwrap_err();
+        assert!(error.to_string().contains("unknown step"));
+    }
+
+    #[test]
     fn write_setup_artifacts_creates_files() {
         let tmpdir = tempfile::tempdir().unwrap();
         let todo_path = tmpdir.path().join("TODO.md");
@@ -2268,6 +2250,35 @@ on_failure: Failed
             version.is_empty(),
             "timeout should cause version to return empty string"
         );
+    }
+
+    #[tokio::test]
+    async fn discover_available_agents_uses_single_probe_result_for_version() {
+        let script = r#"
+if [ "$1" = "--agent" ] && [ "$2" = "test-single-probe" ] && [ "$3" = "--version" ]; then
+  COUNT_FILE="$HOME/probe-count"
+  count=0
+  if [ -f "$COUNT_FILE" ]; then
+    IFS= read -r count < "$COUNT_FILE"
+  fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$COUNT_FILE"
+  printf 'claude 1.2.3\n'
+  exit 0
+fi
+
+exit 1
+"#;
+        let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
+        std::env::set_var("HOME", temp_dir.path());
+
+        let agent = discover_agent("test-single-probe", "Test Single Probe")
+            .await
+            .unwrap();
+        let probe_count = std::fs::read_to_string(temp_dir.path().join("probe-count")).unwrap();
+
+        assert_eq!(agent.version, "claude 1.2.3");
+        assert_eq!(probe_count.trim(), "1");
     }
 
     #[test]
