@@ -264,10 +264,11 @@ describe("SetupWizard", () => {
     expect(screen.getByText("/existing/repo/path1")).toBeInTheDocument();
     expect(screen.getByText("/existing/repo/path2")).toBeInTheDocument();
 
-    // Navigate to Agents step and verify agents are pre-filled
+    // Navigate to Agents step and wait for discovery to complete
     await user.click(screen.getByRole("button", { name: /next/i }));
     await waitFor(() => {
-      expect(screen.queryByText(/loading available agents/i)).not.toBeInTheDocument();
+      // Wait for the discovery to complete and agents to appear
+      expect(screen.getByText(/found \d+ agent/i)).toBeInTheDocument();
     });
 
     // Check that agent roles are pre-filled
