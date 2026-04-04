@@ -1416,6 +1416,167 @@ on_failure: Failed
     }
 
     #[tokio::test]
+    async fn save_yaml_and_save_guided_form_return_same_error_issue_shape() {
+        let (state, _temp_dir) = test_app_state();
+        let current_yaml = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 9
+  api_key: ghp_secret123
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let invalid_yaml = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 9
+  api_key: ghp_secret123
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: missing
+on_success: Done
+on_failure: Failed
+"#
+        .to_string();
+        *state.config_runtime.document_state.write().await = parse_raw_yaml(
+            state.config_runtime.config_path.clone(),
+            current_yaml.to_string(),
+        );
+
+        let (yaml_status, Json(yaml_response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: invalid_yaml.clone(),
+            }),
+        )
+        .await;
+
+        let form = crate::config::form::GuidedConfigForm {
+            tracker: crate::config::form::GuidedTrackerForm {
+                kind: "github".to_string(),
+                path: None,
+                repository: Some("acme/repo".to_string()),
+                project_number: Some(9),
+                api_key: Some("ghp_secret123".to_string()),
+                endpoint: None,
+                active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec![],
+            },
+            repos: vec![],
+            agents: vec![crate::config::form::GuidedAgentForm {
+                name: "builder".to_string(),
+                executor: None,
+                model: None,
+                acpx_agent: Some("claude".to_string()),
+                prompt: Some("Build it.".to_string()),
+                prompt_template: None,
+                reasoning_level: None,
+            }],
+            steps: vec![crate::config::form::GuidedStepForm {
+                name: "build".to_string(),
+                agent: "missing".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            runtime: crate::config::form::GuidedRuntimeForm {
+                max_cycles: 3,
+                concurrency: crate::config::form::GuidedConcurrencyForm {
+                    max_concurrent_agents: 4,
+                    max_step_parallelism: 2,
+                },
+                polling: crate::config::form::GuidedPollingForm { interval_ms: 30000 },
+                workspace: crate::config::form::GuidedWorkspaceForm { root: None },
+                hooks: crate::config::form::GuidedHooksForm {
+                    after_create: None,
+                    before_run: None,
+                    after_run: None,
+                    before_remove: None,
+                    timeout_ms: 60000,
+                },
+                agent: crate::config::form::GuidedAgentRuntimeForm {
+                    max_turns: 20,
+                    max_retry_backoff_ms: 300000,
+                    command: "claude-code".to_string(),
+                    session_mode: "code".to_string(),
+                    permission_policy: "auto_approve_all".to_string(),
+                    turn_timeout_ms: 3600000,
+                    read_timeout_ms: 5000,
+                    stall_timeout_ms: 300000,
+                },
+            },
+            transitions: crate::config::form::GuidedTransitionForm {
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (form_status, Json(form_response)) = save_guided_form(
+            axum::extract::State(state),
+            Json(SaveGuidedFormRequest {
+                base_raw_yaml: current_yaml.to_string(),
+                form,
+            }),
+        )
+        .await;
+
+        assert_eq!(yaml_status, StatusCode::BAD_REQUEST);
+        assert_eq!(form_status, StatusCode::BAD_REQUEST);
+        assert_eq!(yaml_response.state, "parsed");
+        assert_eq!(form_response.state, "parsed");
+        assert!(!yaml_response.issues.is_empty());
+        assert!(!form_response.issues.is_empty());
+
+        let yaml_issue = yaml_response.issues.last().unwrap();
+        let form_issue = form_response.issues.last().unwrap();
+        assert_eq!(yaml_issue.section, "save");
+        assert_eq!(form_issue.section, "save");
+        assert_eq!(yaml_issue.kind, form_issue.kind);
+        assert_eq!(yaml_issue.message, form_issue.message);
+
+        assert!(yaml_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
+        assert!(form_response.raw_yaml.as_ref().unwrap().contains("[REDACTED]"));
+        assert!(
+            !yaml_response
+                .raw_yaml
+                .as_ref()
+                .unwrap()
+                .contains("ghp_secret123")
+        );
+        assert!(
+            !form_response
+                .raw_yaml
+                .as_ref()
+                .unwrap()
+                .contains("ghp_secret123")
+        );
+        assert_eq!(yaml_response.config_path, form_response.config_path);
+    }
+
+    #[tokio::test]
     async fn save_setup_reloads_document_state_after_writing_artifacts() {
         let (state, temp_dir) = test_app_state();
         let request = SaveSetupRequest {
