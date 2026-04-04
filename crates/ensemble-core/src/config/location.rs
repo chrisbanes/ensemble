@@ -133,6 +133,45 @@ fn expand_override_path(path: &Path) -> Result<PathBuf, ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const ENV_VARS: &[&str] = &["ENSEMBLE_TEST_DESKTOP_CONFIG_DIR"];
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_config_path_for_dir_appends_config_yaml() {
@@ -177,6 +216,7 @@ mod tests {
 
     #[test]
     fn test_resolve_desktop_config_dir_expands_env_override() {
+        let _env = EnvGuard::lock(ENV_VARS);
         std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/desktop-config");
         let resolved = resolve_config_dir_for_desktop(Some(OsString::from(
             "$ENSEMBLE_TEST_DESKTOP_CONFIG_DIR",
@@ -248,6 +288,23 @@ mod tests {
     fn test_default_todo_state_path_errors_without_home_dir() {
         let err = default_todo_state_path_from_optional_home(None).unwrap_err();
         assert!(err.to_string().contains("home"));
+    }
+
+    #[test]
+    fn env_guard_restores_tracked_vars() {
+        std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/before");
+
+        {
+            let _env = EnvGuard::lock(ENV_VARS);
+            assert!(std::env::var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR").is_err());
+            std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/during");
+        }
+
+        assert_eq!(
+            std::env::var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR").as_deref(),
+            Ok("/tmp/before")
+        );
+        std::env::remove_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR");
     }
 
     #[test]

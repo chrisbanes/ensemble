@@ -1316,6 +1316,42 @@ pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const ENV_VARS: &[&str] = &["HOME", "ENSEMBLE_TODO_PATH"];
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars.iter().map(|&key| (key, std::env::var(key).ok())).collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn build_setup_artifacts_creates_yaml_and_templates() {
@@ -1932,6 +1968,7 @@ on_failure: Failed
 
     #[test]
     fn write_setup_artifacts_expands_tilde_for_todo_path() {
+        let _env = EnvGuard::lock(ENV_VARS);
         let tmpdir = tempfile::tempdir().unwrap();
         let fake_home = tmpdir.path().join("fake-home");
         std::fs::create_dir_all(&fake_home).unwrap();
@@ -1997,6 +2034,7 @@ on_failure: Failed
 
     #[test]
     fn write_setup_artifacts_expands_env_for_todo_path_before_rebasing() {
+        let _env = EnvGuard::lock(ENV_VARS);
         let tmpdir = tempfile::tempdir().unwrap();
         std::env::set_var("ENSEMBLE_TODO_PATH", "env-dir/TODO.md");
 
@@ -2026,6 +2064,28 @@ on_failure: Failed
 
         assert!(tmpdir.path().join("env-dir/TODO.md").exists());
         assert!(!tmpdir.path().join("$ENSEMBLE_TODO_PATH").exists());
+    }
+
+    #[test]
+    fn env_guard_restores_tracked_vars() {
+        std::env::set_var("HOME", "/tmp/home-before");
+        std::env::set_var("ENSEMBLE_TODO_PATH", "before/TODO.md");
+
+        {
+            let _env = EnvGuard::lock(ENV_VARS);
+            assert!(std::env::var("HOME").is_err());
+            assert!(std::env::var("ENSEMBLE_TODO_PATH").is_err());
+            std::env::set_var("HOME", "/tmp/home-during");
+            std::env::set_var("ENSEMBLE_TODO_PATH", "during/TODO.md");
+        }
+
+        assert_eq!(std::env::var("HOME").as_deref(), Ok("/tmp/home-before"));
+        assert_eq!(
+            std::env::var("ENSEMBLE_TODO_PATH").as_deref(),
+            Ok("before/TODO.md")
+        );
+        std::env::remove_var("HOME");
+        std::env::remove_var("ENSEMBLE_TODO_PATH");
     }
 
     #[test]
