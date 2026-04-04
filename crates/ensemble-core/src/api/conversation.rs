@@ -361,6 +361,13 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "conversation_parse_error");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("failed to parse conversation:"));
     }
 
     #[test]
