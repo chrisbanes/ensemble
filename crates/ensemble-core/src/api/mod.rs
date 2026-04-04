@@ -5,6 +5,7 @@ pub mod conversation;
 pub mod fs_handler;
 pub mod handlers;
 pub mod history_handler;
+pub mod interactions;
 pub mod openapi;
 pub mod router;
 pub mod ws;

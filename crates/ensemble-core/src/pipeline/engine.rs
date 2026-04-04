@@ -10,6 +10,8 @@ pub enum StepState {
     Pending,
     /// Step is currently executing in the given session.
     Running { session_id: String },
+    /// Step is waiting for a human interaction response before it can resume.
+    BlockedOnHuman { interaction_request_id: String },
     /// Step completed and was approved.
     Passed,
     /// Step completed but was rejected by a review agent.
@@ -45,6 +47,11 @@ pub struct DispatchRequest {
 pub enum PipelineAction {
     /// Dispatch these steps to their respective agents.
     Dispatch(Vec<DispatchRequest>),
+    /// A step is blocked pending a human interaction response.
+    BlockedOnHuman {
+        step: String,
+        interaction_request_id: String,
+    },
     /// All steps have passed — pipeline completed successfully.
     Succeeded,
     /// A step failed or was rejected — pipeline halted.
@@ -128,6 +135,24 @@ impl PipelineRun {
                     reason: summary,
                 }
             }
+        }
+    }
+
+    /// Handle a step that is blocked waiting for a human interaction response.
+    pub fn step_blocked_on_human(
+        &mut self,
+        step_name: &str,
+        interaction_request_id: String,
+    ) -> PipelineAction {
+        self.step_states.insert(
+            step_name.to_string(),
+            StepState::BlockedOnHuman {
+                interaction_request_id: interaction_request_id.clone(),
+            },
+        );
+        PipelineAction::BlockedOnHuman {
+            step: step_name.to_string(),
+            interaction_request_id,
         }
     }
 
@@ -464,6 +489,10 @@ mod tests {
             session_id: "x".to_string()
         }
         .is_terminal());
+        assert!(!StepState::BlockedOnHuman {
+            interaction_request_id: "interaction-1".to_string()
+        }
+        .is_terminal());
         assert!(StepState::Passed.is_terminal());
         assert!(StepState::Rejected {
             summary: "nope".to_string()
@@ -473,5 +502,96 @@ mod tests {
             error: "boom".to_string()
         }
         .is_terminal());
+    }
+
+    #[test]
+    fn blocked_step_sets_blocked_state() {
+        let steps = vec![make_step("review", "reviewer", &[])];
+        let mut run = make_run(&steps);
+
+        run.mark_running("review", "session-review".to_string());
+
+        let _ = run.step_blocked_on_human("review", "interaction-123".to_string());
+
+        assert_eq!(
+            run.step_states["review"],
+            StepState::BlockedOnHuman {
+                interaction_request_id: "interaction-123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn blocked_step_returns_blocked_pipeline_action() {
+        let steps = vec![make_step("review", "reviewer", &[])];
+        let mut run = make_run(&steps);
+
+        run.mark_running("review", "session-review".to_string());
+
+        let action = run.step_blocked_on_human("review", "interaction-123".to_string());
+
+        assert_eq!(
+            action,
+            PipelineAction::BlockedOnHuman {
+                step: "review".to_string(),
+                interaction_request_id: "interaction-123".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn blocked_step_is_not_terminal_success_or_failure() {
+        let steps = vec![make_step("review", "reviewer", &[])];
+        let mut run = make_run(&steps);
+
+        run.mark_running("review", "session-review".to_string());
+
+        let action = run.step_blocked_on_human("review", "interaction-123".to_string());
+
+        assert_eq!(
+            action,
+            PipelineAction::BlockedOnHuman {
+                step: "review".to_string(),
+                interaction_request_id: "interaction-123".to_string()
+            }
+        );
+        assert!(!run.step_states["review"].is_terminal());
+        assert_ne!(run.step_states["review"], StepState::Passed);
+        assert!(
+            !matches!(
+                action,
+                PipelineAction::Succeeded | PipelineAction::Failed { .. }
+            ),
+            "blocked step should not produce terminal pipeline action: {action:?}"
+        );
+    }
+
+    #[test]
+    fn downstream_steps_are_not_dispatched_when_a_dependency_is_blocked() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+            make_step("deploy", "deployer", &["review"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        let action = run.step_completed("build", Verdict::Approve);
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
+            "expected Dispatch([review]), got {action:?}"
+        );
+
+        run.mark_running("review", "session-review".to_string());
+        let action = run.step_blocked_on_human("review", "interaction-123".to_string());
+
+        assert_eq!(
+            action,
+            PipelineAction::BlockedOnHuman {
+                step: "review".to_string(),
+                interaction_request_id: "interaction-123".to_string()
+            }
+        );
+        assert_eq!(run.find_dispatchable(), PipelineAction::Waiting);
     }
 }

@@ -1,5 +1,6 @@
 use crate::api::handlers::ApiError;
 use crate::api::router::AppState;
+use crate::interaction::{InteractionStatus, InteractionStore};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -20,6 +21,24 @@ pub struct RetryResponse {
     pub retried: bool,
     pub issue_identifier: String,
     pub message: String,
+}
+
+/// Response for a successful resume operation.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ResumeResponse {
+    pub resumed: bool,
+    pub issue_identifier: String,
+    pub message: String,
+}
+
+fn interaction_store(state: &AppState) -> InteractionStore {
+    let config_dir = state
+        .config_runtime
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    InteractionStore::new(config_dir)
 }
 
 /// POST /api/v1/{identifier}/stop
@@ -220,6 +239,155 @@ pub async fn post_retry(
                 retried: true,
                 issue_identifier: identifier,
                 message: "removed from retry queue, will be re-dispatched on next poll".to_string(),
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/issues/{identifier}/resume
+///
+/// Releases a blocked issue after a human interaction has been resolved so the next poll can
+/// requeue it. Returns 404 if the issue is unknown, 409 if the issue is not resumable.
+#[utoipa::path(
+    post,
+    path = "/api/v1/issues/{identifier}/resume",
+    operation_id = "postResumeIssue",
+    params(("identifier" = String, Path, description = "Issue identifier")),
+    responses(
+        (status = 200, description = "Issue resume queued", body = ResumeResponse),
+        (status = 404, description = "Issue not found", body = ApiError),
+        (status = 409, description = "Issue cannot be resumed", body = ApiError)
+    ),
+    tag = "controls"
+)]
+pub async fn post_resume(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
+    let (waiting_entry, issue_exists) = {
+        let lock = state.orchestrator_state.read().await;
+        let waiting_entry = lock
+            .waiting_on_human
+            .values()
+            .find(|entry| entry.identifier == identifier)
+            .cloned();
+        let issue_exists = waiting_entry.is_some()
+            || lock
+                .running
+                .values()
+                .any(|entry| entry.identifier == identifier)
+            || lock
+                .retry_attempts
+                .values()
+                .any(|entry| entry.identifier == identifier);
+        (waiting_entry, issue_exists)
+    };
+
+    let waiting_entry = match waiting_entry {
+        Some(entry) => entry,
+        None => {
+            let (status, code, message) = if issue_exists {
+                (
+                    StatusCode::CONFLICT,
+                    "invalid_resume_state",
+                    format!("issue '{identifier}' is not waiting on human input"),
+                )
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    "issue_not_found",
+                    format!("no issue with identifier '{identifier}'"),
+                )
+            };
+            return (
+                status,
+                Json(serde_json::to_value(ApiError::new(code, &message)).unwrap()),
+            )
+                .into_response();
+        }
+    };
+
+    let store = interaction_store(&state);
+    let interaction = match store.get(&waiting_entry.interaction_request_id).await {
+        Ok(Some(interaction)) => interaction,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "interaction_not_found",
+                        &format!(
+                            "interaction not found: {}",
+                            waiting_entry.interaction_request_id
+                        ),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "interaction_store_error",
+                        &error.to_string(),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    if interaction.status != InteractionStatus::Resolved {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::to_value(ApiError::new(
+                    "invalid_resume_state",
+                    &format!(
+                        "issue '{}' cannot be resumed until interaction '{}' is resolved",
+                        identifier, interaction.id
+                    ),
+                ))
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    if !interaction.awaiting_resume {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::to_value(ApiError::new(
+                    "already_resumed",
+                    &format!("issue '{identifier}' has already been resumed"),
+                ))
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    {
+        let mut lock = state.orchestrator_state.write().await;
+        lock.queue_resume(&waiting_entry.issue_id);
+    }
+
+    state.refresh_requested.notify_one();
+
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(ResumeResponse {
+                resumed: true,
+                issue_identifier: identifier,
+                message: "issue queued for resume on next refresh".to_string(),
             })
             .unwrap(),
         ),

@@ -2,14 +2,23 @@ import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useGetState, getGetStateQueryKey } from "./generated/api/state/state";
 import { useGetIssueDetail } from "./generated/api/issues/issues";
+import { getGetIssueDetailQueryKey } from "./generated/api/issues/issues";
 import { useGetConfig } from "./generated/api/config/config";
 import { useGetHistory } from "./generated/api/history/history";
 import { useListDirectory } from "./generated/api/filesystem/filesystem";
 import {
   usePostRefresh,
+  usePostResumeIssue,
   usePostStop,
   usePostRetry,
 } from "./generated/api/controls/controls";
+import {
+  getListOpenInteractionsQueryKey,
+  useGetInteractionById,
+  useListOpenInteractions,
+  useRespondToInteraction,
+  useCancelInteraction,
+} from "./generated/api/interactions/interactions";
 import {
   useSaveSetup,
   useValidateSetup,
@@ -28,6 +37,7 @@ import type {
   HistoryResponse,
   ConfigStateResponse,
   GuidedConfigForm,
+  InteractionRequest,
 } from "./generated/models";
 
 /**
@@ -83,6 +93,24 @@ export function useIssueDetailQuery(identifier: string) {
       refetchInterval: 2000,
       enabled: identifier.length > 0,
       select: (resp) => resp.data as IssueDetailSnapshot,
+    },
+  });
+}
+
+export function useInteractionsQuery() {
+  return useListOpenInteractions<InteractionRequest[]>({
+    query: {
+      refetchInterval: 3000,
+      select: (resp) => resp.data as InteractionRequest[],
+    },
+  });
+}
+
+export function useInteractionDetailQuery(id: string) {
+  return useGetInteractionById<InteractionRequest>(id, {
+    query: {
+      enabled: id.length > 0,
+      select: (resp) => resp.data as InteractionRequest,
     },
   });
 }
@@ -174,6 +202,57 @@ export function useRetryMutation() {
     mutation: {
       onSuccess: () => {
         queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
+      },
+    },
+  });
+}
+
+export function useRespondToInteractionMutation(identifier?: string) {
+  const queryClient = useQueryClient();
+  return useRespondToInteraction({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
+        queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
+        if (identifier) {
+          queryClient.invalidateQueries({
+            queryKey: getGetIssueDetailQueryKey(identifier),
+          });
+        }
+      },
+    },
+  });
+}
+
+export function useCancelInteractionMutation(identifier?: string) {
+  const queryClient = useQueryClient();
+  return useCancelInteraction({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
+        queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
+        if (identifier) {
+          queryClient.invalidateQueries({
+            queryKey: getGetIssueDetailQueryKey(identifier),
+          });
+        }
+      },
+    },
+  });
+}
+
+export function useResumeIssueMutation(identifier?: string) {
+  const queryClient = useQueryClient();
+  return usePostResumeIssue({
+    mutation: {
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
+        queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
+        if (identifier) {
+          queryClient.invalidateQueries({
+            queryKey: getGetIssueDetailQueryKey(identifier),
+          });
+        }
       },
     },
   });

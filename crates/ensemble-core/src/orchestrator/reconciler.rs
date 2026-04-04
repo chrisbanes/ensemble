@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
 use super::state::OrchestratorState;
@@ -87,8 +88,14 @@ pub async fn reconcile_tracker_states(
     active_states_lower: &[String],
     terminal_states_lower: &[String],
 ) -> ReconcileTrackerResult {
-    let running_ids: Vec<String> = state.running_issue_ids().map(|s| s.to_string()).collect();
-    if running_ids.is_empty() {
+    let mut tracked_ids: Vec<String> = state.running_issue_ids().map(|s| s.to_string()).collect();
+    for issue_id in state.waiting_on_human.keys() {
+        if !tracked_ids.contains(issue_id) {
+            tracked_ids.push(issue_id.clone());
+        }
+    }
+
+    if tracked_ids.is_empty() {
         return ReconcileTrackerResult {
             updates: vec![],
             terminate_cleanup: vec![],
@@ -97,7 +104,7 @@ pub async fn reconcile_tracker_states(
         };
     }
 
-    let refreshed = match tracker.fetch_issue_states_by_ids(&running_ids).await {
+    let refreshed = match tracker.fetch_issue_states_by_ids(&tracked_ids).await {
         Ok(issues) => issues,
         Err(e) => {
             warn!(
@@ -113,12 +120,13 @@ pub async fn reconcile_tracker_states(
         }
     };
 
+    let refreshed_ids: HashSet<String> = refreshed.iter().map(|issue| issue.id.clone()).collect();
     let mut updates = Vec::new();
     let mut terminate_cleanup = Vec::new();
     let mut terminate_no_cleanup = Vec::new();
 
     for issue in refreshed {
-        if !state.is_running(&issue.id) {
+        if !state.is_running(&issue.id) && !state.is_waiting_on_human(&issue.id) {
             continue;
         }
 
@@ -151,6 +159,32 @@ pub async fn reconcile_tracker_states(
                 terminate_no_cleanup.push(i);
             }
         }
+    }
+
+    for issue_id in tracked_ids {
+        if refreshed_ids.contains(&issue_id) || !state.is_waiting_on_human(&issue_id) {
+            continue;
+        }
+
+        let identifier = state
+            .waiting_on_human
+            .get(&issue_id)
+            .map(|entry| entry.identifier.clone())
+            .unwrap_or_else(|| issue_id.clone());
+        terminate_no_cleanup.push(Issue {
+            id: issue_id.clone(),
+            identifier,
+            title: format!("Missing tracked issue {issue_id}"),
+            description: None,
+            priority: None,
+            state: "missing".to_string(),
+            branch_name: None,
+            url: None,
+            labels: vec![],
+            blocked_by: vec![],
+            created_at: None,
+            updated_at: None,
+        });
     }
 
     ReconcileTrackerResult {

@@ -7,6 +7,17 @@ use crate::config::ensemble::EnsembleConfig;
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
+/// Issue currently blocked waiting for a human response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WaitingOnHumanEntry {
+    pub issue_id: String,
+    pub identifier: String,
+    pub interaction_request_id: String,
+    pub step_name: String,
+    pub retry_attempt: Option<u32>,
+    pub requested_at: DateTime<Utc>,
+}
+
 /// Rate limit snapshot from agent events.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct RateLimitSnapshot {
@@ -29,6 +40,10 @@ pub struct OrchestratorState {
     pub claimed: HashSet<String>,
     /// Pending retries: issue_id -> RetryEntry.
     pub retry_attempts: HashMap<String, RetryEntry>,
+    /// Issues blocked waiting for a human response: issue_id -> waiting entry.
+    pub waiting_on_human: HashMap<String, WaitingOnHumanEntry>,
+    /// Explicit resume requests queued by the API/UI: issue IDs.
+    pub resume_requested: HashSet<String>,
     /// Completed issue IDs (bookkeeping only).
     pub completed: HashSet<String>,
     /// Aggregate token counts and runtime seconds.
@@ -52,6 +67,8 @@ impl OrchestratorState {
             running: HashMap::new(),
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
+            waiting_on_human: HashMap::new(),
+            resume_requested: HashSet::new(),
             completed: HashSet::new(),
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
@@ -124,11 +141,44 @@ impl OrchestratorState {
         self.retry_attempts.remove(issue_id)
     }
 
+    /// Add or replace a waiting-on-human entry while keeping the issue claimed.
+    pub fn add_waiting_on_human(&mut self, entry: WaitingOnHumanEntry) {
+        self.claimed.insert(entry.issue_id.clone());
+        self.waiting_on_human.insert(entry.issue_id.clone(), entry);
+    }
+
+    /// Remove and return a waiting-on-human entry.
+    pub fn remove_waiting_on_human(&mut self, issue_id: &str) -> Option<WaitingOnHumanEntry> {
+        self.waiting_on_human.remove(issue_id)
+    }
+
+    /// Check if an issue is currently waiting on a human response.
+    pub fn is_waiting_on_human(&self, issue_id: &str) -> bool {
+        self.waiting_on_human.contains_key(issue_id)
+    }
+
+    /// Queue an explicit resume request for an issue already waiting on human input.
+    pub fn queue_resume(&mut self, issue_id: &str) {
+        self.resume_requested.insert(issue_id.to_string());
+    }
+
+    /// Remove a queued explicit resume request.
+    pub fn clear_resume_request(&mut self, issue_id: &str) {
+        self.resume_requested.remove(issue_id);
+    }
+
+    /// Check whether an issue has an explicit resume request queued.
+    pub fn is_resume_requested(&self, issue_id: &str) -> bool {
+        self.resume_requested.contains(issue_id)
+    }
+
     /// Release a claim entirely (remove from claimed, running, and retry).
     pub fn release_claim(&mut self, issue_id: &str) {
         self.claimed.remove(issue_id);
         self.running.remove(issue_id);
         self.retry_attempts.remove(issue_id);
+        self.waiting_on_human.remove(issue_id);
+        self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
     }
 
@@ -297,6 +347,7 @@ mod tests {
         assert!(state.running.is_empty());
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
+        assert!(state.waiting_on_human.is_empty());
         assert!(state.completed.is_empty());
         assert_eq!(state.agent_totals.total_tokens, 0);
         assert!(state.pipeline_runs.is_empty());
@@ -376,6 +427,54 @@ mod tests {
 
         assert!(removed.is_some());
         assert!(!state.retry_attempts.contains_key("1"));
+    }
+
+    #[test]
+    fn test_add_waiting_on_human_keeps_claimed() {
+        let mut state = OrchestratorState::new(30000, 10);
+
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            interaction_request_id: "interaction-1".to_string(),
+            step_name: "build".to_string(),
+            retry_attempt: None,
+            requested_at: Utc::now(),
+        });
+
+        assert!(state.is_claimed("1"));
+        assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[test]
+    fn test_queue_and_clear_resume_request() {
+        let mut state = OrchestratorState::new(30000, 10);
+
+        state.queue_resume("1");
+        assert!(state.is_resume_requested("1"));
+
+        state.clear_resume_request("1");
+        assert!(!state.is_resume_requested("1"));
+    }
+
+    #[test]
+    fn test_release_claim_clears_waiting_on_human() {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            interaction_request_id: "interaction-1".to_string(),
+            step_name: "build".to_string(),
+            retry_attempt: None,
+            requested_at: Utc::now(),
+        });
+        state.queue_resume("1");
+
+        state.release_claim("1");
+
+        assert!(!state.is_claimed("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(!state.is_resume_requested("1"));
     }
 
     #[test]

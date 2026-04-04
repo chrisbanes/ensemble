@@ -23,8 +23,13 @@ use utoipa::OpenApi;
         crate::api::config_edit_handler::save_guided_form,
         crate::api::conversation::get_conversation,
         crate::api::conversation::get_conversation_message,
+        crate::api::interactions::list_open_interactions,
+        crate::api::interactions::get_interaction_by_id,
+        crate::api::interactions::respond_to_interaction,
+        crate::api::interactions::cancel_interaction,
         crate::api::controls::post_stop,
         crate::api::controls::post_retry,
+        crate::api::controls::post_resume,
         crate::api::fs_handler::list_directory,
     ),
     components(schemas(
@@ -48,6 +53,13 @@ use utoipa::OpenApi;
         // Control types
         crate::api::controls::StopResponse,
         crate::api::controls::RetryResponse,
+        crate::api::controls::ResumeResponse,
+        // Interaction types
+        crate::api::interactions::InteractionResponseBody,
+        crate::interaction::model::InteractionKind,
+        crate::interaction::model::InteractionStatus,
+        crate::interaction::model::InteractionResponse,
+        crate::interaction::model::InteractionRequest,
         // Config types
         crate::api::config_handler::ConfigResponse,
         crate::api::config_edit_handler::ConfigStateResponse,
@@ -79,6 +91,8 @@ use utoipa::OpenApi;
         crate::config::ensemble::WorkspaceConfig,
         crate::config::ensemble::HooksConfig,
         crate::config::ensemble::AgentRuntimeConfig,
+        crate::config::ensemble::HumanInteractionConfig,
+        crate::config::ensemble::HumanResumeMode,
         // Guided form types
         crate::config::form::GuidedConfigForm,
         crate::config::form::GuidedTrackerForm,
@@ -107,6 +121,7 @@ use utoipa::OpenApi;
         (name = "state", description = "Runtime state"),
         (name = "issues", description = "Issue details"),
         (name = "controls", description = "Agent control"),
+        (name = "interactions", description = "Human interaction requests"),
         (name = "history", description = "Completion history"),
         (name = "config", description = "Configuration"),
         (name = "conversation", description = "Agent conversation logs"),
@@ -124,6 +139,8 @@ mod tests {
         let spec = ApiDoc::openapi().to_pretty_json().unwrap();
         assert!(spec.contains("\"openapi\":"));
         assert!(spec.contains("Ensemble API"));
+        assert!(spec.contains("HumanInteractionConfig"));
+        assert!(spec.contains("HumanResumeMode"));
     }
 
     #[test]

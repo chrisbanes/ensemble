@@ -1,4 +1,5 @@
 use crate::error::ConfigError;
+use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use liquid::ParserBuilder;
 
@@ -9,6 +10,15 @@ pub fn render_prompt(
     template_str: &str,
     issue: &Issue,
     attempt: Option<u32>,
+) -> Result<String, ConfigError> {
+    render_prompt_with_interaction_response(template_str, issue, attempt, None)
+}
+
+pub fn render_prompt_with_interaction_response(
+    template_str: &str,
+    issue: &Issue,
+    attempt: Option<u32>,
+    interaction_response: Option<&InteractionResponse>,
 ) -> Result<String, ConfigError> {
     let parser =
         ParserBuilder::with_stdlib()
@@ -57,6 +67,15 @@ pub fn render_prompt(
 
     if let Some(a) = attempt {
         globals.insert("attempt".into(), liquid::model::Value::scalar(a as i64));
+    }
+
+    if let Some(response) = interaction_response {
+        globals.insert(
+            "interaction_response".into(),
+            liquid::model::to_value(response).map_err(|e| ConfigError::TemplateRenderError {
+                reason: e.to_string(),
+            })?,
+        );
     }
 
     template
@@ -144,5 +163,21 @@ mod tests {
             result,
             Err(ConfigError::TemplateParseError { .. })
         ));
+    }
+
+    #[test]
+    fn test_render_interaction_response() {
+        let template = "{{ interaction_response.kind }}: {{ interaction_response.text }} / {{ interaction_response.selected_option }}";
+        let response = InteractionResponse::Question {
+            response_schema_version: 1,
+            text: "Use staging".to_string(),
+            selected_option: Some("staging".to_string()),
+        };
+
+        let result =
+            render_prompt_with_interaction_response(template, &test_issue(), None, Some(&response))
+                .unwrap();
+
+        assert_eq!(result, "question: Use staging / staging");
     }
 }

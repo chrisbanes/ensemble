@@ -12,6 +12,7 @@ pub struct RuntimeSnapshot {
     pub counts: SnapshotCounts,
     pub running: Vec<RunningSessionRow>,
     pub retrying: Vec<RetryRow>,
+    pub waiting_on_human: Vec<WaitingInteractionRow>,
     pub agent_totals: AgentTotalsSnapshot,
     pub rate_limits: Option<RateLimitSnapshot>,
     pub poll_interval_ms: u64,
@@ -23,6 +24,25 @@ pub struct RuntimeSnapshot {
 pub struct SnapshotCounts {
     pub running: usize,
     pub retrying: usize,
+    pub waiting_on_human: usize,
+}
+
+/// A compact row for an issue currently waiting on human input.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WaitingInteractionRow {
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub interaction_request_id: String,
+    pub step_name: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+/// Compact issue-detail summary for the current waiting interaction.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CurrentInteractionSummary {
+    pub interaction_request_id: String,
+    pub step_name: String,
+    pub requested_at: DateTime<Utc>,
 }
 
 /// A single row in the running sessions list.
@@ -84,6 +104,7 @@ pub struct IssueDetailSnapshot {
     pub attempts: AttemptInfo,
     pub running: Option<RunningDetail>,
     pub retry: Option<RetryRow>,
+    pub current_interaction: Option<CurrentInteractionSummary>,
     pub last_error: Option<String>,
 }
 
@@ -133,6 +154,12 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
         .map(retry_entry_to_row)
         .collect();
 
+    let waiting_rows: Vec<WaitingInteractionRow> = state
+        .waiting_on_human
+        .values()
+        .map(waiting_entry_to_row)
+        .collect();
+
     // Compute live seconds_running: cumulative from ended sessions + active elapsed
     let active_elapsed: f64 = state
         .running
@@ -150,9 +177,11 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
         counts: SnapshotCounts {
             running: running_rows.len(),
             retrying: retry_rows.len(),
+            waiting_on_human: waiting_rows.len(),
         },
         running: running_rows,
         retrying: retry_rows,
+        waiting_on_human: waiting_rows,
         agent_totals: AgentTotalsSnapshot {
             input_tokens: state.agent_totals.input_tokens,
             output_tokens: state.agent_totals.output_tokens,
@@ -182,13 +211,20 @@ pub fn build_issue_snapshot(
         .values()
         .find(|e| e.identifier == identifier);
 
-    if running_entry.is_none() && retry_entry.is_none() {
+    let waiting_entry = state
+        .waiting_on_human
+        .values()
+        .find(|e| e.identifier == identifier);
+
+    if running_entry.is_none() && retry_entry.is_none() && waiting_entry.is_none() {
         return None;
     }
 
     let (issue_id, issue_identifier) = if let Some(entry) = running_entry {
         (entry.issue_id.clone(), entry.identifier.clone())
     } else if let Some(entry) = retry_entry {
+        (entry.issue_id.clone(), entry.identifier.clone())
+    } else if let Some(entry) = waiting_entry {
         (entry.issue_id.clone(), entry.identifier.clone())
     } else {
         return None;
@@ -199,11 +235,17 @@ pub fn build_issue_snapshot(
 
     let status = if running_entry.is_some() {
         "running".to_string()
+    } else if waiting_entry.is_some() {
+        "waiting_on_human".to_string()
     } else {
         "retrying".to_string()
     };
 
     let current_retry_attempt = if let Some(entry) = running_entry {
+        entry.retry_attempt
+    } else if let Some(entry) = waiting_entry {
+        entry.retry_attempt
+    } else if let Some(entry) = state.running.get(&issue_id) {
         entry.retry_attempt
     } else {
         retry_entry.map(|entry| entry.attempt)
@@ -239,6 +281,7 @@ pub fn build_issue_snapshot(
     });
 
     let retry_detail = retry_entry.map(retry_entry_to_row);
+    let current_interaction = waiting_entry.map(current_interaction_summary);
 
     let last_error = retry_entry.and_then(|e| e.error.clone());
 
@@ -255,6 +298,7 @@ pub fn build_issue_snapshot(
         },
         running: running_detail,
         retry: retry_detail,
+        current_interaction,
         last_error,
     })
 }
@@ -303,10 +347,32 @@ fn retry_entry_to_row(entry: &RetryEntry) -> RetryRow {
     }
 }
 
+fn waiting_entry_to_row(
+    entry: &crate::orchestrator::state::WaitingOnHumanEntry,
+) -> WaitingInteractionRow {
+    WaitingInteractionRow {
+        issue_id: entry.issue_id.clone(),
+        issue_identifier: entry.identifier.clone(),
+        interaction_request_id: entry.interaction_request_id.clone(),
+        step_name: entry.step_name.clone(),
+        requested_at: entry.requested_at,
+    }
+}
+
+fn current_interaction_summary(
+    entry: &crate::orchestrator::state::WaitingOnHumanEntry,
+) -> CurrentInteractionSummary {
+    CurrentInteractionSummary {
+        interaction_request_id: entry.interaction_request_id.clone(),
+        step_name: entry.step_name.clone(),
+        requested_at: entry.requested_at,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::orchestrator::state::OrchestratorState;
+    use crate::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
     use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
     fn test_issue() -> Issue {
@@ -374,6 +440,14 @@ mod tests {
             total_tokens: 7400,
             seconds_running: 120.5,
         };
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_789".to_string(),
+            identifier: "my-repo#77".to_string(),
+            interaction_request_id: "interaction-1".to_string(),
+            step_name: "review".to_string(),
+            retry_attempt: None,
+            requested_at: Utc::now(),
+        });
         state
     }
 
@@ -384,6 +458,22 @@ mod tests {
 
         assert_eq!(snapshot.counts.running, 1);
         assert_eq!(snapshot.counts.retrying, 1);
+        assert_eq!(snapshot.counts.waiting_on_human, 1);
+    }
+
+    #[test]
+    fn runtime_snapshot_includes_waiting_interaction_count() {
+        let state = build_test_state();
+        let snapshot = build_state_snapshot(&state);
+
+        assert_eq!(snapshot.counts.waiting_on_human, 1);
+        assert_eq!(snapshot.waiting_on_human.len(), 1);
+
+        let row = &snapshot.waiting_on_human[0];
+        assert_eq!(row.issue_id, "NODE_789");
+        assert_eq!(row.issue_identifier, "my-repo#77");
+        assert_eq!(row.interaction_request_id, "interaction-1");
+        assert_eq!(row.step_name, "review");
     }
 
     #[test]
@@ -451,6 +541,7 @@ mod tests {
         assert!(json.get("counts").is_some());
         assert!(json.get("running").is_some());
         assert!(json.get("retrying").is_some());
+        assert!(json.get("waiting_on_human").is_some());
         assert!(json.get("agent_totals").is_some());
         assert!(json.get("rate_limits").is_some());
         assert!(json.get("poll_interval_ms").is_some());
@@ -460,6 +551,7 @@ mod tests {
         let counts = json.get("counts").unwrap();
         assert!(counts.get("running").is_some());
         assert!(counts.get("retrying").is_some());
+        assert!(counts.get("waiting_on_human").is_some());
 
         // Verify running row sub-keys
         let running = json.get("running").unwrap().as_array().unwrap();
@@ -497,8 +589,10 @@ mod tests {
         let snapshot = build_state_snapshot(&state);
         assert_eq!(snapshot.counts.running, 0);
         assert_eq!(snapshot.counts.retrying, 0);
+        assert_eq!(snapshot.counts.waiting_on_human, 0);
         assert!(snapshot.running.is_empty());
         assert!(snapshot.retrying.is_empty());
+        assert!(snapshot.waiting_on_human.is_empty());
         assert_eq!(snapshot.agent_totals.seconds_running, 0.0);
         assert_eq!(snapshot.poll_interval_ms, 30000);
         assert!(snapshot.last_tick_at.is_none());
@@ -549,6 +643,53 @@ mod tests {
     }
 
     #[test]
+    fn issue_detail_snapshot_includes_current_interaction_summary() {
+        let state = build_test_state();
+        let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces").unwrap();
+
+        assert_eq!(detail.status, "waiting_on_human");
+        let interaction = detail.current_interaction.unwrap();
+        assert_eq!(interaction.interaction_request_id, "interaction-1");
+        assert_eq!(interaction.step_name, "review");
+    }
+
+    #[test]
+    fn issue_detail_snapshot_preserves_retry_attempt_for_waiting_issue() {
+        let mut state = build_test_state();
+        state.add_running(
+            &Issue {
+                id: "NODE_789".to_string(),
+                identifier: "my-repo#77".to_string(),
+                title: "Waiting issue".to_string(),
+                description: None,
+                priority: None,
+                state: "In Progress".to_string(),
+                branch_name: None,
+                url: None,
+                labels: vec![],
+                blocked_by: vec![],
+                created_at: None,
+                updated_at: None,
+            },
+            Some(3),
+        );
+        let entry = state.remove_running("NODE_789").unwrap();
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: entry.issue_id,
+            identifier: entry.identifier,
+            interaction_request_id: "interaction-1".to_string(),
+            step_name: "review".to_string(),
+            retry_attempt: Some(3),
+            requested_at: Utc::now(),
+        });
+
+        let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces").unwrap();
+
+        assert_eq!(detail.attempts.current_retry_attempt, Some(3));
+        assert_eq!(detail.attempts.restart_count, 3);
+    }
+
+    #[test]
     fn test_issue_snapshot_json_shape() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
@@ -561,6 +702,7 @@ mod tests {
         assert!(json.get("attempts").is_some());
         assert!(json.get("running").is_some());
         assert!(json.get("retry").is_some());
+        assert!(json.get("current_interaction").is_some());
         assert!(json.get("last_error").is_some());
 
         let workspace = json.get("workspace").unwrap();

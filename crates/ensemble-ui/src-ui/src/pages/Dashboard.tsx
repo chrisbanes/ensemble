@@ -1,14 +1,16 @@
-import { useStateQuery, useRefreshMutation, useRetryMutation, useNextPollCountdown, useConfigStateQuery } from "@/hooks";
+import { useStateQuery, useRefreshMutation, useRetryMutation, useNextPollCountdown, useConfigStateQuery, useInteractionsQuery } from "@/hooks";
 import { Navigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import RunningTable from "@/components/RunningTable";
 import RetryQueue from "@/components/RetryQueue";
 import AgentTotals from "@/components/AgentTotals";
+import InteractionQueue from "@/components/InteractionQueue";
 
 export default function Dashboard() {
   const { data: configState } = useConfigStateQuery();
   const { data, isLoading, isError, error } = useStateQuery();
+  const { data: interactions = [] } = useInteractionsQuery();
   const refreshMutation = useRefreshMutation();
   const retryMutation = useRetryMutation();
   const pollCountdown = useNextPollCountdown(data?.last_tick_at ?? null, data?.poll_interval_ms);
@@ -65,6 +67,12 @@ export default function Dashboard() {
             <dd className="mt-1 text-2xl font-semibold text-yellow-600 dark:text-yellow-400">{data.counts.retrying}</dd>
           </CardContent>
         </Card>
+        <Card>
+          <CardContent className="p-4">
+            <dt className="text-sm font-medium text-muted-foreground">Waiting</dt>
+            <dd className="mt-1 text-2xl font-semibold text-blue-600 dark:text-blue-400">{data.counts.waiting_on_human}</dd>
+          </CardContent>
+        </Card>
       </div>
 
       <AgentTotals totals={data.agent_totals} rateLimits={data.rate_limits ?? null} />
@@ -80,6 +88,13 @@ export default function Dashboard() {
         <h2 className="text-lg font-semibold mb-3">Retry Queue</h2>
         <Card>
           <RetryQueue entries={data.retrying} onRetry={(id) => retryMutation.mutate({ identifier: id })} />
+        </Card>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold mb-3">Pending Interactions</h2>
+        <Card>
+          <InteractionQueue interactions={interactions} />
         </Card>
       </section>
     </div>

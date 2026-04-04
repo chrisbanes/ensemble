@@ -87,7 +87,7 @@ pub async fn get_issue_detail(
             let error = ApiError::new(
                 "issue_not_found",
                 &format!(
-                    "no running or retrying issue with identifier '{}'",
+                    "no running, waiting, or retrying issue with identifier '{}'",
                     identifier
                 ),
             );
@@ -318,6 +318,23 @@ mod tests {
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_not_found_message_mentions_waiting_issues() {
+        let app_state = build_empty_state();
+        let response = get_issue_detail(State(app_state), Path("nonexistent#999".to_string()))
+            .await
+            .into_response();
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("running, waiting, or retrying"));
     }
 
     #[tokio::test]
