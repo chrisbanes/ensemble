@@ -436,7 +436,7 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
         std::io::ErrorKind::NotFound => crate::error::ConfigError::MissingConfigFile {
             path: path.display().to_string(),
         },
-        _ => crate::error::ConfigError::PathExpansionError {
+        _ => crate::error::ConfigError::ConfigReadError {
             path: path.display().to_string(),
             reason: error.to_string(),
         },
@@ -869,7 +869,7 @@ human_interaction:
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            crate::error::ConfigError::PathExpansionError { path, reason } => {
+            crate::error::ConfigError::ConfigReadError { path, reason } => {
                 assert_eq!(path, dir.path().display().to_string());
                 assert!(!reason.is_empty());
             }

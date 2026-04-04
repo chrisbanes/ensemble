@@ -351,10 +351,10 @@ pub async fn pull_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::ExitStatusExt;
     use tempfile::TempDir;
     use tokio::fs;
 
+    #[cfg(unix)]
     fn assert_git_command_failed(error: WorktreeError, expected_command: &str) {
         match error {
             WorktreeError::GitCommandFailed { command, reason } => {
@@ -365,7 +365,9 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn test_output(status: i32, stderr: &[u8]) -> std::process::Output {
+        use std::os::unix::process::ExitStatusExt;
         std::process::Output {
             status: std::process::ExitStatus::from_raw(status),
             stdout: Vec::new(),
@@ -423,6 +425,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ensure_git_success_returns_output_when_command_succeeds() {
         let output = test_output(0, b"");
@@ -437,6 +440,7 @@ mod tests {
         assert!(result.status.success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ensure_git_success_maps_stderr_to_git_command_failed() {
         let output = test_output(256, b"fatal: not a git repository\n");
@@ -451,6 +455,7 @@ mod tests {
         assert_git_command_failed(error, "git worktree list --porcelain");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_run_git_maps_spawn_failures_to_git_command_failed() {
         let repo_path = "/definitely/missing/repo/path";
@@ -461,6 +466,7 @@ mod tests {
         assert_git_command_failed(error, "git status");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_branch_exists_reports_full_git_command_on_spawn_failure() {
         let repo_path = "/definitely/missing/repo/path";
@@ -471,6 +477,7 @@ mod tests {
         assert_git_command_failed(error, "git rev-parse --verify refs/heads/feature");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_remove_worktree_reports_forced_remove_command_on_failure() {
         let repo = init_test_repo().await;
@@ -482,6 +489,7 @@ mod tests {
         assert_git_command_failed(error, &format!("git worktree remove --force {repo_path}"));
     }
 
+    #[cfg(unix)]
     async fn init_test_repo() -> TempDir {
         let repo = TempDir::new().expect("temp dir");
         let repo_path = repo.path().to_string_lossy().into_owned();

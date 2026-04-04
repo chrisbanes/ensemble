@@ -2292,6 +2292,7 @@ on_failure: Failed
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn discover_available_agents_uses_single_probe_result_for_version() {
         let script = r#"

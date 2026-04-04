@@ -431,9 +431,7 @@ mod tests {
     use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
     use axum::body::to_bytes;
-    use std::process::{Child, Command};
     use std::sync::Arc;
-    use std::time::Duration;
     use tokio::sync::RwLock;
 
     #[test]
@@ -489,8 +487,9 @@ mod tests {
         app_state
     }
 
-    fn spawn_sleep_process() -> Child {
-        Command::new("sleep").arg("30").spawn().unwrap()
+    #[cfg(unix)]
+    fn spawn_sleep_process() -> std::process::Child {
+        std::process::Command::new("sleep").arg("30").spawn().unwrap()
     }
 
     fn test_pipeline_run() -> PipelineRun {
@@ -540,8 +539,11 @@ mod tests {
         app_state
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_stop_running_issue() {
+        use std::time::Duration;
+
         let mut child = spawn_sleep_process();
         let state = build_app_state_with_running();
         {

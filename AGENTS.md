@@ -110,7 +110,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 ## Code conventions
 
 - **Rust 2021 edition**, minimum rust-version 1.80
-- **Async traits**: Do not use the `async-trait` crate/macro. Use native `async fn` inside traits.
+- **Async traits**: The codebase currently uses the `async-trait` crate/macro. Follow the existing pattern in the surrounding module; prefer native `async fn` in traits only where it fits the existing interface and compatibility requirements.
 - **Error handling**: `thiserror` enums (`EnsembleError`, `ConfigError`, `WorkspaceError`, `TrackerError`). Use `?` propagation, not `.unwrap()` in library code. Tests may unwrap. Return `anyhow::Result<()>` from executable `main` functions to avoid manual `process::exit` boilerplate.
 - **Paths & Filesystem**: Prefer `dunce` for path canonicalization and `ignore` or `walkdir` for directory traversal to avoid complex custom filesystem logic. Prefer `camino::Utf8PathBuf` if string manipulation of paths is heavy.
 - **Async runtime**: `tokio` with `features = ["full"]`. Async tests use `#[tokio::test]`.

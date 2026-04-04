@@ -35,7 +35,7 @@ fn redact_secret_in_line(line: &str, keys: &[&str]) -> String {
             let pattern = format!("{key}{delimiter}");
             let mut search_from = 0;
 
-            while let Some(relative_start) = redacted[search_from..].to_lowercase().find(&pattern) {
+            while let Some(relative_start) = redacted[search_from..].to_ascii_lowercase().find(&pattern) {
                 let start = search_from + relative_start;
                 let prefix_start = redacted[..start]
                     .char_indices()
@@ -51,9 +51,8 @@ fn redact_secret_in_line(line: &str, keys: &[&str]) -> String {
                 let value = &redacted[value_start..];
                 let value_trimmed = value.trim_start();
                 let leading_ws = value.len() - value_trimmed.len();
-                let suffix_offset = value_trimmed
-                    .find([',', '}'])
-                    .unwrap_or(value_trimmed.len());
+
+                let suffix_offset = find_value_end(value_trimmed);
                 let candidate_value = &value_trimmed[..suffix_offset].trim_end();
                 if is_env_var_reference(candidate_value) {
                     search_from = value_start + leading_ws + 1;
@@ -69,6 +68,41 @@ fn redact_secret_in_line(line: &str, keys: &[&str]) -> String {
     }
 
     redacted
+}
+
+/// Find the end of a YAML value, respecting quoted strings.
+fn find_value_end(value: &str) -> usize {
+    let trimmed = value.trim_start();
+    if let Some(stripped) = trimmed.strip_prefix('"') {
+        // Find closing quote, skipping escaped quotes
+        let mut in_escape = false;
+        for (i, ch) in stripped.char_indices() {
+            if in_escape {
+                in_escape = false;
+                continue;
+            }
+            if ch == '\\' {
+                in_escape = true;
+                continue;
+            }
+            if ch == '"' {
+                return trimmed[..i + 2].len();
+            }
+        }
+        // No closing quote found — treat entire value
+        trimmed.len()
+    } else if let Some(stripped) = trimmed.strip_prefix('\'') {
+        // Single-quoted value (no escapes in YAML single quotes except '')
+        match stripped.find('\'') {
+            Some(idx) => trimmed[..idx + 2].len(),
+            None => trimmed.len(),
+        }
+    } else {
+        // Unquoted value: terminate at comma, closing brace, or end
+        trimmed
+            .find([',', '}'])
+            .unwrap_or(trimmed.len())
+    }
 }
 
 fn is_env_var_reference(value: &str) -> bool {
@@ -1044,6 +1078,7 @@ on_failure: Failed
         assert!(response.defaults.get("has_existing_config").is_none());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_get_setup_agents_stream_emits_discovered_agent_version() {
         let script = r#"
