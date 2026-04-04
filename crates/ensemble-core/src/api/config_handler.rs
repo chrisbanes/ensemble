@@ -35,15 +35,13 @@ pub async fn get_config(State(state): State<AppState>) -> (StatusCode, Json<Conf
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router::{AppState, ConfigRuntime};
-    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+    use crate::api::test_helpers::{
+        app_state_with_document_state, app_state_with_missing_config, parsed_document_state,
+    };
+    use crate::config::draft::ConfigDocumentState;
     use crate::config::ensemble::parse_config;
-    use crate::observability::events::EventBus;
-    use crate::orchestrator::state::OrchestratorState;
     use axum::extract::State;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     fn test_config() -> crate::config::ensemble::EnsembleConfig {
         parse_config(
@@ -67,27 +65,12 @@ on_failure: Failed
     }
 
     fn build_app_state(config: crate::config::ensemble::EnsembleConfig) -> AppState {
-        let config_path = PathBuf::from("config.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
+        let document_state = ConfigDocumentState {
+            path: PathBuf::from("config.yaml"),
             active_config: Some(config),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+            ..parsed_document_state()
+        };
+        app_state_with_document_state(document_state)
     }
 
     #[tokio::test]
@@ -136,27 +119,10 @@ on_failure: Failed
 
     #[tokio::test]
     async fn test_get_config_missing_state() {
-        let config_path = PathBuf::from("/tmp/nonexistent.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Missing,
-            raw_yaml: None,
-            document: None,
-            active_config: None,
-            validation: DraftValidationReport::default(),
-        }));
-
-        let state = AppState {
-            orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        };
+        let state = app_state_with_missing_config(
+            PathBuf::from("/tmp/nonexistent.yaml"),
+            "/tmp/workspaces",
+        );
 
         let (status, Json(response)) = get_config(State(state)).await;
         assert_eq!(status, StatusCode::OK);

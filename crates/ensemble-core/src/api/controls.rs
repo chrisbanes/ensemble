@@ -420,16 +420,14 @@ pub async fn post_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router::{AppState, ConfigRuntime};
+    use crate::api::router::AppState;
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::StepConfig;
-    use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
-    use crate::observability::events::EventBus;
     use crate::orchestrator::state::OrchestratorState;
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
     use axum::body::to_bytes;
-    use std::path::PathBuf;
     use std::process::{Child, Command};
     use std::sync::Arc;
     use std::time::Duration;
@@ -483,28 +481,9 @@ mod tests {
     fn build_app_state_with_running() -> AppState {
         let mut state = OrchestratorState::new(30000, 10);
         state.add_running(&test_issue(), None);
-
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
     }
 
     fn spawn_sleep_process() -> Child {
@@ -533,30 +512,14 @@ mod tests {
         state.add_running(&test_issue(), None);
         state.update_session_info("NODE_123", "session-123", agent_pid);
 
-        let config_path = PathBuf::from("ensemble.yaml");
-        let active_config = crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap();
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: Some(active_config.clone()),
-            validation: DraftValidationReport::default(),
-        }));
+        let document_state = parsed_document_state();
+        let active_config = document_state.active_config.clone().unwrap();
 
         state.insert_pipeline_run("NODE_123", test_pipeline_run(), Arc::new(active_config));
 
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        let mut app_state = app_state_with_document_state(document_state);
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
     }
 
     fn build_app_state_with_retry() -> AppState {
@@ -569,27 +532,9 @@ mod tests {
             error: Some("timeout".to_string()),
         });
 
-        let config_path = PathBuf::from("ensemble.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Parsed,
-            raw_yaml: None,
-            document: None,
-            active_config: Some(crate::config::ensemble::parse_config("tracker:\n  kind: todo_file\nagents:\n  build:\n    executor: test\n    model: test\n    prompt: test\nsteps:\n  - name: build\n    agent: build\non_success: Done\non_failure: Failed").unwrap()),
-            validation: DraftValidationReport::default(),
-        }));
-
-        AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: "/tmp/workspaces".to_string(),
-            history_path: PathBuf::from("/tmp/history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        }
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
     }
 
     #[tokio::test]

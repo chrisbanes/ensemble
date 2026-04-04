@@ -9,4 +9,6 @@ pub mod history_handler;
 pub mod interactions;
 pub mod openapi;
 pub mod router;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 pub mod ws;

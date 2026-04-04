@@ -725,19 +725,16 @@ pub async fn save_guided_form(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::router::ConfigRuntime;
+    use crate::api::test_helpers::app_state_with_missing_config;
     use crate::config::draft::{ConfigStateKind, DraftValidationReport};
     use axum::body::Body;
     use axum::response::IntoResponse;
     use futures_util::StreamExt;
     use std::io::Write;
-    use crate::observability::events::EventBus;
-    use crate::orchestrator::state::OrchestratorState;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
     use tempfile::TempDir;
-    use tokio::sync::RwLock;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -800,28 +797,10 @@ mod tests {
 
     fn test_app_state() -> (AppState, TempDir) {
         let temp_dir = TempDir::new().unwrap();
-        let state = OrchestratorState::new(30000, 10);
         let config_path = temp_dir.path().join("config.yaml");
-        let document_state = Arc::new(RwLock::new(ConfigDocumentState {
-            path: config_path.clone(),
-            kind: ConfigStateKind::Missing,
-            raw_yaml: None,
-            document: None,
-            active_config: None,
-            validation: DraftValidationReport::default(),
-        }));
-
-        let app_state = AppState {
-            orchestrator_state: Arc::new(RwLock::new(state)),
-            refresh_requested: Arc::new(tokio::sync::Notify::new()),
-            workspace_root: temp_dir.path().join("workspaces").display().to_string(),
-            history_path: temp_dir.path().join("history.jsonl"),
-            event_bus: EventBus::new(),
-            config_runtime: ConfigRuntime {
-                config_path,
-                document_state,
-            },
-        };
+        let workspace_root = temp_dir.path().join("workspaces").display().to_string();
+        let mut app_state = app_state_with_missing_config(config_path, &workspace_root);
+        app_state.history_path = temp_dir.path().join("history.jsonl");
         (app_state, temp_dir)
     }
 
