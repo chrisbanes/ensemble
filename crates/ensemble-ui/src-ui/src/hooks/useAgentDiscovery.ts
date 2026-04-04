@@ -10,7 +10,6 @@ interface UseAgentDiscoveryResult {
   isLoading: boolean;
   isError: boolean;
   error: Error | null;
-  isComplete: boolean;
   retry: () => void;
 }
 
@@ -24,8 +23,8 @@ export function useAgentDiscovery(options: UseAgentDiscoveryOptions = {}): UseAg
   const [isLoading, setIsLoading] = useState(false);
   const [isError, setIsError] = useState(false);
   const [error, setError] = useState<Error | null>(null);
-  const [isComplete, setIsComplete] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const consecutiveErrorsRef = useRef(0);
 
   const cleanup = useCallback(() => {
     if (eventSourceRef.current) {
@@ -42,7 +41,7 @@ export function useAgentDiscovery(options: UseAgentDiscoveryOptions = {}): UseAg
     setIsLoading(true);
     setIsError(false);
     setError(null);
-    setIsComplete(false);
+    consecutiveErrorsRef.current = 0;
 
     // Clean up any existing connection
     cleanup();
@@ -61,42 +60,41 @@ export function useAgentDiscovery(options: UseAgentDiscoveryOptions = {}): UseAg
           }
           return [...prev, agent];
         });
+        // Reset error count on successful message
+        consecutiveErrorsRef.current = 0;
       } catch (err) {
         console.error("Failed to parse agent discovery event:", err);
       }
     };
 
-    eventSource.onerror = (err) => {
+    eventSource.onerror = () => {
       // EventSource automatically tries to reconnect on error
-      // If readyState is CLOSED (2), the connection is done
-      if (eventSource.readyState === EventSource.CLOSED) {
+      // Track consecutive errors to detect real failures vs temporary issues
+      consecutiveErrorsRef.current += 1;
+
+      if (consecutiveErrorsRef.current >= 3) {
+        // After 3 consecutive errors, consider it a failure
+        setIsError(true);
+        setError(new Error("Failed to connect to agent discovery stream"));
         setIsLoading(false);
-        setIsComplete(true);
+        cleanup();
+      } else if (eventSource.readyState === EventSource.CLOSED) {
+        // Connection closed permanently
+        setIsLoading(false);
         cleanup();
       }
     };
 
-    // Timeout to mark as complete after a reasonable time
-    // The server closes the connection when all agents are probed,
-    // but we add a client-side timeout as a safety net
-    const timeoutId = setTimeout(() => {
-      if (eventSourceRef.current) {
-        setIsLoading(false);
-        setIsComplete(true);
-        cleanup();
-      }
-    }, 30000); // 30 second max timeout
-
-    return () => {
-      clearTimeout(timeoutId);
-      cleanup();
+    // Handle connection open
+    eventSource.onopen = () => {
+      // Reset error count on successful connection
+      consecutiveErrorsRef.current = 0;
     };
   }, [enabled, cleanup]);
 
   useEffect(() => {
     const cleanupFn = startDiscovery();
     return () => {
-      cleanupFn?.();
       cleanup();
     };
   }, [startDiscovery, cleanup]);
@@ -110,7 +108,6 @@ export function useAgentDiscovery(options: UseAgentDiscoveryOptions = {}): UseAg
     isLoading,
     isError,
     error,
-    isComplete,
     retry,
   };
 }

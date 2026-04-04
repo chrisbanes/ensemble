@@ -2,18 +2,11 @@ import { useState, useEffect, useRef } from "react";
 import { useGetSetupDefaults } from "@/generated/api/config/config";
 import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
 import { useAgentDiscovery } from "@/hooks/useAgentDiscovery";
-
-// Export discovered agents type for use in the component
-type DiscoveredAgentInfo = {
-  name: string;
-  label: string;
-  version: string;
-};
 import FileBrowser from "./FileBrowser";
-import type { 
-  SetupTracker, 
-  SetupRepo, 
-  SetupAgent, 
+import type {
+  SetupTracker,
+  SetupRepo,
+  SetupAgent,
   SetupStep,
   DiscoveredAgentInfo,
   SetupCheck,
@@ -96,13 +89,12 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   });
   
   // Use progressive agent discovery via SSE
-  const { 
-    agents: discoveredAgents, 
-    isLoading: isLoadingAgents, 
+  const {
+    agents: discoveredAgents,
+    isLoading: isLoadingAgents,
     isError: isAgentsError,
-    isComplete: isAgentsComplete,
-  } = useAgentDiscovery({ 
-    enabled: currentStep === "agents" 
+  } = useAgentDiscovery({
+    enabled: currentStep === "agents"
   });
 
   const validateMutation = useValidateSetupMutation();
@@ -471,7 +463,8 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           )}
           
           {draft.agents.map((agent, index) => {
-            const isCustom = customAgents[index] || (agent.acpx_agent && !discoveredAgents.find((a: DiscoveredAgentInfo) => a.name === agent.acpx_agent));
+            const hasDiscoveredMatch = !!(agent.acpx_agent && discoveredAgents.find((a: DiscoveredAgentInfo) => a.name === agent.acpx_agent));
+            const isCustom = customAgents[index] || (!!agent.acpx_agent && !isLoadingAgents && !hasDiscoveredMatch);
             const promptMode = promptModes[index] || "inline";
             
             return (

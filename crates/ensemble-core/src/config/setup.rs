@@ -493,25 +493,33 @@ pub fn merge_setup_request(
     }
 }
 
+/// List of known agents that can be discovered.
+pub const KNOWN_AGENTS: &[(&str, &str)] = &[
+    ("claude", "Claude Code"),
+    ("codex", "Codex CLI"),
+    ("gemini", "Gemini CLI"),
+    ("amp", "Amp"),
+    ("aider", "Aider"),
+    ("goose", "Goose"),
+    ("copilot", "GitHub Copilot"),
+    ("droid", "Factory Droid"),
+    ("cursor", "Cursor Agent"),
+    ("qwen", "Qwen Code"),
+    ("opencode", "OpenCode"),
+];
+
 /// Discover available agents from the system.
 /// Probes run concurrently with a 15-second overall timeout.
+/// Returns partial results as they complete, even if timeout is reached.
 pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigError> {
-    let known_agents: &[(&str, &str)] = &[
-        ("claude", "Claude Code"),
-        ("codex", "Codex CLI"),
-        ("gemini", "Gemini CLI"),
-        ("amp", "Amp"),
-        ("aider", "Aider"),
-        ("goose", "Goose"),
-        ("copilot", "GitHub Copilot"),
-        ("droid", "Factory Droid"),
-        ("cursor", "Cursor Agent"),
-        ("qwen", "Qwen Code"),
-        ("opencode", "OpenCode"),
-    ];
+    use futures::stream::FuturesUnordered;
+    use futures::StreamExt;
 
-    // Run all probes concurrently for faster discovery
-    let probe_futures: Vec<_> = known_agents
+    let mut available = Vec::new();
+    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+
+    // Create a FuturesUnordered to collect results as they complete
+    let mut probe_tasks: FuturesUnordered<_> = KNOWN_AGENTS
         .iter()
         .map(|(name, label)| async move {
             if probe_agent(name).await {
@@ -527,18 +535,12 @@ pub async fn discover_available_agents() -> Result<Vec<DiscoveredAgent>, ConfigE
         })
         .collect();
 
-    // Apply overall timeout of 15 seconds for all probes
-    let timeout = tokio::time::Duration::from_secs(15);
-    let results = tokio::time::timeout(timeout, futures::future::join_all(probe_futures)).await;
-
-    let available: Vec<DiscoveredAgent> = match results {
-        Ok(agents) => agents.into_iter().flatten().collect(),
-        Err(_) => {
-            // Timeout occurred - return partial results from completed probes
-            // This prevents hanging the UI indefinitely
-            Vec::new()
+    // Collect results as they complete, with a deadline
+    while let Ok(Some(result)) = tokio::time::timeout_at(deadline, probe_tasks.next()).await {
+        if let Some(agent) = result {
+            available.push(agent);
         }
-    };
+    }
 
     Ok(available)
 }

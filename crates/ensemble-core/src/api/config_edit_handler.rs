@@ -262,14 +262,6 @@ pub async fn get_setup_agents(
     }
 }
 
-/// SSE event for a discovered agent.
-#[derive(Debug, Serialize)]
-struct AgentDiscoveredEvent {
-    pub name: String,
-    pub label: String,
-    pub version: String,
-}
-
 /// GET /api/v1/config/setup/agents/stream
 ///
 /// Returns discovered agents as a Server-Sent Events stream.
@@ -288,41 +280,30 @@ pub async fn get_setup_agents_stream(
 ) -> impl axum::response::IntoResponse {
     use axum::response::sse::{Event, Sse};
 
-    // List of agents to probe and stream
-    let agents = vec![
-        ("claude".to_string(), "Claude Code".to_string()),
-        ("codex".to_string(), "Codex CLI".to_string()),
-        ("gemini".to_string(), "Gemini CLI".to_string()),
-        ("amp".to_string(), "Amp".to_string()),
-        ("aider".to_string(), "Aider".to_string()),
-        ("goose".to_string(), "Goose".to_string()),
-        ("copilot".to_string(), "GitHub Copilot".to_string()),
-        ("droid".to_string(), "Factory Droid".to_string()),
-        ("cursor".to_string(), "Cursor Agent".to_string()),
-        ("qwen".to_string(), "Qwen Code".to_string()),
-        ("opencode".to_string(), "OpenCode".to_string()),
-    ];
-
     let stream = async_stream::stream! {
-        for (name, label) in agents {
-            // Probe agent with timeout
-            let probe_result = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                async {
-                    if crate::config::setup::probe_agent(&name).await {
-                        let version = crate::config::setup::get_agent_version(&name).await;
-                        Some(AgentDiscoveredEvent {
-                            name: name.clone(),
-                            label: label.clone(),
-                            version,
-                        })
-                    } else {
-                        None
-                    }
-                }
-            ).await;
+        let mut probe_tasks = tokio::task::JoinSet::new();
 
-            if let Ok(Some(agent)) = probe_result {
+        // Spawn concurrent probe tasks for all known agents
+        for (name, label) in crate::config::setup::KNOWN_AGENTS {
+            let name = name.to_string();
+            let label = label.to_string();
+            probe_tasks.spawn(async move {
+                if crate::config::setup::probe_agent(&name).await {
+                    let version = crate::config::setup::get_agent_version(&name).await;
+                    Some(DiscoveredAgentInfo {
+                        name,
+                        label,
+                        version,
+                    })
+                } else {
+                    None
+                }
+            });
+        }
+
+        // Stream results as they complete (order depends on which probes finish first)
+        while let Some(join_result) = probe_tasks.join_next().await {
+            if let Ok(Some(agent)) = join_result {
                 if let Ok(json) = serde_json::to_string(&agent) {
                     yield Ok::<_, std::convert::Infallible>(Event::default().data(json));
                 }
