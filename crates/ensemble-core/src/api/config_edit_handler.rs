@@ -376,9 +376,7 @@ pub async fn get_setup_agents(
     ),
     tag = "config"
 )]
-pub async fn get_setup_agents_stream(
-    State(_state): State<AppState>,
-) -> impl axum::response::IntoResponse {
+pub async fn get_setup_agents_stream() -> impl axum::response::IntoResponse {
     use axum::response::sse::{Event, Sse};
 
     let stream = async_stream::stream! {
@@ -1058,11 +1056,8 @@ exit 1
 "#;
         let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
         std::env::set_var("HOME", temp_dir.path());
-        let (state, _app_temp_dir) = test_app_state();
 
-        let response = get_setup_agents_stream(axum::extract::State(state))
-            .await
-            .into_response();
+        let response = get_setup_agents_stream().await.into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1746,5 +1741,51 @@ on_failure: Failed
         assert!(redacted.contains("- password: \"[REDACTED]\""));
         assert!(!redacted.contains("abc123"));
         assert!(!redacted.contains("hunter2"));
+    }
+
+    #[test]
+    fn redact_secrets_is_case_insensitive() {
+        let yaml = "tracker:\n  API_KEY: GHP_UPPER\n  Token: mixed_case";
+        let redacted = redact_secrets(yaml);
+        assert!(!redacted.contains("GHP_UPPER"));
+        assert!(!redacted.contains("mixed_case"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_does_not_redact_non_secret_keys() {
+        let yaml = "config:\n  token_count: 42\n  tokenized: true\n  api_keys_list: []";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("token_count: 42"));
+        assert!(redacted.contains("tokenized: true"));
+        assert!(redacted.contains("api_keys_list: []"));
+        assert!(!redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_redacts_quoted_literal_values() {
+        let yaml = "tracker:\n  api_key: \"ghp_quoted_secret\"";
+        let redacted = redact_secrets(yaml);
+        assert!(!redacted.contains("ghp_quoted_secret"));
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_handles_empty_value() {
+        let yaml = "tracker:\n  api_key:";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn redact_secrets_handles_multi_key_yaml_document() {
+        let yaml = "tracker:\n  kind: github\n  api_key: ghp_real\n  repository: org/repo\nagents:\n  builder:\n    model: sonnet\n    secret: mysecret";
+        let redacted = redact_secrets(yaml);
+        assert!(redacted.contains("kind: github"));
+        assert!(redacted.contains("repository: org/repo"));
+        assert!(redacted.contains("model: sonnet"));
+        assert!(!redacted.contains("ghp_real"));
+        assert!(!redacted.contains("mysecret"));
+        assert!(redacted.contains("[REDACTED]"));
     }
 }

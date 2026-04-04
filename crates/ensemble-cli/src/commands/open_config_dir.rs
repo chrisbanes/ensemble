@@ -54,30 +54,16 @@ pub async fn execute(args: OpenConfigDirArgs) -> ExitCode {
     }
 }
 
-/// Open a path in the system file manager
+#[cfg(feature = "open-config-dir")]
 fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
-    open_in_system_file_manager_with(path, open_path)
+    opener::open(path).map_err(|e| e.to_string())
 }
 
-fn open_in_system_file_manager_with<E>(
-    path: &std::path::Path,
-    open: impl FnOnce(&std::path::Path) -> Result<(), E>,
-) -> Result<(), String>
-where
-    E: std::fmt::Display,
-{
-    map_open_result(open(path))
-}
-
-fn open_path(path: &std::path::Path) -> Result<(), opener::OpenError> {
-    opener::open(path)
-}
-
-fn map_open_result<E>(result: Result<(), E>) -> Result<(), String>
-where
-    E: std::fmt::Display,
-{
-    result.map_err(|error| error.to_string())
+#[cfg(not(feature = "open-config-dir"))]
+fn open_in_system_file_manager(path: &std::path::Path) -> Result<(), String> {
+    eprintln!("config directory: {}", path.display());
+    eprintln!("open this path manually (opener feature not enabled)");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -108,24 +94,21 @@ mod tests {
     }
 
     #[test]
-    fn map_open_result_returns_ok_on_success() {
-        assert_eq!(map_open_result::<FakeOpenError>(Ok(())), Ok(()));
-    }
+    #[cfg(feature = "open-config-dir")]
+    fn open_in_system_file_manager_with_fallback() {
+        fn open_in_system_file_manager_with<E>(
+            path: &std::path::Path,
+            open: impl FnOnce(&std::path::Path) -> Result<(), E>,
+        ) -> Result<(), String>
+        where
+            E: std::fmt::Display,
+        {
+            open(path).map_err(|error| error.to_string())
+        }
 
-    #[test]
-    fn map_open_result_formats_open_errors() {
-        assert_eq!(
-            map_open_result(Err(FakeOpenError("launcher missing"))),
-            Err("launcher missing".to_string())
-        );
-    }
-
-    #[test]
-    fn open_in_system_file_manager_maps_errors_from_open_call() {
         let result = open_in_system_file_manager_with(PathBuf::from("/tmp/test").as_path(), |_| {
             Err(FakeOpenError("launcher missing"))
         });
-
         assert_eq!(result, Err("launcher missing".to_string()));
     }
 }
