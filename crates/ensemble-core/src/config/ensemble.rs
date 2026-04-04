@@ -815,10 +815,16 @@ human_interaction:
 
     #[test]
     fn env_guard_restores_tracked_vars() {
+        let guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("GITHUB_TOKEN", "before");
+        let saved = vec![("GITHUB_TOKEN", std::env::var("GITHUB_TOKEN").ok())];
 
         {
-            let _env = EnvGuard::lock(ENV_VARS);
+            let _env = EnvGuard {
+                _guard: guard,
+                saved,
+            };
+            std::env::remove_var("GITHUB_TOKEN");
             assert!(std::env::var("GITHUB_TOKEN").is_err());
             std::env::set_var("GITHUB_TOKEN", "during");
         }

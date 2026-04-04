@@ -414,6 +414,48 @@ pub fn save_raw_yaml_atomically(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const ENV_VARS: &[&str] = &[
+        "ENSEMBLE_DRAFT_TEST_ROOT",
+        "ENSEMBLE_DRAFT_TEST_DOTENV_ONLY",
+    ];
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.lock().unwrap();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for &key in vars {
+                std::env::remove_var(key);
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn load_config_state_reports_missing_file() {
@@ -467,14 +509,39 @@ mod tests {
     }
 
     #[test]
+    fn env_guard_restores_tracked_vars() {
+        let guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("ENSEMBLE_DRAFT_TEST_ROOT", "before");
+        let saved = vec![(
+            "ENSEMBLE_DRAFT_TEST_ROOT",
+            std::env::var("ENSEMBLE_DRAFT_TEST_ROOT").ok(),
+        )];
+
+        {
+            let _env = EnvGuard {
+                _guard: guard,
+                saved,
+            };
+            std::env::remove_var("ENSEMBLE_DRAFT_TEST_ROOT");
+            assert!(std::env::var("ENSEMBLE_DRAFT_TEST_ROOT").is_err());
+            std::env::set_var("ENSEMBLE_DRAFT_TEST_ROOT", "during");
+        }
+
+        assert_eq!(
+            std::env::var("ENSEMBLE_DRAFT_TEST_ROOT").as_deref(),
+            Ok("before")
+        );
+        std::env::remove_var("ENSEMBLE_DRAFT_TEST_ROOT");
+    }
+
+    #[test]
     fn load_config_state_resolves_env_and_relative_paths_from_config_dir() {
+        let _env = EnvGuard::lock(ENV_VARS);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         let env_name = "ENSEMBLE_DRAFT_TEST_ROOT";
 
-        unsafe {
-            std::env::remove_var(env_name);
-        }
+        std::env::remove_var(env_name);
 
         std::fs::write(
             dir.path().join(".env"),
@@ -527,20 +594,17 @@ on_failure: Failed
             Some(dir.path().join("prompts/build.md").as_path())
         );
 
-        unsafe {
-            std::env::remove_var(env_name);
-        }
+        std::env::remove_var(env_name);
     }
 
     #[test]
     fn parse_raw_yaml_uses_sibling_dotenv_without_mutating_process_env() {
+        let _env = EnvGuard::lock(ENV_VARS);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         let env_name = "ENSEMBLE_DRAFT_TEST_DOTENV_ONLY";
 
-        unsafe {
-            std::env::remove_var(env_name);
-        }
+        std::env::remove_var(env_name);
 
         std::fs::write(
             dir.path().join(".env"),
