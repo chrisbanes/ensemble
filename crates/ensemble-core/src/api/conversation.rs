@@ -1,4 +1,4 @@
-use crate::api::handlers::ApiError;
+use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::tracker::model::sanitize_workspace_key;
 use axum::extract::{Path, Query, State};
@@ -85,12 +85,9 @@ pub async fn get_conversation(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "invalid_identifier",
-                        "identifier cannot be sanitized to a workspace key",
-                    ))
-                    .unwrap(),
+                api_error(
+                    "invalid_identifier",
+                    "identifier cannot be sanitized to a workspace key",
                 ),
             )
                 .into_response();
@@ -104,26 +101,20 @@ pub async fn get_conversation(
         Ok(None) => {
             return (
                 StatusCode::OK,
-                Json(
-                    serde_json::to_value(ConversationResponse {
-                        messages: vec![],
-                        total: 0,
-                        next_cursor: None,
-                    })
-                    .unwrap(),
-                ),
+                Json(ConversationResponse {
+                    messages: vec![],
+                    total: 0,
+                    next_cursor: None,
+                }),
             )
                 .into_response();
         }
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_read_error",
-                        &format!("failed to read conversation: {}", e),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "conversation_read_error",
+                    format!("failed to read conversation: {}", e),
                 ),
             )
                 .into_response();
@@ -135,12 +126,9 @@ pub async fn get_conversation(
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_parse_error",
-                        &format!("failed to parse conversation: {}", error),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "conversation_parse_error",
+                    format!("failed to parse conversation: {}", error),
                 ),
             )
                 .into_response();
@@ -162,14 +150,11 @@ pub async fn get_conversation(
 
     (
         StatusCode::OK,
-        Json(
-            serde_json::to_value(ConversationResponse {
-                messages: page,
-                total,
-                next_cursor,
-            })
-            .unwrap(),
-        ),
+        Json(ConversationResponse {
+            messages: page,
+            total,
+            next_cursor,
+        }),
     )
         .into_response()
 }
@@ -200,12 +185,9 @@ pub async fn get_conversation_message(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "invalid_identifier",
-                        "identifier cannot be sanitized to a workspace key",
-                    ))
-                    .unwrap(),
+                api_error(
+                    "invalid_identifier",
+                    "identifier cannot be sanitized to a workspace key",
                 ),
             )
                 .into_response();
@@ -219,12 +201,9 @@ pub async fn get_conversation_message(
         Ok(None) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_not_found",
-                        "no conversation file found for this issue",
-                    ))
-                    .unwrap(),
+                api_error(
+                    "conversation_not_found",
+                    "no conversation file found for this issue",
                 ),
             )
                 .into_response();
@@ -232,12 +211,9 @@ pub async fn get_conversation_message(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_read_error",
-                        &format!("failed to read conversation: {}", e),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "conversation_read_error",
+                    format!("failed to read conversation: {}", e),
                 ),
             )
                 .into_response();
@@ -249,12 +225,9 @@ pub async fn get_conversation_message(
         Err(error) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "conversation_parse_error",
-                        &format!("failed to parse conversation: {}", error),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "conversation_parse_error",
+                    format!("failed to parse conversation: {}", error),
                 ),
             )
                 .into_response();
@@ -264,16 +237,10 @@ pub async fn get_conversation_message(
     let message = messages.into_iter().find(|m| m.index == index);
 
     match message {
-        Some(msg) => (StatusCode::OK, Json(serde_json::to_value(msg).unwrap())).into_response(),
+        Some(msg) => (StatusCode::OK, Json(msg)).into_response(),
         None => (
             StatusCode::NOT_FOUND,
-            Json(
-                serde_json::to_value(ApiError::new(
-                    "message_not_found",
-                    &format!("no message at index {}", index),
-                ))
-                .unwrap(),
-            ),
+            api_error("message_not_found", format!("no message at index {}", index)),
         )
             .into_response(),
     }
@@ -415,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn test_conversation_response_serialize() {
+    fn conversation_response_serializes_total_and_next_cursor() {
         let response = ConversationResponse {
             messages: vec![],
             total: 0,

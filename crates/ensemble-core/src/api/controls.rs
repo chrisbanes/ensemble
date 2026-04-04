@@ -1,4 +1,4 @@
-use crate::api::handlers::ApiError;
+use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
 use axum::extract::{Path, State};
@@ -130,15 +130,12 @@ pub async fn post_stop(
         IssuePresence::Retrying(_) => {
             return (
                 StatusCode::CONFLICT,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "not_running",
-                        &format!(
-                            "issue '{}' is retrying, not running — use retry endpoint instead",
-                            identifier
-                        ),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "not_running",
+                    format!(
+                        "issue '{}' is retrying, not running — use retry endpoint instead",
+                        identifier
+                    ),
                 ),
             )
                 .into_response();
@@ -146,15 +143,12 @@ pub async fn post_stop(
         IssuePresence::Missing => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "issue_not_found",
-                        &format!(
-                            "no running or retrying issue with identifier '{}'",
-                            identifier
-                        ),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "issue_not_found",
+                    format!(
+                        "no running or retrying issue with identifier '{}'",
+                        identifier
+                    ),
                 ),
             )
                 .into_response();
@@ -166,12 +160,9 @@ pub async fn post_stop(
         StopSignalStatus::MissingPid => {
             return (
                 StatusCode::CONFLICT,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "stop_unavailable",
-                        &format!("issue '{}' has no active agent PID to stop", identifier),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "stop_unavailable",
+                    format!("issue '{}' has no active agent PID to stop", identifier),
                 ),
             )
                 .into_response();
@@ -179,15 +170,12 @@ pub async fn post_stop(
         StopSignalStatus::InvalidPid => {
             return (
                 StatusCode::CONFLICT,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "stop_unavailable",
-                        &format!(
-                            "issue '{}' has an invalid agent PID and could not be stopped",
-                            identifier
-                        ),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "stop_unavailable",
+                    format!(
+                        "issue '{}' has an invalid agent PID and could not be stopped",
+                        identifier
+                    ),
                 ),
             )
                 .into_response();
@@ -195,12 +183,9 @@ pub async fn post_stop(
         StopSignalStatus::SignalFailed => {
             return (
                 StatusCode::CONFLICT,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "stop_failed",
-                        &format!("failed to stop running issue '{}'", identifier),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "stop_failed",
+                    format!("failed to stop running issue '{}'", identifier),
                 ),
             )
                 .into_response();
@@ -221,14 +206,11 @@ pub async fn post_stop(
 
     (
         StatusCode::OK,
-        Json(
-            serde_json::to_value(StopResponse {
-                stopped: true,
-                issue_identifier: identifier,
-                message: "agent stopped and issue released".to_string(),
-            })
-            .unwrap(),
-        ),
+        Json(StopResponse {
+            stopped: true,
+            issue_identifier: identifier,
+            message: "agent stopped and issue released".to_string(),
+        }),
     )
         .into_response()
 }
@@ -260,15 +242,12 @@ pub async fn post_retry(
         IssuePresence::Running(_) => {
             return (
                 StatusCode::CONFLICT,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "not_retrying",
-                        &format!(
-                            "issue '{}' is currently running — use stop endpoint to interrupt",
-                            identifier
-                        ),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "not_retrying",
+                    format!(
+                        "issue '{}' is currently running — use stop endpoint to interrupt",
+                        identifier
+                    ),
                 ),
             )
                 .into_response();
@@ -276,15 +255,12 @@ pub async fn post_retry(
         IssuePresence::Missing => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(
-                    serde_json::to_value(ApiError::new(
-                        "issue_not_found",
-                        &format!(
-                            "no running or retrying issue with identifier '{}'",
-                            identifier
-                        ),
-                    ))
-                    .unwrap(),
+                api_error(
+                    "issue_not_found",
+                    format!(
+                        "no running or retrying issue with identifier '{}'",
+                        identifier
+                    ),
                 ),
             )
                 .into_response();
@@ -301,14 +277,11 @@ pub async fn post_retry(
 
     (
         StatusCode::OK,
-        Json(
-            serde_json::to_value(RetryResponse {
-                retried: true,
-                issue_identifier: identifier,
-                message: "removed from retry queue, will be re-dispatched on next poll".to_string(),
-            })
-            .unwrap(),
-        ),
+        Json(RetryResponse {
+            retried: true,
+            issue_identifier: identifier,
+            message: "removed from retry queue, will be re-dispatched on next poll".to_string(),
+        }),
     )
         .into_response()
 }

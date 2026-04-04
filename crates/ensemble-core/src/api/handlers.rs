@@ -22,6 +22,11 @@ pub struct ApiErrorDetail {
     pub message: String,
 }
 
+pub(crate) fn api_error(code: &str, message: impl Into<String>) -> Json<ApiError> {
+    let message = message.into();
+    Json(ApiError::new(code, &message))
+}
+
 impl ApiError {
     pub fn new(code: &str, message: &str) -> Self {
         Self {
@@ -80,9 +85,7 @@ pub async fn get_issue_detail(
     drop(lock);
 
     match detail {
-        Some(detail) => {
-            (StatusCode::OK, Json(serde_json::to_value(detail).unwrap())).into_response()
-        }
+        Some(detail) => (StatusCode::OK, Json(detail)).into_response(),
         None => {
             let error = ApiError::new(
                 "issue_not_found",
@@ -91,11 +94,7 @@ pub async fn get_issue_detail(
                     identifier
                 ),
             );
-            (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::to_value(error).unwrap()),
-            )
-                .into_response()
+            (StatusCode::NOT_FOUND, Json(error)).into_response()
         }
     }
 }
@@ -137,14 +136,13 @@ pub async fn post_refresh(State(state): State<AppState>) -> (StatusCode, Json<Re
 
 /// Handler for unsupported HTTP methods on defined routes.
 /// Returns 405 Method Not Allowed with a JSON error envelope.
-pub async fn method_not_allowed() -> (StatusCode, Json<serde_json::Value>) {
-    let error = ApiError::new(
-        "method_not_allowed",
-        "this HTTP method is not supported on this endpoint",
-    );
+pub async fn method_not_allowed() -> (StatusCode, Json<ApiError>) {
     (
         StatusCode::METHOD_NOT_ALLOWED,
-        Json(serde_json::to_value(error).unwrap()),
+        api_error(
+            "method_not_allowed",
+            "this HTTP method is not supported on this endpoint",
+        ),
     )
 }
 
@@ -349,9 +347,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_method_not_allowed_response() {
-        let (status, _) = method_not_allowed().await;
+    async fn method_not_allowed_returns_json_api_error() {
+        let (status, Json(body)) = method_not_allowed().await;
         assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body.error.code, "method_not_allowed");
+    }
+
+    #[test]
+    fn api_error_helper_returns_json_api_error() {
+        let Json(body) = api_error("issue_not_found", "no such issue");
+        assert_eq!(body.error.code, "issue_not_found");
+        assert_eq!(body.error.message, "no such issue");
     }
 
     #[tokio::test]

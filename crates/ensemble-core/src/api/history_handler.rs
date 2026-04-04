@@ -26,13 +26,12 @@ pub async fn get_history(
     match read_history(&state.history_path, &query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => {
-            let error = crate::api::handlers::ApiError::new(
-                "history_read_error",
-                &format!("failed to read history: {}", e),
-            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::to_value(error).unwrap()),
+                crate::api::handlers::api_error(
+                    "history_read_error",
+                    format!("failed to read history: {}", e),
+                ),
             )
                 .into_response()
         }

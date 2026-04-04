@@ -1,5 +1,6 @@
-use crate::api::handlers::ApiError;
+use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
+use axum::response::Response;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -57,10 +58,9 @@ pub async fn list_directory(
     let path_str = match query.path {
         Some(p) => p,
         None => {
-            let error = ApiError::new("missing_parameter", "path parameter is required");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::to_value(error).unwrap()),
+                api_error("missing_parameter", "path parameter is required"),
             )
                 .into_response();
         }
@@ -69,10 +69,9 @@ pub async fn list_directory(
     let home_dir = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            let error = ApiError::new("internal_error", "could not determine home directory");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::to_value(error).unwrap()),
+                api_error("internal_error", "could not determine home directory"),
             )
                 .into_response();
         }
@@ -85,7 +84,7 @@ pub async fn list_directory(
 async fn list_directory_inner(
     path_str: String,
     home_dir: PathBuf,
-) -> (StatusCode, Json<serde_json::Value>) {
+) -> Response {
     let result =
         tokio::task::spawn_blocking(move || -> Result<Vec<FsEntry>, (StatusCode, ApiError)> {
             // Expand ~ to home directory
@@ -220,14 +219,14 @@ async fn list_directory_inner(
     let mut all_entries = match result {
         Ok(Ok(entries)) => entries,
         Ok(Err((status, error))) => {
-            return (status, Json(serde_json::to_value(error).unwrap()));
+            return (status, Json(error)).into_response();
         }
         Err(e) => {
-            let error = ApiError::new("internal_error", &format!("task join error: {e}"));
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::to_value(error).unwrap()),
-            );
+                api_error("internal_error", format!("task join error: {e}")),
+            )
+                .into_response();
         }
     };
 
@@ -239,21 +238,43 @@ async fn list_directory_inner(
         truncated,
     };
 
-    (
-        StatusCode::OK,
-        Json(serde_json::to_value(response).unwrap()),
-    )
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use axum::http::StatusCode;
+    use axum::response::Response;
+
+    async fn response_json(response: Response) -> serde_json::Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
 
     async fn call_list(path: Option<&str>, home: &PathBuf) -> (StatusCode, serde_json::Value) {
         let path_str = path.unwrap_or("").to_string();
-        let (status, Json(body)) = list_directory_inner(path_str, home.clone()).await;
+        let response = list_directory_inner(path_str, home.clone()).await;
+        let status = response.status();
+        let body = response_json(response).await;
         (status, body)
+    }
+
+    #[test]
+    fn list_response_serializes_entries_and_truncated() {
+        let response = ListResponse {
+            entries: vec![FsEntry {
+                name: "visible.txt".to_string(),
+                is_dir: false,
+                path: "/tmp/visible.txt".to_string(),
+            }],
+            truncated: false,
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["entries"][0]["name"], "visible.txt");
+        assert_eq!(json["truncated"], false);
     }
 
     #[tokio::test]

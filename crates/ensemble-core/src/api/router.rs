@@ -9,7 +9,7 @@ use crate::orchestrator::state::OrchestratorState;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::Router;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -161,11 +161,7 @@ pub fn create_api_router(state: AppState) -> Router {
 
 /// Fallback handler for unmatched API routes. Returns a JSON 404.
 async fn api_not_found() -> impl IntoResponse {
-    let error = handlers::ApiError::new("not_found", "API endpoint not found");
-    (
-        StatusCode::NOT_FOUND,
-        Json(serde_json::to_value(error).unwrap()),
-    )
+    (StatusCode::NOT_FOUND, handlers::api_error("not_found", "API endpoint not found"))
 }
 
 #[cfg(test)]
