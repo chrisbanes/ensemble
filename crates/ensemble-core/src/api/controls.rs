@@ -489,7 +489,10 @@ mod tests {
 
     #[cfg(unix)]
     fn spawn_sleep_process() -> std::process::Child {
-        std::process::Command::new("sleep").arg("30").spawn().unwrap()
+        std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap()
     }
 
     fn test_pipeline_run() -> PipelineRun {

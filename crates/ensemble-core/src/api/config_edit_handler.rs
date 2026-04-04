@@ -35,7 +35,9 @@ fn redact_secret_in_line(line: &str, keys: &[&str]) -> String {
             let pattern = format!("{key}{delimiter}");
             let mut search_from = 0;
 
-            while let Some(relative_start) = redacted[search_from..].to_ascii_lowercase().find(&pattern) {
+            while let Some(relative_start) =
+                redacted[search_from..].to_ascii_lowercase().find(&pattern)
+            {
                 let start = search_from + relative_start;
                 let prefix_start = redacted[..start]
                     .char_indices()
@@ -99,9 +101,7 @@ fn find_value_end(value: &str) -> usize {
         }
     } else {
         // Unquoted value: terminate at comma, closing brace, or end
-        trimmed
-            .find([',', '}'])
-            .unwrap_or(trimmed.len())
+        trimmed.find([',', '}']).unwrap_or(trimmed.len())
     }
 }
 
