@@ -292,10 +292,19 @@ mod tests {
 
     #[test]
     fn env_guard_restores_tracked_vars() {
+        let guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/before");
+        let saved = vec![(
+            "ENSEMBLE_TEST_DESKTOP_CONFIG_DIR",
+            std::env::var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR").ok(),
+        )];
 
         {
-            let _env = EnvGuard::lock(ENV_VARS);
+            let _env = EnvGuard {
+                _guard: guard,
+                saved,
+            };
+            std::env::remove_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR");
             assert!(std::env::var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR").is_err());
             std::env::set_var("ENSEMBLE_TEST_DESKTOP_CONFIG_DIR", "/tmp/during");
         }

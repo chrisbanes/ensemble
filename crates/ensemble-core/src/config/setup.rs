@@ -2068,11 +2068,24 @@ on_failure: Failed
 
     #[test]
     fn env_guard_restores_tracked_vars() {
+        let guard = ENV_LOCK.lock().unwrap();
         std::env::set_var("HOME", "/tmp/home-before");
         std::env::set_var("ENSEMBLE_TODO_PATH", "before/TODO.md");
+        let saved = vec![
+            ("HOME", std::env::var("HOME").ok()),
+            (
+                "ENSEMBLE_TODO_PATH",
+                std::env::var("ENSEMBLE_TODO_PATH").ok(),
+            ),
+        ];
 
         {
-            let _env = EnvGuard::lock(ENV_VARS);
+            let _env = EnvGuard {
+                _guard: guard,
+                saved,
+            };
+            std::env::remove_var("HOME");
+            std::env::remove_var("ENSEMBLE_TODO_PATH");
             assert!(std::env::var("HOME").is_err());
             assert!(std::env::var("ENSEMBLE_TODO_PATH").is_err());
             std::env::set_var("HOME", "/tmp/home-during");
