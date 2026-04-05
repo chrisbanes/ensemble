@@ -39,6 +39,7 @@ export interface GuidedForm {
     prompt?: string;
     prompt_template?: string;
     reasoning_level?: string;
+    permission_mode?: string;
   }>;
   steps: Array<{
     name: string;
@@ -70,7 +71,7 @@ export interface GuidedForm {
       max_retry_backoff_ms: number;
       command: string;
       session_mode: string;
-      permission_policy: string;
+      permission_request_policy: string;
       turn_timeout_ms: number;
       read_timeout_ms: number;
       stall_timeout_ms: number;

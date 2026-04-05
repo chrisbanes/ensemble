@@ -488,6 +488,123 @@ async fn test_post_yaml_validate_returns_syntax_errors() {
 }
 
 #[tokio::test]
+async fn test_get_config_uses_canonical_permission_request_policy_in_guided_form() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    let raw_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    permission_mode: approve_reads
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+agent:
+  command: claude-code
+  permission_request_policy: manual
+on_success: Done
+on_failure: Failed
+"#;
+    *state.config_runtime.document_state.write().await = ConfigDocumentState {
+        path: state.config_runtime.config_path.clone(),
+        kind: ConfigStateKind::Parsed,
+        raw_yaml: Some(raw_yaml.to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config(raw_yaml).unwrap()),
+        validation: DraftValidationReport::default(),
+    };
+
+    let base_url = start_test_server(state).await;
+    let response = reqwest::get(format!("{}/api/v1/config", base_url))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        json["guided_form"]["agents"][0]["permission_mode"],
+        "approve_reads"
+    );
+    assert_eq!(
+        json["guided_form"]["runtime"]["agent"]["permission_request_policy"],
+        "manual"
+    );
+    assert!(json["guided_form"]["agents"][0]
+        .get("permission_request_policy")
+        .is_none());
+    assert!(json["guided_form"]["runtime"]["agent"]
+        .get("permission_mode")
+        .is_none());
+    assert!(json["guided_form"]["runtime"]["agent"]
+        .get("permission_policy")
+        .is_none());
+}
+
+#[tokio::test]
+async fn test_guided_form_save_round_trips_legacy_permission_policy_to_canonical_key() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    let raw_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    permission_mode: approve_reads
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+agent:
+  command: claude-code
+  permission_policy: manual
+on_success: Done
+on_failure: Failed
+"#;
+    std::fs::write(&state.config_runtime.config_path, raw_yaml).unwrap();
+    *state.config_runtime.document_state.write().await = ConfigDocumentState {
+        path: state.config_runtime.config_path.clone(),
+        kind: ConfigStateKind::Parsed,
+        raw_yaml: Some(raw_yaml.to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config(raw_yaml).unwrap()),
+        validation: DraftValidationReport::default(),
+    };
+
+    let base_url = start_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let get_response = client
+        .get(format!("{}/api/v1/config", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), 200);
+    let get_json: serde_json::Value = get_response.json().await.unwrap();
+
+    let save_response = client
+        .post(format!("{}/api/v1/config/form/save", base_url))
+        .json(&serde_json::json!({
+            "base_raw_yaml": get_json["raw_yaml"],
+            "form": get_json["guided_form"],
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save_response.status(), 200);
+
+    let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+    assert!(saved_yaml.contains("permission_mode: approve_reads"));
+    assert!(saved_yaml.contains("permission_request_policy: manual"));
+    assert!(!saved_yaml.contains("permission_policy:"));
+}
+
+#[tokio::test]
 async fn test_setup_defaults_extract_from_parseable_raw_yaml() {
     let (state, _temp_dir) = build_app_state_without_config();
     *state.config_runtime.document_state.write().await = ConfigDocumentState {

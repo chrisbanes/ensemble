@@ -54,6 +54,7 @@ pub struct GuidedAgentForm {
     pub executor: Option<String>,
     pub model: Option<String>,
     pub acpx_agent: Option<String>,
+    pub permission_mode: Option<String>,
     pub prompt: Option<String>,
     pub prompt_template: Option<String>,
     pub reasoning_level: Option<String>,
@@ -110,7 +111,7 @@ pub struct GuidedAgentRuntimeForm {
     pub max_retry_backoff_ms: u64,
     pub command: String,
     pub session_mode: String,
-    pub permission_policy: String,
+    pub permission_request_policy: String,
     pub turn_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub stall_timeout_ms: i64,
@@ -163,6 +164,7 @@ pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigErr
                 executor: agent.executor.clone(),
                 model: agent.model.clone(),
                 acpx_agent: agent.acpx_agent.clone(),
+                permission_mode: agent.permission_mode.clone(),
                 prompt: agent.prompt.clone(),
                 prompt_template: agent
                     .prompt_template
@@ -205,7 +207,7 @@ pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigErr
                 max_retry_backoff_ms: config.agent.max_retry_backoff_ms,
                 command: config.agent.command.clone(),
                 session_mode: config.agent.session_mode.clone(),
-                permission_policy: config.agent.permission_policy.clone(),
+                permission_request_policy: config.agent.permission_request_policy.clone(),
                 turn_timeout_ms: config.agent.turn_timeout_ms,
                 read_timeout_ms: config.agent.read_timeout_ms,
                 stall_timeout_ms: config.agent.stall_timeout_ms,
@@ -344,6 +346,11 @@ pub fn apply_guided_form(
                 } else {
                     am.remove("acpx_agent");
                 }
+                if let Some(v) = opt_to_value(a.permission_mode.clone()) {
+                    am.insert("permission_mode".into(), v);
+                } else {
+                    am.remove("permission_mode");
+                }
                 if let Some(v) = opt_to_value(a.prompt.clone()) {
                     am.insert("prompt".into(), v);
                 } else {
@@ -472,9 +479,10 @@ pub fn apply_guided_form(
             form.runtime.agent.session_mode.clone().into(),
         );
         am.insert(
-            "permission_policy".into(),
-            form.runtime.agent.permission_policy.clone().into(),
+            "permission_request_policy".into(),
+            form.runtime.agent.permission_request_policy.clone().into(),
         );
+        am.remove("permission_policy");
         am.insert(
             "turn_timeout_ms".into(),
             form.runtime.agent.turn_timeout_ms.into(),
@@ -579,6 +587,7 @@ mod tests {
                 executor: None,
                 model: None,
                 acpx_agent: Some("claude".to_string()),
+                permission_mode: Some("approve_reads".to_string()),
                 prompt: Some("hello".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
@@ -611,7 +620,7 @@ mod tests {
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_policy: "auto_approve_all".to_string(),
+                    permission_request_policy: "auto_approve_all".to_string(),
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,
@@ -727,6 +736,92 @@ on_failure: Failed
         assert!(
             !tracker.contains_key("labels_filter"),
             "labels_filter should not be written for todo_file tracker"
+        );
+    }
+
+    #[test]
+    fn extract_guided_form_includes_agent_permission_mode() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    permission_mode: approve_reads
+    prompt: hello
+steps:
+  - name: implement
+    agent: builder
+agent:
+  command: claude-code
+  permission_request_policy: manual
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = extract_guided_form(raw).unwrap();
+
+        assert_eq!(
+            form.agents[0].permission_mode.as_deref(),
+            Some("approve_reads")
+        );
+        assert_eq!(form.runtime.agent.permission_request_policy, "manual");
+    }
+
+    #[test]
+    fn apply_guided_form_writes_permission_request_policy_without_legacy_key() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: hello
+steps:
+  - name: implement
+    agent: builder
+agent:
+  permission_policy: auto
+on_success: Done
+on_failure: Failed
+"#;
+
+        let merged = apply_guided_form(raw, &guided_form_with_workspace_root("/tmp/ws")).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let agent = val.get("agent").unwrap().as_mapping().unwrap();
+        let builder = val
+            .get("agents")
+            .unwrap()
+            .get("builder")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+
+        assert_eq!(
+            agent
+                .get("permission_request_policy")
+                .and_then(serde_yaml::Value::as_str),
+            Some("auto_approve_all")
+        );
+        assert!(
+            !agent.contains_key("permission_mode"),
+            "runtime agent section should not receive per-agent permission_mode"
+        );
+        assert!(
+            !agent.contains_key("permission_policy"),
+            "legacy runtime key should be removed"
+        );
+        assert_eq!(
+            builder
+                .get("permission_mode")
+                .and_then(serde_yaml::Value::as_str),
+            Some("approve_reads")
+        );
+        assert!(
+            !builder.contains_key("permission_request_policy"),
+            "per-agent section should not receive runtime permission_request_policy"
         );
     }
 }

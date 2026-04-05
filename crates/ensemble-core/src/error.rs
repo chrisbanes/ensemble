@@ -130,4 +130,6 @@ pub enum PipelineError {
     DuplicateStepName { name: String },
     #[error("agent must have 'acpx_agent' or both 'executor' and 'model': {agent}")]
     InvalidAgentConfig { agent: String },
+    #[error("invalid permission_mode for agent {agent}: {reason}")]
+    InvalidPermissionMode { agent: String, reason: String },
 }

@@ -25,6 +25,7 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
       acpx_agent: agent.acpx_agent ?? undefined,
       executor: agent.executor ?? undefined,
       model: agent.model ?? undefined,
+      permission_mode: agent.permission_mode ?? undefined,
       prompt: agent.prompt ?? undefined,
       prompt_template: agent.prompt_template ?? undefined,
       reasoning_level: agent.reasoning_level ?? undefined,

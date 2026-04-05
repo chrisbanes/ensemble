@@ -1314,6 +1314,109 @@ custom_root:
         assert!(response.issues.iter().any(|issue| issue.section == "setup"));
     }
 
+    #[tokio::test]
+    async fn save_guided_form_writes_permission_request_policy_to_saved_yaml() {
+        let (state, _temp_dir) = test_app_state();
+        let base_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+agent:
+  permission_policy: auto
+on_success: Done
+on_failure: Failed
+"#;
+        std::fs::write(&state.config_runtime.config_path, base_yaml).unwrap();
+        *state.config_runtime.document_state.write().await = parse_raw_yaml(
+            state.config_runtime.config_path.clone(),
+            base_yaml.to_string(),
+        );
+
+        let form = crate::config::form::GuidedConfigForm {
+            tracker: crate::config::form::GuidedTrackerForm {
+                kind: "todo_file".to_string(),
+                path: Some("TODO.md".to_string()),
+                repository: None,
+                project_number: None,
+                api_key: None,
+                endpoint: None,
+                active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec![],
+            },
+            repos: vec![],
+            agents: vec![crate::config::form::GuidedAgentForm {
+                name: "builder".to_string(),
+                executor: None,
+                model: None,
+                acpx_agent: Some("claude".to_string()),
+                permission_mode: Some("approve_reads".to_string()),
+                prompt: Some("Build it.".to_string()),
+                prompt_template: None,
+                reasoning_level: None,
+            }],
+            steps: vec![crate::config::form::GuidedStepForm {
+                name: "build".to_string(),
+                agent: "builder".to_string(),
+                depends: vec![],
+                tracker_state: None,
+            }],
+            runtime: crate::config::form::GuidedRuntimeForm {
+                max_cycles: 3,
+                concurrency: crate::config::form::GuidedConcurrencyForm {
+                    max_concurrent_agents: 4,
+                    max_step_parallelism: 2,
+                },
+                polling: crate::config::form::GuidedPollingForm { interval_ms: 30000 },
+                workspace: crate::config::form::GuidedWorkspaceForm { root: None },
+                hooks: crate::config::form::GuidedHooksForm {
+                    after_create: None,
+                    before_run: None,
+                    after_run: None,
+                    before_remove: None,
+                    timeout_ms: 60000,
+                },
+                agent: crate::config::form::GuidedAgentRuntimeForm {
+                    max_turns: 20,
+                    max_retry_backoff_ms: 300000,
+                    command: "claude-code".to_string(),
+                    session_mode: "code".to_string(),
+                    permission_request_policy: "manual".to_string(),
+                    turn_timeout_ms: 3600000,
+                    read_timeout_ms: 5000,
+                    stall_timeout_ms: 300000,
+                },
+            },
+            transitions: crate::config::form::GuidedTransitionForm {
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+
+        let (status, Json(response)) = save_guided_form(
+            axum::extract::State(state.clone()),
+            Json(SaveGuidedFormRequest {
+                base_raw_yaml: base_yaml.to_string(),
+                form,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response.state, "parsed");
+
+        let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(saved_yaml.contains("permission_request_policy: manual"));
+        assert!(!saved_yaml.contains("permission_policy:"));
+    }
+
     #[test]
     fn test_config_error_json_adds_save_issue_to_current_state_shape() {
         let config_path = PathBuf::from("/tmp/config.yaml");
@@ -1418,6 +1521,7 @@ on_failure: Failed
                 executor: None,
                 model: None,
                 acpx_agent: None,
+                permission_mode: Some("approve_reads".to_string()),
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
@@ -1448,7 +1552,7 @@ on_failure: Failed
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_policy: "auto_approve_all".to_string(),
+                    permission_request_policy: "auto_approve_all".to_string(),
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,
@@ -1568,6 +1672,7 @@ on_failure: Failed
                 executor: None,
                 model: None,
                 acpx_agent: Some("claude".to_string()),
+                permission_mode: Some("approve_reads".to_string()),
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
@@ -1598,7 +1703,7 @@ on_failure: Failed
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_policy: "auto_approve_all".to_string(),
+                    permission_request_policy: "auto_approve_all".to_string(),
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,

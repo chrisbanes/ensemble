@@ -101,6 +101,7 @@ repos:
 agents:
   builder:
     acpx_agent: claude
+    permission_mode: approve_reads
     prompt_template: templates/implement.liquid  # Relative to config directory
   reviewer:
     executor: claude-code
@@ -185,11 +186,14 @@ List of repositories for workspace setup. Paths can be absolute or relative to t
 
 Named agent definitions. Each key is the agent name referenced by steps.
 
+This section configures per-agent launch settings. Runtime ACP callback handling lives under the top-level `agent.*` section.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `executor` | string | — | Agent executable (e.g., `"claude-code"`) |
 | `model` | string | — | Model identifier (e.g., `"claude-opus-4-6"`) |
 | `acpx_agent` | string | — | ACPX agent name (alternative to executor+model) |
+| `permission_mode` | string | — | ACPX launch-time permission mode for `acpx_agent`; supported values: `"approve_all"`, `"approve_reads"`, `"deny_all"`. Omit to preserve ACPX defaults. |
 | `prompt` | string | — | Inline prompt text |
 | `prompt_template` | string | — | Path to a Liquid template file (config-relative) |
 
@@ -258,16 +262,20 @@ Shell scripts that run at workspace lifecycle points. Each runs via `sh -lc` wit
 
 Runtime settings for agent execution.
 
+This section configures Ensemble's runtime behavior after the agent is launched. It does not set per-agent ACPX launch flags; those belong in `agents.*`.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_turns` | integer | `20` | Maximum agent conversation turns per session |
 | `max_retry_backoff_ms` | integer | `300000` | Cap on exponential backoff delay between retries |
 | `command` | string | `"claude-code"` | Agent binary command |
 | `session_mode` | string | `"code"` | Agent session mode |
-| `permission_policy` | string | `"auto_approve_all"` | Agent permission policy |
+| `permission_request_policy` | string | `"auto_approve_all"` | Ensemble policy for handling ACP `session/request_permission` callbacks |
 | `turn_timeout_ms` | integer | `3600000` | Maximum time for a single agent turn (1 hour) |
 | `read_timeout_ms` | integer | `5000` | Timeout for reading agent output |
 | `stall_timeout_ms` | integer | `300000` | Timeout for detecting a stalled agent |
+
+Legacy note: `agent.permission_policy` is still accepted as a deprecated alias for `agent.permission_request_policy` during config parsing.
 
 ## Prompt templates
 

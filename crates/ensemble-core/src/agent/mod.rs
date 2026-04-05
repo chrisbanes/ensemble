@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-use crate::config::ensemble::EnsembleConfig;
+use crate::config::ensemble::{EnsembleConfig, PermissionMode};
 use crate::config::template::render_prompt_with_interaction_response;
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
@@ -268,16 +268,29 @@ fn shell_escape(arg: &str) -> String {
 
 /// Build the ACP spawn command for an agent.
 ///
-/// When `acpx_agent` is set, uses `acpx --agent <name>` with `--model` if
-/// configured. Arguments are shell-escaped because the command is executed
-/// via `bash -lc`. Falls back to `executor` if set, then to the global default.
+/// When `acpx_agent` is set, uses `acpx --agent <name>` with optional
+/// launch-time flags derived from per-agent `permission_mode` and `model`.
+/// Arguments are shell-escaped because the command is executed via `bash -lc`.
+/// `agent.permission_request_policy` is handled later when ACP permission
+/// callbacks arrive; it does not change the spawn command. Falls back to
+/// `executor` if set, then to the global default.
 fn resolve_agent_command(
     agent_config: Option<&crate::config::ensemble::AgentConfig>,
     default_command: &str,
 ) -> String {
     if let Some(ac) = agent_config {
         if let Some(ref acpx_name) = ac.acpx_agent {
-            let mut cmd = format!("acpx --agent {}", shell_escape(acpx_name));
+            let mut cmd = String::from("acpx");
+            if let Some(permission_flag) = ac
+                .permission_mode
+                .as_deref()
+                .and_then(PermissionMode::parse)
+                .map(PermissionMode::acpx_flag)
+            {
+                cmd.push(' ');
+                cmd.push_str(permission_flag);
+            }
+            cmd.push_str(&format!(" --agent {}", shell_escape(acpx_name)));
             if let Some(ref model) = ac.model {
                 cmd.push_str(&format!(" --model {}", shell_escape(model)));
             }
@@ -411,7 +424,7 @@ impl AgentRunner for AcpAgentRunner {
                     &session_id,
                     &prompt,
                     config.agent.turn_timeout_ms,
-                    &config.agent.permission_policy,
+                    &config.agent.permission_request_policy,
                     &issue.id,
                     step_name,
                     &event_tx,
@@ -995,6 +1008,7 @@ on_failure: Todo
             acpx_agent: Some("claude".to_string()),
             model: Some("sonnet".to_string()),
             executor: None,
+            permission_mode: None,
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
@@ -1004,17 +1018,89 @@ on_failure: Todo
     }
 
     #[test]
+    fn test_resolve_agent_command_includes_approve_all_flag() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: Some("approve_all".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+
+        assert_eq!(cmd, "acpx --approve-all --agent 'claude' --model 'sonnet'");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_includes_approve_reads_flag() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: Some("approve_reads".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+
+        assert_eq!(
+            cmd,
+            "acpx --approve-reads --agent 'claude' --model 'sonnet'"
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_command_includes_deny_all_flag() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: Some("deny_all".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+
+        assert_eq!(cmd, "acpx --deny-all --agent 'claude' --model 'sonnet'");
+    }
+
+    #[test]
     fn test_resolve_agent_command_no_model() {
         let config = crate::config::ensemble::AgentConfig {
             acpx_agent: Some("claude".to_string()),
             model: None,
             executor: None,
+            permission_mode: None,
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
         };
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
         assert_eq!(cmd, "acpx --agent 'claude'");
+    }
+
+    #[test]
+    fn test_resolve_agent_command_omits_permission_flag_when_unset() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: None,
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+        };
+
+        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+
+        assert_eq!(cmd, "acpx --agent 'claude' --model 'sonnet'");
     }
 
     #[test]
@@ -1029,6 +1115,7 @@ on_failure: Todo
             acpx_agent: None,
             model: None,
             executor: Some("codex --profile prod; touch /tmp/pwned".to_string()),
+            permission_mode: None,
             prompt: None,
             prompt_template: None,
             reasoning_level: None,

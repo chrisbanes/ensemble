@@ -76,6 +76,32 @@ fn default_git_remote() -> String {
     "origin".to_string()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermissionMode {
+    ApproveAll,
+    ApproveReads,
+    DenyAll,
+}
+
+impl PermissionMode {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "approve_all" => Some(Self::ApproveAll),
+            "approve_reads" => Some(Self::ApproveReads),
+            "deny_all" => Some(Self::DenyAll),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn acpx_flag(self) -> &'static str {
+        match self {
+            Self::ApproveAll => "--approve-all",
+            Self::ApproveReads => "--approve-reads",
+            Self::DenyAll => "--deny-all",
+        }
+    }
+}
+
 fn default_max_cycles() -> u32 {
     3
 }
@@ -132,6 +158,8 @@ pub struct AgentConfig {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acpx_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -248,8 +276,8 @@ pub struct AgentRuntimeConfig {
     pub command: String,
     #[serde(default = "default_session_mode")]
     pub session_mode: String,
-    #[serde(default = "default_permission_policy")]
-    pub permission_policy: String,
+    #[serde(default = "default_permission_request_policy")]
+    pub permission_request_policy: String,
     #[serde(default = "default_turn_timeout_ms")]
     pub turn_timeout_ms: u64,
     #[serde(default = "default_read_timeout_ms")]
@@ -274,7 +302,7 @@ fn default_session_mode() -> String {
     "code".to_string()
 }
 
-fn default_permission_policy() -> String {
+fn default_permission_request_policy() -> String {
     "auto_approve_all".to_string()
 }
 
@@ -297,7 +325,7 @@ impl Default for AgentRuntimeConfig {
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
             command: default_agent_command(),
             session_mode: default_session_mode(),
-            permission_policy: default_permission_policy(),
+            permission_request_policy: default_permission_request_policy(),
             turn_timeout_ms: default_turn_timeout_ms(),
             read_timeout_ms: default_read_timeout_ms(),
             stall_timeout_ms: default_stall_timeout_ms(),
@@ -450,9 +478,53 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
 /// Note: Does NOT resolve `$VAR` or `~`. Call `config.resolve_env()` after
 /// parsing, or use `load_config()` which does both.
 pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigError> {
-    serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::ConfigParseError {
+    let mut value: serde_yaml::Value =
+        serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::ConfigParseError {
+            reason: e.to_string(),
+        })?;
+    normalize_agent_permission_request_policy(&mut value)?;
+    serde_yaml::from_value(value).map_err(|e| crate::error::ConfigError::ConfigParseError {
         reason: e.to_string(),
     })
+}
+
+fn normalize_agent_permission_request_policy(
+    value: &mut serde_yaml::Value,
+) -> Result<(), crate::error::ConfigError> {
+    let Some(agent) = value
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut(serde_yaml::Value::String("agent".to_string())))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return Ok(());
+    };
+
+    let legacy_key = serde_yaml::Value::String("permission_policy".to_string());
+    let canonical_key = serde_yaml::Value::String("permission_request_policy".to_string());
+    let legacy_value = agent.get(&legacy_key).cloned();
+    let canonical_value = agent.get(&canonical_key).cloned();
+
+    if let Some(legacy_value) = legacy_value {
+        tracing::warn!(
+            "'agent.permission_policy' is deprecated; use 'agent.permission_request_policy' instead"
+        );
+
+        if let Some(canonical_value) = canonical_value {
+            if canonical_value != legacy_value {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason:
+                        "agent.permission_policy conflicts with agent.permission_request_policy"
+                            .to_string(),
+                });
+            }
+        } else {
+            agent.insert(canonical_key, legacy_value);
+        }
+
+        agent.remove(&legacy_key);
+    }
+
+    Ok(())
 }
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
@@ -470,6 +542,26 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         let has_acpx = agent.acpx_agent.is_some();
         let has_executor = agent.executor.is_some();
         let has_model = agent.model.is_some();
+
+        if let Some(permission_mode) = agent.permission_mode.as_deref() {
+            if !has_acpx {
+                return Err(PipelineError::InvalidPermissionMode {
+                    agent: name.clone(),
+                    reason: "permission_mode requires acpx_agent".to_string(),
+                });
+            }
+
+            if PermissionMode::parse(permission_mode).is_none() {
+                return Err(PipelineError::InvalidPermissionMode {
+                    agent: name.clone(),
+                    reason: format!(
+                        "unsupported value '{}' (expected one of: approve_all, approve_reads, deny_all)",
+                        permission_mode
+                    ),
+                });
+            }
+        }
+
         if !has_acpx && (!has_executor || !has_model) {
             return Err(PipelineError::InvalidAgentConfig {
                 agent: name.clone(),
@@ -499,7 +591,10 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io;
+    use std::sync::Arc;
     use std::sync::Mutex;
+    use tracing_subscriber::fmt::writer::MakeWriter;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -513,6 +608,42 @@ mod tests {
     struct EnvGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn output(&self) -> String {
+            String::from_utf8(self.buffer.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    struct BufferGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for BufferGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for SharedWriter {
+        type Writer = BufferGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            BufferGuard {
+                buffer: Arc::clone(&self.buffer),
+            }
+        }
     }
 
     impl EnvGuard {
@@ -744,7 +875,7 @@ on_failure: Failed
         assert_eq!(config.agent.max_retry_backoff_ms, 300_000);
         assert_eq!(config.agent.command, "claude-code");
         assert_eq!(config.agent.session_mode, "code");
-        assert_eq!(config.agent.permission_policy, "auto_approve_all");
+        assert_eq!(config.agent.permission_request_policy, "auto_approve_all");
         assert_eq!(config.agent.turn_timeout_ms, 3_600_000);
         assert_eq!(config.agent.read_timeout_ms, 5_000);
         assert_eq!(config.agent.stall_timeout_ms, 300_000);
@@ -1042,6 +1173,156 @@ on_failure: Failed
     }
 
     #[test]
+    fn test_parse_config_with_permission_mode() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    permission_mode: approve_reads
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let builder = &config.agents["builder"];
+        assert_eq!(builder.permission_mode.as_deref(), Some("approve_reads"));
+        assert_eq!(config.agent.permission_request_policy, "auto_approve_all");
+    }
+
+    #[test]
+    fn test_parse_config_with_permission_request_policy() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  permission_request_policy: manual
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(config.agents["builder"].permission_mode.is_none());
+        assert_eq!(config.agent.permission_request_policy, "manual");
+    }
+
+    #[test]
+    fn test_parse_config_with_legacy_permission_policy() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  permission_policy: manual
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.agent.permission_request_policy, "manual");
+    }
+
+    #[test]
+    fn test_parse_config_with_legacy_permission_policy_warns() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  permission_policy: manual
+"#;
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let config = parse_config(yaml).unwrap();
+            assert_eq!(config.agent.permission_request_policy, "manual");
+        });
+
+        let output = writer.output();
+        assert!(output.contains("agent.permission_policy"));
+        assert!(output.contains("agent.permission_request_policy"));
+        assert!(output.contains("deprecated"));
+    }
+
+    #[test]
+    fn test_parse_config_accepts_matching_permission_policy_keys() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  permission_policy: manual
+  permission_request_policy: manual
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.agent.permission_request_policy, "manual");
+    }
+
+    #[test]
+    fn test_parse_config_rejects_conflicting_permission_policy_keys() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  permission_policy: auto
+  permission_request_policy: manual
+"#;
+        let error = parse_config(yaml).unwrap_err();
+        match error {
+            crate::error::ConfigError::ConfigParseError { reason } => {
+                assert!(reason.contains("permission_policy"));
+                assert!(reason.contains("permission_request_policy"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_config_repos_defaults_to_empty() {
         let config = parse_config(minimal_yaml()).unwrap();
         assert!(config.repos.is_empty());
@@ -1099,6 +1380,104 @@ on_failure: Failed
 "#;
         let config = parse_config(yaml).unwrap();
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_permission_mode_requires_acpx_agent() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    executor: claude-code
+    model: sonnet-4
+    permission_mode: approve_all
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidPermissionMode { agent, reason } => {
+                assert_eq!(agent, "builder");
+                assert!(reason.contains("requires acpx_agent"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_permission_mode_rejects_unknown_value() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    permission_mode: maybe
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidPermissionMode { agent, reason } => {
+                assert_eq!(agent, "builder");
+                assert!(reason.contains("unsupported value 'maybe'"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_permission_mode_accepts_valid_value_for_acpx_agent() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    permission_mode: approve_reads
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_permission_mode_exposes_acpx_flags() {
+        assert_eq!(
+            PermissionMode::parse("approve_all"),
+            Some(PermissionMode::ApproveAll)
+        );
+        assert_eq!(
+            PermissionMode::parse("approve_reads"),
+            Some(PermissionMode::ApproveReads)
+        );
+        assert_eq!(
+            PermissionMode::parse("deny_all"),
+            Some(PermissionMode::DenyAll)
+        );
+        assert_eq!(PermissionMode::parse("nope"), None);
+
+        assert_eq!(PermissionMode::ApproveAll.acpx_flag(), "--approve-all");
+        assert_eq!(PermissionMode::ApproveReads.acpx_flag(), "--approve-reads");
+        assert_eq!(PermissionMode::DenyAll.acpx_flag(), "--deny-all");
     }
 
     #[test]
