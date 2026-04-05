@@ -149,6 +149,8 @@ async fn prepare_orchestrator_runtime(
 
     let config = Arc::new(RwLock::new(config.clone()));
     let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker(&config.read().await.tracker)?);
+    // `AcpAgentRunner` is the shared runtime dispatcher: `acpx_agent` steps run through the
+    // acpx CLI/session runtime, while explicit direct configs keep the ACP stdio path.
     let agent_runner: Arc<dyn AgentRunner> = Arc::new(AcpAgentRunner::new(Arc::clone(&config)));
     let workspace_mgr = WorkspaceManager::new(
         Path::new(&app_state.workspace_root),

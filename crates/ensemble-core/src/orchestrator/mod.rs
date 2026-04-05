@@ -650,10 +650,10 @@ impl Orchestrator {
             } => {
                 state.update_session_info(issue_id, session_id, agent_pid.as_deref());
             }
-            AgentEvent::TurnStarted => {
+            AgentEvent::PromptStarted => {
                 state.increment_turn_count(issue_id);
             }
-            AgentEvent::TurnCompleted { usage } | AgentEvent::TurnFailed { usage, .. } => {
+            AgentEvent::RunCompleted { usage } | AgentEvent::RunFailed { usage, .. } => {
                 if let Some(u) = usage {
                     state.update_token_usage(
                         issue_id,
@@ -1845,12 +1845,27 @@ agent:
 
         drop(state);
 
-        // Send turn completed with usage
+        orchestrator
+            .handle_agent_update("1", "build", AgentEvent::PromptStarted, Utc::now())
+            .await;
         orchestrator
             .handle_agent_update(
                 "1",
                 "build",
-                AgentEvent::TurnCompleted {
+                AgentEvent::OutputChunk {
+                    stream: crate::agent::events::RuntimeStream::Stdout,
+                    content: "hello".to_string(),
+                },
+                Utc::now(),
+            )
+            .await;
+
+        // Send run completed with usage
+        orchestrator
+            .handle_agent_update(
+                "1",
+                "build",
+                AgentEvent::RunCompleted {
                     usage: Some(crate::agent::events::TokenUsage {
                         input_tokens: 500,
                         output_tokens: 200,
@@ -1866,8 +1881,65 @@ agent:
         assert_eq!(entry.agent_input_tokens, 500);
         assert_eq!(entry.agent_output_tokens, 200);
         assert_eq!(entry.agent_total_tokens, 700);
+        assert_eq!(entry.turn_count, 1);
+        assert_eq!(entry.last_agent_event.as_deref(), Some("run_completed"));
+        assert_eq!(entry.last_agent_message.as_deref(), Some("hello"));
         assert_eq!(state.agent_totals.input_tokens, 500);
         assert_eq!(state.agent_totals.total_tokens, 700);
+    }
+
+    #[tokio::test]
+    async fn handle_agent_update_accepts_prompt_started_and_output_chunk() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+        }
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::PromptStarted,
+                timestamp: Utc::now(),
+            })
+            .await;
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::OutputChunk {
+                    stream: crate::agent::events::RuntimeStream::Stdout,
+                    content: "hi".to_string(),
+                },
+                timestamp: Utc::now(),
+            })
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let entry = state.running.get("1").unwrap();
+        assert_eq!(entry.turn_count, 1);
+        assert_eq!(entry.last_agent_event.as_deref(), Some("output_chunk"));
+        assert_eq!(entry.last_agent_message.as_deref(), Some("hi"));
     }
 
     #[tokio::test]
