@@ -19,14 +19,6 @@ pub enum DesktopError {
     #[error("Failed to load config: {0}")]
     ConfigLoadFailed(String),
 
-    /// Configuration validation failed.
-    #[error("Config validation failed: {0}")]
-    ConfigValidationFailed(String),
-
-    /// DAG validation failed.
-    #[error("DAG validation failed: {0}")]
-    DagValidationFailed(String),
-
     /// I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

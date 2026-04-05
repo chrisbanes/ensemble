@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{error, info};
 
-use ensemble_core::config::ensemble::{load_config, validate_config};
+use ensemble_core::api::bootstrap::{
+    build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
+};
+use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
-use ensemble_core::orchestrator::state::OrchestratorState;
-use ensemble_core::pipeline::dag::build_dag;
+use ensemble_core::observability::events::EventBus;
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
@@ -44,49 +44,56 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         "starting ensemble in headless mode"
     );
 
-    // Load and validate config.yaml
-    let config = match load_config(&resolved.config_path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            error!(error = %e, path = %resolved.config_path.display(), "failed to load config");
-            eprintln!(
-                "error: failed to load {}: {}",
-                resolved.config_path.display(),
-                e
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
-    if let Err(e) = validate_config(&config) {
-        error!(error = %e, "config validation failed");
-        eprintln!("error: config validation failed: {}", e);
-        return ExitCode::FAILURE;
-    }
-
-    if let Err(e) = build_dag(&config.steps) {
-        error!(error = %e, "step DAG validation failed");
-        eprintln!("error: step DAG validation failed: {}", e);
-        return ExitCode::FAILURE;
-    }
-
-    info!(
-        tracker_kind = %config.tracker.kind,
-        poll_interval_ms = config.polling.interval_ms,
-        max_concurrent = config.concurrency.max_concurrent_agents,
-        "config loaded successfully"
+    let document_state = load_config_document_or_missing(&resolved.config_path);
+    let prepared = build_app_state(
+        resolved.config_path.clone(),
+        document_state,
+        EventBus::new(),
     );
 
-    // Create orchestrator state
-    let _orchestrator_state = Arc::new(RwLock::new(OrchestratorState::new(
-        config.polling.interval_ms,
-        config.concurrency.max_concurrent_agents,
-    )));
+    if !prepared.has_runnable_config {
+        error!(
+            path = %resolved.config_path.display(),
+            "failed to load a runnable config"
+        );
+        eprintln!(
+            "error: failed to load a runnable config from {}",
+            resolved.config_path.display()
+        );
+        return ExitCode::FAILURE;
+    }
 
-    let _refresh_notify = Arc::new(tokio::sync::Notify::new());
+    {
+        let document_state = prepared
+            .app_state
+            .config_runtime
+            .document_state
+            .read()
+            .await;
+        let config = document_state.active_config.as_ref().unwrap();
+        info!(
+            tracker_kind = %config.tracker.kind,
+            poll_interval_ms = config.polling.interval_ms,
+            max_concurrent = config.concurrency.max_concurrent_agents,
+            "config loaded successfully"
+        );
+    }
 
-    // TODO: Start orchestrator poll loop (Plan 3 wires this up).
-    info!("ensemble is running in headless mode (orchestrator loop placeholder, press Ctrl+C to stop)");
+    match start_or_replace_registered_orchestrator(&prepared.app_state).await {
+        Ok(true) => {}
+        Ok(false) => {
+            error!("runnable config did not produce an orchestrator runtime");
+            eprintln!("error: runnable config did not produce an orchestrator runtime");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => {
+            error!(error = %e, "failed to start orchestrator");
+            eprintln!("error: failed to start orchestrator: {}", e);
+            return ExitCode::FAILURE;
+        }
+    }
+
+    info!("ensemble is running in headless mode (press Ctrl+C to stop)");
 
     // Wait for shutdown signal (ctrl-c)
     match tokio::signal::ctrl_c().await {
@@ -98,6 +105,9 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         }
     }
 
+    if let Some(runtime) = take_registered_orchestrator(&prepared.app_state) {
+        runtime.shutdown().await;
+    }
     info!("ensemble shut down cleanly");
     ExitCode::SUCCESS
 }

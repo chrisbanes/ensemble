@@ -27,6 +27,11 @@ pub struct ConfigRuntime {
 pub struct AppState {
     /// The orchestrator state, shared with the orchestrator task via RwLock.
     pub orchestrator_state: Arc<RwLock<OrchestratorState>>,
+    /// The currently registered orchestrator runtime for this app instance.
+    ///
+    /// Runtime registration only swaps ownership of the handle and never awaits while holding
+    /// the lock, so a blocking mutex keeps this cheap and simple.
+    pub orchestrator_runtime: crate::api::bootstrap::RegisteredOrchestrator,
     /// Flag that signals the orchestrator to run an immediate tick.
     /// The orchestrator polls this flag; setting it triggers a refresh.
     pub refresh_requested: Arc<tokio::sync::Notify>,

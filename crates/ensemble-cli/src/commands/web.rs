@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing::{error, info, warn};
 
-use ensemble_core::api::bootstrap::build_app_state;
+use ensemble_core::api::bootstrap::{
+    build_app_state, clear_registered_orchestrator, start_or_replace_registered_orchestrator,
+    take_registered_orchestrator,
+};
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
@@ -116,9 +119,26 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     }
     let has_runnable_config = prepared.has_runnable_config;
     let app_state = prepared.app_state;
+    if has_runnable_config {
+        match start_or_replace_registered_orchestrator(&app_state).await {
+            Ok(true) => info!("orchestrator started"),
+            Ok(false) => {
+                error!("runnable config did not produce an orchestrator runtime");
+                eprintln!("error: runnable config did not produce an orchestrator runtime");
+                return ExitCode::FAILURE;
+            }
+            Err(e) => {
+                error!(error = %e, "failed to start orchestrator");
+                eprintln!("error: failed to start orchestrator: {}", e);
+                return ExitCode::FAILURE;
+            }
+        }
+    } else {
+        clear_registered_orchestrator(&app_state).await;
+    }
 
     // Create combined router: API routes + SPA fallback
-    let api_router = create_api_router(app_state);
+    let api_router = create_api_router(app_state.clone());
     let spa_router = spa_router();
 
     let router = api_router.merge(spa_router);
@@ -186,10 +206,7 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         }
     });
 
-    // Only start orchestrator if we have a valid config
-    if has_runnable_config {
-        info!("orchestrator can start (loop placeholder)");
-    } else {
+    if !has_runnable_config {
         info!("orchestrator disabled - waiting for valid config via setup wizard");
     }
 
@@ -207,6 +224,9 @@ pub async fn execute(args: WebArgs) -> ExitCode {
 
     // Clean shutdown
     server_handle.abort();
+    if let Some(runtime) = take_registered_orchestrator(&app_state) {
+        runtime.shutdown().await;
+    }
     info!("HTTP server stopped");
 
     info!("ensemble shut down cleanly");

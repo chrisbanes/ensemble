@@ -24,6 +24,7 @@ pub(crate) fn parsed_document_state() -> ConfigDocumentState {
 pub(crate) fn app_state_with_document_state(document_state: ConfigDocumentState) -> AppState {
     AppState {
         orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
+        orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: "/tmp/workspaces".to_string(),
         history_path: PathBuf::from("/tmp/history.jsonl"),
@@ -41,6 +42,7 @@ pub(crate) fn app_state_with_missing_config(
 ) -> AppState {
     AppState {
         orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
+        orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: workspace_root.to_string(),
         history_path: PathBuf::from("/tmp/history.jsonl"),

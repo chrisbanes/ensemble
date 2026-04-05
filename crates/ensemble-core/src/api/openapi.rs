@@ -154,4 +154,21 @@ mod tests {
             "#/components/schemas/ConfigStateResponse"
         );
     }
+
+    #[test]
+    fn test_openapi_documents_runtime_restart_failures_for_save_endpoints() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        for path in [
+            "/api/v1/config/yaml/save",
+            "/api/v1/config/setup/save",
+            "/api/v1/config/form/save",
+        ] {
+            assert!(
+                spec["paths"][path]["post"]["responses"]["500"].is_object(),
+                "expected 500 response to be documented for {path}"
+            );
+        }
+    }
 }

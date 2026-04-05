@@ -1,3 +1,4 @@
+use crate::api::bootstrap::start_or_replace_registered_orchestrator;
 use crate::api::router::AppState;
 use crate::config::draft::{
     parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState, ConfigStateKind, ValidationIssue,
@@ -275,7 +276,8 @@ pub struct SaveYamlRequest {
     request_body = SaveYamlRequest,
     responses(
         (status = 200, description = "Save result", body = ConfigStateResponse),
-        (status = 400, description = "Invalid YAML or validation failed")
+        (status = 400, description = "Invalid YAML or validation failed"),
+        (status = 500, description = "Config saved but orchestrator restart failed", body = ConfigStateResponse)
     ),
     tag = "config"
 )]
@@ -290,7 +292,23 @@ pub async fn save_yaml(
         &state.config_runtime.config_path,
         &request.raw_yaml,
     ) {
-        Ok(response) => (StatusCode::OK, Json(response)),
+        Ok(response) => {
+            drop(doc_state);
+            match start_or_replace_registered_orchestrator(&state).await {
+                Ok(_) => (StatusCode::OK, Json(response)),
+                Err(error) => {
+                    let doc_state = state.config_runtime.document_state.read().await;
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        current_error_json(
+                            &doc_state,
+                            "runtime",
+                            format!("saved config but failed to restart orchestrator: {error}"),
+                        ),
+                    )
+                }
+            }
+        }
         Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     }
 }
@@ -502,7 +520,8 @@ pub struct SaveSetupRequest {
     request_body = SaveSetupRequest,
     responses(
         (status = 200, description = "Save result", body = ConfigStateResponse),
-        (status = 400, description = "Setup validation failed")
+        (status = 400, description = "Setup validation failed"),
+        (status = 500, description = "Config saved but orchestrator restart failed", body = ConfigStateResponse)
     ),
     tag = "config"
 )]
@@ -551,7 +570,23 @@ where
 
     match crate::config::setup::write_setup_artifacts(root, &request.setup, &artifacts) {
         Ok(()) => match reload_document_state(&mut doc_state, &state.config_runtime.config_path) {
-            Ok(response) => (StatusCode::OK, Json(response)),
+            Ok(response) => {
+                drop(doc_state);
+                match start_or_replace_registered_orchestrator(&state).await {
+                    Ok(_) => (StatusCode::OK, Json(response)),
+                    Err(error) => {
+                        let doc_state = state.config_runtime.document_state.read().await;
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            current_error_json(
+                                &doc_state,
+                                "runtime",
+                                format!("saved config but failed to restart orchestrator: {error}"),
+                            ),
+                        )
+                    }
+                }
+            }
             Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
         },
         Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
@@ -725,7 +760,8 @@ pub struct SaveGuidedFormRequest {
     request_body = SaveGuidedFormRequest,
     responses(
         (status = 200, description = "Save result", body = ConfigStateResponse),
-        (status = 400, description = "Merge or save failed")
+        (status = 400, description = "Merge or save failed"),
+        (status = 500, description = "Config saved but orchestrator restart failed", body = ConfigStateResponse)
     ),
     tag = "config"
 )]
@@ -753,7 +789,23 @@ pub async fn save_guided_form(
         &state.config_runtime.config_path,
         &merged_yaml,
     ) {
-        Ok(response) => (StatusCode::OK, Json(response)),
+        Ok(response) => {
+            drop(doc_state);
+            match start_or_replace_registered_orchestrator(&state).await {
+                Ok(_) => (StatusCode::OK, Json(response)),
+                Err(error) => {
+                    let doc_state = state.config_runtime.document_state.read().await;
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        current_error_json(
+                            &doc_state,
+                            "runtime",
+                            format!("saved config but failed to restart orchestrator: {error}"),
+                        ),
+                    )
+                }
+            }
+        }
         Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
     }
 }
@@ -1674,6 +1726,70 @@ on_failure: Failed
                 .and_then(|config| config.tracker.api_key.clone()),
             Some("ghp_secret123".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn save_yaml_starts_orchestrator_after_valid_config_is_written() {
+        let (state, temp_dir) = test_app_state();
+        let todo_path = temp_dir.path().join("TODO.md");
+        std::fs::write(&todo_path, "## Todo\n").unwrap();
+        let request = SaveYamlRequest {
+            raw_yaml: format!(
+                "tracker:\n  kind: todo_file\n  path: {}\npolling:\n  interval_ms: 1234\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n",
+                todo_path.display()
+            ),
+        };
+
+        let (status, Json(response)) =
+            save_yaml(axum::extract::State(state.clone()), Json(request)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert!(response.active_config.is_some());
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if state.orchestrator_state.read().await.last_tick_at.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("orchestrator should start after saving a valid config");
+    }
+
+    #[tokio::test]
+    async fn save_yaml_restarts_orchestrator_with_updated_poll_interval() {
+        let (state, temp_dir) = test_app_state();
+        let todo_path = temp_dir.path().join("TODO.md");
+        std::fs::write(&todo_path, "## Todo\n").unwrap();
+
+        for interval_ms in [1234_u64, 4321_u64] {
+            let request = SaveYamlRequest {
+                raw_yaml: format!(
+                    "tracker:\n  kind: todo_file\n  path: {}\npolling:\n  interval_ms: {interval_ms}\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n",
+                    todo_path.display()
+                ),
+            };
+
+            let (status, Json(response)) =
+                save_yaml(axum::extract::State(state.clone()), Json(request)).await;
+
+            assert_eq!(status, StatusCode::OK);
+            assert!(response.active_config.is_some());
+
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let poll_interval_ms = state.orchestrator_state.read().await.poll_interval_ms;
+                    if poll_interval_ms == interval_ms {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("orchestrator should adopt the saved poll interval");
+        }
     }
 
     #[test]

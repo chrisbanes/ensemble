@@ -50,7 +50,7 @@ ensemble/
 │       └── src/
 │           ├── main.rs           # Tauri entry point, runtime management
 │           ├── embedded_ui.rs    # rust-embed SPA serving for Tauri
-│           └── orchestrator.rs   # Desktop orchestrator integration
+│           └── orchestrator.rs   # Legacy desktop orchestrator wrapper (prefer shared bootstrap in server.rs)
 └── .github/workflows/ci.yml     # CI: check, test, clippy, fmt
 ```
 
@@ -134,5 +134,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 - **Config directory based**: All runtime config lives in a configuration directory containing `config.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. The config directory is resolved via `--config-dir`, `ENSEMBLE_CONFIG_DIR`, or platform defaults. Agent definitions, step DAG, and prompt references are all defined in `config.yaml`. Relative paths are resolved from the config directory.
 - **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `ensemble.yaml`.
 - **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects verdicts from review agents.
+- **Shared orchestrator startup**: `ensemble run`, `ensemble web`, and desktop/Tauri should all start the same real orchestrator runtime path. Do not add placeholder poll loops or separate per-frontend orchestrator implementations when the shared bootstrap can be reused.
+- **Manual refresh behavior**: Refresh, retry, and resume controls should signal the orchestrator loop to run a tick; do not implement ad-hoc polling/state mutation in API or UI handlers that bypasses the orchestrator.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
 - **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.

@@ -11,8 +11,11 @@
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
-use ensemble_core::api::bootstrap::build_app_state;
+use ensemble_core::api::bootstrap::{
+    build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
+};
 use ensemble_core::api::router::create_api_router;
+use ensemble_core::api::router::AppState;
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::observability::events::EventBus;
 
@@ -23,12 +26,20 @@ use crate::error::DesktopError;
 pub struct DesktopServer {
     pub url: url::Url,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    app_state: AppState,
 }
 
 impl Drop for DesktopServer {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
+        }
+        // The registered orchestrator handle lives in shared AppState. DesktopServer is
+        // responsible for taking the currently registered runtime for this app_state during
+        // shutdown and aborting it after removing it from the registry.
+        // Desktop app shutdown is abrupt; abort avoids blocking Drop on async cleanup.
+        if let Some(orchestrator) = take_registered_orchestrator(&self.app_state) {
+            orchestrator.abort();
         }
     }
 }
@@ -88,9 +99,14 @@ pub async fn start_desktop_server(
         );
     }
     let app_state = prepared.app_state;
+    if prepared.has_runnable_config {
+        start_or_replace_registered_orchestrator(&app_state)
+            .await
+            .map_err(|error| DesktopError::ConfigLoadFailed(error.to_string()))?;
+    }
 
     // Create combined router: API routes + SPA fallback
-    let api_router = create_api_router(app_state);
+    let api_router = create_api_router(app_state.clone());
     let spa_router = spa_router();
 
     let router = api_router.merge(spa_router);
@@ -129,6 +145,7 @@ pub async fn start_desktop_server(
     Ok(DesktopServer {
         url: server_url,
         shutdown: Some(shutdown_tx),
+        app_state,
     })
 }
 
