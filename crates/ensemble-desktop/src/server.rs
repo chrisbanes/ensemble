@@ -34,8 +34,9 @@ impl Drop for DesktopServer {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
-        // DesktopServer owns the only registered runtime handle for this app_state instance, so
-        // taking and aborting it here cannot double-drop a live runtime.
+        // The registered orchestrator handle lives in shared AppState. DesktopServer is
+        // responsible for taking the currently registered runtime for this app_state during
+        // shutdown and aborting it after removing it from the registry.
         // Desktop app shutdown is abrupt; abort avoids blocking Drop on async cleanup.
         if let Some(orchestrator) = take_registered_orchestrator(&self.app_state) {
             orchestrator.abort();

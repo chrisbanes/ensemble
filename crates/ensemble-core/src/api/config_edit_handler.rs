@@ -276,7 +276,8 @@ pub struct SaveYamlRequest {
     request_body = SaveYamlRequest,
     responses(
         (status = 200, description = "Save result", body = ConfigStateResponse),
-        (status = 400, description = "Invalid YAML or validation failed")
+        (status = 400, description = "Invalid YAML or validation failed"),
+        (status = 500, description = "Config saved but orchestrator restart failed", body = ConfigStateResponse)
     ),
     tag = "config"
 )]
@@ -519,7 +520,8 @@ pub struct SaveSetupRequest {
     request_body = SaveSetupRequest,
     responses(
         (status = 200, description = "Save result", body = ConfigStateResponse),
-        (status = 400, description = "Setup validation failed")
+        (status = 400, description = "Setup validation failed"),
+        (status = 500, description = "Config saved but orchestrator restart failed", body = ConfigStateResponse)
     ),
     tag = "config"
 )]
@@ -758,7 +760,8 @@ pub struct SaveGuidedFormRequest {
     request_body = SaveGuidedFormRequest,
     responses(
         (status = 200, description = "Save result", body = ConfigStateResponse),
-        (status = 400, description = "Merge or save failed")
+        (status = 400, description = "Merge or save failed"),
+        (status = 500, description = "Config saved but orchestrator restart failed", body = ConfigStateResponse)
     ),
     tag = "config"
 )]
