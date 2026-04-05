@@ -12,6 +12,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::RwLock;
 use utoipa::OpenApi;
 
@@ -27,6 +28,8 @@ pub struct ConfigRuntime {
 pub struct AppState {
     /// The orchestrator state, shared with the orchestrator task via RwLock.
     pub orchestrator_state: Arc<RwLock<OrchestratorState>>,
+    /// The currently registered orchestrator runtime for this app instance.
+    pub orchestrator_runtime: Arc<Mutex<Option<crate::api::bootstrap::OrchestratorRuntime>>>,
     /// Flag that signals the orchestrator to run an immediate tick.
     /// The orchestrator polls this flag; setting it triggers a refresh.
     pub refresh_requested: Arc<tokio::sync::Notify>,

@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use tracing::{error, info};
 
-use ensemble_core::api::bootstrap::{build_app_state, start_orchestrator_for_app};
+use ensemble_core::api::bootstrap::{
+    build_app_state, replace_registered_orchestrator, take_registered_orchestrator,
+};
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
 use ensemble_core::observability::events::EventBus;
@@ -77,15 +79,19 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         );
     }
 
-    let orchestrator_runtime = match start_orchestrator_for_app(&prepared.app_state).await {
-        Ok(Some(runtime)) => runtime,
-        Ok(None) => unreachable!("runnable config should start an orchestrator"),
+    match replace_registered_orchestrator(&prepared.app_state).await {
+        Ok(true) => {}
+        Ok(false) => {
+            error!("runnable config did not produce an orchestrator runtime");
+            eprintln!("error: runnable config did not produce an orchestrator runtime");
+            return ExitCode::FAILURE;
+        }
         Err(e) => {
             error!(error = %e, "failed to start orchestrator");
             eprintln!("error: failed to start orchestrator: {}", e);
             return ExitCode::FAILURE;
         }
-    };
+    }
 
     info!("ensemble is running in headless mode (press Ctrl+C to stop)");
 
@@ -99,7 +105,9 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         }
     }
 
-    orchestrator_runtime.shutdown().await;
+    if let Some(runtime) = take_registered_orchestrator(&prepared.app_state) {
+        runtime.shutdown().await;
+    }
     info!("ensemble shut down cleanly");
     ExitCode::SUCCESS
 }

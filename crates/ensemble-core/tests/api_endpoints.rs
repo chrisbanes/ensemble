@@ -37,6 +37,7 @@ fn build_app_state(
 ) -> AppState {
     AppState {
         orchestrator_state: Arc::new(RwLock::new(orchestrator_state)),
+        orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: temp_dir
             .path()

@@ -2,7 +2,7 @@ use crate::agent::{AcpAgentRunner, AgentRunner};
 use crate::api::router::{AppState, ConfigRuntime};
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{default_workspace_root, ConcurrencyConfig, PollingConfig};
-use crate::error::EnsembleError;
+use crate::error::{ConfigError, EnsembleError};
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use crate::orchestrator::Orchestrator;
@@ -26,6 +26,7 @@ pub struct OrchestratorRuntime {
 
 impl OrchestratorRuntime {
     pub fn request_shutdown(&self) {
+        // Capacity is 1; if a shutdown request is already queued, nothing else is needed.
         let _ = self.shutdown_tx.try_send(());
     }
 
@@ -84,6 +85,7 @@ pub fn build_app_state(
 
     let app_state = AppState {
         orchestrator_state: orchestrator_state_from_document(&document_state),
+        orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root,
         history_path,
@@ -128,7 +130,8 @@ pub async fn start_orchestrator_for_app(
         .config_runtime
         .config_path
         .parent()
-        .unwrap_or_else(|| Path::new("."));
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or(ConfigError::ConfigDirUnavailable)?;
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
     let mut orchestrator = Orchestrator::new_with_state(
         Arc::clone(&app_state.orchestrator_state),
@@ -145,6 +148,21 @@ pub async fn start_orchestrator_for_app(
     });
 
     Ok(Some(OrchestratorRuntime { shutdown_tx, task }))
+}
+
+pub fn take_registered_orchestrator(app_state: &AppState) -> Option<OrchestratorRuntime> {
+    app_state.orchestrator_runtime.lock().unwrap().take()
+}
+
+pub async fn replace_registered_orchestrator(app_state: &AppState) -> Result<bool, EnsembleError> {
+    if let Some(runtime) = take_registered_orchestrator(app_state) {
+        runtime.shutdown().await;
+    }
+
+    let runtime = start_orchestrator_for_app(app_state).await?;
+    let started = runtime.is_some();
+    *app_state.orchestrator_runtime.lock().unwrap() = runtime;
+    Ok(started)
 }
 
 #[cfg(test)]
