@@ -108,6 +108,10 @@ pub enum AgentError {
     HookFailed { reason: String },
     #[error("prompt error: {reason}")]
     PromptError { reason: String },
+    #[error("acpx command failed: {command} — {reason}")]
+    AcpxCommandFailed { command: String, reason: String },
+    #[error("acpx final status missing: {context}")]
+    AcpxFinalStatusMissing { context: String },
 }
 
 #[derive(Debug, Error)]

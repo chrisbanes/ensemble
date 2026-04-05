@@ -65,9 +65,23 @@ pub enum AgentEvent {
         session_id: String,
         agent_pid: Option<String>,
     },
+    PromptStarted,
     OutputChunk {
         stream: RuntimeStream,
         content: String,
+    },
+    RunCompleted {
+        usage: Option<TokenUsage>,
+    },
+    RunFailed {
+        reason: String,
+        usage: Option<TokenUsage>,
+    },
+    Cancelled {
+        reason: Option<String>,
+    },
+    Warning {
+        message: String,
     },
     TurnStarted,
     TurnUpdate {
@@ -104,7 +118,12 @@ impl AgentEvent {
     pub fn event_name(&self) -> &'static str {
         match self {
             AgentEvent::SessionStarted { .. } => "session_started",
+            AgentEvent::PromptStarted => "prompt_started",
             AgentEvent::OutputChunk { .. } => "output_chunk",
+            AgentEvent::RunCompleted { .. } => "run_completed",
+            AgentEvent::RunFailed { .. } => "run_failed",
+            AgentEvent::Cancelled { .. } => "cancelled",
+            AgentEvent::Warning { .. } => "warning",
             AgentEvent::TurnStarted => "turn_started",
             AgentEvent::TurnUpdate { .. } => "turn_update",
             AgentEvent::TurnCompleted { .. } => "turn_completed",
@@ -120,6 +139,11 @@ impl AgentEvent {
     /// Returns the message content for state tracking, truncated to 200 chars.
     pub fn message_for_state(&self) -> Option<Cow<'_, str>> {
         match self {
+            AgentEvent::Warning { message } => Some(truncate_for_state(message)),
+            AgentEvent::RunFailed { reason, .. } => Some(truncate_for_state(reason)),
+            AgentEvent::Cancelled { reason } => {
+                reason.as_deref().map(truncate_for_state)
+            }
             AgentEvent::OutputChunk { content, .. } => Some(truncate_for_state(content)),
             AgentEvent::TurnUpdate { content } => Some(truncate_for_state(content)),
             AgentEvent::TurnFailed { reason, .. } => Some(truncate_for_state(reason)),

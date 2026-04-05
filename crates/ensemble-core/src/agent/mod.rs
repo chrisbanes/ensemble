@@ -1,4 +1,5 @@
 pub mod acp_client;
+pub mod acpx_cli;
 pub mod events;
 pub mod runtime;
 
