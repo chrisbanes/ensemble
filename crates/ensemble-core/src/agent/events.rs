@@ -141,9 +141,7 @@ impl AgentEvent {
         match self {
             AgentEvent::Warning { message } => Some(truncate_for_state(message)),
             AgentEvent::RunFailed { reason, .. } => Some(truncate_for_state(reason)),
-            AgentEvent::Cancelled { reason } => {
-                reason.as_deref().map(truncate_for_state)
-            }
+            AgentEvent::Cancelled { reason } => reason.as_deref().map(truncate_for_state),
             AgentEvent::OutputChunk { content, .. } => Some(truncate_for_state(content)),
             AgentEvent::TurnUpdate { content } => Some(truncate_for_state(content)),
             AgentEvent::TurnFailed { reason, .. } => Some(truncate_for_state(reason)),

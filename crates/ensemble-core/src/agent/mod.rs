@@ -1,5 +1,6 @@
 pub mod acp_client;
 pub mod acpx_cli;
+pub mod acpx_runtime;
 pub mod events;
 pub mod runtime;
 
@@ -20,6 +21,7 @@ use crate::workspace::hooks::{run_hook, run_hook_best_effort};
 use events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 
 use acp_client::{AcpSession, TurnResult};
+use acpx_runtime::AcpxRuntime;
 
 pub struct AgentRunRequest<'a> {
     pub config: Arc<EnsembleConfig>,
@@ -323,21 +325,12 @@ fn shell_escape_command(command: &str) -> String {
 #[async_trait]
 impl AgentRunner for AcpAgentRunner {
     async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
-        let AgentRunRequest {
-            config,
-            issue,
-            agent_name,
-            step_name,
-            attempt,
-            interaction_response,
-            workspace_path,
-            event_tx,
-        } = request;
+        let config = Arc::clone(&request.config);
+        let workspace_path = request.workspace_path;
 
-        self.prepare_workspace(workspace_path, interaction_response.as_ref())
+        self.prepare_workspace(workspace_path, request.interaction_response.as_ref())
             .await?;
 
-        // 1. Run before_run hook
         if let Some(ref script) = config.hooks.before_run {
             run_hook(
                 "before_run",
@@ -351,11 +344,59 @@ impl AgentRunner for AcpAgentRunner {
             })?;
         }
 
-        // 2. Resolve spawn command from per-agent config
+        let agent_config =
+            config
+                .agents
+                .get(request.agent_name)
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!("agent '{}' not found in config", request.agent_name),
+                })?;
+
+        let result = match runtime::RuntimeKind::for_agent(agent_config) {
+            runtime::RuntimeKind::Acpx => {
+                let prompt = self
+                    .build_prompt(
+                        config.as_ref(),
+                        request.issue,
+                        request.agent_name,
+                        request.attempt,
+                        workspace_path,
+                        1,
+                    )
+                    .await?;
+                AcpxRuntime::new().run_step(&request, &prompt).await
+            }
+            runtime::RuntimeKind::Direct => self.run_direct_step(request).await,
+        };
+
+        if let Some(ref script) = config.hooks.after_run {
+            run_hook_best_effort("after_run", script, workspace_path, config.hooks.timeout_ms)
+                .await;
+        }
+
+        result
+    }
+}
+
+impl AcpAgentRunner {
+    async fn run_direct_step(
+        &self,
+        request: AgentRunRequest<'_>,
+    ) -> Result<WorkerResult, AgentError> {
+        let AgentRunRequest {
+            config,
+            issue,
+            agent_name,
+            step_name,
+            attempt,
+            workspace_path,
+            event_tx,
+            ..
+        } = request;
+
         let agent_config = config.agents.get(agent_name);
         let spawn_command = resolve_agent_command(agent_config, &config.agent.command);
 
-        // Spawn ACP agent and do handshake
         let mut session = AcpSession::spawn(&spawn_command, workspace_path).await?;
 
         let cwd_str = workspace_path
@@ -364,15 +405,12 @@ impl AgentRunner for AcpAgentRunner {
                 path: workspace_path.display().to_string(),
             })?;
 
-        // Initialize
         session.initialize(config.agent.read_timeout_ms).await?;
 
-        // Start session
         let session_id = session
             .start_session(cwd_str, serde_json::json!({}), config.agent.read_timeout_ms)
             .await?;
 
-        // Emit session started event
         let _ = event_tx
             .send(WorkerEvent::AgentUpdate {
                 issue_id: issue.id.clone(),
@@ -385,23 +423,16 @@ impl AgentRunner for AcpAgentRunner {
             })
             .await;
 
-        // Set mode if configured
         if !config.agent.session_mode.is_empty() {
             session
                 .set_mode(&session_id, &config.agent.session_mode)
                 .await?;
         }
 
-        // Model is passed via --model flag in the spawn command (handled by
-        // resolve_agent_command). Reasoning level is stored in config but not
-        // yet passable at runtime — acpx doesn't support it on exec/spawn yet.
-
-        // 3. Turn loop
         let max_turns = config.agent.max_turns;
         let mut turn_number: u32 = 1;
 
         let result = loop {
-            // Build prompt for this turn
             let prompt = match self
                 .build_prompt(
                     config.as_ref(),
@@ -420,7 +451,6 @@ impl AgentRunner for AcpAgentRunner {
                 }
             };
 
-            // Run the turn
             let turn_result = session
                 .run_turn(
                     &session_id,
@@ -463,7 +493,6 @@ impl AgentRunner for AcpAgentRunner {
                 }
             }
 
-            // Check if we've hit max turns
             if turn_number >= max_turns {
                 info!(
                     issue_id = %issue.id,
@@ -477,16 +506,7 @@ impl AgentRunner for AcpAgentRunner {
             turn_number += 1;
         };
 
-        // 4. Stop session
         let _ = session.cancel(&session_id).await;
-
-        // 5. Run after_run hook (best effort)
-        if let Some(ref script) = config.hooks.after_run {
-            run_hook_best_effort("after_run", script, workspace_path, config.hooks.timeout_ms)
-                .await;
-        }
-
-        // Kill agent process
         session.kill().await;
 
         result?;
@@ -497,6 +517,9 @@ impl AgentRunner for AcpAgentRunner {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+
     use super::*;
     use crate::config::ensemble::parse_config;
     use crate::interaction::{InteractionKind, InteractionResponse};
@@ -586,6 +609,53 @@ on_failure: Todo
         )
     }
 
+    fn test_acpx_config() -> Arc<EnsembleConfig> {
+        Arc::new(
+            parse_config(
+                r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo"]
+  terminal_states: ["Done"]
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+on_success: Done
+on_failure: Todo
+"#,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn write_mock_acpx_script(dir: &tempfile::TempDir, script_content: &str) -> String {
+        let script_path = dir.path().join("mock_acpx.sh");
+        let mut file = std::fs::File::create(&script_path).unwrap();
+        file.write_all(script_content.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script_path.display().to_string()
+    }
+
+    fn collect_event_names(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<String> {
+        let mut names = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate { event, .. } = event {
+                names.push(event.event_name().to_string());
+            }
+        }
+        names
+    }
+
     #[tokio::test]
     async fn test_mock_agent_runner_success() {
         let runner = MockAgentRunner {
@@ -648,6 +718,71 @@ on_failure: Todo
 
         assert!(result.is_err());
         assert!(matches!(result, Err(AgentError::TurnFailed { .. })));
+    }
+
+    #[tokio::test]
+    async fn acpx_agent_runner_emits_runtime_events_and_success() {
+        static ACPX_TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+        let _guard = ACPX_TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            &workspace,
+            r#"#!/usr/bin/env bash
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    cat <<'JSON'
+{"event":"prompt.started","session":"s1"}
+{"event":"output","stream":"stdout","text":"hello"}
+{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}
+JSON
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+        );
+
+        unsafe {
+            std::env::set_var("ENSEMBLE_TEST_ACPX_EXECUTABLE", &script);
+        }
+
+        let runner =
+            AcpAgentRunner::new(Arc::new(RwLock::new(test_acpx_config().as_ref().clone())));
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = runner
+            .run(AgentRunRequest {
+                config: test_acpx_config(),
+                issue: &test_issue(),
+                agent_name: "builder",
+                step_name: "build",
+                attempt: None,
+                interaction_response: None,
+                workspace_path: workspace.path(),
+                event_tx: tx,
+            })
+            .await
+            .unwrap();
+
+        unsafe {
+            std::env::remove_var("ENSEMBLE_TEST_ACPX_EXECUTABLE");
+        }
+
+        assert!(matches!(result, WorkerResult::Success));
+        let event_names = collect_event_names(&mut rx);
+        assert!(event_names.contains(&"prompt_started".to_string()));
+        assert!(event_names.contains(&"output_chunk".to_string()));
+        assert!(event_names.contains(&"run_completed".to_string()));
     }
 
     async fn write_workspace_file(workspace: &tempfile::TempDir, name: &str, contents: &str) {
@@ -1145,7 +1280,10 @@ on_failure: Failed
         )
         .unwrap();
         let agent = &config.agents["builder"];
-        assert_eq!(runtime::RuntimeKind::for_agent(agent), runtime::RuntimeKind::Acpx);
+        assert_eq!(
+            runtime::RuntimeKind::for_agent(agent),
+            runtime::RuntimeKind::Acpx
+        );
     }
 
     #[test]
