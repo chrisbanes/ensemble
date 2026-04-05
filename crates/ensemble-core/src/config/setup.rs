@@ -811,7 +811,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
 pub async fn probe_agent(name: &str) -> Option<String> {
     let timeout = tokio::time::Duration::from_secs(8);
     let output = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new("acpx")
+        tokio::process::Command::new(acpx_executable())
             .args(["--agent", name, "--version"])
             .kill_on_drop(true)
             .output()
@@ -832,7 +832,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let session_name = "ensemble-probe";
 
     // Create session
-    let output = tokio::process::Command::new("acpx")
+    let output = tokio::process::Command::new(acpx_executable())
         .args([agent_name, "sessions", "ensure", "--name", session_name])
         .kill_on_drop(true)
         .output()
@@ -861,6 +861,15 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
         .await;
 
     caps
+}
+
+fn acpx_executable() -> String {
+    #[cfg(test)]
+    if let Ok(executable) = std::env::var("ENSEMBLE_TEST_ACPX_BIN") {
+        return executable;
+    }
+
+    "acpx".to_string()
 }
 
 async fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
@@ -1269,13 +1278,13 @@ mod tests {
 
     const ENV_VARS: &[&str] = &["HOME", "ENSEMBLE_TODO_PATH"];
 
-    struct PathGuard {
+    struct AcpxBinGuard {
         _guard: EnvGuard,
     }
 
-    impl PathGuard {
+    impl AcpxBinGuard {
         fn with_fake_acpx(script_body: &str) -> (Self, tempfile::TempDir) {
-            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TODO_PATH", "PATH"]);
+            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TODO_PATH", "ENSEMBLE_TEST_ACPX_BIN"]);
             let temp_dir = tempfile::tempdir().unwrap();
             let script_path = temp_dir.path().join("acpx");
             let mut script = std::fs::File::create(&script_path).unwrap();
@@ -1289,7 +1298,7 @@ mod tests {
                 std::fs::set_permissions(&script_path, perms).unwrap();
             }
 
-            std::env::set_var("PATH", temp_dir.path());
+            std::env::set_var("ENSEMBLE_TEST_ACPX_BIN", &script_path);
 
             (Self { _guard: guard }, temp_dir)
         }
@@ -2310,7 +2319,7 @@ fi
 
 exit 1
 "#;
-        let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
+        let (_path_guard, temp_dir) = AcpxBinGuard::with_fake_acpx(script);
         std::env::set_var("HOME", temp_dir.path());
 
         let agent = discover_agent("test-single-probe", "Test Single Probe")

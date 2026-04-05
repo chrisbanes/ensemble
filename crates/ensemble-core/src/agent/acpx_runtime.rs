@@ -109,6 +109,12 @@ impl AcpxRuntime {
     }
 }
 
+impl Default for AcpxRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 async fn emit_event(
     tx: &mpsc::Sender<WorkerEvent>,
     issue_id: &str,

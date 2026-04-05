@@ -860,13 +860,13 @@ mod tests {
         }
     }
 
-    struct PathGuard {
+    struct AcpxBinGuard {
         _guard: EnvGuard,
     }
 
-    impl PathGuard {
+    impl AcpxBinGuard {
         fn with_fake_acpx(script_body: &str) -> (Self, tempfile::TempDir) {
-            let guard = EnvGuard::lock(&["HOME", "PATH"]);
+            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TEST_ACPX_BIN"]);
             let temp_dir = tempfile::tempdir().unwrap();
             let script_path = temp_dir.path().join("acpx");
             let mut script = std::fs::File::create(&script_path).unwrap();
@@ -880,7 +880,7 @@ mod tests {
                 std::fs::set_permissions(&script_path, perms).unwrap();
             }
 
-            std::env::set_var("PATH", temp_dir.path());
+            std::env::set_var("ENSEMBLE_TEST_ACPX_BIN", &script_path);
 
             (Self { _guard: guard }, temp_dir)
         }
@@ -920,7 +920,9 @@ tracker:
   path: TODO.md
 agents:
   builder:
-    acpx_agent: claude
+    runtime: direct
+    executor: claude-code
+    model: sonnet
     prompt: "Build it."
 steps:
   - name: build
@@ -1141,7 +1143,7 @@ fi
 
 exit 1
 "#;
-        let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
+        let (_path_guard, temp_dir) = AcpxBinGuard::with_fake_acpx(script);
         std::env::set_var("HOME", temp_dir.path());
 
         let response = get_setup_agents_stream().await.into_response();
@@ -1354,11 +1356,11 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
-                runtime: None,
-                executor: None,
-                model: None,
-                acpx_agent: Some("claude".to_string()),
-                permission_mode: Some("approve_reads".to_string()),
+                runtime: Some("direct".to_string()),
+                executor: Some("claude-code".to_string()),
+                model: Some("sonnet".to_string()),
+                acpx_agent: None,
+                permission_mode: None,
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
