@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use tracing::{error, info};
 
 use ensemble_core::api::bootstrap::{
-    build_app_state, replace_registered_orchestrator, take_registered_orchestrator,
+    build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
 };
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
@@ -79,7 +79,7 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         );
     }
 
-    match replace_registered_orchestrator(&prepared.app_state).await {
+    match start_or_replace_registered_orchestrator(&prepared.app_state).await {
         Ok(true) => {}
         Ok(false) => {
             error!("runnable config did not produce an orchestrator runtime");

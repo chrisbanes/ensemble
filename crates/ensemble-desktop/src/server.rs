@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use tracing::{error, info, warn};
 
 use ensemble_core::api::bootstrap::{
-    build_app_state, replace_registered_orchestrator, take_registered_orchestrator,
+    build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
 };
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::api::router::AppState;
@@ -34,6 +34,8 @@ impl Drop for DesktopServer {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
         }
+        // DesktopServer owns the only registered runtime handle for this app_state instance, so
+        // taking and aborting it here cannot double-drop a live runtime.
         // Desktop app shutdown is abrupt; abort avoids blocking Drop on async cleanup.
         if let Some(orchestrator) = take_registered_orchestrator(&self.app_state) {
             orchestrator.abort();
@@ -97,7 +99,7 @@ pub async fn start_desktop_server(
     }
     let app_state = prepared.app_state;
     if prepared.has_runnable_config {
-        replace_registered_orchestrator(&app_state)
+        start_or_replace_registered_orchestrator(&app_state)
             .await
             .map_err(|error| DesktopError::ConfigLoadFailed(error.to_string()))?;
     }

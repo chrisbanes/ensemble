@@ -5,7 +5,7 @@ use crate::config::ensemble::{default_workspace_root, ConcurrencyConfig, Polling
 use crate::error::{ConfigError, EnsembleError};
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
-use crate::orchestrator::Orchestrator;
+use crate::orchestrator::{Orchestrator, OrchestratorRuntimeParts};
 use crate::tracker::{create_tracker, IssueTracker};
 use crate::workspace::manager::WorkspaceManager;
 use std::path::Path;
@@ -23,6 +23,11 @@ pub struct OrchestratorRuntime {
     shutdown_tx: mpsc::Sender<()>,
     task: JoinHandle<()>,
 }
+
+/// `std::sync::Mutex` is sufficient here because runtime registration only swaps an `Option`
+/// and never holds the mutex guard across `.await`. A tokio mutex would add async overhead
+/// without improving correctness for these tiny critical sections.
+pub type RegisteredOrchestrator = Arc<std::sync::Mutex<Option<OrchestratorRuntime>>>;
 
 impl OrchestratorRuntime {
     pub fn request_shutdown(&self) {
@@ -134,13 +139,15 @@ pub async fn start_orchestrator_for_app(
         .ok_or(ConfigError::ConfigDirUnavailable)?;
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
     let mut orchestrator = Orchestrator::new_with_state(
-        Arc::clone(&app_state.orchestrator_state),
-        config,
-        tracker,
-        agent_runner,
-        workspace_mgr,
+        OrchestratorRuntimeParts {
+            state: Arc::clone(&app_state.orchestrator_state),
+            config,
+            tracker,
+            agent_runner,
+            workspace_mgr,
+            refresh_requested: Arc::clone(&app_state.refresh_requested),
+        },
         config_dir,
-        Arc::clone(&app_state.refresh_requested),
         shutdown_rx,
     );
     let task = tokio::spawn(async move {
@@ -154,7 +161,15 @@ pub fn take_registered_orchestrator(app_state: &AppState) -> Option<Orchestrator
     app_state.orchestrator_runtime.lock().unwrap().take()
 }
 
-pub async fn replace_registered_orchestrator(app_state: &AppState) -> Result<bool, EnsembleError> {
+pub async fn clear_registered_orchestrator(app_state: &AppState) {
+    if let Some(runtime) = take_registered_orchestrator(app_state) {
+        runtime.shutdown().await;
+    }
+}
+
+pub async fn start_or_replace_registered_orchestrator(
+    app_state: &AppState,
+) -> Result<bool, EnsembleError> {
     if let Some(runtime) = take_registered_orchestrator(app_state) {
         runtime.shutdown().await;
     }
@@ -282,5 +297,33 @@ mod tests {
             ticked.is_ok(),
             "orchestrator did not record an initial tick"
         );
+    }
+
+    #[tokio::test]
+    async fn clear_registered_orchestrator_removes_stored_runtime() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let todo_path = temp_dir.path().join("TODO.md");
+        let config_path = temp_dir.path().join("config.yaml");
+        let yaml = format!(
+            "tracker:\n  kind: todo_file\n  path: {}\n  active_states: [Todo]\n  terminal_states: [Done]\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n",
+            todo_path.display()
+        );
+        let document_state = parse_raw_yaml(config_path.clone(), yaml);
+        let built = build_app_state(config_path, document_state, EventBus::new());
+
+        let runtime = start_orchestrator_for_app(&built.app_state)
+            .await
+            .unwrap()
+            .unwrap();
+        *built.app_state.orchestrator_runtime.lock().unwrap() = Some(runtime);
+
+        clear_registered_orchestrator(&built.app_state).await;
+
+        assert!(built
+            .app_state
+            .orchestrator_runtime
+            .lock()
+            .unwrap()
+            .is_none());
     }
 }

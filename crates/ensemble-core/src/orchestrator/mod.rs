@@ -64,6 +64,15 @@ pub struct Orchestrator {
     shutdown_rx: mpsc::Receiver<()>,
 }
 
+pub struct OrchestratorRuntimeParts {
+    pub state: Arc<RwLock<OrchestratorState>>,
+    pub config: Arc<RwLock<EnsembleConfig>>,
+    pub tracker: Arc<dyn IssueTracker>,
+    pub agent_runner: Arc<dyn AgentRunner>,
+    pub workspace_mgr: WorkspaceManager,
+    pub refresh_requested: Arc<tokio::sync::Notify>,
+}
+
 impl Orchestrator {
     /// Create a new Orchestrator.
     pub fn new(
@@ -77,38 +86,35 @@ impl Orchestrator {
         let state = Arc::new(RwLock::new(OrchestratorState::new(30_000, 10)));
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
         Self::new_with_state(
-            state,
-            config,
-            tracker,
-            agent_runner,
-            workspace_mgr,
+            OrchestratorRuntimeParts {
+                state,
+                config,
+                tracker,
+                agent_runner,
+                workspace_mgr,
+                refresh_requested,
+            },
             config_dir,
-            refresh_requested,
             shutdown_rx,
         )
     }
 
     /// Create a new Orchestrator using externally managed state and refresh signaling.
     pub fn new_with_state(
-        state: Arc<RwLock<OrchestratorState>>,
-        config: Arc<RwLock<EnsembleConfig>>,
-        tracker: Arc<dyn IssueTracker>,
-        agent_runner: Arc<dyn AgentRunner>,
-        workspace_mgr: WorkspaceManager,
+        parts: OrchestratorRuntimeParts,
         config_dir: &Path,
-        refresh_requested: Arc<tokio::sync::Notify>,
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(1000);
 
         Self {
-            state,
-            config,
-            tracker,
-            agent_runner,
+            state: parts.state,
+            config: parts.config,
+            tracker: parts.tracker,
+            agent_runner: parts.agent_runner,
             interaction_store: InteractionStore::new(config_dir.to_path_buf()),
-            workspace_mgr: Arc::new(workspace_mgr),
-            refresh_requested,
+            workspace_mgr: Arc::new(parts.workspace_mgr),
+            refresh_requested: parts.refresh_requested,
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -1986,13 +1992,15 @@ agent:
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(
-            Arc::clone(&state),
-            config,
-            tracker,
-            runner,
-            workspace_mgr,
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr,
+                refresh_requested: Arc::clone(&refresh_requested),
+            },
             dir.path(),
-            Arc::clone(&refresh_requested),
             shutdown_rx,
         );
 

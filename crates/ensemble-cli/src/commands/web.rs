@@ -4,7 +4,8 @@ use std::process::ExitCode;
 use tracing::{error, info, warn};
 
 use ensemble_core::api::bootstrap::{
-    build_app_state, replace_registered_orchestrator, take_registered_orchestrator,
+    build_app_state, clear_registered_orchestrator, start_or_replace_registered_orchestrator,
+    take_registered_orchestrator,
 };
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::config::draft::load_config_document_or_missing;
@@ -119,7 +120,7 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     let has_runnable_config = prepared.has_runnable_config;
     let app_state = prepared.app_state;
     if has_runnable_config {
-        match replace_registered_orchestrator(&app_state).await {
+        match start_or_replace_registered_orchestrator(&app_state).await {
             Ok(true) => info!("orchestrator started"),
             Ok(false) => {
                 error!("runnable config did not produce an orchestrator runtime");
@@ -133,7 +134,7 @@ pub async fn execute(args: WebArgs) -> ExitCode {
             }
         }
     } else {
-        *app_state.orchestrator_runtime.lock().unwrap() = None;
+        clear_registered_orchestrator(&app_state).await;
     }
 
     // Create combined router: API routes + SPA fallback

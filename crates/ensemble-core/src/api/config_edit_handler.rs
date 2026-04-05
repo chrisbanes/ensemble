@@ -1,4 +1,4 @@
-use crate::api::bootstrap::replace_registered_orchestrator;
+use crate::api::bootstrap::start_or_replace_registered_orchestrator;
 use crate::api::router::AppState;
 use crate::config::draft::{
     parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState, ConfigStateKind, ValidationIssue,
@@ -293,7 +293,7 @@ pub async fn save_yaml(
     ) {
         Ok(response) => {
             drop(doc_state);
-            match replace_registered_orchestrator(&state).await {
+            match start_or_replace_registered_orchestrator(&state).await {
                 Ok(_) => (StatusCode::OK, Json(response)),
                 Err(error) => {
                     let doc_state = state.config_runtime.document_state.read().await;
@@ -570,7 +570,7 @@ where
         Ok(()) => match reload_document_state(&mut doc_state, &state.config_runtime.config_path) {
             Ok(response) => {
                 drop(doc_state);
-                match replace_registered_orchestrator(&state).await {
+                match start_or_replace_registered_orchestrator(&state).await {
                     Ok(_) => (StatusCode::OK, Json(response)),
                     Err(error) => {
                         let doc_state = state.config_runtime.document_state.read().await;
@@ -788,7 +788,7 @@ pub async fn save_guided_form(
     ) {
         Ok(response) => {
             drop(doc_state);
-            match replace_registered_orchestrator(&state).await {
+            match start_or_replace_registered_orchestrator(&state).await {
                 Ok(_) => (StatusCode::OK, Json(response)),
                 Err(error) => {
                     let doc_state = state.config_runtime.document_state.read().await;
