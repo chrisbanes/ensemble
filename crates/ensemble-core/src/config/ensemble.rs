@@ -544,9 +544,20 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         let has_model = agent.model.is_some();
 
         if let Some(permission_mode) = agent.permission_mode.as_deref() {
-            if !has_acpx || PermissionMode::parse(permission_mode).is_none() {
-                return Err(PipelineError::InvalidAgentConfig {
+            if !has_acpx {
+                return Err(PipelineError::InvalidPermissionMode {
                     agent: name.clone(),
+                    reason: "permission_mode requires acpx_agent".to_string(),
+                });
+            }
+
+            if PermissionMode::parse(permission_mode).is_none() {
+                return Err(PipelineError::InvalidPermissionMode {
+                    agent: name.clone(),
+                    reason: format!(
+                        "unsupported value '{}' (expected one of: approve_all, approve_reads, deny_all)",
+                        permission_mode
+                    ),
                 });
             }
         }
@@ -1392,8 +1403,9 @@ on_failure: Failed
         let result = validate_config(&config);
         assert!(result.is_err());
         match result.unwrap_err() {
-            PipelineError::InvalidAgentConfig { agent } => {
+            PipelineError::InvalidPermissionMode { agent, reason } => {
                 assert_eq!(agent, "builder");
+                assert!(reason.contains("requires acpx_agent"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -1419,8 +1431,9 @@ on_failure: Failed
         let result = validate_config(&config);
         assert!(result.is_err());
         match result.unwrap_err() {
-            PipelineError::InvalidAgentConfig { agent } => {
+            PipelineError::InvalidPermissionMode { agent, reason } => {
                 assert_eq!(agent, "builder");
+                assert!(reason.contains("unsupported value 'maybe'"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

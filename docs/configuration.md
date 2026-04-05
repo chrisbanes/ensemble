@@ -275,6 +275,8 @@ This section configures Ensemble's runtime behavior after the agent is launched.
 | `read_timeout_ms` | integer | `5000` | Timeout for reading agent output |
 | `stall_timeout_ms` | integer | `300000` | Timeout for detecting a stalled agent |
 
+Legacy note: `agent.permission_policy` is still accepted as a deprecated alias for `agent.permission_request_policy` during config parsing.
+
 ## Prompt templates
 
 Prompt templates use [Liquid](https://shopify.github.io/liquid/) syntax. Available variables:

@@ -19,7 +19,7 @@ const initialForm: GuidedForm = {
       name: "builder",
       acpx_agent: "claude",
       prompt: "Build it",
-      permission_mode: "default",
+      permission_mode: "approve_reads",
     },
   ],
   steps: [{ name: "build", agent: "builder", depends: [] }],
