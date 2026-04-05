@@ -1,5 +1,6 @@
 pub mod acp_client;
 pub mod events;
+pub mod runtime;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -1122,5 +1123,37 @@ on_failure: Todo
         };
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
         assert_eq!(cmd, "'codex' '--profile' 'prod;' 'touch' '/tmp/pwned'");
+    }
+
+    #[test]
+    fn runtime_kind_defaults_to_acpx_for_acpx_agent() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+        let agent = &config.agents["builder"];
+        assert_eq!(runtime::RuntimeKind::for_agent(agent), runtime::RuntimeKind::Acpx);
+    }
+
+    #[test]
+    fn runtime_event_name_exposes_output_chunk() {
+        let event = AgentEvent::OutputChunk {
+            stream: crate::agent::events::RuntimeStream::Stdout,
+            content: "hello".to_string(),
+        };
+        assert_eq!(event.event_name(), "output_chunk");
+        assert_eq!(event.message_for_state().as_deref(), Some("hello"));
     }
 }
