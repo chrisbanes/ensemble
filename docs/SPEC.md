@@ -15,8 +15,8 @@ The service solves four operational problems:
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`ensemble.yaml`) so teams version the agent prompt and
-  runtime settings with their code.
+- It keeps workflow policy in a configuration directory (`config.yaml` plus prompt templates) so
+  teams can version agent prompts and runtime settings together.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -45,7 +45,7 @@ Important boundary:
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `ensemble.yaml` contract.
+- Load runtime behavior from a configuration-directory `config.yaml` contract.
 - Expose operator-visible observability (at minimum structured logs).
 - Support restart recovery without requiring a persistent database.
 
@@ -65,7 +65,7 @@ Important boundary:
 ### 3.1 Main Components
 
 1. `Config Loader`
-   - Reads `ensemble.yaml`.
+   - Resolves the configuration directory and reads `<config_dir>/config.yaml`.
    - Parses tracker config, agent definitions, step DAG, and prompt references.
    - Returns `EnsembleConfig`.
 
@@ -89,7 +89,7 @@ Important boundary:
    - Tracks session metrics and retry queue state.
 
 5. `Pipeline Engine`
-   - Builds a step DAG from `ensemble.yaml` step definitions.
+   - Builds a step DAG from `config.yaml` step definitions.
    - Executes pipeline steps per issue, dispatching agents and collecting verdicts.
    - Drives tracker state transitions at step boundaries.
    - Enforces concurrency limits (global and per-issue).
@@ -124,12 +124,12 @@ Important boundary:
 
 Ensemble is easiest to port when kept in these layers:
 
-1. `Policy Layer` (repo-defined)
-   - `ensemble.yaml` agent definitions, step DAG, and prompt templates.
+1. `Policy Layer` (configuration-directory-defined)
+   - `config.yaml` agent definitions, step DAG, and prompt templates in the config directory.
    - Team-specific rules for ticket handling, validation, and handoff.
 
 2. `Configuration Layer` (typed getters)
-   - Parses `ensemble.yaml` into typed runtime settings.
+   - Parses `config.yaml` into typed runtime settings.
    - Handles defaults, environment tokens, and path normalization.
 
 3. `Coordination Layer` (orchestrator)
@@ -188,7 +188,7 @@ Fields:
 
 #### 4.1.2 Ensemble Config
 
-Parsed `ensemble.yaml` payload:
+Parsed `config.yaml` payload:
 
 - `tracker` (TrackerConfig)
   - Tracker kind, active/terminal states, and backend-specific settings.
@@ -207,10 +207,13 @@ Parsed `ensemble.yaml` payload:
 
 #### 4.1.3 Agent Config
 
-Per-agent configuration within `ensemble.yaml`:
+Per-agent configuration within `config.yaml`:
 
+- `acpx_agent` (string or null) — acpx agent name used for launch-time agent selection.
 - `executor` (string) — ACP-compatible agent executable identifier.
 - `model` (string) — model to use for the agent.
+- `permission_mode` (string or null) — optional acpx launch-time permission mode for `acpx_agent`
+  (`approve_all`, `approve_reads`, `deny_all`).
 - `prompt` (string or null) — inline prompt text.
 - `prompt_template` (path or null) — file reference to a Markdown prompt template.
 - Exactly one of `prompt` or `prompt_template` must be set.
@@ -539,6 +542,10 @@ Named agent definitions. Each key is the agent role name, each value is an objec
 - `model` (string, optional)
   - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
   - When omitted, the agent uses its default model.
+- `permission_mode` (string, optional)
+  - Optional acpx launch-time permission mode for `acpx_agent`.
+  - Supported values: `approve_all`, `approve_reads`, `deny_all`.
+  - When omitted, Ensemble does not pass a permission-mode flag and acpx uses its own default.
 - `reasoning_level` (string, optional)
   - Reasoning/thinking level for agents that support it (for example `high`, `low`).
   - When omitted, the agent uses its default reasoning level.
@@ -641,7 +648,8 @@ Fields:
 
 #### 5.3.12 `agent` (object)
 
-Global agent runtime defaults. Per-agent `executor` and `model` are defined in `agents` (5.3.3).
+Global agent runtime defaults. Per-agent launch settings such as `acpx_agent`, `model`, and
+`permission_mode` are defined in `agents` (5.3.3).
 
 Fields:
 
@@ -660,8 +668,11 @@ Fields:
   - ACP session mode sent via `session/set_mode` after session creation.
   - Possible values: `code`, `architect`, `ask`.
   - Default: `code`.
-- `permission_policy` (string, optional)
-  - Defines how the orchestrator handles `session/request_permission` callbacks from the ACP agent.
+- `permission_request_policy` (string, optional)
+  - Defines how the orchestrator handles ACP `session/request_permission` callbacks after the agent
+    is launched.
+  - This does not control acpx launch-time permission mode; use `agents.*.permission_mode` for
+    that.
   - Values: `auto_approve_all`, `approve_reads_reject_writes`, `reject_all`, or
     implementation-defined.
   - Default: implementation-defined.
@@ -817,8 +828,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.labels_filter`: list of strings, optional; restrict candidates to issues with these labels
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Done", "Closed"]`
-- `agents.<name>.executor`: string, required; ACP-compatible agent executable identifier
-- `agents.<name>.model`: string, required; model identifier
+- `agents.<name>.acpx_agent`: string, optional; acpx agent identifier (alternative to executor)
+- `agents.<name>.executor`: string, required unless `acpx_agent` is set; ACP-compatible agent executable identifier
+- `agents.<name>.model`: string, optional; model identifier, including for `acpx_agent` entries
 - `agents.<name>.prompt`: string, optional; inline prompt (mutually exclusive with prompt_template)
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier
@@ -845,7 +857,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.command`: shell command string, default implementation-defined
 - `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
-- `agent.permission_policy`: string, default implementation-defined
+- `agent.permission_request_policy`: string, default implementation-defined
 - `agent.turn_timeout_ms`: integer, default `3600000`
 - `agent.read_timeout_ms`: integer, default `5000`
 - `agent.stall_timeout_ms`: integer, default `300000`
@@ -1304,7 +1316,7 @@ Important emitted events may include:
 
 ### 10.5 Permission, Tool Calls, and User Input Policy
 
-Permission and user-input behavior is governed by `agent.permission_policy`.
+Permission and user-input behavior is governed by `agent.permission_request_policy`.
 
 Policy requirements:
 
@@ -1318,7 +1330,7 @@ ACP permission handling:
 - The agent sends `session/request_permission` (agent-to-client JSON-RPC request) when it needs
   approval for an action (for example executing a command or writing a file).
 - The request includes `permissionId`, `description`, and available response options.
-- The orchestrator responds based on `agent.permission_policy`:
+- The orchestrator responds based on `agent.permission_request_policy`:
   - `auto_approve_all`: respond with `allow_always` for all permission requests.
   - `approve_reads_reject_writes`: approve read operations, reject write operations.
   - `reject_all`: reject all permission requests.
@@ -1728,7 +1740,7 @@ Enablement (extension):
 
 - Start the HTTP server when the `ensemble web` subcommand is used. The `--port` flag controls
   the bind port; if omitted, an ephemeral port is assigned.
-- Start the HTTP server when `server.port` is present in `ensemble.yaml`.
+- Start the HTTP server when `server.port` is present in `<config_dir>/config.yaml`.
 - `server.port` is extension configuration and is intentionally not part of the core front-matter
   schema in Section 5.3.
 - Precedence: `ensemble web --port` overrides `server.port` when both are present.
@@ -1888,7 +1900,7 @@ API design notes:
 ### 14.1 Failure Classes
 
 1. `Workflow/Config Failures`
-   - Missing `ensemble.yaml`
+   - Missing `config.yaml` in the resolved config directory
    - Invalid YAML config
    - Unsupported tracker kind or missing tracker credentials/project slug
    - Missing coding-agent executable
@@ -1956,8 +1968,8 @@ After restart:
 
 Operators can control behavior by:
 
-- Editing `ensemble.yaml` (pipeline config and most runtime settings).
-- `ensemble.yaml` changes should be detected and re-applied automatically without restart.
+- Editing `config.yaml` (pipeline config and most runtime settings).
+- `config.yaml` changes should be detected and re-applied automatically without restart.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
@@ -2001,7 +2013,7 @@ Recommended additional hardening for ports:
 
 ### 15.4 Hook Script Safety
 
-Workspace hooks are arbitrary shell scripts from `ensemble.yaml`.
+Workspace hooks are arbitrary shell scripts from `config.yaml`.
 
 Implications:
 
@@ -2296,12 +2308,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 ### 17.1 Workflow and Config Parsing
 
 - Config file path precedence:
-  - explicit runtime path is used when provided
-  - cwd default is `ensemble.yaml` when no explicit runtime path is provided
+  - config directory is resolved via `--config-dir`, `ENSEMBLE_CONFIG_DIR`, then platform default
+  - config file path is derived as `<config_dir>/config.yaml`
 - Config file changes are detected and trigger re-read/re-apply without restart
 - Invalid config reload keeps last known good effective configuration and emits an
   operator-visible error
-- Missing `ensemble.yaml` returns typed error
+- Missing `<config_dir>/config.yaml` returns typed error
 - Invalid YAML returns typed error
 - Root non-map returns typed error
 - Agent definitions validate: each agent has exactly one of `prompt` or `prompt_template`
@@ -2378,7 +2390,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Partial JSON lines are buffered until newline
 - Stdout and stderr are handled separately; protocol JSON is parsed from stdout only
 - Non-JSON stderr lines are logged but do not crash parsing
-- `session/request_permission` callbacks are handled according to `agent.permission_policy`
+- `session/request_permission` callbacks are handled according to `agent.permission_request_policy`
 - Permission requests do not stall indefinitely
 - Unsupported tool calls are rejected without stalling the session
 - User input requests are handled according to the implementation's documented policy and do not
@@ -2411,9 +2423,9 @@ The `ensemble` binary supports the following subcommands:
 
 - `ensemble init` — Interactive setup wizard that scaffolds a ready-to-run Ensemble configuration
   directory. Discovers available agents via acpx, collects tracker credentials, validates the
-  setup, and writes `ensemble.yaml` with prompt templates.
-- `ensemble run [PATH]` — Run the orchestrator. `PATH` defaults to `ensemble.yaml`.
-- `ensemble` (no subcommand) — Equivalent to `ensemble run`.
+  setup, and writes `config.yaml` with prompt templates.
+- `ensemble run [--config-dir <path>]` — Run the orchestrator using the resolved config directory.
+- `ensemble` (no subcommand) — Equivalent to `ensemble run` using the same config-dir resolution.
 
 `ensemble init` Requirements:
 
@@ -2421,15 +2433,16 @@ The `ensemble` binary supports the following subcommands:
   exits.
 - At least one agent must be discoverable via acpx.
 - The wizard produces:
-  - `ensemble.yaml` — generated configuration
+  - `config.yaml` — generated configuration
   - `templates/*.liquid` — prompt templates for each pipeline step
   - `TODO.md` — sample issues (only if `todo_file` tracker selected)
 
 CLI defaults:
 
-- CLI accepts an optional positional config path argument (`path-to-ensemble.yaml`)
-- CLI uses `./ensemble.yaml` when no config path argument is provided
-- CLI errors on nonexistent explicit config path or missing default `./ensemble.yaml`
+- CLI resolves the configuration directory using `--config-dir`, `ENSEMBLE_CONFIG_DIR`, then the
+  platform default
+- CLI derives the config file path as `<config_dir>/config.yaml`
+- CLI errors when the resolved config directory is missing `config.yaml`
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2457,10 +2470,10 @@ Use the same validation profiles as Section 17:
 
 ### 18.1 Required for Conformance
 
-- Config path selection supports explicit runtime path and cwd default (`ensemble.yaml`)
-- `ensemble.yaml` loader with agent definitions, step DAG, and prompt references
+- Config directory selection supports `--config-dir`, `ENSEMBLE_CONFIG_DIR`, and platform defaults
+- `<config_dir>/config.yaml` loader with agent definitions, step DAG, and prompt references
 - Typed config layer with defaults and `$` resolution
-- Dynamic `ensemble.yaml` watch/reload/re-apply for config and prompt
+- Dynamic `config.yaml` watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch + write operations
 - Pipeline engine with step DAG construction, validation, and per-issue execution

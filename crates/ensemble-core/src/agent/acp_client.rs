@@ -195,7 +195,7 @@ impl AcpSession {
         session_id: &str,
         content: &str,
         turn_timeout_ms: u64,
-        permission_policy: &str,
+        permission_request_policy: &str,
         issue_id: &str,
         step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
@@ -222,7 +222,7 @@ impl AcpSession {
             self.stream_turn(
                 id,
                 session_id,
-                permission_policy,
+                permission_request_policy,
                 issue_id,
                 step_name,
                 event_tx,
@@ -244,7 +244,7 @@ impl AcpSession {
         &mut self,
         prompt_request_id: u64,
         _session_id: &str,
-        permission_policy: &str,
+        permission_request_policy: &str,
         issue_id: &str,
         step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
@@ -292,7 +292,7 @@ impl AcpSession {
                     if method == "session/request_permission" {
                         self.handle_permission_request(
                             &msg,
-                            permission_policy,
+                            permission_request_policy,
                             issue_id,
                             step_name,
                             event_tx,
@@ -427,7 +427,7 @@ impl AcpSession {
     async fn handle_permission_request(
         &mut self,
         msg: &JsonRpcMessage,
-        permission_policy: &str,
+        permission_request_policy: &str,
         issue_id: &str,
         step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
@@ -455,7 +455,7 @@ impl AcpSession {
         )
         .await;
 
-        let allowed = match permission_policy {
+        let allowed = match permission_request_policy {
             "auto_approve_all" => true,
             "reject_all" => false,
             "approve_reads_reject_writes" => {
