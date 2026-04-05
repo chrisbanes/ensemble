@@ -1,15 +1,43 @@
+use crate::agent::{AcpAgentRunner, AgentRunner};
 use crate::api::router::{AppState, ConfigRuntime};
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{default_workspace_root, ConcurrencyConfig, PollingConfig};
+use crate::error::EnsembleError;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
+use crate::orchestrator::Orchestrator;
+use crate::tracker::{create_tracker, IssueTracker};
+use crate::workspace::manager::WorkspaceManager;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
+use tokio::task::JoinHandle;
 
 pub struct PreparedApp {
     pub app_state: AppState,
     pub has_runnable_config: bool,
+}
+
+pub struct OrchestratorRuntime {
+    shutdown_tx: mpsc::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+impl OrchestratorRuntime {
+    pub fn request_shutdown(&self) {
+        let _ = self.shutdown_tx.try_send(());
+    }
+
+    pub fn abort(self) {
+        self.request_shutdown();
+        self.task.abort();
+    }
+
+    pub async fn shutdown(self) {
+        self.request_shutdown();
+        let _ = self.task.await;
+    }
 }
 
 pub fn orchestrator_state_from_document(
@@ -70,6 +98,53 @@ pub fn build_app_state(
         app_state,
         has_runnable_config,
     }
+}
+
+pub async fn start_orchestrator_for_app(
+    app_state: &AppState,
+) -> Result<Option<OrchestratorRuntime>, EnsembleError> {
+    let active_config = {
+        app_state
+            .config_runtime
+            .document_state
+            .read()
+            .await
+            .active_config
+            .clone()
+    };
+
+    let Some(config) = active_config else {
+        return Ok(None);
+    };
+
+    let config = Arc::new(RwLock::new(config.clone()));
+    let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker(&config.read().await.tracker)?);
+    let agent_runner: Arc<dyn AgentRunner> = Arc::new(AcpAgentRunner::new(Arc::clone(&config)));
+    let workspace_mgr = WorkspaceManager::new(
+        Path::new(&app_state.workspace_root),
+        Some(config.read().await.repos.clone()),
+    )?;
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+    let mut orchestrator = Orchestrator::new_with_state(
+        Arc::clone(&app_state.orchestrator_state),
+        config,
+        tracker,
+        agent_runner,
+        workspace_mgr,
+        config_dir,
+        Arc::clone(&app_state.refresh_requested),
+        shutdown_rx,
+    );
+    let task = tokio::spawn(async move {
+        orchestrator.run().await;
+    });
+
+    Ok(Some(OrchestratorRuntime { shutdown_tx, task }))
 }
 
 #[cfg(test)]
@@ -138,6 +213,56 @@ mod tests {
         assert_eq!(
             built.app_state.history_path,
             PathBuf::from(&built.app_state.workspace_root).join("ensemble_history.jsonl")
+        );
+    }
+
+    #[tokio::test]
+    async fn start_orchestrator_for_app_returns_none_without_active_config() {
+        let config_path = PathBuf::from("/tmp/missing-config.yaml");
+        let built = build_app_state(
+            config_path.clone(),
+            missing_config_state(config_path),
+            EventBus::new(),
+        );
+
+        let runtime = start_orchestrator_for_app(&built.app_state).await.unwrap();
+
+        assert!(runtime.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_orchestrator_for_app_updates_shared_state_after_first_tick() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let todo_path = temp_dir.path().join("TODO.md");
+        let config_path = temp_dir.path().join("config.yaml");
+        let yaml = format!(
+            "tracker:\n  kind: todo_file\n  path: {}\n  active_states: [Todo]\n  terminal_states: [Done]\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\npolling:\n  interval_ms: 60000\n",
+            todo_path.display()
+        );
+        let document_state = parse_raw_yaml(config_path.clone(), yaml);
+        let built = build_app_state(config_path, document_state, EventBus::new());
+
+        let runtime = start_orchestrator_for_app(&built.app_state)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let ticked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let last_tick_at = built.app_state.orchestrator_state.read().await.last_tick_at;
+                if last_tick_at.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        runtime.shutdown().await;
+
+        assert!(
+            ticked.is_ok(),
+            "orchestrator did not record an initial tick"
         );
     }
 }

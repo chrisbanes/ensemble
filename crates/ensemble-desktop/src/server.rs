@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 use tracing::{error, info, warn};
 
-use ensemble_core::api::bootstrap::build_app_state;
+use ensemble_core::api::bootstrap::{
+    build_app_state, start_orchestrator_for_app, OrchestratorRuntime,
+};
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::observability::events::EventBus;
@@ -23,12 +25,16 @@ use crate::error::DesktopError;
 pub struct DesktopServer {
     pub url: url::Url,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    orchestrator: Option<OrchestratorRuntime>,
 }
 
 impl Drop for DesktopServer {
     fn drop(&mut self) {
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
+        }
+        if let Some(orchestrator) = self.orchestrator.take() {
+            orchestrator.abort();
         }
     }
 }
@@ -88,6 +94,13 @@ pub async fn start_desktop_server(
         );
     }
     let app_state = prepared.app_state;
+    let orchestrator = if prepared.has_runnable_config {
+        start_orchestrator_for_app(&app_state)
+            .await
+            .map_err(|error| DesktopError::ConfigLoadFailed(error.to_string()))?
+    } else {
+        None
+    };
 
     // Create combined router: API routes + SPA fallback
     let api_router = create_api_router(app_state);
@@ -129,6 +142,7 @@ pub async fn start_desktop_server(
     Ok(DesktopServer {
         url: server_url,
         shutdown: Some(shutdown_tx),
+        orchestrator,
     })
 }
 

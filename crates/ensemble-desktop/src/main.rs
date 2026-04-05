@@ -1,17 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use ensemble_core::observability::events::EventBus;
-use tauri::Manager;
 use tracing::{info, warn};
 
 mod embedded_ui;
 mod error;
-mod orchestrator;
 mod server;
 
 use embedded_ui::spa_available;
 use ensemble_core::config::location::resolve_config_dir_for_desktop;
-use orchestrator::DesktopOrchestrator;
 use server::start_desktop_server;
 
 fn main() {
@@ -49,19 +46,6 @@ fn main() {
     // Create a single shared EventBus for both orchestrator and server
     let event_bus = EventBus::new();
 
-    // Initialize orchestrator before the Tauri builder so we don't block the UI thread.
-    // Use tauri::async_runtime::block_on instead of a manual tokio runtime.
-    let orchestrator = if resolved.config_path.exists() {
-        tauri::async_runtime::block_on(DesktopOrchestrator::new(
-            resolved.config_path.clone(),
-            event_bus.clone(),
-        ))
-        .ok()
-    } else {
-        info!("No config found - app running in setup mode");
-        None
-    };
-
     // Start the local HTTP server using Tauri's async runtime
     let desktop_server = tauri::async_runtime::block_on(start_desktop_server(
         resolved.config_dir.clone(),
@@ -91,14 +75,6 @@ fn main() {
             .resizable(true)
             .build()
             .expect("Failed to create main window");
-
-            // Register orchestrator if it was initialized successfully
-            if let Some(orch) = orchestrator {
-                app.manage(orch);
-                info!("Orchestrator registered with Tauri app state");
-            } else if resolved.config_path.exists() {
-                warn!("Failed to initialize orchestrator - app will run in setup mode");
-            }
 
             info!("Ensemble Desktop initialized successfully");
             Ok(())

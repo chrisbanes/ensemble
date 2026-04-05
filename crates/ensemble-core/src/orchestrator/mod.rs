@@ -58,6 +58,7 @@ pub struct Orchestrator {
     agent_runner: Arc<dyn AgentRunner>,
     workspace_mgr: Arc<WorkspaceManager>,
     interaction_store: InteractionStore,
+    refresh_requested: Arc<tokio::sync::Notify>,
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -73,17 +74,41 @@ impl Orchestrator {
         config_dir: &Path,
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
+        let state = Arc::new(RwLock::new(OrchestratorState::new(30_000, 10)));
+        let refresh_requested = Arc::new(tokio::sync::Notify::new());
+        Self::new_with_state(
+            state,
+            config,
+            tracker,
+            agent_runner,
+            workspace_mgr,
+            config_dir,
+            refresh_requested,
+            shutdown_rx,
+        )
+    }
+
+    /// Create a new Orchestrator using externally managed state and refresh signaling.
+    pub fn new_with_state(
+        state: Arc<RwLock<OrchestratorState>>,
+        config: Arc<RwLock<EnsembleConfig>>,
+        tracker: Arc<dyn IssueTracker>,
+        agent_runner: Arc<dyn AgentRunner>,
+        workspace_mgr: WorkspaceManager,
+        config_dir: &Path,
+        refresh_requested: Arc<tokio::sync::Notify>,
+        shutdown_rx: mpsc::Receiver<()>,
+    ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(1000);
 
-        let cfg = OrchestratorState::new(30_000, 10);
-
         Self {
-            state: Arc::new(RwLock::new(cfg)),
+            state,
             config,
             tracker,
             agent_runner,
             interaction_store: InteractionStore::new(config_dir.to_path_buf()),
             workspace_mgr: Arc::new(workspace_mgr),
+            refresh_requested,
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -151,6 +176,12 @@ impl Orchestrator {
                 // Poll timer
                 _ = sleep(poll_interval) => {
                     debug!("poll tick");
+                    self.handle_tick().await;
+                }
+
+                // Manual refresh signal
+                _ = self.refresh_requested.notified() => {
+                    debug!("manual refresh tick");
                     self.handle_tick().await;
                 }
 
@@ -1934,6 +1965,70 @@ agent:
                 "should have retry or be completed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn refresh_signal_triggers_an_immediate_tick() {
+        let mut config_value = make_config();
+        config_value.polling.interval_ms = 60_000;
+        let config = Arc::new(RwLock::new(config_value));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let refresh_requested = Arc::new(tokio::sync::Notify::new());
+        let state = Arc::new(RwLock::new(OrchestratorState::new(60_000, 10)));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let mut orchestrator = Orchestrator::new_with_state(
+            Arc::clone(&state),
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            Arc::clone(&refresh_requested),
+            shutdown_rx,
+        );
+
+        let run_handle = tokio::spawn(async move {
+            orchestrator.run().await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.read().await.last_tick_at.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let first_tick_at = state.read().await.last_tick_at.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        refresh_requested.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let current_tick_at = state.read().await.last_tick_at.unwrap();
+                if current_tick_at > first_tick_at {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        shutdown_tx.send(()).await.unwrap();
+        run_handle.await.unwrap();
     }
 
     #[tokio::test]
