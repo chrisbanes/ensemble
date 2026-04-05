@@ -1142,6 +1142,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_escapes_acpx_name() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: Some("claude".to_string()),
             model: Some("sonnet".to_string()),
             executor: None,
@@ -1157,6 +1158,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_includes_approve_all_flag() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: Some("claude".to_string()),
             model: Some("sonnet".to_string()),
             executor: None,
@@ -1174,6 +1176,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_includes_approve_reads_flag() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: Some("claude".to_string()),
             model: Some("sonnet".to_string()),
             executor: None,
@@ -1194,6 +1197,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_includes_deny_all_flag() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: Some("claude".to_string()),
             model: Some("sonnet".to_string()),
             executor: None,
@@ -1211,6 +1215,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_no_model() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: Some("claude".to_string()),
             model: None,
             executor: None,
@@ -1226,6 +1231,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_omits_permission_flag_when_unset() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: Some("claude".to_string()),
             model: Some("sonnet".to_string()),
             executor: None,
@@ -1249,6 +1255,7 @@ on_failure: Todo
     #[test]
     fn test_resolve_agent_command_escapes_executor_tokens() {
         let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
             acpx_agent: None,
             model: None,
             executor: Some("codex --profile prod; touch /tmp/pwned".to_string()),

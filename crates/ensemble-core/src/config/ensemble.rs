@@ -1,3 +1,4 @@
+use crate::agent::runtime::RuntimeKind;
 use crate::config::location::default_todo_state_path;
 use crate::error::PipelineError;
 use crate::workspace::push_strategy::PushStrategy;
@@ -152,6 +153,8 @@ impl std::fmt::Debug for TrackerConfig {
 /// Per-agent definition: which executor to use and what prompt to send.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -542,6 +545,27 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         let has_acpx = agent.acpx_agent.is_some();
         let has_executor = agent.executor.is_some();
         let has_model = agent.model.is_some();
+        let runtime_kind = RuntimeKind::for_agent(agent);
+
+        if let Some(runtime) = agent.runtime.as_deref() {
+            match runtime {
+                "acpx" => {
+                    if !has_acpx {
+                        return Err(PipelineError::InvalidRuntimeConfig {
+                            agent: name.clone(),
+                            reason: "runtime 'acpx' requires acpx_agent".to_string(),
+                        });
+                    }
+                }
+                "direct" => {}
+                _ => {
+                    return Err(PipelineError::InvalidRuntimeConfig {
+                        agent: name.clone(),
+                        reason: format!("unsupported runtime '{runtime}'"),
+                    });
+                }
+            }
+        }
 
         if let Some(permission_mode) = agent.permission_mode.as_deref() {
             if !has_acpx {
@@ -562,12 +586,24 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
             }
         }
 
-        if !has_acpx && (!has_executor || !has_model) {
+        if runtime_kind == RuntimeKind::Direct && (!has_executor || !has_model) {
             return Err(PipelineError::InvalidAgentConfig {
                 agent: name.clone(),
             });
         }
     }
+
+    let any_acpx = config
+        .agents
+        .values()
+        .any(|agent| RuntimeKind::for_agent(agent) == RuntimeKind::Acpx);
+    if any_acpx && config.agent.permission_request_policy != default_permission_request_policy() {
+        return Err(PipelineError::InvalidRuntimeConfig {
+            agent: "agent".to_string(),
+            reason: "permission_request_policy is ignored for acpx runtime; remove it or use direct runtime".to_string(),
+        });
+    }
+
     // Step names must be unique
     let mut seen_names = std::collections::HashSet::new();
     for step in &config.steps {
@@ -1214,6 +1250,58 @@ agent:
         let config = parse_config(yaml).unwrap();
         assert!(config.agents["builder"].permission_mode.is_none());
         assert_eq!(config.agent.permission_request_policy, "manual");
+    }
+
+    #[test]
+    fn acpx_agent_defaults_runtime_to_acpx() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.agents["builder"].runtime.as_deref(), None);
+        assert_eq!(
+            RuntimeKind::for_agent(&config.agents["builder"]),
+            RuntimeKind::Acpx
+        );
+    }
+
+    #[test]
+    fn permission_request_policy_is_rejected_for_acpx_runtime_override() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    runtime: acpx
+    prompt: hi
+agent:
+  permission_request_policy: manual
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("permission_request_policy"));
     }
 
     #[test]

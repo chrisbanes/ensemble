@@ -352,6 +352,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
             field: Some("permission_mode".to_string()),
             path: Some(format!("agents.{}.permission_mode", agent)),
         },
+        PipelineError::InvalidRuntimeConfig { agent, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("agent '{}': {}", agent, reason),
+            section: "agents".to_string(),
+            field: Some("runtime".to_string()),
+            path: Some(format!("agents.{}.runtime", agent)),
+        },
     }
 }
 

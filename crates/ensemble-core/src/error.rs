@@ -136,4 +136,6 @@ pub enum PipelineError {
     InvalidAgentConfig { agent: String },
     #[error("invalid permission_mode for agent {agent}: {reason}")]
     InvalidPermissionMode { agent: String, reason: String },
+    #[error("invalid runtime config for agent {agent}: {reason}")]
+    InvalidRuntimeConfig { agent: String, reason: String },
 }

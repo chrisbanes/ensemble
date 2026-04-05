@@ -1354,6 +1354,7 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
+                runtime: None,
                 executor: None,
                 model: None,
                 acpx_agent: Some("claude".to_string()),
@@ -1518,6 +1519,7 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
+                runtime: None,
                 executor: None,
                 model: None,
                 acpx_agent: None,
@@ -1669,6 +1671,7 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
+                runtime: None,
                 executor: None,
                 model: None,
                 acpx_agent: Some("claude".to_string()),

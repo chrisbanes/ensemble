@@ -552,8 +552,9 @@ tracker:
   path: TODO.md
 agents:
   builder:
-    acpx_agent: claude
-    permission_mode: approve_reads
+    runtime: direct
+    executor: claude-code
+    model: sonnet
     prompt: Build it.
 steps:
   - name: build
@@ -599,9 +600,67 @@ on_failure: Failed
     assert_eq!(save_response.status(), 200);
 
     let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
-    assert!(saved_yaml.contains("permission_mode: approve_reads"));
+    assert!(saved_yaml.contains("runtime: direct"));
     assert!(saved_yaml.contains("permission_request_policy: manual"));
     assert!(!saved_yaml.contains("permission_policy:"));
+}
+
+#[tokio::test]
+async fn test_guided_form_save_preserves_explicit_agent_runtime() {
+    let (state, _temp_dir) = build_app_state_without_config();
+    let raw_yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+    std::fs::write(&state.config_runtime.config_path, raw_yaml).unwrap();
+    *state.config_runtime.document_state.write().await = ConfigDocumentState {
+        path: state.config_runtime.config_path.clone(),
+        kind: ConfigStateKind::Parsed,
+        raw_yaml: Some(raw_yaml.to_string()),
+        document: None,
+        active_config: Some(ensemble_core::config::ensemble::parse_config(raw_yaml).unwrap()),
+        validation: DraftValidationReport::default(),
+    };
+
+    let base_url = start_test_server(state.clone()).await;
+    let client = reqwest::Client::new();
+
+    let get_response = client
+        .get(format!("{}/api/v1/config", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(get_response.status(), 200);
+    let get_json: serde_json::Value = get_response.json().await.unwrap();
+    assert_eq!(get_json["guided_form"]["agents"][0]["runtime"], "direct");
+
+    let save_response = client
+        .post(format!("{}/api/v1/config/form/save", base_url))
+        .json(&serde_json::json!({
+            "base_raw_yaml": get_json["raw_yaml"],
+            "form": get_json["guided_form"],
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(save_response.status(), 200);
+
+    let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+    assert!(saved_yaml.contains("runtime: direct"));
 }
 
 #[tokio::test]
