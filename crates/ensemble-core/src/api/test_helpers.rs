@@ -1,3 +1,4 @@
+use crate::agent::cancellation::new_cancellation_registry;
 use crate::api::router::{AppState, ConfigRuntime};
 use crate::config::draft::{
     missing_config_state, ConfigDocumentState, ConfigStateKind, DraftValidationReport,
@@ -33,6 +34,7 @@ pub(crate) fn app_state_with_document_state(document_state: ConfigDocumentState)
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
         },
+        cancellation_registry: new_cancellation_registry(),
     }
 }
 
@@ -51,6 +53,7 @@ pub(crate) fn app_state_with_missing_config(
             config_path: config_path.clone(),
             document_state: Arc::new(RwLock::new(missing_config_state(config_path))),
         },
+        cancellation_registry: new_cancellation_registry(),
     }
 }
 

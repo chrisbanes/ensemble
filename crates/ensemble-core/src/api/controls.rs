@@ -1,3 +1,4 @@
+use crate::agent::cancellation::{cancel_issue, clear_issue_cancellation};
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
@@ -165,8 +166,10 @@ pub async fn post_stop(
         }
     };
 
+    let cancelled = cancel_issue(&state.cancellation_registry, &issue_id);
     match try_signal_stop(&lock, &issue_id) {
         StopSignalStatus::Sent => {}
+        StopSignalStatus::MissingPid if cancelled => {}
         StopSignalStatus::MissingPid => {
             return issue_error_response(
                 StatusCode::CONFLICT,
@@ -193,11 +196,7 @@ pub async fn post_stop(
         }
     }
 
-    // TODO: Once the orchestrator event loop exists (Plan 3), stop requests
-    // should be routed through a command channel instead of mutating state
-    // directly. This avoids a race where the orchestrator's WorkerExited
-    // handler processes a stale entry. For now, direct mutation is correct
-    // because the orchestrator loop is a placeholder.
+    clear_issue_cancellation(&state.cancellation_registry, &issue_id);
     if let Some(entry) = lock.remove_running(&issue_id) {
         lock.add_runtime_seconds(&entry);
     }
@@ -433,6 +432,7 @@ pub async fn post_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cancellation::register_issue_cancellation;
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::StepConfig;
@@ -443,6 +443,7 @@ mod tests {
     use axum::body::to_bytes;
     use std::sync::Arc;
     use tokio::sync::RwLock;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn find_issue_presence_reports_running_retrying_and_missing() {
@@ -610,6 +611,27 @@ mod tests {
         let lock = state.orchestrator_state.read().await;
         assert!(lock.running.contains_key("NODE_123"));
         assert!(lock.is_claimed("NODE_123"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_running_issue_without_pid_uses_cancellation_registry() {
+        let state = build_app_state_with_running_pid(None);
+        let cancellation = CancellationToken::new();
+        register_issue_cancellation(
+            &state.cancellation_registry,
+            "NODE_123",
+            cancellation.clone(),
+        );
+
+        let response = post_stop(State(state.clone()), Path("my-repo#42".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(cancellation.is_cancelled());
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.running.is_empty());
+        assert!(!lock.is_claimed("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_none());
     }
 
     #[tokio::test]

@@ -1,3 +1,4 @@
+use crate::agent::cancellation::CancellationRegistry;
 use crate::api::interactions;
 use crate::api::{
     config_edit_handler, config_handler, controls, conversation, fs_handler, handlers,
@@ -43,6 +44,8 @@ pub struct AppState {
     pub event_bus: EventBus,
     /// Runtime configuration store with document state.
     pub config_runtime: ConfigRuntime,
+    /// Per-issue cancellation handles for active worker runs.
+    pub cancellation_registry: CancellationRegistry,
 }
 
 /// Create the axum router for the Ensemble HTTP API.

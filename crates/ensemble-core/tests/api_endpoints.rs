@@ -2,6 +2,7 @@
 //! hit endpoints with reqwest, verify JSON shapes match SPEC.md Section 13.7.2.
 
 use chrono::Utc;
+use ensemble_core::agent::cancellation::new_cancellation_registry;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
 use ensemble_core::interaction::model::{
@@ -50,6 +51,7 @@ fn build_app_state(
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
         },
+        cancellation_registry: new_cancellation_registry(),
     }
 }
 

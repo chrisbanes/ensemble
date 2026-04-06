@@ -1159,8 +1159,13 @@ exit 1
 
         let body = response.into_body();
         let mut stream = Body::into_data_stream(body);
-        let first_chunk = stream.next().await.unwrap().unwrap();
-        let event_text = String::from_utf8(first_chunk.to_vec()).unwrap();
+        let mut event_text = String::new();
+        while let Some(chunk) = stream.next().await {
+            event_text.push_str(&String::from_utf8(chunk.unwrap().to_vec()).unwrap());
+            if event_text.contains("claude 9.9.9") {
+                break;
+            }
+        }
 
         assert!(event_text.contains("claude"));
         assert!(event_text.contains("claude 9.9.9"));

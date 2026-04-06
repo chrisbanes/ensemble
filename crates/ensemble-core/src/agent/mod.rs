@@ -1,6 +1,7 @@
 pub mod acp_client;
 pub mod acpx_cli;
 pub mod acpx_runtime;
+pub mod cancellation;
 pub mod events;
 pub mod runtime;
 
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::config::ensemble::{EnsembleConfig, PermissionMode};
@@ -32,6 +34,7 @@ pub struct AgentRunRequest<'a> {
     pub(crate) interaction_response: Option<InteractionResponseEnvelope>,
     pub workspace_path: &'a Path,
     pub event_tx: mpsc::Sender<WorkerEvent>,
+    pub cancel_token: CancellationToken,
 }
 
 /// Trait for running an agent session against an issue.
@@ -523,6 +526,7 @@ mod tests {
     use super::*;
     use crate::config::ensemble::parse_config;
     use crate::interaction::{InteractionKind, InteractionResponse};
+    use tokio_util::sync::CancellationToken;
 
     /// Mock agent runner for testing the orchestrator.
     pub struct MockAgentRunner {
@@ -675,6 +679,7 @@ on_failure: Todo
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
+                cancel_token: CancellationToken::new(),
             })
             .await;
 
@@ -713,6 +718,7 @@ on_failure: Todo
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
+                cancel_token: CancellationToken::new(),
             })
             .await;
 
@@ -770,6 +776,7 @@ exit 1
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
+                cancel_token: CancellationToken::new(),
             })
             .await
             .unwrap();

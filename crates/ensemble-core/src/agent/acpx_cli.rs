@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use tracing::debug;
 
 use crate::error::AgentError;
 
@@ -25,6 +26,7 @@ impl AcpxCli {
     ) -> Result<(), AgentError> {
         let mut command = self.base_command(agent, cwd, model);
         command.args(["sessions", "ensure", "--name", session_name]);
+        debug!(agent, session_name, cwd = %cwd.display(), "running acpx sessions ensure");
 
         let status = command.status().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx sessions ensure: {e}"),
@@ -52,6 +54,7 @@ impl AcpxCli {
             .args(["prompt", "--session", session_name, "--file", "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped());
+        debug!(agent, session_name, cwd = %cwd.display(), "running acpx prompt");
 
         let mut child = command.spawn().map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx prompt: {e}"),
@@ -120,6 +123,7 @@ impl AcpxCli {
     ) -> Result<(), AgentError> {
         let mut command = self.base_command(agent, cwd, model);
         command.args(["cancel", "--session", session_name]);
+        debug!(agent, session_name, cwd = %cwd.display(), "running acpx cancel");
         let status = command.status().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx cancel: {e}"),
         })?;
@@ -141,6 +145,7 @@ impl AcpxCli {
     ) -> Result<(), AgentError> {
         let mut command = self.base_command(agent, cwd, model);
         command.args(["sessions", "close", session_name]);
+        debug!(agent, session_name, cwd = %cwd.display(), "running acpx sessions close");
         let status = command.status().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx sessions close: {e}"),
         })?;
