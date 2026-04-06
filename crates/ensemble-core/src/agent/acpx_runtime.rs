@@ -1,4 +1,5 @@
 use tokio::sync::mpsc;
+use tracing::warn;
 
 use crate::error::AgentError;
 
@@ -49,8 +50,8 @@ impl AcpxRuntime {
             })?;
         let session_name = format!(
             "{}-{}-attempt-{}",
-            request.issue.id,
-            request.step_name,
+            sanitize_session_component(&request.issue.id),
+            sanitize_session_component(request.step_name),
             request.attempt.unwrap_or(1)
         );
 
@@ -95,7 +96,7 @@ impl AcpxRuntime {
             .await;
         }
 
-        let _ = self
+        if let Err(error) = self
             .cli
             .close_session(
                 acpx_agent,
@@ -103,7 +104,10 @@ impl AcpxRuntime {
                 request.workspace_path,
                 agent.model.as_deref(),
             )
-            .await;
+            .await
+        {
+            warn!(%error, session_name, "failed to close acpx session");
+        }
 
         Ok(detect_worker_result(request.workspace_path).await)
     }
@@ -113,6 +117,19 @@ impl Default for AcpxRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn sanitize_session_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 async fn emit_event(
@@ -133,6 +150,7 @@ async fn emit_event(
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::Arc;
 
     use super::*;
@@ -164,12 +182,23 @@ on_failure: Failed
         )
     }
 
+    fn write_mock_acpx_script(dir: &tempfile::TempDir, script_content: &str) -> String {
+        let script_path = dir.path().join("mock_acpx.sh");
+        let mut file = std::fs::File::create(&script_path).unwrap();
+        file.write_all(script_content.as_bytes()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script_path.display().to_string()
+    }
+
     #[tokio::test]
     async fn acpx_runtime_emits_runtime_events_and_success() {
         let workspace = tempfile::TempDir::new().unwrap();
-        let script_path = workspace.path().join("mock_acpx.sh");
-        std::fs::write(
-            &script_path,
+        let script_path = write_mock_acpx_script(
+            &workspace,
             r#"#!/usr/bin/env bash
 case "$*" in
   *" sessions ensure --name "*)
@@ -189,15 +218,9 @@ JSON
 esac
 exit 1
 "#,
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
 
-        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path.display().to_string()));
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let issue = test_issue("issue-1", "Todo");
         let config = test_config();
@@ -231,5 +254,99 @@ exit 1
         }
         assert!(saw_prompt_started);
         assert!(saw_output);
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_tolerates_close_session_failure() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let script_path = write_mock_acpx_script(
+            &workspace,
+            r#"#!/usr/bin/env bash
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    cat <<'JSON'
+{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}
+JSON
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 1
+    ;;
+esac
+exit 1
+"#,
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+        };
+
+        let result = runner.run_step(&request, "finish the task").await.unwrap();
+
+        assert!(matches!(result, WorkerResult::Success));
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_sanitizes_session_names() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            &workspace,
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    cat <<'JSON'
+{{"event":"completed","usage":{{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}
+JSON
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue/1 weird", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build/review",
+            attempt: Some(2),
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+        };
+
+        let _ = runner.run_step(&request, "finish the task").await.unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("issue_1_weird-build_review-attempt-2"));
     }
 }

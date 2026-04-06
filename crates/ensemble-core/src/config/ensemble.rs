@@ -597,7 +597,14 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         .agents
         .values()
         .any(|agent| RuntimeKind::for_agent(agent) == RuntimeKind::Acpx);
-    if any_acpx && config.agent.permission_request_policy != default_permission_request_policy() {
+    let any_direct = config
+        .agents
+        .values()
+        .any(|agent| RuntimeKind::for_agent(agent) == RuntimeKind::Direct);
+    if any_acpx
+        && !any_direct
+        && config.agent.permission_request_policy != default_permission_request_policy()
+    {
         return Err(PipelineError::InvalidRuntimeConfig {
             agent: "agent".to_string(),
             reason: "permission_request_policy is ignored for acpx runtime; remove it or use direct runtime".to_string(),
@@ -1302,6 +1309,37 @@ on_failure: Failed
 
         let err = validate_config(&config).unwrap_err();
         assert!(err.to_string().contains("permission_request_policy"));
+    }
+
+    #[test]
+    fn permission_request_policy_is_allowed_for_mixed_runtime_configs() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: hello
+agent:
+  permission_request_policy: manual
+steps:
+  - name: build
+    agent: builder
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]

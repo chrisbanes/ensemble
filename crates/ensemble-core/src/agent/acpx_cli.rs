@@ -192,7 +192,10 @@ fn map_event(value: serde_json::Value) -> AgentEvent {
                 .and_then(|v| v.as_str())
                 .unwrap_or("acpx run failed")
                 .to_string(),
-            usage: None,
+            usage: value
+                .get("usage")
+                .cloned()
+                .and_then(|usage| serde_json::from_value::<TokenUsage>(usage).ok()),
         },
         Some("cancelled") => AgentEvent::Cancelled {
             reason: value
@@ -218,7 +221,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
 
-    use crate::agent::events::AgentEvent;
+    use crate::agent::events::{AgentEvent, TokenUsage};
     use crate::error::AgentError;
 
     use super::AcpxCli;
@@ -303,6 +306,37 @@ JSON
             .unwrap_err();
 
         assert!(matches!(error, AgentError::AcpxFinalStatusMissing { .. }));
+    }
+
+    #[tokio::test]
+    async fn failed_event_preserves_usage() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"event":"failed","reason":"boom","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        let events = client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            AgentEvent::RunFailed {
+                reason,
+                usage: Some(TokenUsage {
+                    input_tokens: 4,
+                    output_tokens: 5,
+                    total_tokens: 9
+                })
+            } if reason == "boom"
+        ));
     }
 
     #[tokio::test]
