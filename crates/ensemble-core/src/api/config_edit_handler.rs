@@ -860,13 +860,13 @@ mod tests {
         }
     }
 
-    struct PathGuard {
+    struct AcpxBinGuard {
         _guard: EnvGuard,
     }
 
-    impl PathGuard {
+    impl AcpxBinGuard {
         fn with_fake_acpx(script_body: &str) -> (Self, tempfile::TempDir) {
-            let guard = EnvGuard::lock(&["HOME", "PATH"]);
+            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TEST_ACPX_BIN"]);
             let temp_dir = tempfile::tempdir().unwrap();
             let script_path = temp_dir.path().join("acpx");
             let mut script = std::fs::File::create(&script_path).unwrap();
@@ -880,7 +880,7 @@ mod tests {
                 std::fs::set_permissions(&script_path, perms).unwrap();
             }
 
-            std::env::set_var("PATH", temp_dir.path());
+            std::env::set_var("ENSEMBLE_TEST_ACPX_BIN", &script_path);
 
             (Self { _guard: guard }, temp_dir)
         }
@@ -920,7 +920,9 @@ tracker:
   path: TODO.md
 agents:
   builder:
-    acpx_agent: claude
+    runtime: direct
+    executor: claude-code
+    model: sonnet
     prompt: "Build it."
 steps:
   - name: build
@@ -1141,7 +1143,7 @@ fi
 
 exit 1
 "#;
-        let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
+        let (_path_guard, temp_dir) = AcpxBinGuard::with_fake_acpx(script);
         std::env::set_var("HOME", temp_dir.path());
 
         let response = get_setup_agents_stream().await.into_response();
@@ -1157,8 +1159,13 @@ exit 1
 
         let body = response.into_body();
         let mut stream = Body::into_data_stream(body);
-        let first_chunk = stream.next().await.unwrap().unwrap();
-        let event_text = String::from_utf8(first_chunk.to_vec()).unwrap();
+        let mut event_text = String::new();
+        while let Some(chunk) = stream.next().await {
+            event_text.push_str(&String::from_utf8(chunk.unwrap().to_vec()).unwrap());
+            if event_text.contains("claude 9.9.9") {
+                break;
+            }
+        }
 
         assert!(event_text.contains("claude"));
         assert!(event_text.contains("claude 9.9.9"));
@@ -1354,10 +1361,11 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
-                executor: None,
-                model: None,
-                acpx_agent: Some("claude".to_string()),
-                permission_mode: Some("approve_reads".to_string()),
+                runtime: Some("direct".to_string()),
+                executor: Some("claude-code".to_string()),
+                model: Some("sonnet".to_string()),
+                acpx_agent: None,
+                permission_mode: None,
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
@@ -1518,6 +1526,7 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
+                runtime: None,
                 executor: None,
                 model: None,
                 acpx_agent: None,
@@ -1669,6 +1678,7 @@ on_failure: Failed
             repos: vec![],
             agents: vec![crate::config::form::GuidedAgentForm {
                 name: "builder".to_string(),
+                runtime: None,
                 executor: None,
                 model: None,
                 acpx_agent: Some("claude".to_string()),

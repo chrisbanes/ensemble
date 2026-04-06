@@ -209,6 +209,7 @@ Parsed `config.yaml` payload:
 
 Per-agent configuration within `config.yaml`:
 
+- `runtime` (string or null) — optional runtime override (`acpx` or `direct`).
 - `acpx_agent` (string or null) — acpx agent name used for launch-time agent selection.
 - `executor` (string) — ACP-compatible agent executable identifier.
 - `model` (string) — model to use for the agent.
@@ -532,16 +533,19 @@ repos:
 
 Named agent definitions. Each key is the agent role name, each value is an object:
 
+- `runtime` (string, optional)
+  - Optional runtime override: `acpx` or `direct`.
+  - When omitted, Ensemble infers `acpx` if `acpx_agent` is set; otherwise `direct`.
 - `acpx_agent` (string, optional)
   - acpx agent identifier (for example `claude`, `codex`, `gemini`).
-  - When set, Ensemble delegates agent communication to acpx.
-  - Takes precedence over `executor` if both are specified.
+  - When set, Ensemble delegates agent communication to acpx unless `runtime: direct` overrides it.
 - `executor` (string, optional)
   - ACP-compatible agent executable identifier (for example `claude-code`, `amp`).
-  - Required if `acpx_agent` is not set.
+  - Required for `direct` runtime.
 - `model` (string, optional)
   - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
-  - When omitted, the agent uses its default model.
+  - Required for `direct` runtime.
+  - When omitted for other runtimes, the agent uses its default model.
 - `permission_mode` (string, optional)
   - Optional acpx launch-time permission mode for `acpx_agent`.
   - Supported values: `approve_all`, `approve_reads`, `deny_all`.
@@ -670,12 +674,14 @@ Fields:
   - Default: `code`.
 - `permission_request_policy` (string, optional)
   - Defines how the orchestrator handles ACP `session/request_permission` callbacks after the agent
-    is launched.
+    is launched on direct ACP runtime paths.
   - This does not control acpx launch-time permission mode; use `agents.*.permission_mode` for
     that.
   - Values: `auto_approve_all`, `approve_reads_reject_writes`, `reject_all`, or
     implementation-defined.
   - Default: implementation-defined.
+  - If all configured agents resolve to `acpx`, non-default values are invalid.
+  - In mixed runtime configurations, this still applies only to agents using the direct runtime.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `read_timeout_ms` (integer)
@@ -829,7 +835,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Done", "Closed"]`
 - `agents.<name>.acpx_agent`: string, optional; acpx agent identifier (alternative to executor)
-- `agents.<name>.executor`: string, required unless `acpx_agent` is set; ACP-compatible agent executable identifier
+- `agents.<name>.runtime`: string, optional; `acpx` or `direct` runtime override
+- `agents.<name>.executor`: string, required for direct runtime; ACP-compatible agent executable identifier
 - `agents.<name>.model`: string, optional; model identifier, including for `acpx_agent` entries
 - `agents.<name>.prompt`: string, optional; inline prompt (mutually exclusive with prompt_template)
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
@@ -857,7 +864,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.command`: shell command string, default implementation-defined
 - `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
-- `agent.permission_request_policy`: string, default implementation-defined
+- `agent.permission_request_policy`: string, default implementation-defined; only applies to direct runtime paths
 - `agent.turn_timeout_ms`: integer, default `3600000`
 - `agent.read_timeout_ms`: integer, default `5000`
 - `agent.stall_timeout_ms`: integer, default `300000`
@@ -1291,7 +1298,7 @@ Line handling requirements:
 
 ### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
 
-The ACP session client emits structured events to the orchestrator callback. Each event should
+The active runtime emits structured events to the orchestrator callback. Each event should
 include:
 
 - `event` (enum/string)
@@ -1304,19 +1311,19 @@ Important emitted events may include:
 
 - `session_started` — after `session/new` succeeds
 - `startup_failed` — if `initialize` or `session/new` fails
-- `turn_started` — after `session/prompt` is sent
-- `turn_update` — on each `session/update` notification with content blocks
-- `turn_completed` — when `session/update` contains `stopReason: "end_turn"`
-- `turn_failed` — when `stopReason` is `refusal`, `cancelled`, or `max_turn_requests`
-- `permission_requested` — when agent sends `session/request_permission`
-- `permission_resolved` — after orchestrator responds to permission request
-- `notification` — generic content update from `session/update`
+- `prompt_started` — after a prompt/turn is submitted to the runtime
+- `output_chunk` — streamed stdout/stderr or textual progress output
+- `run_completed` — when the runtime reports terminal success
+- `run_failed` — when the runtime reports terminal failure
+- `cancelled` — when the runtime reports explicit cancellation
+- `warning` — warning surfaced by the runtime, including direct-runtime permission prompts
+- `notification` — generic informational runtime update
 - `other_message` — unrecognized JSON-RPC message
 - `malformed` — unparseable line
 
 ### 10.5 Permission, Tool Calls, and User Input Policy
 
-Permission and user-input behavior is governed by `agent.permission_request_policy`.
+Permission and user-input behavior on direct ACP paths is governed by `agent.permission_request_policy`.
 
 Policy requirements:
 
@@ -1325,7 +1332,7 @@ Policy requirements:
   implementation should either satisfy them, surface them to an operator, auto-resolve them, or
   fail the run according to its documented policy.
 
-ACP permission handling:
+Direct ACP permission handling:
 
 - The agent sends `session/request_permission` (agent-to-client JSON-RPC request) when it needs
   approval for an action (for example executing a command or writing a file).
@@ -2390,7 +2397,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Partial JSON lines are buffered until newline
 - Stdout and stderr are handled separately; protocol JSON is parsed from stdout only
 - Non-JSON stderr lines are logged but do not crash parsing
-- `session/request_permission` callbacks are handled according to `agent.permission_request_policy`
+- direct-runtime `session/request_permission` callbacks are handled according to `agent.permission_request_policy`
 - Permission requests do not stall indefinitely
 - Unsupported tool calls are rejected without stalling the session
 - User input requests are handled according to the implementation's documented policy and do not

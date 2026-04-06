@@ -108,6 +108,10 @@ pub enum AgentError {
     HookFailed { reason: String },
     #[error("prompt error: {reason}")]
     PromptError { reason: String },
+    #[error("acpx command failed: {command} — {reason}")]
+    AcpxCommandFailed { command: String, reason: String },
+    #[error("acpx final status missing: {context}")]
+    AcpxFinalStatusMissing { context: String },
 }
 
 #[derive(Debug, Error)]
@@ -132,4 +136,6 @@ pub enum PipelineError {
     InvalidAgentConfig { agent: String },
     #[error("invalid permission_mode for agent {agent}: {reason}")]
     InvalidPermissionMode { agent: String, reason: String },
+    #[error("invalid runtime config for agent {agent}: {reason}")]
+    InvalidRuntimeConfig { agent: String, reason: String },
 }

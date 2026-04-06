@@ -13,6 +13,13 @@ pub struct TokenUsage {
     pub total_tokens: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeStream {
+    Stdout,
+    Stderr,
+}
+
 /// ACP stop reasons mapped from session/update notifications.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,9 +61,29 @@ impl StopReason {
 /// Internal event types emitted by the ACP client to the orchestrator.
 #[derive(Debug, Clone, Serialize)]
 pub enum AgentEvent {
+    /// Runtime session established. `agent_pid` is retained for direct ACP workers so the
+    /// orchestrator/API can still expose process metadata and support stop/cancel controls.
     SessionStarted {
         session_id: String,
         agent_pid: Option<String>,
+    },
+    PromptStarted,
+    OutputChunk {
+        stream: RuntimeStream,
+        content: String,
+    },
+    RunCompleted {
+        usage: Option<TokenUsage>,
+    },
+    RunFailed {
+        reason: String,
+        usage: Option<TokenUsage>,
+    },
+    Cancelled {
+        reason: Option<String>,
+    },
+    Warning {
+        message: String,
     },
     TurnStarted,
     TurnUpdate {
@@ -93,6 +120,12 @@ impl AgentEvent {
     pub fn event_name(&self) -> &'static str {
         match self {
             AgentEvent::SessionStarted { .. } => "session_started",
+            AgentEvent::PromptStarted => "prompt_started",
+            AgentEvent::OutputChunk { .. } => "output_chunk",
+            AgentEvent::RunCompleted { .. } => "run_completed",
+            AgentEvent::RunFailed { .. } => "run_failed",
+            AgentEvent::Cancelled { .. } => "cancelled",
+            AgentEvent::Warning { .. } => "warning",
             AgentEvent::TurnStarted => "turn_started",
             AgentEvent::TurnUpdate { .. } => "turn_update",
             AgentEvent::TurnCompleted { .. } => "turn_completed",
@@ -108,6 +141,10 @@ impl AgentEvent {
     /// Returns the message content for state tracking, truncated to 200 chars.
     pub fn message_for_state(&self) -> Option<Cow<'_, str>> {
         match self {
+            AgentEvent::Warning { message } => Some(truncate_for_state(message)),
+            AgentEvent::RunFailed { reason, .. } => Some(truncate_for_state(reason)),
+            AgentEvent::Cancelled { reason } => reason.as_deref().map(truncate_for_state),
+            AgentEvent::OutputChunk { content, .. } => Some(truncate_for_state(content)),
             AgentEvent::TurnUpdate { content } => Some(truncate_for_state(content)),
             AgentEvent::TurnFailed { reason, .. } => Some(truncate_for_state(reason)),
             AgentEvent::PermissionRequested { description, .. } => {

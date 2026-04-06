@@ -104,6 +104,7 @@ agents:
     permission_mode: approve_reads
     prompt_template: templates/implement.liquid  # Relative to config directory
   reviewer:
+    runtime: direct
     executor: claude-code
     model: claude-opus-4-6
     prompt_template: templates/review.liquid
@@ -190,6 +191,7 @@ This section configures per-agent launch settings. Runtime ACP callback handling
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `runtime` | string | inferred | Optional runtime override: `"acpx"` or `"direct"` |
 | `executor` | string | — | Agent executable (e.g., `"claude-code"`) |
 | `model` | string | — | Model identifier (e.g., `"claude-opus-4-6"`) |
 | `acpx_agent` | string | — | ACPX agent name (alternative to executor+model) |
@@ -198,7 +200,9 @@ This section configures per-agent launch settings. Runtime ACP callback handling
 | `prompt_template` | string | — | Path to a Liquid template file (config-relative) |
 
 **Validation rules:**
-- Provide either `acpx_agent` alone, or both `executor` and `model`.
+- Omit `runtime` to infer it automatically: `acpx_agent` => `acpx`, otherwise `direct`.
+- `runtime: acpx` requires `acpx_agent`.
+- `runtime: direct` requires `executor` and `model`.
 - Provide either `prompt` (inline) or `prompt_template` (file), not both.
 
 ### steps
@@ -270,10 +274,12 @@ This section configures Ensemble's runtime behavior after the agent is launched.
 | `max_retry_backoff_ms` | integer | `300000` | Cap on exponential backoff delay between retries |
 | `command` | string | `"claude-code"` | Agent binary command |
 | `session_mode` | string | `"code"` | Agent session mode |
-| `permission_request_policy` | string | `"auto_approve_all"` | Ensemble policy for handling ACP `session/request_permission` callbacks |
+| `permission_request_policy` | string | `"auto_approve_all"` | Ensemble policy for handling ACP `session/request_permission` callbacks on direct runtime paths |
 | `turn_timeout_ms` | integer | `3600000` | Maximum time for a single agent turn (1 hour) |
 | `read_timeout_ms` | integer | `5000` | Timeout for reading agent output |
 | `stall_timeout_ms` | integer | `300000` | Timeout for detecting a stalled agent |
+
+`agent.permission_request_policy` only applies to direct ACP runtime paths. If all configured agents resolve to the `acpx` runtime, leave this at its default. In mixed configurations, it still applies only to agents using the direct runtime; to customize permission handling for an `acpx`-resolved agent, switch that agent to `runtime: direct`.
 
 Legacy note: `agent.permission_policy` is still accepted as a deprecated alias for `agent.permission_request_policy` during config parsing.
 

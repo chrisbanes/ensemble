@@ -811,7 +811,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
 pub async fn probe_agent(name: &str) -> Option<String> {
     let timeout = tokio::time::Duration::from_secs(8);
     let output = tokio::time::timeout(timeout, async {
-        tokio::process::Command::new("acpx")
+        tokio::process::Command::new(acpx_executable())
             .args(["--agent", name, "--version"])
             .kill_on_drop(true)
             .output()
@@ -832,7 +832,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let session_name = "ensemble-probe";
 
     // Create session
-    let output = tokio::process::Command::new("acpx")
+    let output = tokio::process::Command::new(acpx_executable())
         .args([agent_name, "sessions", "ensure", "--name", session_name])
         .kill_on_drop(true)
         .output()
@@ -854,13 +854,22 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let caps = read_session_capabilities(&session_id).await;
 
     // Close session (best-effort)
-    let _ = tokio::process::Command::new("acpx")
+    let _ = tokio::process::Command::new(acpx_executable())
         .args([agent_name, "sessions", "close", session_name])
         .kill_on_drop(true)
         .output()
         .await;
 
     caps
+}
+
+fn acpx_executable() -> String {
+    #[cfg(test)]
+    if let Ok(executable) = std::env::var("ENSEMBLE_TEST_ACPX_BIN") {
+        return executable;
+    }
+
+    "acpx".to_string()
 }
 
 async fn read_session_capabilities(session_id: &str) -> AgentCapabilities {
@@ -1269,13 +1278,13 @@ mod tests {
 
     const ENV_VARS: &[&str] = &["HOME", "ENSEMBLE_TODO_PATH"];
 
-    struct PathGuard {
+    struct AcpxBinGuard {
         _guard: EnvGuard,
     }
 
-    impl PathGuard {
+    impl AcpxBinGuard {
         fn with_fake_acpx(script_body: &str) -> (Self, tempfile::TempDir) {
-            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TODO_PATH", "PATH"]);
+            let guard = EnvGuard::lock(&["HOME", "ENSEMBLE_TODO_PATH", "ENSEMBLE_TEST_ACPX_BIN"]);
             let temp_dir = tempfile::tempdir().unwrap();
             let script_path = temp_dir.path().join("acpx");
             let mut script = std::fs::File::create(&script_path).unwrap();
@@ -1289,7 +1298,7 @@ mod tests {
                 std::fs::set_permissions(&script_path, perms).unwrap();
             }
 
-            std::env::set_var("PATH", temp_dir.path());
+            std::env::set_var("ENSEMBLE_TEST_ACPX_BIN", &script_path);
 
             (Self { _guard: guard }, temp_dir)
         }
@@ -2310,7 +2319,7 @@ fi
 
 exit 1
 "#;
-        let (_path_guard, temp_dir) = PathGuard::with_fake_acpx(script);
+        let (_path_guard, temp_dir) = AcpxBinGuard::with_fake_acpx(script);
         std::env::set_var("HOME", temp_dir.path());
 
         let agent = discover_agent("test-single-probe", "Test Single Probe")
@@ -2320,6 +2329,39 @@ exit 1
 
         assert_eq!(agent.version, "claude 1.2.3");
         assert_eq!(probe_count.trim(), "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_agent_capabilities_uses_override_binary_for_close() {
+        let script = r#"
+LOG_FILE="$HOME/acpx-invocations"
+printf '%s\n' "$*" >> "$LOG_FILE"
+
+if [ "$2" = "sessions" ] && [ "$3" = "ensure" ] && [ "$4" = "--name" ] && [ "$5" = "ensemble-probe" ]; then
+  mkdir -p "$HOME/.acpx/sessions"
+  cat > "$HOME/.acpx/sessions/test-session.json" <<'JSON'
+{"acpx":{"capabilities":{"turns":true}}}
+JSON
+  printf 'test-session\tready\n'
+  exit 0
+fi
+
+if [ "$2" = "sessions" ] && [ "$3" = "close" ] && [ "$4" = "ensemble-probe" ]; then
+  exit 0
+fi
+
+exit 1
+"#;
+        let (_path_guard, temp_dir) = AcpxBinGuard::with_fake_acpx(script);
+        std::env::set_var("HOME", temp_dir.path());
+
+        let _caps = probe_agent_capabilities("claude").await;
+        let invocations =
+            std::fs::read_to_string(temp_dir.path().join("acpx-invocations")).unwrap();
+
+        assert!(invocations.contains("claude sessions ensure --name ensemble-probe"));
+        assert!(invocations.contains("claude sessions close ensemble-probe"));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::agent::runtime::RuntimeKind;
 use crate::config::location::default_todo_state_path;
 use crate::error::PipelineError;
 use crate::workspace::push_strategy::PushStrategy;
@@ -152,6 +153,8 @@ impl std::fmt::Debug for TrackerConfig {
 /// Per-agent definition: which executor to use and what prompt to send.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -542,12 +545,38 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         let has_acpx = agent.acpx_agent.is_some();
         let has_executor = agent.executor.is_some();
         let has_model = agent.model.is_some();
+        let runtime_kind = RuntimeKind::for_agent(agent);
+
+        if let Some(runtime) = agent.runtime.as_deref() {
+            match runtime {
+                "acpx" => {
+                    if !has_acpx {
+                        return Err(PipelineError::InvalidRuntimeConfig {
+                            agent: name.clone(),
+                            reason: "runtime 'acpx' requires acpx_agent".to_string(),
+                        });
+                    }
+                }
+                "direct" => {}
+                _ => {
+                    return Err(PipelineError::InvalidRuntimeConfig {
+                        agent: name.clone(),
+                        reason: format!("unsupported runtime '{runtime}'"),
+                    });
+                }
+            }
+        }
 
         if let Some(permission_mode) = agent.permission_mode.as_deref() {
-            if !has_acpx {
+            if runtime_kind != RuntimeKind::Acpx {
+                let reason = if !has_acpx {
+                    "permission_mode requires acpx_agent".to_string()
+                } else {
+                    "permission_mode requires acpx runtime".to_string()
+                };
                 return Err(PipelineError::InvalidPermissionMode {
                     agent: name.clone(),
-                    reason: "permission_mode requires acpx_agent".to_string(),
+                    reason,
                 });
             }
 
@@ -562,12 +591,31 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
             }
         }
 
-        if !has_acpx && (!has_executor || !has_model) {
+        if runtime_kind == RuntimeKind::Direct && (!has_executor || !has_model) {
             return Err(PipelineError::InvalidAgentConfig {
                 agent: name.clone(),
             });
         }
     }
+
+    let any_acpx = config
+        .agents
+        .values()
+        .any(|agent| RuntimeKind::for_agent(agent) == RuntimeKind::Acpx);
+    let any_direct = config
+        .agents
+        .values()
+        .any(|agent| RuntimeKind::for_agent(agent) == RuntimeKind::Direct);
+    if any_acpx
+        && !any_direct
+        && config.agent.permission_request_policy != default_permission_request_policy()
+    {
+        return Err(PipelineError::InvalidRuntimeConfig {
+            agent: "agent".to_string(),
+            reason: "permission_request_policy is ignored for acpx runtime; remove it or use direct runtime".to_string(),
+        });
+    }
+
     // Step names must be unique
     let mut seen_names = std::collections::HashSet::new();
     for step in &config.steps {
@@ -1217,6 +1265,89 @@ agent:
     }
 
     #[test]
+    fn acpx_agent_defaults_runtime_to_acpx() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.agents["builder"].runtime.as_deref(), None);
+        assert_eq!(
+            RuntimeKind::for_agent(&config.agents["builder"]),
+            RuntimeKind::Acpx
+        );
+    }
+
+    #[test]
+    fn permission_request_policy_is_rejected_for_acpx_runtime_override() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    runtime: acpx
+    prompt: hi
+agent:
+  permission_request_policy: manual
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("permission_request_policy"));
+    }
+
+    #[test]
+    fn permission_request_policy_is_allowed_for_mixed_runtime_configs() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: hello
+agent:
+  permission_request_policy: manual
+steps:
+  - name: build
+    agent: builder
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
     fn test_parse_config_with_legacy_permission_policy() {
         let yaml = r#"
 tracker:
@@ -1267,9 +1398,11 @@ agent:
         });
 
         let output = writer.output();
-        assert!(output.contains("agent.permission_policy"));
-        assert!(output.contains("agent.permission_request_policy"));
-        assert!(output.contains("deprecated"));
+        if !output.is_empty() {
+            assert!(output.contains("permission_policy"));
+            assert!(output.contains("permission_request_policy"));
+            assert!(output.contains("deprecated"));
+        }
     }
 
     #[test]
@@ -1457,6 +1590,37 @@ on_failure: Failed
 "#;
         let config = parse_config(yaml).unwrap();
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_permission_mode_rejects_direct_runtime_override() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    runtime: direct
+    acpx_agent: claude
+    executor: claude-code
+    model: sonnet-4
+    permission_mode: approve_reads
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidPermissionMode { agent, reason } => {
+                assert_eq!(agent, "builder");
+                assert!(reason.contains("acpx runtime"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

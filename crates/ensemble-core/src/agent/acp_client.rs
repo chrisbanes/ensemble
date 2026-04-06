@@ -10,7 +10,9 @@ use tracing::{debug, info};
 
 use crate::error::AgentError;
 
-use super::events::{AgentEvent, JsonRpcMessage, StopReason, TokenUsage, WorkerEvent};
+use super::events::{
+    AgentEvent, JsonRpcMessage, RuntimeStream, StopReason, TokenUsage, WorkerEvent,
+};
 
 /// ACP session managing a subprocess and stdio JSON-RPC 2.0 protocol.
 pub struct AcpSession {
@@ -213,8 +215,7 @@ impl AcpSession {
 
         self.send_json_rpc(&msg).await?;
 
-        // Emit turn started event
-        Self::emit_event(event_tx, issue_id, step_name, AgentEvent::TurnStarted).await;
+        Self::emit_event(event_tx, issue_id, step_name, AgentEvent::PromptStarted).await;
 
         let turn_duration = Duration::from_millis(turn_timeout_ms);
         let result = timeout(
@@ -344,7 +345,7 @@ impl AcpSession {
                                             event_tx,
                                             issue_id,
                                             step_name,
-                                            AgentEvent::TurnCompleted {
+                                            AgentEvent::RunCompleted {
                                                 usage: last_usage.clone(),
                                             },
                                         )
@@ -356,7 +357,7 @@ impl AcpSession {
                                             event_tx,
                                             issue_id,
                                             step_name,
-                                            AgentEvent::TurnCompleted {
+                                            AgentEvent::RunCompleted {
                                                 usage: last_usage.clone(),
                                             },
                                         )
@@ -368,7 +369,7 @@ impl AcpSession {
                                             event_tx,
                                             issue_id,
                                             step_name,
-                                            AgentEvent::TurnFailed {
+                                            AgentEvent::RunFailed {
                                                 reason: reason.clone(),
                                                 usage: last_usage.clone(),
                                             },
@@ -393,7 +394,10 @@ impl AcpSession {
                                     event_tx,
                                     issue_id,
                                     step_name,
-                                    AgentEvent::TurnUpdate { content },
+                                    AgentEvent::OutputChunk {
+                                        stream: RuntimeStream::Stdout,
+                                        content,
+                                    },
                                 )
                                 .await;
                             } else {
@@ -448,9 +452,11 @@ impl AcpSession {
             event_tx,
             issue_id,
             step_name,
-            AgentEvent::PermissionRequested {
-                permission_id: permission_id.clone(),
-                description: description.clone(),
+            AgentEvent::Warning {
+                message: format!(
+                    "permission requested ({permission_id}): {}",
+                    description.as_str()
+                ),
             },
         )
         .await;
@@ -490,9 +496,11 @@ impl AcpSession {
             event_tx,
             issue_id,
             step_name,
-            AgentEvent::PermissionResolved {
-                permission_id,
-                allowed,
+            AgentEvent::Notification {
+                message: format!(
+                    "permission {} ({permission_id})",
+                    if allowed { "approved" } else { "rejected" }
+                ),
             },
         )
         .await;
@@ -757,12 +765,12 @@ done
             assert_eq!(u.total_tokens, 150);
         }
 
-        // Check events were emitted
+        // Check runtime-agnostic events were emitted
         let mut events = vec![];
         while let Ok(evt) = rx.try_recv() {
             events.push(evt);
         }
-        // Should have: TurnStarted, TurnUpdate or Notification, TurnCompleted
+        // Should have: PromptStarted, OutputChunk or Notification, RunCompleted
         assert!(events.len() >= 2);
 
         session.kill().await;
@@ -999,38 +1007,34 @@ done
 
         assert!(result.is_success());
 
-        // Verify permission events
-        let mut perm_requested = false;
-        let mut perm_resolved = false;
+        // Verify permission events are normalized into warning/notification messages
+        let mut saw_permission_warning = false;
+        let mut saw_permission_resolution = false;
         while let Ok(evt) = rx.try_recv() {
             match evt {
                 WorkerEvent::AgentUpdate {
-                    event:
-                        AgentEvent::PermissionRequested {
-                            ref permission_id, ..
-                        },
+                    event: AgentEvent::Warning { ref message },
                     ..
                 } => {
-                    assert_eq!(permission_id, "perm-1");
-                    perm_requested = true;
+                    assert!(message.contains("perm-1"));
+                    saw_permission_warning = true;
                 }
                 WorkerEvent::AgentUpdate {
-                    event:
-                        AgentEvent::PermissionResolved {
-                            ref permission_id,
-                            allowed,
-                        },
+                    event: AgentEvent::Notification { ref message },
                     ..
                 } => {
-                    assert_eq!(permission_id, "perm-1");
-                    assert!(allowed);
-                    perm_resolved = true;
+                    assert!(message.contains("approved"));
+                    assert!(message.contains("perm-1"));
+                    saw_permission_resolution = true;
                 }
                 _ => {}
             }
         }
-        assert!(perm_requested, "expected PermissionRequested event");
-        assert!(perm_resolved, "expected PermissionResolved event");
+        assert!(saw_permission_warning, "expected permission warning event");
+        assert!(
+            saw_permission_resolution,
+            "expected permission resolution notification event"
+        );
 
         session.kill().await;
     }

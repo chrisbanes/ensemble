@@ -51,6 +51,7 @@ pub struct GuidedRepoForm {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GuidedAgentForm {
     pub name: String,
+    pub runtime: Option<String>,
     pub executor: Option<String>,
     pub model: Option<String>,
     pub acpx_agent: Option<String>,
@@ -161,6 +162,7 @@ pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigErr
             .iter()
             .map(|(name, agent)| GuidedAgentForm {
                 name: name.clone(),
+                runtime: agent.runtime.clone(),
                 executor: agent.executor.clone(),
                 model: agent.model.clone(),
                 acpx_agent: agent.acpx_agent.clone(),
@@ -331,6 +333,11 @@ pub fn apply_guided_form(
                 .entry(a.name.clone().into())
                 .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
             if let serde_yaml::Value::Mapping(ref mut am) = *agent_val {
+                if let Some(v) = opt_to_value(a.runtime.clone()) {
+                    am.insert("runtime".into(), v);
+                } else {
+                    am.remove("runtime");
+                }
                 if let Some(v) = opt_to_value(a.executor.clone()) {
                     am.insert("executor".into(), v);
                 } else {
@@ -584,6 +591,7 @@ mod tests {
             repos: vec![],
             agents: vec![GuidedAgentForm {
                 name: "builder".to_string(),
+                runtime: None,
                 executor: None,
                 model: None,
                 acpx_agent: Some("claude".to_string()),
@@ -766,6 +774,7 @@ on_failure: Failed
             form.agents[0].permission_mode.as_deref(),
             Some("approve_reads")
         );
+        assert_eq!(form.agents[0].runtime, None);
         assert_eq!(form.runtime.agent.permission_request_policy, "manual");
     }
 

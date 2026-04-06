@@ -1,3 +1,4 @@
+use crate::agent::cancellation::new_cancellation_registry;
 use crate::agent::{AcpAgentRunner, AgentRunner};
 use crate::api::router::{AppState, ConfigRuntime};
 use crate::config::draft::ConfigDocumentState;
@@ -105,6 +106,7 @@ pub fn build_app_state(
             config_path,
             document_state: Arc::new(RwLock::new(document_state)),
         },
+        cancellation_registry: new_cancellation_registry(),
     };
 
     PreparedApp {
@@ -149,6 +151,8 @@ async fn prepare_orchestrator_runtime(
 
     let config = Arc::new(RwLock::new(config.clone()));
     let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker(&config.read().await.tracker)?);
+    // `AcpAgentRunner` is the shared runtime dispatcher: `acpx_agent` steps run through the
+    // acpx CLI/session runtime, while explicit direct configs keep the ACP stdio path.
     let agent_runner: Arc<dyn AgentRunner> = Arc::new(AcpAgentRunner::new(Arc::clone(&config)));
     let workspace_mgr = WorkspaceManager::new(
         Path::new(&app_state.workspace_root),
@@ -164,6 +168,7 @@ async fn prepare_orchestrator_runtime(
             agent_runner,
             workspace_mgr,
             refresh_requested: Arc::clone(&app_state.refresh_requested),
+            cancellation_registry: Arc::clone(&app_state.cancellation_registry),
         },
         &config_dir,
         shutdown_rx,
