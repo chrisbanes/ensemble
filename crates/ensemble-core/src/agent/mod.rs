@@ -532,6 +532,44 @@ mod tests {
     use crate::interaction::{InteractionKind, InteractionResponse};
     use tokio_util::sync::CancellationToken;
 
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct EnvGuard {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn lock(vars: &[&'static str]) -> Self {
+            let guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let saved = vars
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect();
+            for &key in vars {
+                unsafe {
+                    std::env::remove_var(key);
+                }
+            }
+
+            Self {
+                _guard: guard,
+                saved,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.saved {
+                match value {
+                    Some(value) => unsafe { std::env::set_var(key, value) },
+                    None => unsafe { std::env::remove_var(key) },
+                }
+            }
+        }
+    }
+
     /// Mock agent runner for testing the orchestrator.
     pub struct MockAgentRunner {
         pub should_succeed: bool,
@@ -645,6 +683,7 @@ on_failure: Todo
     fn write_mock_acpx_script(dir: &tempfile::TempDir, script_content: &str) -> String {
         let script_path = dir.path().join("mock_acpx.sh");
         let mut file = std::fs::File::create(&script_path).unwrap();
+        let script_content = script_content.replacen("#!/usr/bin/env bash", "#!/bin/bash", 1);
         file.write_all(script_content.as_bytes()).unwrap();
         #[cfg(unix)]
         {
@@ -732,12 +771,7 @@ on_failure: Todo
 
     #[tokio::test]
     async fn acpx_agent_runner_emits_runtime_events_and_success() {
-        static ACPX_TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-        let _guard = ACPX_TEST_ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap();
+        let _guard = EnvGuard::lock(&["ENSEMBLE_TEST_ACPX_EXECUTABLE"]);
 
         let workspace = tempfile::TempDir::new().unwrap();
         let script = write_mock_acpx_script(
@@ -748,11 +782,10 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
-    cat <<'JSON'
-{"event":"prompt.started","session":"s1"}
-{"event":"output","stream":"stdout","text":"hello"}
-{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}
-JSON
+    printf '%s\n' \
+      '{"event":"prompt.started","session":"s1"}' \
+      '{"event":"output","stream":"stdout","text":"hello"}' \
+      '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -794,6 +827,61 @@ exit 1
         assert!(event_names.contains(&"prompt_started".to_string()));
         assert!(event_names.contains(&"output_chunk".to_string()));
         assert!(event_names.contains(&"run_completed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn acpx_agent_runner_mock_script_succeeds_with_empty_path() {
+        let _guard = EnvGuard::lock(&["ENSEMBLE_TEST_ACPX_EXECUTABLE", "PATH"]);
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            &workspace,
+            r#"#!/bin/bash
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    printf '%s\n' \
+      '{"event":"prompt.started","session":"s1"}' \
+      '{"event":"output","stream":"stdout","text":"hello"}' \
+      '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+        );
+
+        unsafe {
+            std::env::set_var("ENSEMBLE_TEST_ACPX_EXECUTABLE", &script);
+            std::env::set_var("PATH", "");
+        }
+
+        let runner =
+            AcpAgentRunner::new(Arc::new(RwLock::new(test_acpx_config().as_ref().clone())));
+        let (tx, mut rx) = mpsc::channel(16);
+        let result = runner
+            .run(AgentRunRequest {
+                config: test_acpx_config(),
+                issue: &test_issue(),
+                agent_name: "builder",
+                step_name: "build",
+                attempt: None,
+                interaction_response: None,
+                workspace_path: workspace.path(),
+                event_tx: tx,
+                cancel_token: CancellationToken::new(),
+            })
+            .await
+            .unwrap();
+
+        assert!(matches!(result, WorkerResult::Success));
+        let event_names = collect_event_names(&mut rx);
+        assert!(event_names.contains(&"output_chunk".to_string()));
     }
 
     async fn write_workspace_file(workspace: &tempfile::TempDir, name: &str, contents: &str) {
