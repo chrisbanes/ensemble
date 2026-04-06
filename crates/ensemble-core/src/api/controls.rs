@@ -167,13 +167,19 @@ pub async fn post_stop(
     };
 
     let cancelled = cancel_issue(&state.cancellation_registry, &issue_id);
+    let has_runtime_session = lock
+        .running
+        .get(&issue_id)
+        .and_then(|entry| entry.session_id.as_deref())
+        .is_some();
     // A stop request can race with normal worker shutdown. In that case the
     // cancellation token may already be gone and/or the worker PID may already
-    // have exited; treating a missing PID as success after token cancellation is
-    // acceptable because the issue is already finishing.
+    // have exited. Treating a missing PID as success is only acceptable once a
+    // runtime session exists (the acpx path); direct-runtime startup before a
+    // PID is recorded still reports a conflict.
     match try_signal_stop(&lock, &issue_id) {
         StopSignalStatus::Sent => {}
-        StopSignalStatus::MissingPid if cancelled => {}
+        StopSignalStatus::MissingPid if cancelled && has_runtime_session => {}
         StopSignalStatus::MissingPid => {
             return issue_error_response(
                 StatusCode::CONFLICT,
@@ -635,6 +641,27 @@ mod tests {
         let lock = state.orchestrator_state.read().await;
         assert!(lock.running.is_empty());
         assert!(!lock.is_claimed("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_stop_running_issue_without_session_keeps_conflict_even_if_cancelled() {
+        let state = build_app_state_with_running();
+        let cancellation = CancellationToken::new();
+        register_issue_cancellation(
+            &state.cancellation_registry,
+            "NODE_123",
+            cancellation.clone(),
+        );
+
+        let response = post_stop(State(state.clone()), Path("my-repo#42".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(cancellation.is_cancelled());
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.running.contains_key("NODE_123"));
+        assert!(lock.is_claimed("NODE_123"));
         assert!(lock.get_pipeline_run("NODE_123").is_none());
     }
 
