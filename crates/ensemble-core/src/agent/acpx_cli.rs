@@ -48,12 +48,14 @@ impl AcpxCli {
         cwd: &Path,
         prompt: &str,
         model: Option<&str>,
-    ) -> Result<Vec<AgentEvent>, AgentError> {
+        mut on_event: impl FnMut(AgentEvent) + Send,
+    ) -> Result<(), AgentError> {
         let mut command = self.base_command(agent, cwd, model);
         command
             .args(["prompt", "--session", session_name, "--file", "-"])
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped());
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         debug!(agent, session_name, cwd = %cwd.display(), "running acpx prompt");
 
         let mut child = command.spawn().map_err(|e| AgentError::IoError {
@@ -78,8 +80,20 @@ impl AcpxCli {
         let stdout = child.stdout.take().ok_or_else(|| AgentError::IoError {
             reason: "failed to capture acpx stdout".to_string(),
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| AgentError::IoError {
+            reason: "failed to capture acpx stderr".to_string(),
+        })?;
+
+        // Spawn a task to forward stderr to tracing
+        let agent_name = agent.to_string();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                debug!(agent = %agent_name, "acpx stderr: {}", line);
+            }
+        });
+
         let mut reader = BufReader::new(stdout).lines();
-        let mut events = Vec::new();
         let mut saw_terminal_event = false;
 
         while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
@@ -96,9 +110,9 @@ impl AcpxCli {
                     ) {
                         saw_terminal_event = true;
                     }
-                    events.push(event);
+                    on_event(event);
                 }
-                Err(_) => events.push(AgentEvent::Malformed { line }),
+                Err(_) => on_event(AgentEvent::Malformed { line }),
             }
         }
 
@@ -117,7 +131,7 @@ impl AcpxCli {
             });
         }
 
-        Ok(events)
+        Ok(())
     }
 
     pub async fn cancel(
@@ -167,6 +181,7 @@ impl AcpxCli {
     fn base_command(&self, agent: &str, cwd: &Path, model: Option<&str>) -> Command {
         let mut command = Command::new(&self.executable);
         command
+            .kill_on_drop(true)
             .args(["--format", "json", "--json-strict", "--cwd"])
             .arg(cwd)
             .arg(agent);
@@ -292,8 +307,11 @@ JSON
         );
 
         let client = AcpxCli::new(script);
-        let events = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+        let mut events = Vec::new();
+        client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None, |e| {
+                events.push(e)
+            })
             .await
             .unwrap();
 
@@ -317,7 +335,7 @@ JSON
 
         let client = AcpxCli::new(script);
         let error = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+            .run_prompt("codex", "build-session", dir.path(), "hi", None, |_| {})
             .await
             .unwrap_err();
 
@@ -337,8 +355,11 @@ JSON
         );
 
         let client = AcpxCli::new(script);
-        let events = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+        let mut events = Vec::new();
+        client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None, |e| {
+                events.push(e)
+            })
             .await
             .unwrap();
 
@@ -403,7 +424,7 @@ exec 0<&-
         let prompt = "hi".repeat(1024 * 1024);
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            client.run_prompt("codex", "build-session", dir.path(), &prompt, None),
+            client.run_prompt("codex", "build-session", dir.path(), &prompt, None, |_| {}),
         )
         .await
         .expect("run_prompt should not hang when stdin closes")

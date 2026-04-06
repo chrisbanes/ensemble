@@ -34,6 +34,10 @@ pub struct AgentRunRequest<'a> {
     pub(crate) interaction_response: Option<InteractionResponseEnvelope>,
     pub workspace_path: &'a Path,
     pub event_tx: mpsc::Sender<WorkerEvent>,
+    /// Token for cooperative cancellation of the agent run.
+    /// NOTE: Currently explicitly used by `AcpxRuntime`. `DirectRuntime`
+    /// ignores this token as it relies on the orchestrator sending SIGTERM
+    /// to the registered `agent_pid` during cancellation.
     pub cancel_token: CancellationToken,
 }
 
