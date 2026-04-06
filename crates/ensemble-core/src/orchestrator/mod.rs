@@ -589,40 +589,24 @@ impl Orchestrator {
         register_issue_cancellation(&self.cancellation_registry, &issue.id, cancel_token.clone());
         let cancellation_registry = Arc::clone(&self.cancellation_registry);
         tokio::spawn(async move {
-            // Run agent. Catch panics so we can emit a failed worker exit and
-            // clear cancellation bookkeeping instead of leaking stale tokens.
-            let result = AssertUnwindSafe(runner.run(AgentRunRequest {
-                config: Arc::clone(&config_snapshot),
-                issue: &issue_clone,
-                agent_name: &agent_name_owned,
-                step_name: &step_name_owned,
-                attempt,
-                interaction_response: interaction_response.clone(),
-                workspace_path: &workspace_path,
-                event_tx: event_tx.clone(),
-                cancel_token,
-            }))
-            .catch_unwind()
+            let worker_result = catch_worker_panic(
+                runner.run(AgentRunRequest {
+                    config: Arc::clone(&config_snapshot),
+                    issue: &issue_clone,
+                    agent_name: &agent_name_owned,
+                    step_name: &step_name_owned,
+                    attempt,
+                    interaction_response: interaction_response.clone(),
+                    workspace_path: &workspace_path,
+                    event_tx: event_tx.clone(),
+                    cancel_token,
+                }),
+                &issue_clone.id,
+                &step_name_owned,
+            )
             .await;
 
             clear_issue_cancellation(&cancellation_registry, &issue_clone.id);
-
-            let worker_result = match result {
-                Ok(Ok(worker_result)) => worker_result,
-                Ok(Err(e)) => WorkerResult::Failed {
-                    error: e.to_string(),
-                },
-                Err(_) => {
-                    warn!(
-                        issue_id = %issue_clone.id,
-                        step = %step_name_owned,
-                        "worker task panicked"
-                    );
-                    WorkerResult::Failed {
-                        error: "worker task panicked".to_string(),
-                    }
-                }
-            };
 
             let _ = event_tx
                 .send(WorkerEvent::WorkerExited {
@@ -1501,6 +1485,24 @@ impl Orchestrator {
                         pid, "failed to send SIGTERM during orchestrator shutdown"
                     );
                 }
+            }
+        }
+    }
+}
+
+async fn catch_worker_panic<F>(fut: F, issue_id: &str, step_name: &str) -> WorkerResult
+where
+    F: std::future::Future<Output = Result<WorkerResult, AgentError>>,
+{
+    match AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(Ok(result)) => result,
+        Ok(Err(e)) => WorkerResult::Failed {
+            error: e.to_string(),
+        },
+        Err(_) => {
+            warn!(issue_id, step = step_name, "worker task panicked");
+            WorkerResult::Failed {
+                error: "worker task panicked".to_string(),
             }
         }
     }

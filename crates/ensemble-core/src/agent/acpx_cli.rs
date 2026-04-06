@@ -418,7 +418,7 @@ exec 0<&-
         let prompt = "hi".repeat(1024 * 1024);
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            client.run_prompt("codex", "build-session", dir.path(), &prompt, None, |_| {}),
+            client.run_prompt("codex", "build-session", dir.path(), &prompt, None),
         )
         .await
         .expect("run_prompt should not hang when stdin closes")

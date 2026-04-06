@@ -35,9 +35,9 @@ pub struct AgentRunRequest<'a> {
     pub workspace_path: &'a Path,
     pub event_tx: mpsc::Sender<WorkerEvent>,
     /// Token for cooperative cancellation of the agent run.
-    /// NOTE: Currently explicitly used by `AcpxRuntime`. `DirectRuntime`
-    /// ignores this token as it relies on the orchestrator sending SIGTERM
-    /// to the registered `agent_pid` during cancellation.
+    /// Used by `AcpxRuntime` to abort the acpx prompt via `tokio::select!`.
+    /// The direct ACP path (`AcpAgentRunner::run_direct_step`) ignores this
+    /// token — cancellation there relies on SIGTERM sent to `agent_pid`.
     pub cancel_token: CancellationToken,
 }
 

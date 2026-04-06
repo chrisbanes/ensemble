@@ -87,29 +87,17 @@ impl AcpxRuntime {
             session_name,
             "starting acpx prompt"
         );
-        let event_tx = request.event_tx.clone();
-        let issue_id = request.issue.id.clone();
-        let step_name = request.step_name.to_string();
-
         let run_prompt = self.cli.run_prompt(
             acpx_agent,
             &session_name,
             request.workspace_path,
             prompt,
             agent.model.as_deref(),
-            |event| {
-                let tx = event_tx.clone();
-                let id = issue_id.clone();
-                let name = step_name.clone();
-                tokio::spawn(async move {
-                    emit_event(&tx, &id, &name, event).await;
-                });
-            },
         );
         tokio::pin!(run_prompt);
 
-        tokio::select! {
-            result = &mut run_prompt => result?,
+        let events = tokio::select! {
+            events = &mut run_prompt => events?,
             _ = request.cancel_token.cancelled() => {
                 debug!(
                     issue_id = %request.issue.id,
@@ -151,6 +139,16 @@ impl AcpxRuntime {
                 return Err(AgentError::TurnCancelled);
             }
         };
+
+        for event in events {
+            emit_event(
+                &request.event_tx,
+                &request.issue.id,
+                request.step_name,
+                event,
+            )
+            .await;
+        }
 
         close_session(
             &self.cli,
