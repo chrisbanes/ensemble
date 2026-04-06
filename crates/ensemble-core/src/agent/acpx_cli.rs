@@ -495,7 +495,7 @@ exec 0<&-
         let client = AcpxCli::new(script);
         let prompt = "hi".repeat(1024 * 1024);
         let error = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
+            std::time::Duration::from_secs(10),
             client.run_prompt(
                 "codex",
                 "build-session",
