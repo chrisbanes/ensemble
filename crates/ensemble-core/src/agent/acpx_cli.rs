@@ -48,8 +48,7 @@ impl AcpxCli {
         cwd: &Path,
         prompt: &str,
         model: Option<&str>,
-        mut on_event: impl FnMut(AgentEvent) + Send,
-    ) -> Result<(), AgentError> {
+    ) -> Result<Vec<AgentEvent>, AgentError> {
         let mut command = self.base_command(agent, cwd, model);
         command
             .args(["prompt", "--session", session_name, "--file", "-"])
@@ -94,6 +93,7 @@ impl AcpxCli {
         });
 
         let mut reader = BufReader::new(stdout).lines();
+        let mut events = Vec::new();
         let mut saw_terminal_event = false;
 
         while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
@@ -110,9 +110,9 @@ impl AcpxCli {
                     ) {
                         saw_terminal_event = true;
                     }
-                    on_event(event);
+                    events.push(event);
                 }
-                Err(_) => on_event(AgentEvent::Malformed { line }),
+                Err(_) => events.push(AgentEvent::Malformed { line }),
             }
         }
 
@@ -131,7 +131,7 @@ impl AcpxCli {
             });
         }
 
-        Ok(())
+        Ok(events)
     }
 
     pub async fn cancel(
@@ -307,11 +307,8 @@ JSON
         );
 
         let client = AcpxCli::new(script);
-        let mut events = Vec::new();
-        client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |e| {
-                events.push(e)
-            })
+        let events = client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None)
             .await
             .unwrap();
 
@@ -335,7 +332,7 @@ JSON
 
         let client = AcpxCli::new(script);
         let error = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |_| {})
+            .run_prompt("codex", "build-session", dir.path(), "hi", None)
             .await
             .unwrap_err();
 
@@ -355,11 +352,8 @@ JSON
         );
 
         let client = AcpxCli::new(script);
-        let mut events = Vec::new();
-        client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |e| {
-                events.push(e)
-            })
+        let events = client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None)
             .await
             .unwrap();
 
