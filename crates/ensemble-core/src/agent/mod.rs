@@ -541,7 +541,10 @@ mod tests {
 
     impl EnvGuard {
         fn lock(vars: &[&'static str]) -> Self {
-            let guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let guard = ENV_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let saved = vars
                 .iter()
                 .map(|&key| (key, std::env::var(key).ok()))
@@ -778,17 +781,17 @@ on_failure: Todo
             &workspace,
             r#"#!/usr/bin/env bash
 case "$*" in
-  *" sessions ensure --name "*)
+  *"sessions ensure"*)
     exit 0
     ;;
-  *" prompt --session "*)
+  *"prompt --session"*)
     printf '%s\n' \
       '{"event":"prompt.started","session":"s1"}' \
       '{"event":"output","stream":"stdout","text":"hello"}' \
       '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
     exit 0
     ;;
-  *" sessions close "*)
+  *"sessions close"*)
     exit 0
     ;;
 esac
@@ -838,21 +841,15 @@ exit 1
             &workspace,
             r#"#!/bin/bash
 case "$*" in
-  *" sessions ensure --name "*)
-    exit 0
-    ;;
-  *" prompt --session "*)
+  *"prompt --session"*)
     printf '%s\n' \
       '{"event":"prompt.started","session":"s1"}' \
       '{"event":"output","stream":"stdout","text":"hello"}' \
       '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
     exit 0
     ;;
-  *" sessions close "*)
-    exit 0
-    ;;
 esac
-exit 1
+exit 0
 "#,
         );
 

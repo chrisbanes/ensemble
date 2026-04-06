@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::Path;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -41,14 +42,19 @@ impl AcpxCli {
         Ok(())
     }
 
-    pub async fn run_prompt(
+    pub async fn run_prompt<F, Fut>(
         &self,
         agent: &str,
         session_name: &str,
         cwd: &Path,
         prompt: &str,
         model: Option<&str>,
-    ) -> Result<Vec<AgentEvent>, AgentError> {
+        mut on_event: F,
+    ) -> Result<(), AgentError>
+    where
+        F: FnMut(AgentEvent) -> Fut,
+        Fut: Future<Output = ()> + Send,
+    {
         let mut command = self.base_command(agent, cwd, model);
         command
             .args(["prompt", "--session", session_name, "--file", "-"])
@@ -93,7 +99,6 @@ impl AcpxCli {
         });
 
         let mut reader = BufReader::new(stdout).lines();
-        let mut events = Vec::new();
         let mut saw_terminal_event = false;
 
         while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
@@ -110,9 +115,9 @@ impl AcpxCli {
                     ) {
                         saw_terminal_event = true;
                     }
-                    events.push(event);
+                    on_event(event).await;
                 }
-                Err(_) => events.push(AgentEvent::Malformed { line }),
+                Err(_) => on_event(AgentEvent::Malformed { line }).await,
             }
         }
 
@@ -131,7 +136,7 @@ impl AcpxCli {
             });
         }
 
-        Ok(events)
+        Ok(())
     }
 
     pub async fn cancel(
@@ -251,6 +256,7 @@ fn map_event(value: serde_json::Value) -> AgentEvent {
 mod tests {
     use std::io::Write;
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     use crate::agent::events::{AgentEvent, TokenUsage};
     use crate::error::AgentError;
@@ -307,14 +313,72 @@ JSON
         );
 
         let client = AcpxCli::new(script);
-        let events = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+        let events = Arc::new(Mutex::new(Vec::new()));
+        client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
+                let events = Arc::clone(&events);
+                async move {
+                    events.lock().unwrap().push(event);
+                }
+            })
             .await
             .unwrap();
+        let events = events.lock().unwrap();
 
         assert!(matches!(events[0], AgentEvent::PromptStarted));
         assert!(matches!(events[1], AgentEvent::OutputChunk { .. }));
         assert!(matches!(events[2], AgentEvent::RunCompleted { .. }));
+    }
+
+    #[tokio::test]
+    async fn prompt_stream_emits_output_before_process_exit() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let release_path = dir.path().join("release.flag");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                r#"#!/bin/bash
+printf '%s\n' '{{"event":"prompt.started","session":"s1"}}'
+printf '%s\n' '{{"event":"output","stream":"stdout","text":"hello"}}'
+while [ ! -f "{}" ]; do
+  /bin/sleep 0.05
+done
+printf '%s\n' '{{"event":"completed","usage":{{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}'
+"#,
+                release_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let run = client.run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(event).await;
+            }
+        });
+        tokio::pin!(run);
+
+        let saw_output = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                tokio::select! {
+                    result = &mut run => panic!("prompt exited before streaming output: {result:?}"),
+                    maybe_event = rx.recv() => {
+                        match maybe_event {
+                            Some(AgentEvent::OutputChunk { content, .. }) if content == "hello" => break true,
+                            Some(_) => {}
+                            None => panic!("event stream closed before output arrived"),
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(saw_output);
+        std::fs::write(&release_path, "").unwrap();
+        run.await.unwrap();
     }
 
     #[tokio::test]
@@ -332,7 +396,14 @@ JSON
 
         let client = AcpxCli::new(script);
         let error = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                None,
+                |_| async {},
+            )
             .await
             .unwrap_err();
 
@@ -352,10 +423,17 @@ JSON
         );
 
         let client = AcpxCli::new(script);
-        let events = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+        let events = Arc::new(Mutex::new(Vec::new()));
+        client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
+                let events = Arc::clone(&events);
+                async move {
+                    events.lock().unwrap().push(event);
+                }
+            })
             .await
             .unwrap();
+        let events = events.lock().unwrap();
 
         assert!(matches!(
             &events[0],
@@ -418,7 +496,14 @@ exec 0<&-
         let prompt = "hi".repeat(1024 * 1024);
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(2),
-            client.run_prompt("codex", "build-session", dir.path(), &prompt, None),
+            client.run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                &prompt,
+                None,
+                |_| async {},
+            ),
         )
         .await
         .expect("run_prompt should not hang when stdin closes")

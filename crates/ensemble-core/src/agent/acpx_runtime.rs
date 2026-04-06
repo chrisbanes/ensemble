@@ -14,7 +14,7 @@ pub struct AcpxRuntime {
 impl AcpxRuntime {
     pub fn new() -> Self {
         #[cfg(test)]
-        if let Ok(executable) = std::env::var("ENSEMBLE_TEST_ACPX_EXECUTABLE") {
+        if let Some(executable) = test_acpx_executable() {
             return Self {
                 cli: AcpxCli::new(executable),
             };
@@ -93,11 +93,19 @@ impl AcpxRuntime {
             request.workspace_path,
             prompt,
             agent.model.as_deref(),
+            |event| {
+                emit_event(
+                    &request.event_tx,
+                    &request.issue.id,
+                    request.step_name,
+                    event,
+                )
+            },
         );
         tokio::pin!(run_prompt);
 
-        let events = tokio::select! {
-            events = &mut run_prompt => events?,
+        let prompt_result = tokio::select! {
+            result = &mut run_prompt => result,
             _ = request.cancel_token.cancelled() => {
                 debug!(
                     issue_id = %request.issue.id,
@@ -140,16 +148,6 @@ impl AcpxRuntime {
             }
         };
 
-        for event in events {
-            emit_event(
-                &request.event_tx,
-                &request.issue.id,
-                request.step_name,
-                event,
-            )
-            .await;
-        }
-
         close_session(
             &self.cli,
             acpx_agent,
@@ -159,6 +157,8 @@ impl AcpxRuntime {
         )
         .await;
 
+        prompt_result?;
+
         Ok(detect_worker_result(request.workspace_path).await)
     }
 }
@@ -167,6 +167,13 @@ impl Default for AcpxRuntime {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(test)]
+fn test_acpx_executable() -> Option<String> {
+    std::env::var("ENSEMBLE_TEST_ACPX_EXECUTABLE")
+        .ok()
+        .or_else(|| std::env::var("ENSEMBLE_TEST_ACPX_BIN").ok())
 }
 
 fn sanitize_session_component(value: &str) -> String {
@@ -368,6 +375,58 @@ exit 1
         let result = runner.run_step(&request, "finish the task").await.unwrap();
 
         assert!(matches!(result, WorkerResult::Success));
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_closes_session_when_prompt_errors() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            &workspace,
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    exit 1
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+        };
+
+        let error = runner
+            .run_step(&request, "finish the task")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AgentError::AcpxCommandFailed { .. }));
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("sessions close"));
     }
 
     #[tokio::test]
