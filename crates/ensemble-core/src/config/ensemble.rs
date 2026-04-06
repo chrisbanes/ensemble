@@ -568,10 +568,15 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         }
 
         if let Some(permission_mode) = agent.permission_mode.as_deref() {
-            if !has_acpx {
+            if runtime_kind != RuntimeKind::Acpx {
+                let reason = if !has_acpx {
+                    "permission_mode requires acpx_agent".to_string()
+                } else {
+                    "permission_mode requires acpx runtime".to_string()
+                };
                 return Err(PipelineError::InvalidPermissionMode {
                     agent: name.clone(),
-                    reason: "permission_mode requires acpx_agent".to_string(),
+                    reason,
                 });
             }
 
@@ -1583,6 +1588,37 @@ on_failure: Failed
 "#;
         let config = parse_config(yaml).unwrap();
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_permission_mode_rejects_direct_runtime_override() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    runtime: direct
+    acpx_agent: claude
+    executor: claude-code
+    model: sonnet-4
+    permission_mode: approve_reads
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            PipelineError::InvalidPermissionMode { agent, reason } => {
+                assert_eq!(agent, "builder");
+                assert!(reason.contains("acpx runtime"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]

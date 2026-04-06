@@ -854,7 +854,7 @@ async fn probe_agent_capabilities(agent_name: &str) -> AgentCapabilities {
     let caps = read_session_capabilities(&session_id).await;
 
     // Close session (best-effort)
-    let _ = tokio::process::Command::new("acpx")
+    let _ = tokio::process::Command::new(acpx_executable())
         .args([agent_name, "sessions", "close", session_name])
         .kill_on_drop(true)
         .output()
@@ -2329,6 +2329,39 @@ exit 1
 
         assert_eq!(agent.version, "claude 1.2.3");
         assert_eq!(probe_count.trim(), "1");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_agent_capabilities_uses_override_binary_for_close() {
+        let script = r#"
+LOG_FILE="$HOME/acpx-invocations"
+printf '%s\n' "$*" >> "$LOG_FILE"
+
+if [ "$2" = "sessions" ] && [ "$3" = "ensure" ] && [ "$4" = "--name" ] && [ "$5" = "ensemble-probe" ]; then
+  mkdir -p "$HOME/.acpx/sessions"
+  cat > "$HOME/.acpx/sessions/test-session.json" <<'JSON'
+{"acpx":{"capabilities":{"turns":true}}}
+JSON
+  printf 'test-session\tready\n'
+  exit 0
+fi
+
+if [ "$2" = "sessions" ] && [ "$3" = "close" ] && [ "$4" = "ensemble-probe" ]; then
+  exit 0
+fi
+
+exit 1
+"#;
+        let (_path_guard, temp_dir) = AcpxBinGuard::with_fake_acpx(script);
+        std::env::set_var("HOME", temp_dir.path());
+
+        let _caps = probe_agent_capabilities("claude").await;
+        let invocations =
+            std::fs::read_to_string(temp_dir.path().join("acpx-invocations")).unwrap();
+
+        assert!(invocations.contains("claude sessions ensure --name ensemble-probe"));
+        assert!(invocations.contains("claude sessions close ensemble-probe"));
     }
 
     #[test]
