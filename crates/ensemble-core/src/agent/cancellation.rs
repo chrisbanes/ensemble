@@ -34,7 +34,11 @@ pub fn clear_issue_cancellation(
 }
 
 pub fn cancel_all(registry: &CancellationRegistry) -> usize {
-    let tokens: Vec<CancellationToken> = registry_guard(registry).values().cloned().collect();
+    let tokens: Vec<CancellationToken> = {
+        // Clone the current handles inside a narrow scope so the mutex guard is
+        // definitely released before we invoke `cancel()` on any token.
+        registry_guard(registry).values().cloned().collect()
+    };
     let count = tokens.len();
     for token in tokens {
         token.cancel();

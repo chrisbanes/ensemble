@@ -167,6 +167,10 @@ pub async fn post_stop(
     };
 
     let cancelled = cancel_issue(&state.cancellation_registry, &issue_id);
+    // A stop request can race with normal worker shutdown. In that case the
+    // cancellation token may already be gone and/or the worker PID may already
+    // have exited; treating a missing PID as success after token cancellation is
+    // acceptable because the issue is already finishing.
     match try_signal_stop(&lock, &issue_id) {
         StopSignalStatus::Sent => {}
         StopSignalStatus::MissingPid if cancelled => {}
