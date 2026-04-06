@@ -352,13 +352,25 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
             field: Some("permission_mode".to_string()),
             path: Some(format!("agents.{}.permission_mode", agent)),
         },
-        PipelineError::InvalidRuntimeConfig { agent, reason } => ValidationIssue {
-            kind: ValidationIssueKind::Config,
-            message: format!("agent '{}': {}", agent, reason),
-            section: "agents".to_string(),
-            field: Some("runtime".to_string()),
-            path: Some(format!("agents.{}.runtime", agent)),
-        },
+        PipelineError::InvalidRuntimeConfig { agent, reason } => {
+            if agent == "agent" {
+                ValidationIssue {
+                    kind: ValidationIssueKind::Config,
+                    message: format!("agent '{}': {}", agent, reason),
+                    section: "agent".to_string(),
+                    field: Some("permission_request_policy".to_string()),
+                    path: Some("agent.permission_request_policy".to_string()),
+                }
+            } else {
+                ValidationIssue {
+                    kind: ValidationIssueKind::Config,
+                    message: format!("agent '{}': {}", agent, reason),
+                    section: "agents".to_string(),
+                    field: Some("runtime".to_string()),
+                    path: Some(format!("agents.{}.runtime", agent)),
+                }
+            }
+        }
     }
 }
 
@@ -878,5 +890,22 @@ on_failure: Failed
         assert!(matches!(issue.kind, ValidationIssueKind::Config));
         assert_eq!(issue.section, "agents");
         assert!(issue.message.contains("missing_agent"));
+    }
+
+    #[test]
+    fn global_runtime_errors_map_to_agent_permission_request_policy() {
+        let error = PipelineError::InvalidRuntimeConfig {
+            agent: "agent".to_string(),
+            reason: "permission_request_policy is ignored for acpx runtime".to_string(),
+        };
+        let issue = pipeline_error_to_validation_issue(error);
+
+        assert!(matches!(issue.kind, ValidationIssueKind::Config));
+        assert_eq!(issue.section, "agent");
+        assert_eq!(issue.field.as_deref(), Some("permission_request_policy"));
+        assert_eq!(
+            issue.path.as_deref(),
+            Some("agent.permission_request_policy")
+        );
     }
 }

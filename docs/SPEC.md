@@ -544,7 +544,8 @@ Named agent definitions. Each key is the agent role name, each value is an objec
   - Required for `direct` runtime.
 - `model` (string, optional)
   - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
-  - When omitted, the agent uses its default model.
+  - Required for `direct` runtime.
+  - When omitted for other runtimes, the agent uses its default model.
 - `permission_mode` (string, optional)
   - Optional acpx launch-time permission mode for `acpx_agent`.
   - Supported values: `approve_all`, `approve_reads`, `deny_all`.
@@ -679,7 +680,8 @@ Fields:
   - Values: `auto_approve_all`, `approve_reads_reject_writes`, `reject_all`, or
     implementation-defined.
   - Default: implementation-defined.
-  - If any configured agent resolves to `acpx`, non-default values should be rejected as invalid.
+  - If all configured agents resolve to `acpx`, non-default values are invalid.
+  - In mixed runtime configurations, this still applies only to agents using the direct runtime.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `read_timeout_ms` (integer)
