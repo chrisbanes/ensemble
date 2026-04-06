@@ -61,6 +61,8 @@ impl StopReason {
 /// Internal event types emitted by the ACP client to the orchestrator.
 #[derive(Debug, Clone, Serialize)]
 pub enum AgentEvent {
+    /// Runtime session established. `agent_pid` is retained for direct ACP workers so the
+    /// orchestrator/API can still expose process metadata and support stop/cancel controls.
     SessionStarted {
         session_id: String,
         agent_pid: Option<String>,

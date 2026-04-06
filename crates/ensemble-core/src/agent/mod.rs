@@ -1294,6 +1294,34 @@ on_failure: Failed
     }
 
     #[test]
+    fn runtime_kind_honors_explicit_direct_override() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    runtime: direct
+    acpx_agent: codex
+    executor: codex
+    model: gpt-5
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+        let agent = &config.agents["builder"];
+        assert_eq!(
+            runtime::RuntimeKind::for_agent(agent),
+            runtime::RuntimeKind::Direct
+        );
+    }
+
+    #[test]
     fn runtime_event_name_exposes_output_chunk() {
         let event = AgentEvent::OutputChunk {
             stream: crate::agent::events::RuntimeStream::Stdout,

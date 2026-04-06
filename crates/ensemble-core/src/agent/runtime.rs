@@ -8,10 +8,11 @@ pub enum RuntimeKind {
 
 impl RuntimeKind {
     pub fn for_agent(agent: &AgentConfig) -> Self {
-        if agent.acpx_agent.is_some() {
-            Self::Acpx
-        } else {
-            Self::Direct
+        match agent.runtime.as_deref() {
+            Some("direct") => Self::Direct,
+            Some("acpx") => Self::Acpx,
+            Some(_) | None if agent.acpx_agent.is_some() => Self::Acpx,
+            _ => Self::Direct,
         }
     }
 }
