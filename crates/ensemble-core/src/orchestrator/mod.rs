@@ -1630,6 +1630,15 @@ mod tests {
         }
     }
 
+    struct PanicRunner;
+
+    #[async_trait]
+    impl AgentRunner for PanicRunner {
+        async fn run(&self, _request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
+            panic!("boom");
+        }
+    }
+
     fn test_issue(id: &str, state: &str) -> Issue {
         crate::tracker::model::test_helpers::test_issue(id, state)
     }
@@ -2232,6 +2241,46 @@ agent:
             .unwrap()
             .unwrap();
         run_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn worker_panic_clears_cancellation_registry() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(PanicRunner);
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("1", "Todo");
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let is_empty = orchestrator
+                    .cancellation_registry
+                    .lock()
+                    .unwrap()
+                    .is_empty();
+                if is_empty {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

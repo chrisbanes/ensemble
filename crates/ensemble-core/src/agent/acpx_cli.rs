@@ -370,4 +370,34 @@ JSON
         assert!(args.contains("cancel --session build-session"));
         assert!(args.contains("sessions close build-session"));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_write_failure_kills_spawned_process() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_path = dir.path().join("pid.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                r#"#!/bin/bash
+printf '%s' "$$" > "{}"
+exec 0<&-
+/bin/sleep 30
+"#,
+                pid_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        let error = client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AgentError::IoError { .. }));
+
+        let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "acpx child should be terminated after stdin write failure");
+    }
 }
