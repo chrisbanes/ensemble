@@ -4,6 +4,7 @@ pub mod scheduler;
 pub mod state;
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,6 +30,7 @@ use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
 
+use futures_util::FutureExt;
 use reconciler::{reconcile_stalled_runs, reconcile_tracker_states, startup_terminal_cleanup};
 use retry::{current_time_ms, get_due_retries, next_attempt, schedule_failure_retry};
 use scheduler::{
@@ -585,27 +587,41 @@ impl Orchestrator {
         let attempt = dispatch.attempt;
         let cancel_token = tokio_util::sync::CancellationToken::new();
         register_issue_cancellation(&self.cancellation_registry, &issue.id, cancel_token.clone());
+        let cancellation_registry = Arc::clone(&self.cancellation_registry);
         tokio::spawn(async move {
-            // Run agent
-            let result = runner
-                .run(AgentRunRequest {
-                    config: Arc::clone(&config_snapshot),
-                    issue: &issue_clone,
-                    agent_name: &agent_name_owned,
-                    step_name: &step_name_owned,
-                    attempt,
-                    interaction_response: interaction_response.clone(),
-                    workspace_path: &workspace_path,
-                    event_tx: event_tx.clone(),
-                    cancel_token,
-                })
-                .await;
+            // Run agent. Catch panics so we can emit a failed worker exit and
+            // clear cancellation bookkeeping instead of leaking stale tokens.
+            let result = AssertUnwindSafe(runner.run(AgentRunRequest {
+                config: Arc::clone(&config_snapshot),
+                issue: &issue_clone,
+                agent_name: &agent_name_owned,
+                step_name: &step_name_owned,
+                attempt,
+                interaction_response: interaction_response.clone(),
+                workspace_path: &workspace_path,
+                event_tx: event_tx.clone(),
+                cancel_token,
+            }))
+            .catch_unwind()
+            .await;
+
+            clear_issue_cancellation(&cancellation_registry, &issue_clone.id);
 
             let worker_result = match result {
-                Ok(worker_result) => worker_result,
-                Err(e) => WorkerResult::Failed {
+                Ok(Ok(worker_result)) => worker_result,
+                Ok(Err(e)) => WorkerResult::Failed {
                     error: e.to_string(),
                 },
+                Err(_) => {
+                    warn!(
+                        issue_id = %issue_clone.id,
+                        step = %step_name_owned,
+                        "worker task panicked"
+                    );
+                    WorkerResult::Failed {
+                        error: "worker task panicked".to_string(),
+                    }
+                }
             };
 
             let _ = event_tx

@@ -203,6 +203,8 @@ async fn close_session(
     model: Option<&str>,
 ) {
     debug!(session_name, "closing acpx session");
+    // Session close is best-effort cleanup; orchestration should preserve the
+    // primary run outcome even if acpx session teardown fails.
     if let Err(error) = cli
         .close_session(acpx_agent, session_name, workspace_path, model)
         .await

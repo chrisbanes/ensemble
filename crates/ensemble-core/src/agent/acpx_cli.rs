@@ -61,12 +61,18 @@ impl AcpxCli {
         })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .await
-                .map_err(|e| AgentError::IoError {
-                    reason: format!("failed to write prompt to acpx stdin: {e}"),
-                })?;
+            if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+                cleanup_prompt_child(&mut child).await;
+                return Err(AgentError::IoError {
+                    reason: format!("failed to write prompt to acpx stdin: {error}"),
+                });
+            }
+            if let Err(error) = stdin.flush().await {
+                cleanup_prompt_child(&mut child).await;
+                return Err(AgentError::IoError {
+                    reason: format!("failed to flush prompt to acpx stdin: {error}"),
+                });
+            }
         }
 
         let stdout = child.stdout.take().ok_or_else(|| AgentError::IoError {
@@ -169,6 +175,11 @@ impl AcpxCli {
         }
         command
     }
+}
+
+async fn cleanup_prompt_child(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
+    let _ = child.wait().await;
 }
 
 fn map_event(value: serde_json::Value) -> AgentEvent {
@@ -389,15 +400,22 @@ exec 0<&-
         );
 
         let client = AcpxCli::new(script);
-        let error = client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None)
-            .await
-            .unwrap_err();
+        let prompt = "hi".repeat(1024 * 1024);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.run_prompt("codex", "build-session", dir.path(), &prompt, None),
+        )
+        .await
+        .expect("run_prompt should not hang when stdin closes")
+        .unwrap_err();
 
         assert!(matches!(error, AgentError::IoError { .. }));
 
         let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
         let alive = unsafe { libc::kill(pid, 0) } == 0;
-        assert!(!alive, "acpx child should be terminated after stdin write failure");
+        assert!(
+            !alive,
+            "acpx child should be terminated after stdin write failure"
+        );
     }
 }
