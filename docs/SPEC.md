@@ -469,8 +469,8 @@ Parsing rules:
 - Level-2 headings (`## <State>`) define state sections.
 - List items under a heading are issues. The first line is the title.
 - If the title starts with `[<identifier>]`, that bracketed value is the issue identifier.
-- Otherwise, the implementation generates a stable identifier from state + position + title slug
-  (for example `todo-0-add-login-page`).
+- Otherwise, the implementation generates a stable identifier from state + position
+  (for example `todo-0`).
 - Items without bracketed IDs are supported for dispatch and state transitions. When moved to a
   new state, implementations may normalize the list line to bracket form
   (`- [generated-id] Title`) so future transitions remain stable.
