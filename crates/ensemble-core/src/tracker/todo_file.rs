@@ -158,8 +158,7 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
 /// Extract identifier and title from a list item.
 ///
 /// If the line starts with `[IDENTIFIER]`, extracts the identifier and remaining title.
-/// Otherwise generates a stable slug from the title, incorporating the state and
-/// position to ensure uniqueness and handle non-alphanumeric-only titles.
+/// Otherwise generates a stable identifier from state + position.
 fn extract_identifier_and_title(line: &str, state: &str, position: i32) -> (String, String) {
     if line.starts_with('[') {
         if let Some(end) = line.find(']') {
@@ -170,16 +169,9 @@ fn extract_identifier_and_title(line: &str, state: &str, position: i32) -> (Stri
             }
         }
     }
-    // No bracketed identifier — generate a stable slug with position for uniqueness.
-    // The position suffix ensures duplicate titles produce distinct identifiers,
-    // and provides a fallback when the title contains no ASCII alphanumeric chars.
-    let slug = generate_slug(line);
+    // No bracketed identifier — generate a stable state+position identifier.
     let state_slug = generate_slug(state);
-    let identifier = if slug.is_empty() {
-        format!("{}-{}", state_slug, position)
-    } else {
-        format!("{}-{}-{}", state_slug, position, slug)
-    };
+    let identifier = format!("{}-{}", state_slug, position);
     (identifier, line.to_string())
 }
 
@@ -538,10 +530,10 @@ mod tests {
         let issues = parse_todo_content(content);
         assert_eq!(issues.len(), 2);
 
-        assert_eq!(issues[0].identifier, "todo-0-add-login-page");
+        assert_eq!(issues[0].identifier, "todo-0");
         assert_eq!(issues[0].title, "Add login page");
 
-        assert_eq!(issues[1].identifier, "todo-1-fix-the-checkout-bug");
+        assert_eq!(issues[1].identifier, "todo-1");
         assert_eq!(issues[1].title, "Fix the checkout bug!");
     }
 
@@ -605,8 +597,8 @@ mod tests {
         let content = "## Todo\n- [] Some title\n";
         let issues = parse_todo_content(content);
         assert_eq!(issues.len(), 1);
-        // Empty brackets -> fallback to slug with state-position prefix
-        assert_eq!(issues[0].identifier, "todo-0-some-title");
+        // Empty brackets -> fallback to state-position identifier
+        assert_eq!(issues[0].identifier, "todo-0");
         assert_eq!(issues[0].title, "[] Some title");
     }
 
@@ -622,7 +614,7 @@ mod tests {
     #[test]
     fn test_extract_without_identifier() {
         let (id, title) = extract_identifier_and_title("Add login page", "Todo", 0);
-        assert_eq!(id, "todo-0-add-login-page");
+        assert_eq!(id, "todo-0");
         assert_eq!(title, "Add login page");
     }
 
@@ -646,8 +638,8 @@ mod tests {
         let (id1, _) = extract_identifier_and_title("Fix bug", "Todo", 0);
         let (id2, _) = extract_identifier_and_title("Fix bug", "Todo", 1);
         assert_ne!(id1, id2);
-        assert_eq!(id1, "todo-0-fix-bug");
-        assert_eq!(id2, "todo-1-fix-bug");
+        assert_eq!(id1, "todo-0");
+        assert_eq!(id2, "todo-1");
     }
 
     // --- generate_slug tests ---
@@ -957,7 +949,7 @@ mod tests {
         let path = write_todo(dir.path(), content);
         let tracker = TodoFileTracker::new(path.clone(), active_states());
 
-        let generated_id = "todo-0-configure-build-toolchain";
+        let generated_id = "todo-0";
         tracker
             .set_issue_state(generated_id, "In Progress")
             .await
@@ -974,7 +966,7 @@ mod tests {
         assert_eq!(moved.state, "In Progress");
 
         let written = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(written.contains("- [todo-0-configure-build-toolchain] Configure build toolchain"));
+        assert!(written.contains("- [todo-0] Configure build toolchain"));
     }
 
     #[tokio::test]
@@ -990,7 +982,7 @@ mod tests {
         let path = write_todo(dir.path(), content);
         let tracker = TodoFileTracker::new(path, active_states());
 
-        let generated_id = "todo-0-do-the-thing";
+        let generated_id = "todo-0";
         tracker
             .set_issue_state(generated_id, "In Progress")
             .await
