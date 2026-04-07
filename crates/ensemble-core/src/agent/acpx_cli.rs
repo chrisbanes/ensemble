@@ -276,7 +276,6 @@ fn map_event(value: serde_json::Value) -> AgentEvent {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
@@ -287,9 +286,7 @@ mod tests {
 
     fn write_mock_acpx_script(dir: &Path, script_content: &str) -> String {
         let script_path = dir.join("mock_acpx.sh");
-        let mut file = std::fs::File::create(&script_path).unwrap();
-        file.write_all(script_content.as_bytes()).unwrap();
-        file.sync_all().unwrap();
+        std::fs::write(&script_path, script_content).unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
