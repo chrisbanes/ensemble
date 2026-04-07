@@ -179,10 +179,7 @@ impl AcpxCli {
                 continue;
             }
 
-            on_event(AgentEvent::OtherMessage {
-                raw: serde_json::to_string(&message).unwrap_or_else(|_| String::from("{}")),
-            })
-            .await;
+            on_event(AgentEvent::OtherMessage { raw: line }).await;
         }
 
         let status = child.wait().await.map_err(|e| AgentError::IoError {
@@ -283,8 +280,9 @@ fn parse_session_update_from_message(
 fn map_stop_reason(stop_reason: StopReason, usage: Option<TokenUsage>) -> AgentEvent {
     match stop_reason {
         StopReason::EndTurn | StopReason::MaxTokens => AgentEvent::RunCompleted { usage },
-        StopReason::Cancelled => AgentEvent::Cancelled {
-            reason: Some("stop reason: cancelled".to_string()),
+        StopReason::Cancelled => AgentEvent::RunFailed {
+            reason: "stop reason: cancelled".to_string(),
+            usage,
         },
         StopReason::Refusal => AgentEvent::RunFailed {
             reason: "stop reason: refusal".to_string(),
@@ -574,6 +572,37 @@ JSON
                     total_tokens: 9
                 })
             } if reason == "stop reason: refusal"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_stop_reason_is_mapped_to_run_failed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"jsonrpc":"2.0","id":13,"result":{"stopReason":"cancelled"}}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        client
+            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
+                let events = Arc::clone(&events);
+                async move {
+                    events.lock().unwrap().push(event);
+                }
+            })
+            .await
+            .unwrap();
+        let events = events.lock().unwrap();
+
+        assert!(matches!(
+            &events[0],
+            AgentEvent::RunFailed { reason, .. } if reason == "stop reason: cancelled"
         ));
     }
 

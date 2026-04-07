@@ -372,16 +372,6 @@ impl AcpSession {
                                         },
                                     )
                                     .await;
-                                } else {
-                                    Self::emit_event(
-                                        event_tx,
-                                        issue_id,
-                                        step_name,
-                                        AgentEvent::Notification {
-                                            message: line.chars().take(200).collect(),
-                                        },
-                                    )
-                                    .await;
                                 }
                             } else {
                                 Self::emit_event(
@@ -892,6 +882,72 @@ done
             }
         }
         assert!(saw_output);
+
+        session.kill().await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_usage_only_update_does_not_emit_notification() {
+        let dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+
+        let script = r#"#!/bin/bash
+while IFS= read -r line; do
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
+
+    if [ "$method" = "initialize" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
+    elif [ "$method" = "session/new" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"usage-only-session\"}}"
+    elif [ "$method" = "session/prompt" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"usage-only-session\",\"update\":{\"sessionUpdate\":\"usage_update\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}}"
+        echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"usage-only-session\",\"stopReason\":\"end_turn\"}}"
+    fi
+done
+"#;
+        let script_path = write_mock_agent_script(dir.path(), script);
+
+        let mut session = AcpSession::spawn(&script_path, workspace.path())
+            .await
+            .unwrap();
+        session.initialize(15000).await.unwrap();
+        let session_id = session
+            .start_session(
+                workspace.path().to_str().unwrap(),
+                serde_json::json!({}),
+                15000,
+            )
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let result = session
+            .run_turn(
+                &session_id,
+                "Do work",
+                30000,
+                "auto_approve_all",
+                "issue-usage-only",
+                "build",
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, TurnResult::Completed { .. }));
+
+        let mut saw_notification = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate {
+                event: AgentEvent::Notification { .. },
+                ..
+            } = evt
+            {
+                saw_notification = true;
+            }
+        }
+        assert!(!saw_notification);
 
         session.kill().await;
     }

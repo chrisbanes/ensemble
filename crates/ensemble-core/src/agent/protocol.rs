@@ -24,7 +24,29 @@ pub struct ParsedSessionUpdate {
 ///
 /// Returns `None` when the line is not valid JSON-RPC JSON.
 pub fn parse_jsonrpc(line: &str) -> Option<JsonRpcMessage> {
-    serde_json::from_str::<JsonRpcMessage>(line).ok()
+    let message = serde_json::from_str::<JsonRpcMessage>(line).ok()?;
+    let is_jsonrpc_2 = message.jsonrpc == "2.0";
+    if !is_jsonrpc_2 {
+        return None;
+    }
+
+    let has_method = message.method.is_some();
+    let has_id = message.id.is_some();
+    let has_result = message.result.is_some();
+    let has_error = message.error.is_some();
+
+    if has_method {
+        if has_result || has_error {
+            return None;
+        }
+        return Some(message);
+    }
+
+    if has_id && (has_result ^ has_error) {
+        return Some(message);
+    }
+
+    None
 }
 
 /// Parse a `session/update` payload into normalized fields.
@@ -48,12 +70,22 @@ pub fn parse_session_update(value: &serde_json::Value) -> Option<ParsedSessionUp
     let stop_reason = extract_stop_reason(params, update);
     let permission_request = extract_permission_request(params, update);
 
-    Some(ParsedSessionUpdate {
+    let parsed = ParsedSessionUpdate {
         output_text,
         usage,
         stop_reason,
         permission_request,
-    })
+    };
+
+    if parsed.output_text.is_none()
+        && parsed.usage.is_none()
+        && parsed.stop_reason.is_none()
+        && parsed.permission_request.is_none()
+    {
+        return None;
+    }
+
+    Some(parsed)
 }
 
 pub fn parse_stop_reason_from_result(value: &serde_json::Value) -> Option<StopReason> {
@@ -186,6 +218,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_jsonrpc_invalid_envelope_returns_none() {
+        let invalid = r#"{"jsonrpc":"2.0","params":{"foo":"bar"}}"#;
+        assert!(parse_jsonrpc(invalid).is_none());
+    }
+
+    #[test]
     fn parse_session_update_supports_flat_content() {
         let params = json!({
             "sessionId": "s1",
@@ -247,8 +285,19 @@ mod tests {
             "content": ""
         });
 
-        let parsed = parse_session_update(&params).unwrap();
-        assert_eq!(parsed.output_text, None);
+        assert!(parse_session_update(&params).is_none());
+    }
+
+    #[test]
+    fn parse_session_update_returns_none_for_unrecognized_update() {
+        let params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "noop"
+            }
+        });
+
+        assert!(parse_session_update(&params).is_none());
     }
 
     #[test]
