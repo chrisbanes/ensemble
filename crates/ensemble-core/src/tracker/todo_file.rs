@@ -264,6 +264,9 @@ fn collect_issue_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize)
 
 fn locate_issue_block(lines: &[&str], id: &str) -> Option<(usize, usize, Vec<String>)> {
     let mut current_state: Option<String> = None;
+    // Generated IDs depend on `(state, position_in_state, title_slug)`, so this counter must
+    // mirror parse order for the *current file snapshot*. If list order changes between runs,
+    // generated IDs for no-bracket items may also change.
     let mut position_in_state: i32 = 0;
 
     for (idx, line) in lines.iter().enumerate() {
@@ -291,7 +294,7 @@ fn locate_issue_block(lines: &[&str], id: &str) -> Option<(usize, usize, Vec<Str
             continue;
         }
 
-        let (mut issue_block, end_idx) = collect_issue_block(lines, idx);
+        let (mut issue_lines, end_idx) = collect_issue_block(lines, idx);
         let explicit_identifier = rest.starts_with('[')
             && rest
                 .find(']')
@@ -299,14 +302,17 @@ fn locate_issue_block(lines: &[&str], id: &str) -> Option<(usize, usize, Vec<Str
                 .unwrap_or(false);
 
         if !explicit_identifier {
-            issue_block[0] = if title.is_empty() {
+            let rewritten_first_line = if title.is_empty() {
                 format!("- [{id}]")
             } else {
                 format!("- [{id}] {title}")
             };
+            if let Some(first_line) = issue_lines.first_mut() {
+                *first_line = rewritten_first_line;
+            }
         }
 
-        return Some((idx, end_idx, issue_block));
+        return Some((idx, end_idx, issue_lines));
     }
 
     None
@@ -998,5 +1004,32 @@ mod tests {
         assert_eq!(done.len(), 1);
         assert_eq!(done[0].identifier, generated_id);
         assert_eq!(done[0].state, "Done");
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_whitespace_only_title_item() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+-   
+
+## In Progress
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        tracker
+            .set_issue_state("todo-0", "In Progress")
+            .await
+            .unwrap();
+
+        let in_progress = tracker
+            .fetch_issues_by_states(&["In Progress".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0].identifier, "todo-0");
+
+        let written = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(written.contains("- [todo-0]"));
     }
 }
