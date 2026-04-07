@@ -331,6 +331,7 @@ mod tests {
                 args_path.display()
             ),
         );
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         let client = AcpxCli::new(script);
         client
