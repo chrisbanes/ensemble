@@ -284,24 +284,38 @@ impl WorkspaceManager {
 mod tests {
     use super::*;
     use crate::config::ensemble::RepoConfig;
+    use std::path::Path;
     use tempfile::TempDir;
+
+    fn git_binary_for_tests() -> &'static str {
+        for candidate in [
+            "/usr/bin/git",
+            "/usr/local/bin/git",
+            "/opt/homebrew/bin/git",
+        ] {
+            if Path::new(candidate).is_file() {
+                return candidate;
+            }
+        }
+        "git"
+    }
 
     fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
         let dir = TempDir::new().unwrap();
 
-        std::process::Command::new("git")
+        std::process::Command::new(git_binary_for_tests())
             .args(["init", "-b", "main"])
             .current_dir(&dir)
             .output()
             .unwrap();
 
         std::fs::write(dir.path().join("README.md"), format!("# {name}")).unwrap();
-        std::process::Command::new("git")
+        std::process::Command::new(git_binary_for_tests())
             .args(["add", "."])
             .current_dir(&dir)
             .output()
             .unwrap();
-        std::process::Command::new("git")
+        std::process::Command::new(git_binary_for_tests())
             .args(["commit", "-m", "initial"])
             .current_dir(&dir)
             .env("GIT_AUTHOR_NAME", "Test")
