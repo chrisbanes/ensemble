@@ -1,8 +1,8 @@
 use crate::config::ensemble::RepoConfig;
 use crate::error::WorktreeError;
 use crate::workspace::worktree::{
-    attach_worktree, branch_exists, create_worktree, pull_worktree, remove_orphaned_worktree,
-    remove_worktree, sanitize_branch_name, worktree_exists,
+    attach_worktree, branch_exists, create_worktree, delete_branch_if_exists, pull_worktree,
+    remove_orphaned_worktree, remove_worktree, sanitize_branch_name, worktree_exists,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -189,7 +189,7 @@ impl WorktreeCoordinator {
 
         info!(issue_id, branch, "cleaning up worktrees");
 
-        let mut errors = Vec::new();
+        let mut errors: Vec<(String, String)> = Vec::new();
 
         for (repo_name, repo_config) in &self.repos {
             let worktree_path = self.worktree_root.join(repo_name).join(&branch);
@@ -199,13 +199,15 @@ impl WorktreeCoordinator {
                 match e {
                     WorktreeError::NotFound { .. } => {
                         warn!(repo = repo_name, "worktree already absent during cleanup");
+                        if let Err(orphan_error) =
+                            delete_branch_if_exists(&repo_config.path, &branch).await
+                        {
+                            errors.push((repo_name.clone(), orphan_error.to_string()));
+                        }
                     }
                     other => {
                         warn!(repo = repo_name, error = %other, "failed to cleanup worktree");
-                        errors.push(WorktreeError::CleanupFailed {
-                            repo: repo_name.clone(),
-                            error: other.to_string(),
-                        });
+                        errors.push((repo_name.clone(), other.to_string()));
                     }
                 }
             }
@@ -214,7 +216,16 @@ impl WorktreeCoordinator {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(errors.into_iter().next().unwrap())
+            errors.sort_by(|a, b| a.0.cmp(&b.0));
+            let error = errors
+                .into_iter()
+                .map(|(repo, error)| format!("{repo}: {error}"))
+                .collect::<Vec<_>>()
+                .join("; ");
+            Err(WorktreeError::CleanupFailed {
+                repo: "multiple repos".to_string(),
+                error,
+            })
         }
     }
 

@@ -87,13 +87,35 @@ impl WorkspaceManager {
 
     async fn load_branch_date(&self, base_path: &Path) -> Option<String> {
         let metadata_path = Self::metadata_path(base_path);
-        if metadata_path.exists() {
-            let content = fs::read_to_string(&metadata_path).await.ok()?;
-            let metadata: WorkspaceMetadata = serde_json::from_str(&content).ok()?;
-            Some(metadata.branch_date)
-        } else {
-            None
+        if !metadata_path.exists() {
+            return None;
         }
+
+        let content = match fs::read_to_string(&metadata_path).await {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(
+                    path = %metadata_path.display(),
+                    error = %error,
+                    "failed to read workspace metadata; ignoring persisted branch date"
+                );
+                return None;
+            }
+        };
+
+        let metadata: WorkspaceMetadata = match serde_json::from_str(&content) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                warn!(
+                    path = %metadata_path.display(),
+                    error = %error,
+                    "failed to parse workspace metadata; ignoring persisted branch date"
+                );
+                return None;
+            }
+        };
+
+        Some(metadata.branch_date)
     }
 
     async fn save_branch_date(&self, base_path: &Path, date: &str) -> Result<(), WorkspaceError> {
@@ -415,7 +437,9 @@ mod tests {
     async fn test_remove_workspace_uses_persisted_branch_date() {
         let dir = TempDir::new().unwrap();
 
-        let test_path = dir.path().join("test_issue");
+        let identifier = "test-issue";
+        let workspace_key = sanitize_workspace_key(identifier).unwrap();
+        let test_path = dir.path().join(&workspace_key);
         std::fs::create_dir_all(&test_path).unwrap();
 
         let metadata_path = test_path.join(".ensemble-workspace.json");
@@ -428,8 +452,9 @@ mod tests {
         }];
         let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
 
-        let result = mgr.remove_workspace("test-issue").await;
+        let result = mgr.remove_workspace(identifier).await;
         assert!(result.is_err());
+        assert!(test_path.exists());
     }
 
     #[tokio::test]

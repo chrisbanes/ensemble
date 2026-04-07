@@ -227,6 +227,25 @@ pub async fn branch_exists(repo_path: &str, branch: &str) -> Result<bool, Worktr
     Ok(output.status.success())
 }
 
+/// Delete a local branch if it exists.
+pub async fn delete_branch_if_exists(repo_path: &str, branch: &str) -> Result<(), WorktreeError> {
+    if !branch_exists(repo_path, branch).await? {
+        return Ok(());
+    }
+
+    let branch_args = ["branch", "-D", branch];
+    let command = git_command_label(&branch_args);
+    let error_command = command.clone();
+    ensure_git_success(run_git(repo_path, &branch_args, command).await?, |stderr| {
+        WorktreeError::GitCommandFailed {
+            command: error_command,
+            reason: stderr,
+        }
+    })?;
+
+    Ok(())
+}
+
 /// Remove an orphaned worktree directory that is not registered in git.
 ///
 /// This handles the case where the directory exists but `git worktree list`
@@ -299,21 +318,8 @@ pub async fn remove_worktree(
 
     debug!(worktree_path = %worktree_path, "Worktree removed successfully");
 
-    let branch_args = ["branch", "-D", branch];
-    let branch_output = run_git(repo_path, &branch_args, git_command_label(&branch_args)).await;
-
-    match branch_output {
-        Ok(output) => {
-            if output.status.success() {
-                debug!(branch = %branch, "Branch deleted successfully");
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!(stderr = %stderr, branch = %branch, "Failed to delete branch");
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, branch = %branch, "Failed to spawn branch delete command");
-        }
+    if let Err(e) = delete_branch_if_exists(repo_path, branch).await {
+        warn!(error = %e, branch = %branch, "Failed to delete branch");
     }
 
     Ok(())
