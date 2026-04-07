@@ -49,7 +49,9 @@ impl AcpxCli {
             } else {
                 format!(
                     "{}; stderr: {}; stdout: {}",
-                    output.status, stderr.trim(), stdout.trim()
+                    output.status,
+                    stderr.trim(),
+                    stdout.trim()
                 )
             };
             return Err(AgentError::AcpxCommandFailed {
@@ -332,12 +334,7 @@ mod tests {
 
         let client = AcpxCli::new(script);
         client
-            .ensure_session(
-                "codex",
-                "build-session",
-                dir.path(),
-                Some("gpt-5.4/medium"),
-            )
+            .ensure_session("codex", "build-session", dir.path(), Some("gpt-5.4/medium"))
             .await
             .unwrap();
 
