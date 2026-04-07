@@ -58,6 +58,9 @@ impl AcpxRuntime {
         debug!(
             issue_id = %request.issue.id,
             step = request.step_name,
+            agent_name = request.agent_name,
+            acpx_agent,
+            model = agent.model.as_deref(),
             session_name,
             "ensuring acpx session"
         );

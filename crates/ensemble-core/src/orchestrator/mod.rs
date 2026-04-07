@@ -819,19 +819,9 @@ impl Orchestrator {
                                 reason = %reason,
                                 "pipeline failed"
                             );
-                            // Set tracker to on_failure state
-                            if self.tracker.supports_writes() {
-                                if let Err(e) = self
-                                    .tracker
-                                    .set_issue_state(issue_id, &config.on_failure)
-                                    .await
-                                {
-                                    warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
-                                }
-                            }
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
-                                schedule_failure_retry(
+                                let retry_scheduled = schedule_failure_retry(
                                     &mut state,
                                     issue_id,
                                     &entry.identifier,
@@ -840,6 +830,15 @@ impl Orchestrator {
                                     config.max_cycles,
                                     &reason,
                                 );
+                                if retry_scheduled.is_none() && self.tracker.supports_writes() {
+                                    if let Err(e) = self
+                                        .tracker
+                                        .set_issue_state(issue_id, &config.on_failure)
+                                        .await
+                                    {
+                                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                                    }
+                                }
                             }
                             state.remove_pipeline_run(issue_id);
                         }
@@ -903,25 +902,13 @@ impl Orchestrator {
                     "worker exited with failure"
                 );
 
-                // Notify pipeline of step failure
                 if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                     run.step_failed(step_name, error.clone());
                 }
 
-                // Set tracker to on_failure state
-                if self.tracker.supports_writes() {
-                    if let Err(e) = self
-                        .tracker
-                        .set_issue_state(issue_id, &config.on_failure)
-                        .await
-                    {
-                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
-                    }
-                }
-
                 if let Some(entry) = state.remove_running(issue_id) {
                     state.add_runtime_seconds(&entry);
-                    schedule_failure_retry(
+                    let retry_scheduled = schedule_failure_retry(
                         &mut state,
                         issue_id,
                         &entry.identifier,
@@ -930,6 +917,15 @@ impl Orchestrator {
                         config.max_cycles,
                         &error,
                     );
+                    if retry_scheduled.is_none() && self.tracker.supports_writes() {
+                        if let Err(e) = self
+                            .tracker
+                            .set_issue_state(issue_id, &config.on_failure)
+                            .await
+                        {
+                            warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                        }
+                    }
                 }
                 state.remove_pipeline_run(issue_id);
             }
