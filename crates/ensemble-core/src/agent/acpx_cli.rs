@@ -25,17 +25,36 @@ impl AcpxCli {
         cwd: &Path,
         model: Option<&str>,
     ) -> Result<(), AgentError> {
-        let mut command = self.base_command(agent, cwd, model);
-        command.args(["sessions", "ensure", "--name", session_name]);
-        debug!(agent, session_name, cwd = %cwd.display(), "running acpx sessions ensure");
+        let mut command = Command::new(&self.executable);
+        command.kill_on_drop(true);
+        if let Some(model) = model {
+            command.args(["--model", model]);
+        }
+        command
+            .arg("--cwd")
+            .arg(cwd.display().to_string())
+            .args(["--format", "json", "--json-strict"])
+            .arg(agent)
+            .args(["sessions", "ensure", "--name", session_name]);
+        debug!(agent, session_name, cwd = %cwd.display(), model, "running acpx sessions ensure");
 
-        let status = command.status().await.map_err(|e| AgentError::IoError {
+        let output = command.output().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx sessions ensure: {e}"),
         })?;
-        if !status.success() {
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let reason = if stderr.is_empty() && stdout.is_empty() {
+                output.status.to_string()
+            } else {
+                format!(
+                    "{}; stderr: {}; stdout: {}",
+                    output.status, stderr.trim(), stdout.trim()
+                )
+            };
             return Err(AgentError::AcpxCommandFailed {
                 command: "sessions ensure".to_string(),
-                reason: status.to_string(),
+                reason,
             });
         }
 
@@ -185,14 +204,15 @@ impl AcpxCli {
 
     fn base_command(&self, agent: &str, cwd: &Path, model: Option<&str>) -> Command {
         let mut command = Command::new(&self.executable);
-        command
-            .kill_on_drop(true)
-            .args(["--format", "json", "--json-strict", "--cwd"])
-            .arg(cwd)
-            .arg(agent);
+        command.kill_on_drop(true);
         if let Some(model) = model {
             command.args(["--model", model]);
         }
+        command
+            .arg("--cwd")
+            .arg(cwd.display().to_string())
+            .args(["--format", "json", "--json-strict"])
+            .arg(agent);
         command
     }
 }
@@ -296,6 +316,39 @@ mod tests {
         let args = std::fs::read_to_string(args_path).unwrap();
         assert!(args.contains("sessions ensure"));
         assert!(args.contains("--name build-session"));
+    }
+
+    #[tokio::test]
+    async fn ensure_session_puts_model_before_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .ensure_session(
+                "codex",
+                "build-session",
+                dir.path(),
+                Some("gpt-5.4/medium"),
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let model_pos = args.find("--model").expect("--model should be present");
+        let agent_pos = args.find("codex").expect("codex agent should be present");
+        assert!(
+            model_pos < agent_pos,
+            "--model must come BEFORE agent; got: {}",
+            args
+        );
     }
 
     #[tokio::test]
