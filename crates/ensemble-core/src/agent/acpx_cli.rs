@@ -289,6 +289,7 @@ mod tests {
         let script_path = dir.join("mock_acpx.sh");
         let mut file = std::fs::File::create(&script_path).unwrap();
         file.write_all(script_content.as_bytes()).unwrap();
+        file.sync_all().unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -331,7 +332,6 @@ mod tests {
                 args_path.display()
             ),
         );
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         let client = AcpxCli::new(script);
         client
