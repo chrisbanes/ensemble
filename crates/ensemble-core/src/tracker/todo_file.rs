@@ -236,6 +236,82 @@ fn state_matches(state: &str, states: &[String]) -> bool {
     states.iter().any(|s| s.eq_ignore_ascii_case(state))
 }
 
+fn collect_issue_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
+    let mut issue_block: Vec<String> = vec![lines[start_idx].to_string()];
+    let mut end_idx = start_idx + 1;
+    while end_idx < lines.len() {
+        let line = lines[end_idx];
+        // A continuation line is either blank or starts with whitespace.
+        if line.is_empty() || line.starts_with("  ") || line.starts_with('\t') {
+            issue_block.push(line.to_string());
+            end_idx += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Trim trailing blank lines from the issue block so we don't accumulate extra whitespace.
+    while issue_block
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        issue_block.pop();
+    }
+
+    (issue_block, end_idx)
+}
+
+fn locate_issue_block(lines: &[&str], id: &str) -> Option<(usize, usize, Vec<String>)> {
+    let mut current_state: Option<String> = None;
+    let mut position_in_state: i32 = 0;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            let heading = heading.trim();
+            if !heading.is_empty() {
+                current_state = Some(heading.to_string());
+                position_in_state = 0;
+            }
+            continue;
+        }
+
+        let Some(rest) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let Some(state) = current_state.as_ref() else {
+            continue;
+        };
+
+        let rest = rest.trim();
+        let (parsed_id, title) = extract_identifier_and_title(rest, state, position_in_state);
+        position_in_state += 1;
+
+        if parsed_id != id {
+            continue;
+        }
+
+        let (mut issue_block, end_idx) = collect_issue_block(lines, idx);
+        let explicit_identifier = rest.starts_with('[')
+            && rest
+                .find(']')
+                .map(|end| !rest[1..end].trim().is_empty())
+                .unwrap_or(false);
+
+        if !explicit_identifier {
+            issue_block[0] = if title.is_empty() {
+                format!("- [{id}]")
+            } else {
+                format!("- [{id}] {title}")
+            };
+        }
+
+        return Some((idx, end_idx, issue_block));
+    }
+
+    None
+}
+
 #[async_trait]
 impl IssueTracker for TodoFileTracker {
     /// Fetch candidate issues in active states for dispatch.
@@ -296,49 +372,16 @@ impl IssueTracker for TodoFileTracker {
 
         let lines: Vec<&str> = content.lines().collect();
 
-        // Identify the issue block: the `- [ID]` line plus any immediately following
-        // indented continuation lines.
-        let issue_prefix = format!("- [{id}]");
-        let issue_line_idx = lines.iter().position(|l| {
-            l.starts_with(&issue_prefix) && {
-                // Confirm the character after `]` is either end-of-line, a space, or nothing
-                // (avoids matching `[PROJ-10]` when searching for `[PROJ-1]`).
-                let after = &l[issue_prefix.len()..];
-                after.is_empty() || after.starts_with(' ')
-            }
-        });
-
-        let issue_line_idx = match issue_line_idx {
-            Some(i) => i,
+        // Identify the issue block from parsed identifiers so both bracketed IDs and
+        // generated slug IDs can be transitioned.
+        let (issue_line_idx, end_idx, issue_block) = match locate_issue_block(&lines, id) {
+            Some(result) => result,
             None => {
                 return Err(TrackerError::IoError {
                     reason: format!("issue [{id}] not found in {}", self.path.display()),
                 });
             }
         };
-
-        // Collect the full issue block (title line + indented continuation lines).
-        let mut issue_block: Vec<String> = vec![lines[issue_line_idx].to_string()];
-        let mut end_idx = issue_line_idx + 1;
-        while end_idx < lines.len() {
-            let line = lines[end_idx];
-            // A continuation line is either blank or starts with whitespace.
-            if line.is_empty() || line.starts_with("  ") || line.starts_with('\t') {
-                issue_block.push(line.to_string());
-                end_idx += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Trim trailing blank lines from the issue block so we don't accumulate extra whitespace.
-        while issue_block
-            .last()
-            .map(|l| l.trim().is_empty())
-            .unwrap_or(false)
-        {
-            issue_block.pop();
-        }
 
         // Build the new file content without the issue block.
         let mut new_lines: Vec<String> = lines
@@ -894,5 +937,66 @@ mod tests {
             written.contains("## Done"),
             "expected '## Done' heading in file"
         );
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_moves_slug_identifier_and_bracketizes_line() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- Configure build toolchain
+  Verify all dependencies resolve.
+
+## In Progress
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        let generated_id = "todo-0-configure-build-toolchain";
+        tracker
+            .set_issue_state(generated_id, "In Progress")
+            .await
+            .unwrap();
+
+        let all_issues = tracker
+            .fetch_issues_by_states(&["Todo".to_string(), "In Progress".to_string()])
+            .await
+            .unwrap();
+        let moved = all_issues
+            .iter()
+            .find(|issue| issue.identifier == generated_id)
+            .unwrap();
+        assert_eq!(moved.state, "In Progress");
+
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains("- [todo-0-configure-build-toolchain] Configure build toolchain"));
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_slug_identifier_can_transition_again() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- Do the thing
+
+## In Progress
+
+## Done
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path, active_states());
+
+        let generated_id = "todo-0-do-the-thing";
+        tracker
+            .set_issue_state(generated_id, "In Progress")
+            .await
+            .unwrap();
+        tracker.set_issue_state(generated_id, "Done").await.unwrap();
+
+        let done = tracker
+            .fetch_issues_by_states(&["Done".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].identifier, generated_id);
+        assert_eq!(done[0].state, "Done");
     }
 }
