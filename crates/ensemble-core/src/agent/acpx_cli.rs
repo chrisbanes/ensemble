@@ -276,7 +276,6 @@ fn map_event(value: serde_json::Value) -> AgentEvent {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
