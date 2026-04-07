@@ -3,6 +3,7 @@ pub mod acpx_cli;
 pub mod acpx_runtime;
 pub mod cancellation;
 pub mod events;
+pub mod protocol;
 pub mod runtime;
 
 use std::path::Path;
@@ -786,9 +787,8 @@ case "$*" in
     ;;
   *"prompt --session"*)
     printf '%s\n' \
-      '{"event":"prompt.started","session":"s1"}' \
-      '{"event":"output","stream":"stdout","text":"hello"}' \
-      '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
+      '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
+      '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
     exit 0
     ;;
   *"sessions close"*)
@@ -827,7 +827,6 @@ exit 1
 
         assert!(matches!(result, WorkerResult::Success));
         let event_names = collect_event_names(&mut rx);
-        assert!(event_names.contains(&"prompt_started".to_string()));
         assert!(event_names.contains(&"output_chunk".to_string()));
         assert!(event_names.contains(&"run_completed".to_string()));
     }
@@ -843,9 +842,8 @@ exit 1
 case "$*" in
   *"prompt --session"*)
     printf '%s\n' \
-      '{"event":"prompt.started","session":"s1"}' \
-      '{"event":"output","stream":"stdout","text":"hello"}' \
-      '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
+      '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
+      '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
     exit 0
     ;;
 esac

@@ -7,7 +7,8 @@ use tracing::debug;
 
 use crate::error::AgentError;
 
-use super::events::{AgentEvent, RuntimeStream, TokenUsage};
+use super::events::{AgentEvent, RuntimeStream, StopReason, TokenUsage};
+use super::protocol;
 
 pub struct AcpxCli {
     executable: String,
@@ -121,25 +122,67 @@ impl AcpxCli {
 
         let mut reader = BufReader::new(stdout).lines();
         let mut saw_terminal_event = false;
+        let mut last_usage: Option<TokenUsage> = None;
 
         while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to read acpx stdout: {e}"),
         })? {
-            match serde_json::from_str::<serde_json::Value>(&line) {
-                Ok(value) => {
-                    let event = map_event(value);
-                    if matches!(
-                        event,
-                        AgentEvent::RunCompleted { .. }
-                            | AgentEvent::RunFailed { .. }
-                            | AgentEvent::Cancelled { .. }
-                    ) {
-                        saw_terminal_event = true;
-                    }
-                    on_event(event).await;
+            let message =
+                protocol::parse_jsonrpc(&line).ok_or_else(|| AgentError::ResponseError {
+                    reason: format!("invalid JSON-RPC message from acpx: {line}"),
+                })?;
+
+            if let Some(update) = parse_session_update_from_message(&message)? {
+                if let Some(usage) = update.usage {
+                    last_usage = Some(usage);
                 }
-                Err(_) => on_event(AgentEvent::Malformed { line }).await,
+                if let Some(content) = update.output_text {
+                    on_event(AgentEvent::OutputChunk {
+                        stream: RuntimeStream::Stdout,
+                        content,
+                    })
+                    .await;
+                }
+                if let Some(permission) = update.permission_request {
+                    on_event(AgentEvent::Warning {
+                        message: format!(
+                            "permission requested ({}): {}",
+                            permission.permission_id, permission.description
+                        ),
+                    })
+                    .await;
+                }
+                if let Some(stop_reason) = update.stop_reason {
+                    saw_terminal_event = true;
+                    on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                }
+                continue;
             }
+
+            if let Some(stop_reason) = message
+                .result
+                .as_ref()
+                .and_then(protocol::parse_stop_reason_from_result)
+            {
+                saw_terminal_event = true;
+                on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                continue;
+            }
+
+            if let Some(error) = message.error.as_ref() {
+                saw_terminal_event = true;
+                on_event(AgentEvent::RunFailed {
+                    reason: error.message.clone(),
+                    usage: last_usage.clone(),
+                })
+                .await;
+                continue;
+            }
+
+            on_event(AgentEvent::OtherMessage {
+                raw: serde_json::to_string(&message).unwrap_or_else(|_| String::from("{}")),
+            })
+            .await;
         }
 
         let status = child.wait().await.map_err(|e| AgentError::IoError {
@@ -224,52 +267,33 @@ async fn cleanup_prompt_child(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
-fn map_event(value: serde_json::Value) -> AgentEvent {
-    match value.get("event").and_then(|v| v.as_str()) {
-        Some("prompt.started") => AgentEvent::PromptStarted,
-        Some("output") => AgentEvent::OutputChunk {
-            stream: match value.get("stream").and_then(|v| v.as_str()) {
-                Some("stderr") => RuntimeStream::Stderr,
-                _ => RuntimeStream::Stdout,
-            },
-            content: value
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
+fn parse_session_update_from_message(
+    message: &super::events::JsonRpcMessage,
+) -> Result<Option<protocol::ParsedSessionUpdate>, AgentError> {
+    if message.method.as_deref() != Some("session/update") {
+        return Ok(None);
+    }
+
+    let value = serde_json::to_value(message).map_err(|e| AgentError::ResponseError {
+        reason: format!("failed to encode JSON-RPC message: {e}"),
+    })?;
+
+    Ok(protocol::parse_session_update(&value))
+}
+
+fn map_stop_reason(stop_reason: StopReason, usage: Option<TokenUsage>) -> AgentEvent {
+    match stop_reason {
+        StopReason::EndTurn | StopReason::MaxTokens => AgentEvent::RunCompleted { usage },
+        StopReason::Cancelled => AgentEvent::Cancelled {
+            reason: Some("stop reason: cancelled".to_string()),
         },
-        Some("completed") => AgentEvent::RunCompleted {
-            usage: value
-                .get("usage")
-                .cloned()
-                .and_then(|usage| serde_json::from_value::<TokenUsage>(usage).ok()),
+        StopReason::Refusal => AgentEvent::RunFailed {
+            reason: "stop reason: refusal".to_string(),
+            usage,
         },
-        Some("failed") => AgentEvent::RunFailed {
-            reason: value
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("acpx run failed")
-                .to_string(),
-            usage: value
-                .get("usage")
-                .cloned()
-                .and_then(|usage| serde_json::from_value::<TokenUsage>(usage).ok()),
-        },
-        Some("cancelled") => AgentEvent::Cancelled {
-            reason: value
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .map(str::to_string),
-        },
-        Some("warning") => AgentEvent::Warning {
-            message: value
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default()
-                .to_string(),
-        },
-        _ => AgentEvent::OtherMessage {
-            raw: value.to_string(),
+        StopReason::MaxTurnRequests => AgentEvent::RunFailed {
+            reason: "stop reason: max_turn_requests".to_string(),
+            usage,
         },
     }
 }
@@ -356,9 +380,8 @@ mod tests {
             dir.path(),
             r#"#!/usr/bin/env bash
 cat <<'JSON'
-{"event":"prompt.started","session":"s1"}
-{"event":"output","stream":"stdout","text":"hello"}
-{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"},"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}
+{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}
 JSON
 "#,
         );
@@ -376,9 +399,8 @@ JSON
             .unwrap();
         let events = events.lock().unwrap();
 
-        assert!(matches!(events[0], AgentEvent::PromptStarted));
-        assert!(matches!(events[1], AgentEvent::OutputChunk { .. }));
-        assert!(matches!(events[2], AgentEvent::RunCompleted { .. }));
+        assert!(matches!(events[0], AgentEvent::OutputChunk { .. }));
+        assert!(matches!(events[1], AgentEvent::RunCompleted { .. }));
     }
 
     #[tokio::test]
@@ -412,6 +434,34 @@ JSON
     }
 
     #[tokio::test]
+    async fn prompt_stream_rejects_non_jsonrpc_lines() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"event":"completed"}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        let error = client
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                None,
+                |_| async {},
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AgentError::ResponseError { .. }));
+    }
+
+    #[tokio::test]
     async fn prompt_stream_emits_output_before_process_exit() {
         let dir = tempfile::TempDir::new().unwrap();
         let release_path = dir.path().join("release.flag");
@@ -419,12 +469,11 @@ JSON
             dir.path(),
             &format!(
                 r#"#!/bin/bash
-printf '%s\n' '{{"event":"prompt.started","session":"s1"}}'
-printf '%s\n' '{{"event":"output","stream":"stdout","text":"hello"}}'
+printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"hello"}}}}}}}}'
 while [ ! -f "{}" ]; do
   /bin/sleep 0.05
 done
-printf '%s\n' '{{"event":"completed","usage":{{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}'
+printf '%s\n' '{{"jsonrpc":"2.0","id":11,"result":{{"stopReason":"end_turn"}}}}'
 "#,
                 release_path.display()
             ),
@@ -440,7 +489,7 @@ printf '%s\n' '{{"event":"completed","usage":{{"input_tokens":1,"output_tokens":
         });
         tokio::pin!(run);
 
-        let saw_output = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        let saw_output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 tokio::select! {
                     result = &mut run => panic!("prompt exited before streaming output: {result:?}"),
@@ -469,8 +518,7 @@ printf '%s\n' '{{"event":"completed","usage":{{"input_tokens":1,"output_tokens":
             dir.path(),
             r#"#!/usr/bin/env bash
 cat <<'JSON'
-{"event":"prompt.started","session":"s1"}
-{"event":"output","stream":"stdout","text":"hello"}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}
 JSON
 "#,
         );
@@ -498,7 +546,8 @@ JSON
             dir.path(),
             r#"#!/usr/bin/env bash
 cat <<'JSON'
-{"event":"failed","reason":"boom","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"usage_update","usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}}}
+{"jsonrpc":"2.0","id":12,"result":{"stopReason":"refusal"}}
 JSON
 "#,
         );
@@ -525,7 +574,7 @@ JSON
                     output_tokens: 5,
                     total_tokens: 9
                 })
-            } if reason == "boom"
+            } if reason == "stop reason: refusal"
         ));
     }
 

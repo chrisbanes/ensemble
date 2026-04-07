@@ -287,9 +287,8 @@ case "$*" in
   ;;
   *" prompt --session "*)
   printf '%s\n' \
-    '{"event":"prompt.started","session":"s1"}' \
-    '{"event":"output","stream":"stdout","text":"hello"}' \
-    '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
+    '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
+    '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
   exit 0
   ;;
   *" sessions close "*)
@@ -319,12 +318,10 @@ exit 1
         let result = runner.run_step(&request, "finish the task").await.unwrap();
 
         assert!(matches!(result, WorkerResult::Success));
-        let mut saw_prompt_started = false;
         let mut saw_output = false;
         while let Ok(event) = rx.try_recv() {
             if let WorkerEvent::AgentUpdate { event, .. } = event {
                 match event {
-                    AgentEvent::PromptStarted => saw_prompt_started = true,
                     AgentEvent::OutputChunk {
                         stream: RuntimeStream::Stdout,
                         content,
@@ -333,7 +330,6 @@ exit 1
                 }
             }
         }
-        assert!(saw_prompt_started);
         assert!(saw_output);
     }
 
@@ -348,7 +344,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
-    printf '%s\n' '{"event":"completed","usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}}'
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -446,7 +442,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
-    printf '%s\n' '{{"event":"completed","usage":{{"input_tokens":1,"output_tokens":2,"total_tokens":3}}}}'
+    printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -493,11 +489,11 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
-    printf '%s\n' '{{"event":"prompt.started","session":"s1"}}'
+    printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"running"}}}}}}}}'
     while [ ! -f "{0}/cancelled.flag" ]; do
       /bin/sleep 0.05
     done
-    printf '%s\n' '{{"event":"cancelled","reason":"stop requested"}}'
+    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"stopReason":"cancelled"}}}}'
     exit 0
     ;;
   *" cancel --session "*)
