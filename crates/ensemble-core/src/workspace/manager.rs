@@ -4,6 +4,21 @@ use crate::tracker::model::sanitize_workspace_key;
 use crate::workspace::coordinator::{WorktreeCoordinator, WorktreeInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use tokio::fs;
+use tracing::{info, warn};
+
+const WORKSPACE_METADATA_FILE: &str = ".ensemble-workspace.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct WorkspaceMetadata {
+    branch_date: String,
+}
+
+/// Manage per-issue workspace directories.
+pub struct WorkspaceManager {
+    root: PathBuf,
+    repos: HashMap<String, RepoConfig>,
+}
 
 /// Result of preparing a workspace for an issue.
 pub struct WorkspaceResult {
@@ -15,12 +30,6 @@ pub struct WorkspaceResult {
     pub workspace_key: String,
     /// True if the directory was newly created (not reused).
     pub created_now: bool,
-}
-
-/// Manage per-issue workspace directories.
-pub struct WorkspaceManager {
-    root: PathBuf,
-    worktree_coordinator: Option<WorktreeCoordinator>,
 }
 
 impl WorkspaceManager {
@@ -39,23 +48,25 @@ impl WorkspaceManager {
                 .join(root)
         };
 
-        let worktree_coordinator = repos.filter(|r| !r.is_empty()).map(|repo_list| {
-            let mut repos_map = HashMap::new();
-            for (index, repo) in repo_list.into_iter().enumerate() {
-                let name = Path::new(&repo.path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("repo-{index}"));
-                repos_map.insert(name, repo);
-            }
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-            WorktreeCoordinator::new(repos_map, today)
-        });
+        let repos_map = repos
+            .filter(|r| !r.is_empty())
+            .map(|repo_list| {
+                let mut repos_map = HashMap::new();
+                for (index, repo) in repo_list.into_iter().enumerate() {
+                    let name = Path::new(&repo.path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| format!("repo-{index}"));
+                    repos_map.insert(name, repo);
+                }
+                repos_map
+            })
+            .unwrap_or_default();
 
         Ok(Self {
             root,
-            worktree_coordinator,
+            repos: repos_map,
         })
     }
 
@@ -68,6 +79,37 @@ impl WorkspaceManager {
     /// Returns None if the identifier cannot be sanitized.
     pub fn workspace_path(&self, identifier: &str) -> Option<PathBuf> {
         sanitize_workspace_key(identifier).map(|key| self.root.join(key))
+    }
+
+    fn metadata_path(base_path: &Path) -> PathBuf {
+        base_path.join(WORKSPACE_METADATA_FILE)
+    }
+
+    async fn load_branch_date(&self, base_path: &Path) -> Option<String> {
+        let metadata_path = Self::metadata_path(base_path);
+        if metadata_path.exists() {
+            let content = fs::read_to_string(&metadata_path).await.ok()?;
+            let metadata: WorkspaceMetadata = serde_json::from_str(&content).ok()?;
+            Some(metadata.branch_date)
+        } else {
+            None
+        }
+    }
+
+    async fn save_branch_date(&self, base_path: &Path, date: &str) -> Result<(), WorkspaceError> {
+        let metadata = WorkspaceMetadata {
+            branch_date: date.to_string(),
+        };
+        let content =
+            serde_json::to_string(&metadata).map_err(|e| WorkspaceError::CreationFailed {
+                reason: format!("failed to serialize workspace metadata: {e}"),
+            })?;
+        let metadata_path = Self::metadata_path(base_path);
+        fs::write(&metadata_path, content)
+            .await
+            .map_err(|e| WorkspaceError::CreationFailed {
+                reason: format!("failed to write workspace metadata: {e}"),
+            })
     }
 
     /// Prepare (create or reuse) a workspace for the given issue identifier.
@@ -101,8 +143,25 @@ impl WorkspaceManager {
             true
         };
 
-        // Prepare worktrees if coordinator is configured
-        let worktrees = if let Some(coordinator) = &self.worktree_coordinator {
+        // Prepare worktrees if repos configured
+        let worktrees = if !self.repos.is_empty() {
+            let branch_date = if base_created {
+                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                self.save_branch_date(&base_path, &today).await?;
+                today
+            } else {
+                match self.load_branch_date(&base_path).await {
+                    Some(date) => date,
+                    None => {
+                        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                        self.save_branch_date(&base_path, &today).await?;
+                        today
+                    }
+                }
+            };
+            let coordinator =
+                WorktreeCoordinator::new(self.repos.clone(), branch_date, base_path.clone());
+            info!(workspace = %base_path.display(), "preparing worktrees inside workspace");
             coordinator
                 .prepare_worktrees(identifier)
                 .await
@@ -133,8 +192,21 @@ impl WorkspaceManager {
 
         self.validate_path_inside_root(&base_path)?;
 
-        // Clean up worktrees first
-        if let Some(coordinator) = &self.worktree_coordinator {
+        // Clean up worktrees first - use persisted branch date to avoid date drift
+        if !self.repos.is_empty() {
+            let branch_date = match self.load_branch_date(&base_path).await {
+                Some(date) => date,
+                None => {
+                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                    if base_path.exists() {
+                        self.save_branch_date(&base_path, &today).await?;
+                    }
+                    today
+                }
+            };
+            let coordinator =
+                WorktreeCoordinator::new(self.repos.clone(), branch_date, base_path.clone());
+            warn!(workspace = %base_path.display(), "cleaning up worktrees");
             coordinator
                 .cleanup_worktrees(identifier)
                 .await
@@ -189,7 +261,42 @@ impl WorkspaceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::RepoConfig;
     use tempfile::TempDir;
+
+    fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
+        let dir = TempDir::new().unwrap();
+
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+
+        std::fs::write(dir.path().join("README.md"), format!("# {name}")).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(&dir)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+
+        let config = RepoConfig {
+            path: dir.path().to_string_lossy().to_string(),
+            branch: "main".to_string(),
+            git_remote: "origin".to_string(),
+        };
+
+        (dir, config)
+    }
 
     fn setup() -> (TempDir, WorkspaceManager) {
         let dir = TempDir::new().unwrap();
@@ -286,5 +393,84 @@ mod tests {
     async fn test_workspace_root_accessor() {
         let (dir, mgr) = setup();
         assert_eq!(mgr.root(), dir.path());
+    }
+
+    #[tokio::test]
+    async fn test_branch_date_persisted_and_loaded() {
+        let dir = TempDir::new().unwrap();
+        let mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+
+        let test_path = dir.path().join("test-workspace");
+        std::fs::create_dir_all(&test_path).unwrap();
+
+        mgr.save_branch_date(&test_path, "2024-06-15")
+            .await
+            .unwrap();
+
+        let loaded = mgr.load_branch_date(&test_path).await;
+        assert_eq!(loaded, Some("2024-06-15".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace_uses_persisted_branch_date() {
+        let dir = TempDir::new().unwrap();
+
+        let test_path = dir.path().join("test_issue");
+        std::fs::create_dir_all(&test_path).unwrap();
+
+        let metadata_path = test_path.join(".ensemble-workspace.json");
+        std::fs::write(&metadata_path, r#"{"branch_date":"2020-01-01"}"#).unwrap();
+
+        let repos = vec![RepoConfig {
+            path: "/nonexistent/path".to_string(),
+            branch: "main".to_string(),
+            git_remote: "origin".to_string(),
+        }];
+        let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
+
+        let result = mgr.remove_workspace("test-issue").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace_blocks_on_cleanup_failure() {
+        let dir = TempDir::new().unwrap();
+        let repos = vec![RepoConfig {
+            path: "/nonexistent/path".to_string(),
+            branch: "main".to_string(),
+            git_remote: "origin".to_string(),
+        }];
+        let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
+
+        let ws_path = dir.path().join("cleanup-test");
+        std::fs::create_dir_all(&ws_path).unwrap();
+        let metadata_path = ws_path.join(".ensemble-workspace.json");
+        std::fs::write(&metadata_path, r#"{"branch_date":"2020-01-01"}"#).unwrap();
+
+        let remove_result = mgr.remove_workspace("cleanup-test").await;
+        assert!(remove_result.is_err());
+
+        assert!(
+            ws_path.exists(),
+            "workspace should not be deleted when cleanup fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_prepare_persists_branch_date_for_legacy_workspace() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+
+        let identifier = "legacy#42";
+        let workspace_key = sanitize_workspace_key(identifier).unwrap();
+        let base_path = root.path().join(workspace_key);
+        std::fs::create_dir_all(&base_path).unwrap();
+
+        assert!(!WorkspaceManager::metadata_path(&base_path).exists());
+
+        let result = mgr.prepare_workspace(identifier).await;
+        assert!(result.is_ok());
+        assert!(WorkspaceManager::metadata_path(&base_path).exists());
     }
 }

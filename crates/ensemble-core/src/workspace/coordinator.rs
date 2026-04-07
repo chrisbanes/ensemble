@@ -23,11 +23,20 @@ pub struct WorktreeInfo {
 pub struct WorktreeCoordinator {
     repos: HashMap<String, RepoConfig>,
     base_date: String,
+    worktree_root: PathBuf,
 }
 
 impl WorktreeCoordinator {
-    pub fn new(repos: HashMap<String, RepoConfig>, base_date: String) -> Self {
-        Self { repos, base_date }
+    pub fn new(
+        repos: HashMap<String, RepoConfig>,
+        base_date: String,
+        worktree_root: PathBuf,
+    ) -> Self {
+        Self {
+            repos,
+            base_date,
+            worktree_root,
+        }
     }
 
     /// Prepare worktrees for all configured repos for the given issue.
@@ -54,7 +63,7 @@ impl WorktreeCoordinator {
                 });
             }
 
-            let worktree_path = repo_path.join(".worktrees").join(&branch);
+            let worktree_path = self.worktree_root.join(repo_name).join(&branch);
             let worktree_path_str = worktree_path.to_string_lossy().to_string();
             let repo_path_str = &repo_config.path;
 
@@ -180,17 +189,33 @@ impl WorktreeCoordinator {
 
         info!(issue_id, branch, "cleaning up worktrees");
 
+        let mut errors = Vec::new();
+
         for (repo_name, repo_config) in &self.repos {
-            let repo_path = Path::new(&repo_config.path);
-            let worktree_path = repo_path.join(".worktrees").join(&branch);
+            let worktree_path = self.worktree_root.join(repo_name).join(&branch);
             let worktree_path_str = worktree_path.to_string_lossy().to_string();
 
             if let Err(e) = remove_worktree(&repo_config.path, &worktree_path_str, &branch).await {
-                warn!(repo = repo_name, error = %e, "failed to cleanup worktree (continuing)");
+                match e {
+                    WorktreeError::NotFound { .. } => {
+                        warn!(repo = repo_name, "worktree already absent during cleanup");
+                    }
+                    other => {
+                        warn!(repo = repo_name, error = %other, "failed to cleanup worktree");
+                        errors.push(WorktreeError::CleanupFailed {
+                            repo: repo_name.clone(),
+                            error: other.to_string(),
+                        });
+                    }
+                }
             }
         }
 
-        Ok(())
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.into_iter().next().unwrap())
+        }
     }
 
     /// List expected worktree paths for an issue without creating them.
@@ -198,9 +223,8 @@ impl WorktreeCoordinator {
         let branch = self.format_branch_name(issue_id);
         let mut paths = HashMap::new();
 
-        for (repo_name, repo_config) in &self.repos {
-            let repo_path = Path::new(&repo_config.path);
-            let worktree_path = repo_path.join(".worktrees").join(&branch);
+        for repo_name in self.repos.keys() {
+            let worktree_path = self.worktree_root.join(repo_name).join(&branch);
             paths.insert(repo_name.clone(), worktree_path);
         }
 
@@ -241,7 +265,11 @@ mod tests {
     #[test]
     fn test_format_branch_name() {
         let repos = HashMap::new();
-        let coordinator = WorktreeCoordinator::new(repos, "2026-03-30".to_string());
+        let coordinator = WorktreeCoordinator::new(
+            repos,
+            "2026-03-30".to_string(),
+            PathBuf::from("/tmp/worktrees"),
+        );
 
         let branch = coordinator.format_branch_name("my-repo#42");
         assert_eq!(branch, "ensemble-2026-03-30-my-repo-42");

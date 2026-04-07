@@ -78,6 +78,8 @@ pub enum WorktreeError {
     RollbackFailed { reason: String },
     #[error("invalid repo path: {path}")]
     InvalidRepoPath { path: String },
+    #[error("cleanup failed for {repo}: {error}")]
+    CleanupFailed { repo: String, error: String },
 }
 
 #[derive(Debug, Error)]

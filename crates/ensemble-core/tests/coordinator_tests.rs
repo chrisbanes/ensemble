@@ -6,14 +6,12 @@ use tempfile::TempDir;
 fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
     let dir = TempDir::new().unwrap();
 
-    // Initialize git repo
     std::process::Command::new("git")
         .args(["init", "-b", "main"])
         .current_dir(&dir)
         .output()
         .unwrap();
 
-    // Create initial commit
     std::fs::write(dir.path().join("README.md"), format!("# {}", name)).unwrap();
     std::process::Command::new("git")
         .args(["add", "."])
@@ -41,6 +39,7 @@ fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
 
 #[tokio::test]
 async fn test_prepare_worktrees_creates_all() {
+    let worktree_root = TempDir::new().unwrap();
     let (_repo1_dir, repo1_config) = setup_repo("repo1");
     let (_repo2_dir, repo2_config) = setup_repo("repo2");
 
@@ -49,7 +48,11 @@ async fn test_prepare_worktrees_creates_all() {
         ("api".to_string(), repo2_config),
     ]);
 
-    let coordinator = WorktreeCoordinator::new(repos, "2026-03-30".to_string());
+    let coordinator = WorktreeCoordinator::new(
+        repos,
+        "2026-03-30".to_string(),
+        worktree_root.path().to_path_buf(),
+    );
 
     let result = coordinator.prepare_worktrees("my-issue-42").await;
 
@@ -60,7 +63,6 @@ async fn test_prepare_worktrees_creates_all() {
     assert!(worktrees.contains_key("frontend"));
     assert!(worktrees.contains_key("api"));
 
-    // Verify directories exist
     let frontend_path = &worktrees["frontend"].path;
     let api_path = &worktrees["api"].path;
 
@@ -72,17 +74,20 @@ async fn test_prepare_worktrees_creates_all() {
 
 #[tokio::test]
 async fn test_prepare_worktrees_reuses_existing() {
+    let worktree_root = TempDir::new().unwrap();
     let (_repo1_dir, repo1_config) = setup_repo("repo1");
 
     let repos = HashMap::from([("frontend".to_string(), repo1_config)]);
 
-    let coordinator = WorktreeCoordinator::new(repos, "2026-03-30".to_string());
+    let coordinator = WorktreeCoordinator::new(
+        repos,
+        "2026-03-30".to_string(),
+        worktree_root.path().to_path_buf(),
+    );
 
-    // First call creates
     let result1 = coordinator.prepare_worktrees("my-issue-42").await.unwrap();
     assert!(result1["frontend"].created_now);
 
-    // Second call reuses
     let result2 = coordinator.prepare_worktrees("my-issue-42").await.unwrap();
     assert!(!result2["frontend"].created_now);
     assert_eq!(result1["frontend"].path, result2["frontend"].path);
@@ -90,20 +95,61 @@ async fn test_prepare_worktrees_reuses_existing() {
 
 #[tokio::test]
 async fn test_cleanup_worktrees() {
+    let worktree_root = TempDir::new().unwrap();
     let (_repo1_dir, repo1_config) = setup_repo("repo1");
 
     let repos = HashMap::from([("frontend".to_string(), repo1_config)]);
 
-    let coordinator = WorktreeCoordinator::new(repos, "2026-03-30".to_string());
+    let coordinator = WorktreeCoordinator::new(
+        repos,
+        "2026-03-30".to_string(),
+        worktree_root.path().to_path_buf(),
+    );
 
-    // Create worktree
     let worktrees = coordinator.prepare_worktrees("my-issue-42").await.unwrap();
     let path = worktrees["frontend"].path.clone();
     assert!(path.exists());
 
-    // Cleanup
     coordinator.cleanup_worktrees("my-issue-42").await.unwrap();
 
-    // Verify removed
     assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn test_cleanup_worktrees_is_idempotent_when_missing() {
+    let worktree_root = TempDir::new().unwrap();
+    let (_repo1_dir, repo1_config) = setup_repo("repo1");
+
+    let repos = HashMap::from([("frontend".to_string(), repo1_config)]);
+
+    let coordinator = WorktreeCoordinator::new(
+        repos,
+        "2026-03-30".to_string(),
+        worktree_root.path().to_path_buf(),
+    );
+
+    let result = coordinator.cleanup_worktrees("my-issue-42").await;
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn test_cleanup_worktrees_propagates_failure() {
+    let worktree_root = TempDir::new().unwrap();
+    let repos = HashMap::from([(
+        "frontend".to_string(),
+        RepoConfig {
+            path: "/nonexistent/path/to/repo".to_string(),
+            branch: "main".to_string(),
+            git_remote: "origin".to_string(),
+        },
+    )]);
+
+    let coordinator = WorktreeCoordinator::new(
+        repos,
+        "2026-03-30".to_string(),
+        worktree_root.path().to_path_buf(),
+    );
+
+    let result = coordinator.cleanup_worktrees("my-issue-42").await;
+    assert!(result.is_err());
 }
