@@ -158,8 +158,7 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
 /// Extract identifier and title from a list item.
 ///
 /// If the line starts with `[IDENTIFIER]`, extracts the identifier and remaining title.
-/// Otherwise generates a stable slug from the title, incorporating the state and
-/// position to ensure uniqueness and handle non-alphanumeric-only titles.
+/// Otherwise generates a stable identifier from state + position.
 fn extract_identifier_and_title(line: &str, state: &str, position: i32) -> (String, String) {
     if line.starts_with('[') {
         if let Some(end) = line.find(']') {
@@ -170,16 +169,9 @@ fn extract_identifier_and_title(line: &str, state: &str, position: i32) -> (Stri
             }
         }
     }
-    // No bracketed identifier — generate a stable slug with position for uniqueness.
-    // The position suffix ensures duplicate titles produce distinct identifiers,
-    // and provides a fallback when the title contains no ASCII alphanumeric chars.
-    let slug = generate_slug(line);
+    // No bracketed identifier — generate a stable state+position identifier.
     let state_slug = generate_slug(state);
-    let identifier = if slug.is_empty() {
-        format!("{}-{}", state_slug, position)
-    } else {
-        format!("{}-{}-{}", state_slug, position, slug)
-    };
+    let identifier = format!("{}-{}", state_slug, position);
     (identifier, line.to_string())
 }
 
@@ -234,6 +226,88 @@ fn to_issue(parsed: &ParsedIssue) -> Issue {
 /// Check if a state matches any in a list (case-insensitive).
 fn state_matches(state: &str, states: &[String]) -> bool {
     states.iter().any(|s| s.eq_ignore_ascii_case(state))
+}
+
+fn collect_issue_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
+    let mut issue_block: Vec<String> = vec![lines[start_idx].to_string()];
+    let mut end_idx = start_idx + 1;
+    while end_idx < lines.len() {
+        let line = lines[end_idx];
+        // A continuation line is either blank or starts with whitespace.
+        if line.is_empty() || line.starts_with("  ") || line.starts_with('\t') {
+            issue_block.push(line.to_string());
+            end_idx += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Trim trailing blank lines from the issue block so we don't accumulate extra whitespace.
+    while issue_block
+        .last()
+        .map(|line| line.trim().is_empty())
+        .unwrap_or(false)
+    {
+        issue_block.pop();
+    }
+
+    (issue_block, end_idx)
+}
+
+fn locate_issue_block(lines: &[&str], id: &str) -> Option<(usize, usize, Vec<String>)> {
+    let mut current_state: Option<String> = None;
+    // Generated IDs depend on `(state, position_in_state, title_slug)`, so this counter must
+    // mirror parse order for the *current file snapshot*. If list order changes between runs,
+    // generated IDs for no-bracket items may also change.
+    let mut position_in_state: i32 = 0;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if let Some(heading) = line.strip_prefix("## ") {
+            let heading = heading.trim();
+            if !heading.is_empty() {
+                current_state = Some(heading.to_string());
+                position_in_state = 0;
+            }
+            continue;
+        }
+
+        let Some(rest) = line.strip_prefix("- ") else {
+            continue;
+        };
+        let Some(state) = current_state.as_ref() else {
+            continue;
+        };
+
+        let rest = rest.trim();
+        let (parsed_id, title) = extract_identifier_and_title(rest, state, position_in_state);
+        position_in_state += 1;
+
+        if parsed_id != id {
+            continue;
+        }
+
+        let (mut issue_lines, end_idx) = collect_issue_block(lines, idx);
+        let explicit_identifier = rest.starts_with('[')
+            && rest
+                .find(']')
+                .map(|end| !rest[1..end].trim().is_empty())
+                .unwrap_or(false);
+
+        if !explicit_identifier {
+            let rewritten_first_line = if title.is_empty() {
+                format!("- [{id}]")
+            } else {
+                format!("- [{id}] {title}")
+            };
+            if let Some(first_line) = issue_lines.first_mut() {
+                *first_line = rewritten_first_line;
+            }
+        }
+
+        return Some((idx, end_idx, issue_lines));
+    }
+
+    None
 }
 
 #[async_trait]
@@ -296,49 +370,16 @@ impl IssueTracker for TodoFileTracker {
 
         let lines: Vec<&str> = content.lines().collect();
 
-        // Identify the issue block: the `- [ID]` line plus any immediately following
-        // indented continuation lines.
-        let issue_prefix = format!("- [{id}]");
-        let issue_line_idx = lines.iter().position(|l| {
-            l.starts_with(&issue_prefix) && {
-                // Confirm the character after `]` is either end-of-line, a space, or nothing
-                // (avoids matching `[PROJ-10]` when searching for `[PROJ-1]`).
-                let after = &l[issue_prefix.len()..];
-                after.is_empty() || after.starts_with(' ')
-            }
-        });
-
-        let issue_line_idx = match issue_line_idx {
-            Some(i) => i,
+        // Identify the issue block from parsed identifiers so both bracketed IDs and
+        // generated slug IDs can be transitioned.
+        let (issue_line_idx, end_idx, issue_block) = match locate_issue_block(&lines, id) {
+            Some(result) => result,
             None => {
                 return Err(TrackerError::IoError {
                     reason: format!("issue [{id}] not found in {}", self.path.display()),
                 });
             }
         };
-
-        // Collect the full issue block (title line + indented continuation lines).
-        let mut issue_block: Vec<String> = vec![lines[issue_line_idx].to_string()];
-        let mut end_idx = issue_line_idx + 1;
-        while end_idx < lines.len() {
-            let line = lines[end_idx];
-            // A continuation line is either blank or starts with whitespace.
-            if line.is_empty() || line.starts_with("  ") || line.starts_with('\t') {
-                issue_block.push(line.to_string());
-                end_idx += 1;
-            } else {
-                break;
-            }
-        }
-
-        // Trim trailing blank lines from the issue block so we don't accumulate extra whitespace.
-        while issue_block
-            .last()
-            .map(|l| l.trim().is_empty())
-            .unwrap_or(false)
-        {
-            issue_block.pop();
-        }
 
         // Build the new file content without the issue block.
         let mut new_lines: Vec<String> = lines
@@ -489,10 +530,10 @@ mod tests {
         let issues = parse_todo_content(content);
         assert_eq!(issues.len(), 2);
 
-        assert_eq!(issues[0].identifier, "todo-0-add-login-page");
+        assert_eq!(issues[0].identifier, "todo-0");
         assert_eq!(issues[0].title, "Add login page");
 
-        assert_eq!(issues[1].identifier, "todo-1-fix-the-checkout-bug");
+        assert_eq!(issues[1].identifier, "todo-1");
         assert_eq!(issues[1].title, "Fix the checkout bug!");
     }
 
@@ -556,8 +597,8 @@ mod tests {
         let content = "## Todo\n- [] Some title\n";
         let issues = parse_todo_content(content);
         assert_eq!(issues.len(), 1);
-        // Empty brackets -> fallback to slug with state-position prefix
-        assert_eq!(issues[0].identifier, "todo-0-some-title");
+        // Empty brackets -> fallback to state-position identifier
+        assert_eq!(issues[0].identifier, "todo-0");
         assert_eq!(issues[0].title, "[] Some title");
     }
 
@@ -573,7 +614,7 @@ mod tests {
     #[test]
     fn test_extract_without_identifier() {
         let (id, title) = extract_identifier_and_title("Add login page", "Todo", 0);
-        assert_eq!(id, "todo-0-add-login-page");
+        assert_eq!(id, "todo-0");
         assert_eq!(title, "Add login page");
     }
 
@@ -597,8 +638,8 @@ mod tests {
         let (id1, _) = extract_identifier_and_title("Fix bug", "Todo", 0);
         let (id2, _) = extract_identifier_and_title("Fix bug", "Todo", 1);
         assert_ne!(id1, id2);
-        assert_eq!(id1, "todo-0-fix-bug");
-        assert_eq!(id2, "todo-1-fix-bug");
+        assert_eq!(id1, "todo-0");
+        assert_eq!(id2, "todo-1");
     }
 
     // --- generate_slug tests ---
@@ -894,5 +935,93 @@ mod tests {
             written.contains("## Done"),
             "expected '## Done' heading in file"
         );
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_moves_slug_identifier_and_bracketizes_line() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- Configure build toolchain
+  Verify all dependencies resolve.
+
+## In Progress
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        let generated_id = "todo-0";
+        tracker
+            .set_issue_state(generated_id, "In Progress")
+            .await
+            .unwrap();
+
+        let all_issues = tracker
+            .fetch_issues_by_states(&["Todo".to_string(), "In Progress".to_string()])
+            .await
+            .unwrap();
+        let moved = all_issues
+            .iter()
+            .find(|issue| issue.identifier == generated_id)
+            .unwrap();
+        assert_eq!(moved.state, "In Progress");
+
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert!(written.contains("- [todo-0] Configure build toolchain"));
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_slug_identifier_can_transition_again() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- Do the thing
+
+## In Progress
+
+## Done
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path, active_states());
+
+        let generated_id = "todo-0";
+        tracker
+            .set_issue_state(generated_id, "In Progress")
+            .await
+            .unwrap();
+        tracker.set_issue_state(generated_id, "Done").await.unwrap();
+
+        let done = tracker
+            .fetch_issues_by_states(&["Done".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].identifier, generated_id);
+        assert_eq!(done[0].state, "Done");
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_whitespace_only_title_item() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+-   
+
+## In Progress
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        tracker
+            .set_issue_state("todo-0", "In Progress")
+            .await
+            .unwrap();
+
+        let in_progress = tracker
+            .fetch_issues_by_states(&["In Progress".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(in_progress.len(), 1);
+        assert_eq!(in_progress[0].identifier, "todo-0");
+
+        let written = tokio::fs::read_to_string(path).await.unwrap();
+        assert!(written.contains("- [todo-0]"));
     }
 }

@@ -174,6 +174,14 @@ Defines where Ensemble reads and writes issues.
 
 For todo_file trackers, if `path` is not specified, it defaults to `~/ensemble/TODO.md` (the `ensemble` directory in your home folder).
 
+Todo file issue format:
+
+- `- [ID] Title` (explicit ID) or `- Title` (ID auto-generated) are both valid.
+- Indented lines under an item are treated as description text.
+- Auto-generated IDs follow a stable `state-position` format (for example `todo-0`).
+- When a no-ID item is moved between states, Ensemble may rewrite it to bracket form
+  (`- [generated-id] Title`) to stabilize future state transitions.
+
 ### repos
 
 List of repositories for workspace setup. Paths can be absolute or relative to the config directory.

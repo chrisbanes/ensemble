@@ -44,22 +44,31 @@ pub fn render_prompt_with_interaction_response(
         "labels": issue.labels,
     });
 
-    // Optional string fields: present as value or absent (nil)
-    if let Some(ref desc) = issue.description {
-        issue_obj.insert(
-            "description".into(),
-            liquid::model::Value::scalar(desc.clone()),
-        );
-    }
-    if let Some(ref bn) = issue.branch_name {
-        issue_obj.insert(
-            "branch_name".into(),
-            liquid::model::Value::scalar(bn.clone()),
-        );
-    }
-    if let Some(ref u) = issue.url {
-        issue_obj.insert("url".into(), liquid::model::Value::scalar(u.clone()));
-    }
+    // Optional fields are always present for issue.*, using nil when absent.
+    issue_obj.insert(
+        "description".into(),
+        issue
+            .description
+            .as_ref()
+            .map_or(liquid::model::Value::Nil, |desc| {
+                liquid::model::Value::scalar(desc.clone())
+            }),
+    );
+    issue_obj.insert(
+        "branch_name".into(),
+        issue
+            .branch_name
+            .as_ref()
+            .map_or(liquid::model::Value::Nil, |branch_name| {
+                liquid::model::Value::scalar(branch_name.clone())
+            }),
+    );
+    issue_obj.insert(
+        "url".into(),
+        issue.url.as_ref().map_or(liquid::model::Value::Nil, |url| {
+            liquid::model::Value::scalar(url.clone())
+        }),
+    );
 
     let mut globals = liquid::object!({
         "issue": issue_obj,
@@ -154,6 +163,15 @@ mod tests {
         let template = "{% if issue.description %}has desc{% else %}no desc{% endif %}";
         let result = render_prompt(template, &issue, None).unwrap();
         assert_eq!(result, "no desc");
+    }
+
+    #[test]
+    fn test_render_missing_description_direct_access_renders_empty() {
+        let mut issue = test_issue();
+        issue.description = None;
+        let template = "{{ issue.description }}";
+        let result = render_prompt(template, &issue, None).unwrap();
+        assert_eq!(result, "");
     }
 
     #[test]

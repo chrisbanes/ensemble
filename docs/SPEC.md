@@ -469,8 +469,11 @@ Parsing rules:
 - Level-2 headings (`## <State>`) define state sections.
 - List items under a heading are issues. The first line is the title.
 - If the title starts with `[<identifier>]`, that bracketed value is the issue identifier.
-  Otherwise, the implementation generates a stable identifier from the title (for example a
-  slugified hash).
+- Otherwise, the implementation generates a stable identifier from state + position
+  (for example `todo-0`).
+- Items without bracketed IDs are supported for dispatch and state transitions. When moved to a
+  new state, implementations may normalize the list line to bracket form
+  (`- [generated-id] Title`) so future transitions remain stable.
 - Indented lines after the title line (before the next list item) are the description.
 - The file is re-read on each poll tick. Implementations may also watch for file changes.
 - Issues are returned in document order within each state section.
