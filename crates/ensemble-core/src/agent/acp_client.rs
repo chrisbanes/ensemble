@@ -256,6 +256,8 @@ impl AcpSession {
         loop {
             let line = self.read_line().await?;
 
+            // Keep direct deserialization here so malformed JSON can emit
+            // `AgentEvent::Malformed` with the raw original line content.
             let msg: JsonRpcMessage = match serde_json::from_str(&line) {
                 Ok(m) => m,
                 Err(_) => {
@@ -429,15 +431,38 @@ impl AcpSession {
                 .await;
                 Ok(TurnResult::Completed { usage })
             }
-            StopReason::Cancelled | StopReason::Refusal | StopReason::MaxTurnRequests => {
-                let reason = match stop_reason {
-                    StopReason::Cancelled => "stop reason: cancelled",
-                    StopReason::Refusal => "stop reason: refusal",
-                    StopReason::MaxTurnRequests => "stop reason: max_turn_requests",
-                    _ => "stop reason: unknown",
-                }
-                .to_string();
+            StopReason::Cancelled => {
+                let reason = "stop reason: cancelled".to_string();
+                Self::emit_event(
+                    event_tx,
+                    issue_id,
+                    step_name,
+                    AgentEvent::RunFailed {
+                        reason: reason.clone(),
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
 
+                Ok(TurnResult::Failed { reason, usage })
+            }
+            StopReason::Refusal => {
+                let reason = "stop reason: refusal".to_string();
+                Self::emit_event(
+                    event_tx,
+                    issue_id,
+                    step_name,
+                    AgentEvent::RunFailed {
+                        reason: reason.clone(),
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
+
+                Ok(TurnResult::Failed { reason, usage })
+            }
+            StopReason::MaxTurnRequests => {
+                let reason = "stop reason: max_turn_requests".to_string();
                 Self::emit_event(
                     event_tx,
                     issue_id,

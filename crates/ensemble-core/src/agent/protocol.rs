@@ -1,11 +1,17 @@
 use crate::agent::events::{JsonRpcMessage, StopReason, TokenUsage};
 
+/// Permission request details surfaced in session updates.
 #[derive(Debug, Clone)]
 pub struct PermissionRequest {
     pub permission_id: String,
     pub description: String,
 }
 
+/// Normalized data extracted from ACP `session/update` payloads.
+///
+/// `permission_request` is currently consumed by the acpx runtime path when
+/// mapping runtime warnings, but the shared parser keeps this field available
+/// for any runtime that needs it.
 #[derive(Debug, Clone)]
 pub struct ParsedSessionUpdate {
     pub output_text: Option<String>,
@@ -14,10 +20,18 @@ pub struct ParsedSessionUpdate {
     pub permission_request: Option<PermissionRequest>,
 }
 
+/// Parse one stdout line as a JSON-RPC message.
+///
+/// Returns `None` when the line is not valid JSON-RPC JSON.
 pub fn parse_jsonrpc(line: &str) -> Option<JsonRpcMessage> {
     serde_json::from_str::<JsonRpcMessage>(line).ok()
 }
 
+/// Parse a `session/update` payload into normalized fields.
+///
+/// Accepts either:
+/// - a full JSON-RPC notification object (`method = session/update`), or
+/// - a direct `params` object from that notification.
 pub fn parse_session_update(value: &serde_json::Value) -> Option<ParsedSessionUpdate> {
     let params = if let Some(method) = value.get("method").and_then(|v| v.as_str()) {
         if method != "session/update" {
@@ -53,11 +67,11 @@ fn extract_output_text(
     update: Option<&serde_json::Value>,
 ) -> Option<String> {
     if let Some(text) = update.and_then(|u| u.get("content")).and_then(content_text) {
-        return Some(text);
+        return Some(text).filter(|s| !s.is_empty());
     }
 
     if let Some(text) = params.get("content").and_then(content_text) {
-        return Some(text);
+        return Some(text).filter(|s| !s.is_empty());
     }
 
     None
@@ -164,5 +178,96 @@ mod tests {
 
         let stop = parse_stop_reason_from_result(&line).unwrap();
         assert_eq!(stop, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn parse_jsonrpc_invalid_input_returns_none() {
+        assert!(parse_jsonrpc("not-json").is_none());
+    }
+
+    #[test]
+    fn parse_session_update_supports_flat_content() {
+        let params = json!({
+            "sessionId": "s1",
+            "content": "flat text",
+            "stopReason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        assert_eq!(parsed.output_text.as_deref(), Some("flat text"));
+        assert_eq!(parsed.stop_reason, Some(StopReason::EndTurn));
+        let usage = parsed.usage.expect("usage should be parsed");
+        assert_eq!(usage.input_tokens, 1);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.total_tokens, 3);
+    }
+
+    #[test]
+    fn parse_session_update_prefers_nested_usage_over_flat_usage() {
+        let params = json!({
+            "sessionId": "s1",
+            "usage": {"input_tokens": 9, "output_tokens": 9, "total_tokens": 18},
+            "update": {
+                "sessionUpdate": "usage_update",
+                "usage": {"input_tokens": 4, "output_tokens": 5, "total_tokens": 9}
+            }
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        let usage = parsed.usage.expect("usage should be parsed");
+        assert_eq!(usage.input_tokens, 4);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.total_tokens, 9);
+    }
+
+    #[test]
+    fn parse_session_update_extracts_permission_request() {
+        let params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "permission_request",
+                "permissionId": "perm-1",
+                "description": "write file"
+            }
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        let permission = parsed
+            .permission_request
+            .expect("permission request should be parsed");
+        assert_eq!(permission.permission_id, "perm-1");
+        assert_eq!(permission.description, "write file");
+    }
+
+    #[test]
+    fn parse_session_update_ignores_empty_content() {
+        let params = json!({
+            "sessionId": "s1",
+            "content": ""
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        assert_eq!(parsed.output_text, None);
+    }
+
+    #[test]
+    fn parse_session_update_supports_content_object_and_string() {
+        let object_params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "obj text"}
+            }
+        });
+        let string_params = json!({
+            "sessionId": "s1",
+            "content": "str text"
+        });
+
+        let object_parsed = parse_session_update(&object_params).unwrap();
+        let string_parsed = parse_session_update(&string_params).unwrap();
+        assert_eq!(object_parsed.output_text.as_deref(), Some("obj text"));
+        assert_eq!(string_parsed.output_text.as_deref(), Some("str text"));
     }
 }

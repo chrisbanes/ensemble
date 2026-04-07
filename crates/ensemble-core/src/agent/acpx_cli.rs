@@ -274,11 +274,10 @@ fn parse_session_update_from_message(
         return Ok(None);
     }
 
-    let value = serde_json::to_value(message).map_err(|e| AgentError::ResponseError {
-        reason: format!("failed to encode JSON-RPC message: {e}"),
-    })?;
-
-    Ok(protocol::parse_session_update(&value))
+    Ok(message
+        .params
+        .as_ref()
+        .and_then(protocol::parse_session_update))
 }
 
 fn map_stop_reason(stop_reason: StopReason, usage: Option<TokenUsage>) -> AgentEvent {
