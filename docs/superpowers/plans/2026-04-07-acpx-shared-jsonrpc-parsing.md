@@ -4,7 +4,7 @@
 
 **Goal:** Unify ACP/ACPX message parsing so both direct ACP sessions and the `acpx` CLI runtime correctly handle JSON-RPC `session/update` envelopes and terminal `stopReason` responses.
 
-**Architecture:** Introduce a shared ACP protocol parsing module in `ensemble-core` that normalizes JSON-RPC lines into runtime-friendly signals (output chunks, usage deltas, stop reasons, permission requests). Refactor both `acp_client.rs` and `acpx_cli.rs` to use the same helpers instead of maintaining divergent message-shape assumptions. Keep flat legacy `{"event": ...}` mapping as fallback in `acpx_cli` only for backward compatibility.
+**Architecture:** Introduce a shared ACP protocol parsing module in `ensemble-core` that normalizes JSON-RPC lines into runtime-friendly signals (output chunks, usage deltas, stop reasons, permission requests). Refactor both `acp_client.rs` and `acpx_cli.rs` to use the same helpers instead of maintaining divergent message-shape assumptions. Remove flat legacy `{"event": ...}` parsing from `acpx_cli` so ACP/ACPX transport handling is JSON-RPC-only.
 
 **Tech Stack:** Rust 2021, tokio async process I/O, serde/serde_json, thiserror, tracing, cargo test.
 
@@ -110,19 +110,17 @@ async fn prompt_stream_maps_jsonrpc_updates_and_stop_reason() {
 Run: `rtk cargo test -p ensemble-core prompt_stream_maps_jsonrpc_updates_and_stop_reason -- --exact`
 Expected: FAIL with `AcpxFinalStatusMissing` (no flat terminal event seen).
 
-- [ ] **Step 3: Replace `map_event`-only path with shared parser-first logic**
+- [ ] **Step 3: Replace `map_event` path with strict JSON-RPC parsing**
 
 ```rust
 while let Some(line) = reader.next_line().await? {
-    if let Some(msg) = protocol::parse_jsonrpc(&line) {
-        handle_jsonrpc_message(&msg, &mut saw_terminal_event, &mut on_event).await;
-        continue;
-    }
-
-    // fallback compatibility for legacy flat {"event": ...}
-    match serde_json::from_str::<serde_json::Value>(&line) {
-        Ok(value) => { /* old map_event path */ }
-        Err(_) => on_event(AgentEvent::Malformed { line }).await,
+    match protocol::parse_jsonrpc(&line) {
+        Some(msg) => handle_jsonrpc_message(&msg, &mut saw_terminal_event, &mut on_event).await,
+        None => {
+            return Err(AgentError::ResponseError {
+                reason: format!("invalid JSON-RPC message from acpx: {line}"),
+            });
+        }
     }
 }
 ```
@@ -137,9 +135,9 @@ match stop_reason {
 }
 ```
 
-- [ ] **Step 5: Keep legacy flat-event compatibility tests green**
+- [ ] **Step 5: Remove flat-event parser tests; keep JSON-RPC tests green**
 
-Run: `rtk cargo test -p ensemble-core prompt_stream_maps_output_and_completion_events prompt_stream_maps_jsonrpc_updates_and_stop_reason`
+Run: `rtk cargo test -p ensemble-core prompt_stream_maps_jsonrpc_updates_and_stop_reason`
 Expected: PASS
 
 - [ ] **Step 6: Commit**
@@ -206,11 +204,11 @@ git commit -m "refactor(agent): share ACP message parsing in direct runtime"
 - Modify: `crates/ensemble-core/src/agent/mod.rs` (tests only if needed)
 - Optional docs update: `docs/pipelines.md` (if runtime event wording changed)
 
-- [ ] **Step 1: Add/adjust runtime integration test fixtures to JSON-RPC shape**
+- [ ] **Step 1: Convert runtime integration fixtures to JSON-RPC shape only**
 
 ```rust
-// Replace flat {"event":"..."} fixture in at least one runtime integration test
-// with session/update + result.stopReason payloads.
+// Replace flat {"event":"..."} fixtures with session/update + result.stopReason payloads.
+// Ensure no runtime tests depend on flat event parsing.
 ```
 
 - [ ] **Step 2: Run focused integration tests**
@@ -242,4 +240,3 @@ git commit -m "test(agent): add JSON-RPC regressions for acpx/direct runtimes"
 - Spec coverage: includes shared parsing module, acpx runtime path, direct ACP path, and regression verification.
 - Placeholder scan: no TBD/TODO placeholders in actionable steps; each task contains file paths and commands.
 - Type consistency: shared parser outputs (`ParsedSessionUpdate`, `StopReason`, `TokenUsage`) are reused across both runtimes.
-
