@@ -26,6 +26,33 @@ pub struct RateLimitSnapshot {
     pub reset_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalizeStatus {
+    NotRequired,
+    PendingApproval,
+    InProgress,
+    Succeeded,
+    Failed,
+    SkippedHeadless,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct RepoFinalizeState {
+    pub repo: String,
+    pub mode: String,
+    pub approval_required: bool,
+    pub status: FinalizeStatus,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct IssueFinalizeState {
+    pub issue_identifier: String,
+    pub status: FinalizeStatus,
+    pub repos: Vec<RepoFinalizeState>,
+}
+
 /// The single authoritative in-memory state owned by the orchestrator.
 /// All state mutations are serialized through the orchestrator's event loop.
 #[derive(Debug)]
@@ -52,6 +79,8 @@ pub struct OrchestratorState {
     pub agent_rate_limits: Option<RateLimitSnapshot>,
     /// Active pipeline runs: issue_id -> PipelineRun.
     pub pipeline_runs: HashMap<String, PipelineRun>,
+    /// Finalization state for issues that have finished pipeline execution.
+    pub finalize: HashMap<String, IssueFinalizeState>,
     /// Immutable config snapshot for each active pipeline run.
     pub pipeline_configs: HashMap<String, std::sync::Arc<EnsembleConfig>>,
     /// Timestamp of the last orchestrator poll tick.
@@ -77,6 +106,7 @@ impl OrchestratorState {
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
+            finalize: HashMap::new(),
             pipeline_configs: HashMap::new(),
             last_tick_at: None,
             active_states_lower: Vec::new(),
@@ -202,6 +232,23 @@ impl OrchestratorState {
         self.waiting_on_human.remove(issue_id);
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
+        self.finalize.remove(issue_id);
+    }
+
+    pub fn set_finalize_state(&mut self, issue_id: &str, finalize: IssueFinalizeState) {
+        self.finalize.insert(issue_id.to_string(), finalize);
+    }
+
+    pub fn get_finalize_state(&self, issue_id: &str) -> Option<&IssueFinalizeState> {
+        self.finalize.get(issue_id)
+    }
+
+    pub fn get_finalize_state_mut(&mut self, issue_id: &str) -> Option<&mut IssueFinalizeState> {
+        self.finalize.get_mut(issue_id)
+    }
+
+    pub fn clear_finalize_state(&mut self, issue_id: &str) {
+        self.finalize.remove(issue_id);
     }
 
     /// Update session metadata on a running entry.

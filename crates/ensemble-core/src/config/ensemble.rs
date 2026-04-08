@@ -1959,7 +1959,10 @@ on_failure: Failed
         let config = parse_config(yaml).expect("config should parse");
         let finalize = &config.repos[0].finalize;
         assert!(finalize.enabled);
-        assert_eq!(finalize.mode, crate::workspace::finalize::FinalizeMode::None);
+        assert_eq!(
+            finalize.mode,
+            crate::workspace::finalize::FinalizeMode::None
+        );
         assert!(!finalize.approval_required);
     }
 

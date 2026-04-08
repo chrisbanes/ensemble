@@ -78,6 +78,11 @@ impl WorkspaceManager {
         &self.root
     }
 
+    /// Get configured repositories keyed by derived repo name.
+    pub fn repos(&self) -> &HashMap<String, RepoConfig> {
+        &self.repos
+    }
+
     /// Get the workspace path for a given identifier without creating it.
     /// Returns None if the identifier cannot be sanitized.
     pub fn workspace_path(&self, identifier: &str) -> Option<PathBuf> {
