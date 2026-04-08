@@ -124,6 +124,17 @@ pub struct RepoFinalizeSnapshot {
     pub last_error: Option<String>,
 }
 
+fn finalize_status_str(status: &FinalizeStatus) -> &'static str {
+    match status {
+        FinalizeStatus::NotRequired => "not_required",
+        FinalizeStatus::PendingApproval => "pending_approval",
+        FinalizeStatus::InProgress => "in_progress",
+        FinalizeStatus::Succeeded => "succeeded",
+        FinalizeStatus::Failed => "failed",
+        FinalizeStatus::SkippedHeadless => "skipped_headless",
+    }
+}
+
 /// Workspace path info for issue detail.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WorkspaceInfo {
@@ -264,17 +275,7 @@ pub fn build_issue_snapshot(
     } else if waiting_entry.is_some() {
         "waiting_on_human".to_string()
     } else if let Some((_, finalize)) = finalize_entry {
-        format!(
-            "finalize_{}",
-            match finalize.status {
-                FinalizeStatus::NotRequired => "not_required",
-                FinalizeStatus::PendingApproval => "pending_approval",
-                FinalizeStatus::InProgress => "in_progress",
-                FinalizeStatus::Succeeded => "succeeded",
-                FinalizeStatus::Failed => "failed",
-                FinalizeStatus::SkippedHeadless => "skipped_headless",
-            }
-        )
+        format!("finalize_{}", finalize_status_str(&finalize.status))
     } else {
         "retrying".to_string()
     };
@@ -324,15 +325,7 @@ pub fn build_issue_snapshot(
     let last_error = retry_entry.and_then(|e| e.error.clone());
     let finalize = if let Some((_, finalize_state)) = finalize_entry {
         FinalizeSnapshot {
-            status: match finalize_state.status {
-                FinalizeStatus::NotRequired => "not_required",
-                FinalizeStatus::PendingApproval => "pending_approval",
-                FinalizeStatus::InProgress => "in_progress",
-                FinalizeStatus::Succeeded => "succeeded",
-                FinalizeStatus::Failed => "failed",
-                FinalizeStatus::SkippedHeadless => "skipped_headless",
-            }
-            .to_string(),
+            status: finalize_status_str(&finalize_state.status).to_string(),
             repos: finalize_state
                 .repos
                 .iter()
@@ -340,15 +333,7 @@ pub fn build_issue_snapshot(
                     repo: repo.repo.clone(),
                     mode: repo.mode.clone(),
                     approval_required: repo.approval_required,
-                    status: match repo.status {
-                        FinalizeStatus::NotRequired => "not_required",
-                        FinalizeStatus::PendingApproval => "pending_approval",
-                        FinalizeStatus::InProgress => "in_progress",
-                        FinalizeStatus::Succeeded => "succeeded",
-                        FinalizeStatus::Failed => "failed",
-                        FinalizeStatus::SkippedHeadless => "skipped_headless",
-                    }
-                    .to_string(),
+                    status: finalize_status_str(&repo.status).to_string(),
                     last_error: repo.last_error.clone(),
                 })
                 .collect(),

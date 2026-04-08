@@ -463,7 +463,7 @@ pub async fn post_finalize_retry(
             repo.status = if repo.approval_required {
                 FinalizeStatus::PendingApproval
             } else {
-                FinalizeStatus::Succeeded
+                FinalizeStatus::InProgress
             };
             changed = true;
         }
@@ -477,17 +477,21 @@ pub async fn post_finalize_retry(
         );
     }
 
-    if finalize
+    finalize.status = if finalize
         .repos
         .iter()
         .all(|repo| repo.status == FinalizeStatus::Succeeded)
     {
-        finalize.status = FinalizeStatus::Succeeded;
-        lock.completed.insert(issue_id.clone());
-        lock.release_claim(&issue_id);
+        FinalizeStatus::Succeeded
+    } else if finalize
+        .repos
+        .iter()
+        .any(|repo| repo.status == FinalizeStatus::InProgress)
+    {
+        FinalizeStatus::InProgress
     } else {
-        finalize.status = FinalizeStatus::PendingApproval;
-    }
+        FinalizeStatus::PendingApproval
+    };
 
     state.refresh_requested.notify_one();
 
@@ -658,7 +662,9 @@ mod tests {
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::StepConfig;
-    use crate::orchestrator::state::OrchestratorState;
+    use crate::orchestrator::state::{
+        FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
+    };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
@@ -693,6 +699,25 @@ mod tests {
             find_issue_presence(&state, "missing#1"),
             IssuePresence::Missing
         ));
+
+        state.set_finalize_state(
+            "NODE_789",
+            IssueFinalizeState {
+                issue_identifier: "my-repo#777".to_string(),
+                status: FinalizeStatus::Failed,
+                repos: vec![RepoFinalizeState {
+                    repo: "repo".to_string(),
+                    mode: "push".to_string(),
+                    approval_required: false,
+                    status: FinalizeStatus::Failed,
+                    last_error: Some("push failed".to_string()),
+                }],
+            },
+        );
+        match find_issue_presence(&state, "my-repo#777") {
+            IssuePresence::Finalizing(issue_id) => assert_eq!(issue_id, "NODE_789"),
+            other => panic!("expected finalizing issue, got {other:?}"),
+        }
     }
 
     fn test_issue() -> Issue {
@@ -775,6 +800,50 @@ mod tests {
         app_state
     }
 
+    fn build_app_state_with_finalize_pending() -> AppState {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.set_finalize_state(
+            "NODE_888",
+            IssueFinalizeState {
+                issue_identifier: "my-repo#888".to_string(),
+                status: FinalizeStatus::PendingApproval,
+                repos: vec![RepoFinalizeState {
+                    repo: "repo".to_string(),
+                    mode: "push".to_string(),
+                    approval_required: true,
+                    status: FinalizeStatus::PendingApproval,
+                    last_error: None,
+                }],
+            },
+        );
+
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
+    }
+
+    fn build_app_state_with_finalize_failed() -> AppState {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.set_finalize_state(
+            "NODE_999",
+            IssueFinalizeState {
+                issue_identifier: "my-repo#999".to_string(),
+                status: FinalizeStatus::Failed,
+                repos: vec![RepoFinalizeState {
+                    repo: "repo".to_string(),
+                    mode: "push".to_string(),
+                    approval_required: false,
+                    status: FinalizeStatus::Failed,
+                    last_error: Some("push failed".to_string()),
+                }],
+            },
+        );
+
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_stop_running_issue() {
@@ -813,6 +882,34 @@ mod tests {
         let response = post_stop(State(state), Path("nonexistent#999".to_string())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_finalize_approve_transitions_pending_to_succeeded() {
+        let state = build_app_state_with_finalize_pending();
+        let response =
+            post_finalize_approve(State(state.clone()), Path("my-repo#888".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.get_finalize_state("NODE_888").is_none());
+        assert!(lock.completed.contains("NODE_888"));
+    }
+
+    #[tokio::test]
+    async fn test_finalize_retry_sets_repo_to_in_progress() {
+        let state = build_app_state_with_finalize_failed();
+        let response =
+            post_finalize_retry(State(state.clone()), Path("my-repo#999".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let lock = state.orchestrator_state.read().await;
+        let finalize = lock.get_finalize_state("NODE_999").unwrap();
+        assert_eq!(finalize.status, FinalizeStatus::InProgress);
+        assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
+        assert!(finalize.repos[0].last_error.is_none());
     }
 
     #[tokio::test]
