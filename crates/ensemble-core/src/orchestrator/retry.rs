@@ -109,6 +109,8 @@ pub fn next_attempt(current: Option<u32>) -> u32 {
 }
 
 fn normalize_reason(reason: &str) -> &str {
+    // Returns either the original borrowed input or a static fallback.
+    // Callers must treat the result as borrowed data and avoid assuming ownership.
     if reason.trim().is_empty() {
         "unknown"
     } else {

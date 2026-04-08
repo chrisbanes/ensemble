@@ -1,4 +1,7 @@
 use crate::error::WorktreeError;
+use crate::observability::events_contract::{
+    WORKSPACE_GIT_COMMAND_FINISHED, WORKSPACE_GIT_COMMAND_STARTED,
+};
 use crate::observability::redaction::truncate_for_log;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -43,7 +46,7 @@ async fn run_git(
 ) -> Result<std::process::Output, WorktreeError> {
     let command = command_label.into();
     trace!(
-        event = "workspace.git_command_started",
+        event = WORKSPACE_GIT_COMMAND_STARTED,
         repo_path = repo_path,
         command = %command,
         "starting git command"
@@ -63,7 +66,7 @@ async fn run_git(
         })?;
 
     trace!(
-        event = "workspace.git_command_finished",
+        event = WORKSPACE_GIT_COMMAND_FINISHED,
         repo_path = repo_path,
         command = %command,
         success = output.status.success(),

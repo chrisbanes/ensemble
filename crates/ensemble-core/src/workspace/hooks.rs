@@ -59,7 +59,6 @@ pub async fn run_hook(
                     event = WORKSPACE_HOOK_FINISHED,
                     hook = hook_name,
                     duration_ms = elapsed_ms(started_at),
-                    detail = %format_hook_log(hook_name, elapsed_ms(started_at), "ok"),
                     "hook completed successfully"
                 );
                 Ok(())
@@ -79,7 +78,6 @@ pub async fn run_hook(
                     event = WORKSPACE_HOOK_FAILED,
                     hook = hook_name,
                     duration_ms = elapsed_ms(started_at),
-                    detail = %format_hook_log(hook_name, elapsed_ms(started_at), "failed"),
                     %reason,
                     "hook failed"
                 );
@@ -118,10 +116,6 @@ pub async fn run_hook(
             })
         }
     }
-}
-
-fn format_hook_log(hook_name: &str, duration_ms: u128, outcome: &str) -> String {
-    format!("hook={hook_name} duration_ms={duration_ms} outcome={outcome}")
 }
 
 fn preferred_shell() -> &'static str {
@@ -199,13 +193,6 @@ mod tests {
 
     fn setup() -> TempDir {
         TempDir::new().unwrap()
-    }
-
-    #[test]
-    fn hook_log_includes_duration_and_outcome() {
-        let line = format_hook_log("after_run", 42, "ok");
-        assert!(line.contains("duration_ms=42"));
-        assert!(line.contains("outcome=ok"));
     }
 
     #[tokio::test]
