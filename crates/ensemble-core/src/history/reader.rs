@@ -12,6 +12,9 @@ pub struct HistoryQuery {
     /// Filter to records that traversed a specific step name.
     pub step: Option<String>,
     /// Cursor-based pagination: skip records before this 0-based index.
+    ///
+    /// This cursor is positional, not stable. If new records are appended between
+    /// page fetches, later pages may include duplicates or skip entries.
     pub cursor: Option<usize>,
     /// Maximum number of records to return (default: 50).
     pub limit: Option<usize>,
@@ -29,6 +32,10 @@ pub struct HistoryResponse {
 ///
 /// Returns an empty response if the file does not exist.
 /// Malformed lines are silently skipped.
+///
+/// Current implementation loads the full file into memory before filtering.
+/// This is acceptable for v1 and small/medium logs, but long-running deployments
+/// should consider log rotation or indexed/streaming reads.
 pub async fn read_history(
     path: &Path,
     query: &HistoryQuery,
