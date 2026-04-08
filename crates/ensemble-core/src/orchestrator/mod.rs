@@ -21,8 +21,10 @@ use crate::agent::cancellation::{
 };
 use crate::agent::events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
-use crate::config::ensemble::EnsembleConfig;
+use crate::config::ensemble::{default_workspace_root, EnsembleConfig};
 use crate::error::{AgentError, EnsembleError};
+use crate::history::model::{HistoryRecord, TokenTotals};
+use crate::history::writer::HistoryWriter;
 use crate::interaction::{InteractionStatus, InteractionStore};
 use crate::observability::events_contract::{
     elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
@@ -30,7 +32,7 @@ use crate::observability::events_contract::{
     TRACKER_TRANSITION_SUCCEEDED,
 };
 use crate::pipeline::dag::build_dag;
-use crate::pipeline::engine::{PipelineAction, PipelineRun};
+use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
 use crate::pipeline::verdict::resolve_verdict;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
@@ -851,6 +853,21 @@ impl Orchestrator {
                         }
                         PipelineAction::Succeeded => {
                             info!(issue_id = %issue_id, "pipeline succeeded");
+                            let completed_at = Utc::now();
+                            let history_record = state
+                                .running
+                                .get(issue_id)
+                                .zip(state.get_pipeline_run(issue_id))
+                                .map(|(entry, run)| {
+                                    self.build_history_record(
+                                        issue_id,
+                                        "succeeded",
+                                        None,
+                                        entry,
+                                        run,
+                                        completed_at,
+                                    )
+                                });
                             // Set tracker to on_success state
                             if self.tracker.supports_writes() {
                                 if let Err(e) = self
@@ -867,6 +884,11 @@ impl Orchestrator {
                             state.release_claim(issue_id);
                             state.remove_pipeline_run(issue_id);
                             state.completed.insert(issue_id.to_string());
+
+                            drop(state);
+                            if let Some(record) = history_record {
+                                self.append_history_record(&config, record).await;
+                            }
                         }
                         PipelineAction::Failed { step, reason } => {
                             warn!(
@@ -875,6 +897,22 @@ impl Orchestrator {
                                 reason = %reason,
                                 "pipeline failed"
                             );
+                            let completed_at = Utc::now();
+                            let history_record = state
+                                .running
+                                .get(issue_id)
+                                .zip(state.get_pipeline_run(issue_id))
+                                .map(|(entry, run)| {
+                                    self.build_history_record(
+                                        issue_id,
+                                        "failed",
+                                        Some(reason.clone()),
+                                        entry,
+                                        run,
+                                        completed_at,
+                                    )
+                                });
+                            let mut final_failure = false;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                                 let retry_scheduled = schedule_failure_retry(
@@ -886,6 +924,7 @@ impl Orchestrator {
                                     config.max_cycles,
                                     &reason,
                                 );
+                                final_failure = retry_scheduled.is_none();
                                 if retry_scheduled.is_none() && self.tracker.supports_writes() {
                                     if let Err(e) = self
                                         .tracker
@@ -897,6 +936,13 @@ impl Orchestrator {
                                 }
                             }
                             state.remove_pipeline_run(issue_id);
+
+                            drop(state);
+                            if final_failure {
+                                if let Some(record) = history_record {
+                                    self.append_history_record(&config, record).await;
+                                }
+                            }
                         }
                         PipelineAction::BlockedOnHuman { .. } => {}
                         PipelineAction::Waiting => {
@@ -962,6 +1008,23 @@ impl Orchestrator {
                     run.step_failed(step_name, error.clone());
                 }
 
+                let completed_at = Utc::now();
+                let history_record = state
+                    .running
+                    .get(issue_id)
+                    .zip(state.get_pipeline_run(issue_id))
+                    .map(|(entry, run)| {
+                        self.build_history_record(
+                            issue_id,
+                            "failed",
+                            Some(error.clone()),
+                            entry,
+                            run,
+                            completed_at,
+                        )
+                    });
+                let mut final_failure = false;
+
                 if let Some(entry) = state.remove_running(issue_id) {
                     state.add_runtime_seconds(&entry);
                     let retry_scheduled = schedule_failure_retry(
@@ -973,6 +1036,7 @@ impl Orchestrator {
                         config.max_cycles,
                         &error,
                     );
+                    final_failure = retry_scheduled.is_none();
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
                         if let Err(e) = self
                             .tracker
@@ -984,6 +1048,13 @@ impl Orchestrator {
                     }
                 }
                 state.remove_pipeline_run(issue_id);
+
+                drop(state);
+                if final_failure {
+                    if let Some(record) = history_record {
+                        self.append_history_record(&config, record).await;
+                    }
+                }
             }
         }
     }
@@ -1118,12 +1189,75 @@ impl Orchestrator {
     }
 
     fn pipeline_has_running_steps(run: &PipelineRun) -> bool {
-        run.step_states.values().any(|step_state| {
-            matches!(
-                step_state,
-                crate::pipeline::engine::StepState::Running { .. }
-            )
-        })
+        run.step_states
+            .values()
+            .any(|step_state| matches!(step_state, StepState::Running { .. }))
+    }
+
+    fn build_history_record(
+        &self,
+        issue_id: &str,
+        outcome: &str,
+        last_error: Option<String>,
+        running_entry: &crate::tracker::model::RunningEntry,
+        run: &PipelineRun,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> HistoryRecord {
+        let mut steps_traversed: Vec<String> = run
+            .step_states
+            .iter()
+            .filter_map(|(step_name, step_state)| {
+                if matches!(step_state, StepState::Pending) {
+                    None
+                } else {
+                    Some(step_name.clone())
+                }
+            })
+            .collect();
+        steps_traversed.sort();
+
+        let duration_seconds = completed_at
+            .signed_duration_since(running_entry.started_at)
+            .num_seconds()
+            .max(0) as u64;
+
+        let workspace_path = self
+            .workspace_mgr
+            .workspace_path(&running_entry.identifier)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+
+        HistoryRecord {
+            issue_identifier: running_entry.identifier.clone(),
+            issue_id: issue_id.to_string(),
+            outcome: outcome.to_string(),
+            steps_traversed,
+            attempts: running_entry.retry_attempt.unwrap_or(0).saturating_add(1),
+            tokens: TokenTotals {
+                input_tokens: running_entry.agent_input_tokens,
+                output_tokens: running_entry.agent_output_tokens,
+                total_tokens: running_entry.agent_total_tokens,
+            },
+            duration_seconds,
+            started_at: running_entry.started_at,
+            completed_at,
+            last_error,
+            verdict: None,
+            workspace_path,
+        }
+    }
+
+    async fn append_history_record(&self, config: &EnsembleConfig, record: HistoryRecord) {
+        let history_path = std::path::PathBuf::from(workspace_root_from_config(config))
+            .join("ensemble_history.jsonl");
+        let writer = HistoryWriter::new(history_path);
+        if let Err(error) = writer.append(&record).await {
+            warn!(
+                issue_id = %record.issue_id,
+                error = %error,
+                "failed to append history record"
+            );
+        }
     }
 
     async fn restore_blocked_issue_state(
@@ -1609,6 +1743,14 @@ fn sanitize_interaction_fragment(value: &str) -> String {
         .collect()
 }
 
+fn workspace_root_from_config(config: &EnsembleConfig) -> String {
+    config
+        .workspace
+        .root
+        .clone()
+        .unwrap_or_else(default_workspace_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1888,6 +2030,60 @@ agent:
             state.completed.contains("1") || state.retry_attempts.contains_key("1"),
             "should be completed or retrying"
         );
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_writes_history_record_on_completion() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut raw_config = make_config();
+        raw_config.workspace.root = Some(dir.path().display().to_string());
+
+        let config = Arc::new(RwLock::new(raw_config));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit("1", "build", WorkerResult::Success)
+            .await;
+
+        let history_path = dir.path().join("ensemble_history.jsonl");
+        let contents = tokio::fs::read_to_string(&history_path).await.unwrap();
+        let record = contents
+            .lines()
+            .map(|line| serde_json::from_str::<crate::history::model::HistoryRecord>(line).unwrap())
+            .next()
+            .unwrap();
+
+        assert_eq!(record.issue_id, "1");
+        assert_eq!(record.outcome, "succeeded");
     }
 
     #[tokio::test]
