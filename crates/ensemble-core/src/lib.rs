@@ -8,5 +8,6 @@ pub mod observability;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod tracker;
+pub mod timeline;
 pub mod ui;
 pub mod workspace;
