@@ -36,6 +36,7 @@ use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
 use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
+use crate::workspace::finalize::FinalizeMode;
 use crate::workspace::manager::WorkspaceManager;
 
 use futures_util::FutureExt;
@@ -44,7 +45,9 @@ use retry::{current_time_ms, get_due_retries, next_attempt, schedule_failure_ret
 use scheduler::{
     has_available_slots, is_dispatch_eligible, is_resume_dispatch_eligible, sort_for_dispatch,
 };
-use state::{OrchestratorState, WaitingOnHumanEntry};
+use state::{
+    FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState, WaitingOnHumanEntry,
+};
 
 struct StepDispatchContext<'a> {
     step_name: &'a str,
@@ -919,6 +922,13 @@ impl Orchestrator {
                         }
                         PipelineAction::Succeeded => {
                             info!(issue_id = %issue_id, "pipeline succeeded");
+                            let issue_identifier = issue_snapshot
+                                .as_ref()
+                                .map(|issue| issue.identifier.clone())
+                                .unwrap_or_else(|| issue_id.to_string());
+                            let finalize_state =
+                                self.run_finalize_phase(&issue_identifier, &config).await;
+
                             let completed_at = Utc::now();
                             let history_record = state
                                 .running
@@ -934,26 +944,35 @@ impl Orchestrator {
                                         completed_at,
                                     )
                                 });
-                            // Set tracker to on_success state
-                            if self.tracker.supports_writes() {
-                                if let Err(e) = self
-                                    .tracker
-                                    .set_issue_state(issue_id, &config.on_success)
-                                    .await
-                                {
-                                    warn!(issue_id = %issue_id, error = %e, "failed to set tracker success state");
-                                }
-                            }
+
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                             }
-                            state.release_claim(issue_id);
-                            state.remove_pipeline_run(issue_id);
-                            state.completed.insert(issue_id.to_string());
 
-                            drop(state);
-                            if let Some(record) = history_record {
-                                self.append_history_record(record).await;
+                            if finalize_state.status == FinalizeStatus::Succeeded
+                                || finalize_state.status == FinalizeStatus::NotRequired
+                            {
+                                if self.tracker.supports_writes() {
+                                    if let Err(e) = self
+                                        .tracker
+                                        .set_issue_state(issue_id, &config.on_success)
+                                        .await
+                                    {
+                                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker success state");
+                                    }
+                                }
+                                state.release_claim(issue_id);
+                                state.remove_pipeline_run(issue_id);
+                                state.completed.insert(issue_id.to_string());
+                                state.clear_finalize_state(issue_id);
+
+                                drop(state);
+                                if let Some(record) = history_record {
+                                    self.append_history_record(record).await;
+                                }
+                            } else {
+                                state.set_finalize_state(issue_id, finalize_state);
+                                state.remove_pipeline_run(issue_id);
                             }
                         }
                         PipelineAction::Failed { step, reason } => {
@@ -1250,6 +1269,211 @@ impl Orchestrator {
                 "failed to clear interaction waiting state during waiting-issue cleanup"
             );
         }
+    }
+
+    fn is_headless_runtime() -> bool {
+        std::env::var("ENSEMBLE_HEADLESS")
+            .map(|value| value == "1")
+            .unwrap_or(false)
+    }
+
+    async fn run_finalize_phase(
+        &self,
+        issue_identifier: &str,
+        _config: &EnsembleConfig,
+    ) -> IssueFinalizeState {
+        let mut repos = Vec::new();
+        let headless = Self::is_headless_runtime();
+
+        let configured_repos = self.workspace_mgr.repos();
+        let requires_workspace = configured_repos
+            .values()
+            .any(|repo| repo.finalize.enabled && !matches!(repo.finalize.mode, FinalizeMode::None));
+
+        let prepared_workspace = if requires_workspace {
+            match self.workspace_mgr.prepare_workspace(issue_identifier).await {
+                Ok(workspace) => Some(workspace),
+                Err(error) => {
+                    return IssueFinalizeState {
+                        issue_identifier: issue_identifier.to_string(),
+                        status: FinalizeStatus::Failed,
+                        repos: vec![RepoFinalizeState {
+                            repo: "workspace".to_string(),
+                            mode: "prepare".to_string(),
+                            approval_required: false,
+                            status: FinalizeStatus::Failed,
+                            last_error: Some(error.to_string()),
+                        }],
+                    };
+                }
+            }
+        } else {
+            None
+        };
+
+        for (repo_name, repo_config) in configured_repos {
+            if !repo_config.finalize.enabled
+                || matches!(repo_config.finalize.mode, FinalizeMode::None)
+            {
+                continue;
+            }
+
+            let mode_name = match repo_config.finalize.mode {
+                FinalizeMode::None => "none",
+                FinalizeMode::Push => "push",
+                FinalizeMode::PushAndPr => "push_and_pr",
+            }
+            .to_string();
+
+            if repo_config.finalize.approval_required {
+                let status = if headless {
+                    FinalizeStatus::SkippedHeadless
+                } else {
+                    FinalizeStatus::PendingApproval
+                };
+                repos.push(RepoFinalizeState {
+                    repo: repo_name.clone(),
+                    mode: mode_name,
+                    approval_required: true,
+                    status,
+                    last_error: None,
+                });
+                continue;
+            }
+
+            let worktree_path = prepared_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.worktrees.get(repo_name))
+                .map(|wt| wt.path.clone());
+
+            let Some(worktree_path) = worktree_path else {
+                repos.push(RepoFinalizeState {
+                    repo: repo_name.clone(),
+                    mode: mode_name,
+                    approval_required: false,
+                    status: FinalizeStatus::Failed,
+                    last_error: Some("worktree not found for repo".to_string()),
+                });
+                continue;
+            };
+
+            let finalize_result = self
+                .execute_finalize_action(
+                    &worktree_path,
+                    &repo_config.git_remote,
+                    &repo_config.branch,
+                    &repo_config.finalize.mode,
+                )
+                .await;
+
+            match finalize_result {
+                Ok(()) => repos.push(RepoFinalizeState {
+                    repo: repo_name.clone(),
+                    mode: mode_name,
+                    approval_required: false,
+                    status: FinalizeStatus::Succeeded,
+                    last_error: None,
+                }),
+                Err(error) => repos.push(RepoFinalizeState {
+                    repo: repo_name.clone(),
+                    mode: mode_name,
+                    approval_required: false,
+                    status: FinalizeStatus::Failed,
+                    last_error: Some(error),
+                }),
+            }
+        }
+
+        let status = if repos.is_empty() {
+            FinalizeStatus::NotRequired
+        } else if repos
+            .iter()
+            .any(|repo| repo.status == FinalizeStatus::Failed)
+        {
+            FinalizeStatus::Failed
+        } else if repos
+            .iter()
+            .any(|repo| repo.status == FinalizeStatus::PendingApproval)
+        {
+            FinalizeStatus::PendingApproval
+        } else if repos
+            .iter()
+            .any(|repo| repo.status == FinalizeStatus::SkippedHeadless)
+        {
+            FinalizeStatus::SkippedHeadless
+        } else {
+            FinalizeStatus::Succeeded
+        };
+
+        IssueFinalizeState {
+            issue_identifier: issue_identifier.to_string(),
+            status,
+            repos,
+        }
+    }
+
+    async fn execute_finalize_action(
+        &self,
+        repo_path: &std::path::Path,
+        remote: &str,
+        base_branch: &str,
+        mode: &FinalizeMode,
+    ) -> Result<(), String> {
+        let push_output = tokio::process::Command::new("git")
+            .arg("push")
+            .arg(remote)
+            .arg("HEAD")
+            .current_dir(repo_path)
+            .output()
+            .await
+            .map_err(|error| format!("failed to run git push: {error}"))?;
+        if !push_output.status.success() {
+            return Err(format!(
+                "git push failed: {}",
+                String::from_utf8_lossy(&push_output.stderr)
+            ));
+        }
+
+        if matches!(mode, FinalizeMode::PushAndPr) {
+            let branch_output = tokio::process::Command::new("git")
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(repo_path)
+                .output()
+                .await
+                .map_err(|error| format!("failed to resolve branch: {error}"))?;
+            if !branch_output.status.success() {
+                return Err(format!(
+                    "failed to resolve current branch: {}",
+                    String::from_utf8_lossy(&branch_output.stderr)
+                ));
+            }
+            let current_branch = String::from_utf8_lossy(&branch_output.stdout)
+                .trim()
+                .to_string();
+
+            let pr_output = tokio::process::Command::new("gh")
+                .args([
+                    "pr",
+                    "create",
+                    "--fill",
+                    "--head",
+                    &current_branch,
+                    "--base",
+                    base_branch,
+                ])
+                .current_dir(repo_path)
+                .output()
+                .await
+                .map_err(|error| format!("failed to run gh pr create: {error}"))?;
+            if !pr_output.status.success() {
+                return Err(format!(
+                    "gh pr create failed: {}",
+                    String::from_utf8_lossy(&pr_output.stderr)
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn pipeline_has_running_steps(run: &PipelineRun) -> bool {

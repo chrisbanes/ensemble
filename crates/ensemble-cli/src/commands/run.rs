@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use ensemble_core::api::bootstrap::{
     build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
@@ -77,6 +77,28 @@ pub async fn execute(args: RunArgs) -> ExitCode {
             max_concurrent = config.concurrency.max_concurrent_agents,
             "config loaded successfully"
         );
+    }
+
+    // Mark this runtime as headless so finalize policies can adapt.
+    std::env::set_var("ENSEMBLE_HEADLESS", "1");
+
+    {
+        let mut document_state = prepared
+            .app_state
+            .config_runtime
+            .document_state
+            .write()
+            .await;
+        if let Some(config_guard) = document_state.active_config.as_mut() {
+            for repo in &mut config_guard.repos {
+                if repo.finalize.enabled && repo.finalize.approval_required {
+                    warn!(
+                        repo_path = %repo.path,
+                        "approval-required finalize configured in headless mode; finalize will be skipped"
+                    );
+                }
+            }
+        }
     }
 
     match start_or_replace_registered_orchestrator(&prepared.app_state).await {
