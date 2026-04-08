@@ -6,6 +6,7 @@ pub mod state;
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,6 +71,8 @@ pub struct Orchestrator {
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
 }
+
+static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 pub struct OrchestratorRuntimeParts {
     pub state: Arc<RwLock<OrchestratorState>>,
@@ -143,6 +146,10 @@ impl Orchestrator {
 
     /// Run the orchestrator main loop.
     pub async fn run(&mut self) {
+        let run_id = new_run_id();
+        let run_span = tracing::info_span!("ensemble_run", run_id = %run_id, mode = "orchestrator");
+        let _run_guard = run_span.enter();
+
         // Initialize state from config
         {
             let config = self.config.read().await;
@@ -1504,6 +1511,12 @@ where
     }
 }
 
+fn new_run_id() -> String {
+    let millis = Utc::now().timestamp_millis();
+    let seq = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("run-{millis}-{seq}")
+}
+
 fn build_interaction_request(
     issue: &Issue,
     context: InteractionRequestContext,
@@ -1729,6 +1742,13 @@ agent:
   session_mode: code
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    #[test]
+    fn run_id_has_expected_prefix() {
+        let run_id = new_run_id();
+        assert!(run_id.starts_with("run-"));
+        assert!(run_id.len() > 8);
     }
 
     #[tokio::test]
