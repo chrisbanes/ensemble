@@ -169,6 +169,8 @@ async fn prepare_orchestrator_runtime(
             workspace_mgr,
             refresh_requested: Arc::clone(&app_state.refresh_requested),
             cancellation_registry: Arc::clone(&app_state.cancellation_registry),
+            event_bus: app_state.event_bus.clone(),
+            workspace_root: PathBuf::from(&app_state.workspace_root),
         },
         &config_dir,
         shutdown_rx,

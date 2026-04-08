@@ -2,7 +2,7 @@ use crate::agent::cancellation::CancellationRegistry;
 use crate::api::interactions;
 use crate::api::{
     config_edit_handler, config_handler, controls, conversation, fs_handler, handlers,
-    history_handler, ws,
+    history_handler, timeline_handler, ws,
 };
 use crate::config::draft::ConfigDocumentState;
 use crate::observability::events::EventBus;
@@ -135,6 +135,10 @@ pub fn create_api_router(state: AppState) -> Router {
         .route(
             "/{identifier}/conversation/{index}",
             get(conversation::get_conversation_message),
+        )
+        .route(
+            "/{identifier}/timeline",
+            get(timeline_handler::get_timeline),
         )
         .route("/{identifier}/stop", post(controls::post_stop))
         .route("/{identifier}/retry", post(controls::post_retry))

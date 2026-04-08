@@ -50,6 +50,7 @@ pub struct BlockerRef {
 pub struct RunningEntry {
     pub issue_id: String,
     pub identifier: String,
+    pub run_id: Option<String>,
     pub issue: Issue,
     pub session_id: Option<String>,
     pub agent_pid: Option<String>,

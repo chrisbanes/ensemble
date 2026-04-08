@@ -1,3 +1,4 @@
+use crate::timeline::model::TimelineEventRecord;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::broadcast;
@@ -106,6 +107,146 @@ impl PipelineEvent {
             | Self::Complete { timestamp, .. } => *timestamp,
         }
     }
+
+    pub fn to_timeline_record(&self, run_id: &str, sequence: u64) -> TimelineEventRecord {
+        match self {
+            Self::SessionStarted {
+                issue_identifier,
+                timestamp,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "session_started".to_string(),
+                step_name: None,
+                attempt: 1,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::StepStarted {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+                ..
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "step_started".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt: 1,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::StepCompleted {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+                verdict,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "step_completed".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt: 1,
+                detail: detail.clone(),
+                verdict: verdict.clone(),
+                tool_name: None,
+            },
+            Self::TurnCompleted {
+                issue_identifier,
+                timestamp,
+                detail,
+                ..
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "turn_completed".to_string(),
+                step_name: None,
+                attempt: 1,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::ToolCall {
+                issue_identifier,
+                timestamp,
+                tool_name,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "tool_call".to_string(),
+                step_name: None,
+                attempt: 1,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: Some(tool_name.clone()),
+            },
+            Self::Error {
+                issue_identifier,
+                timestamp,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "error".to_string(),
+                step_name: None,
+                attempt: 1,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::RetryScheduled {
+                issue_identifier,
+                timestamp,
+                detail,
+                attempt,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "retry_scheduled".to_string(),
+                step_name: None,
+                attempt: *attempt,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::Complete {
+                issue_identifier,
+                timestamp,
+                outcome,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "complete".to_string(),
+                step_name: None,
+                attempt: 1,
+                detail: outcome.clone(),
+                verdict: Some(outcome.clone()),
+                tool_name: None,
+            },
+        }
+    }
 }
 
 const EVENT_BUS_CAPACITY: usize = 1024;
@@ -172,5 +313,109 @@ mod tests {
             detail: "ls".into(),
         };
         assert_eq!(event.issue_identifier(), "MT-99");
+    }
+
+    #[test]
+    fn pipeline_event_maps_to_timeline_record_with_run_and_sequence() {
+        let event = PipelineEvent::RetryScheduled {
+            issue_identifier: "repo#1".into(),
+            timestamp: Utc::now(),
+            attempt: 2,
+            detail: "retry".into(),
+        };
+
+        let record = event.to_timeline_record("run-1", 7);
+        assert_eq!(record.run_id, "run-1");
+        assert_eq!(record.sequence, 7);
+        assert_eq!(record.attempt, 2);
+        assert_eq!(record.event_type, "retry_scheduled");
+    }
+
+    #[test]
+    fn all_pipeline_events_map_to_timeline_record() {
+        let ts = Utc::now();
+
+        let session_started = PipelineEvent::SessionStarted {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            detail: "session started".into(),
+        };
+        let session_record = session_started.to_timeline_record("run-1", 1);
+        assert_eq!(session_record.event_type, "session_started");
+        assert_eq!(session_record.run_id, "run-1");
+        assert_eq!(session_record.sequence, 1);
+
+        let step_started = PipelineEvent::StepStarted {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            step_name: "build".into(),
+            agent_name: "agent-1".into(),
+            detail: "step started".into(),
+        };
+        let step_record = step_started.to_timeline_record("run-1", 2);
+        assert_eq!(step_record.event_type, "step_started");
+        assert_eq!(step_record.step_name, Some("build".into()));
+
+        let step_completed = PipelineEvent::StepCompleted {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            step_name: "build".into(),
+            detail: "step completed".into(),
+            verdict: Some("approved".into()),
+        };
+        let completed_record = step_completed.to_timeline_record("run-1", 3);
+        assert_eq!(completed_record.event_type, "step_completed");
+        assert_eq!(completed_record.verdict, Some("approved".into()));
+
+        let turn_completed = PipelineEvent::TurnCompleted {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            turn: 2,
+            detail: "turn completed".into(),
+            conversation_index: Some(1),
+            tokens_delta: TokensDelta {
+                input: 100,
+                output: 200,
+            },
+        };
+        let turn_record = turn_completed.to_timeline_record("run-1", 4);
+        assert_eq!(turn_record.event_type, "turn_completed");
+
+        let tool_call = PipelineEvent::ToolCall {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            tool_name: "bash".into(),
+            detail: "ls".into(),
+        };
+        let tool_record = tool_call.to_timeline_record("run-1", 5);
+        assert_eq!(tool_record.event_type, "tool_call");
+        assert_eq!(tool_record.tool_name, Some("bash".into()));
+
+        let error_event = PipelineEvent::Error {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            detail: "something failed".into(),
+        };
+        let error_record = error_event.to_timeline_record("run-1", 6);
+        assert_eq!(error_record.event_type, "error");
+
+        let complete = PipelineEvent::Complete {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            outcome: "succeeded".into(),
+        };
+        let complete_record = complete.to_timeline_record("run-1", 7);
+        assert_eq!(complete_record.event_type, "complete");
+        assert_eq!(complete_record.detail, "succeeded");
+
+        let retry = PipelineEvent::RetryScheduled {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            attempt: 3,
+            detail: "retrying".into(),
+        };
+        let retry_record = retry.to_timeline_record("run-1", 8);
+        assert_eq!(retry_record.event_type, "retry_scheduled");
+        assert_eq!(retry_record.attempt, 3);
     }
 }

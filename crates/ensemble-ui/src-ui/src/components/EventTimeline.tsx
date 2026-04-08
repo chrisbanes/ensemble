@@ -1,5 +1,6 @@
 import type { WsEventData } from "@/ws-types";
 import { cn } from "@/lib/utils";
+import { Badge } from "@/components/ui/badge";
 
 interface EventTimelineProps {
   events: WsEventData[];
@@ -60,8 +61,16 @@ export default function EventTimeline({ events, live, onViewConversation }: Even
                       </span>
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="text-sm">
+                      <div className="text-sm flex items-center gap-2 flex-wrap">
                         <span className="font-medium">{event.type}</span>
+                        {event.stepName && (
+                          <span className="text-xs text-muted-foreground">step: {event.stepName}</span>
+                        )}
+                        {(event.attempt ?? 1) > 1 && (
+                          <Badge variant="secondary" className="bg-amber-100 text-amber-900 border-amber-300">
+                            Retry • Attempt {event.attempt}
+                          </Badge>
+                        )}
                         <span className="ml-2 text-muted-foreground text-xs">{formatTime(event.timestamp)}</span>
                       </div>
                       <p className="mt-0.5 text-sm text-muted-foreground">{event.detail}</p>

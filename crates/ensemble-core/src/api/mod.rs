@@ -11,4 +11,5 @@ pub mod openapi;
 pub mod router;
 #[cfg(test)]
 pub(crate) mod test_helpers;
+pub mod timeline_handler;
 pub mod ws;

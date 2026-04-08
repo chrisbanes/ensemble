@@ -24,6 +24,14 @@ pub fn redact_kv(input: &str) -> String {
             return format!("{prefix}{REDACTED}");
         }
     }
+
+    if input.starts_with("Authorization: Bearer ") {
+        return "Authorization: Bearer [REDACTED]".to_string();
+    }
+    if input.starts_with("Bearer ") {
+        return "Bearer [REDACTED]".to_string();
+    }
+
     input.to_string()
 }
 
@@ -95,5 +103,14 @@ mod tests {
         assert!(out.contains(r#""authorization":"[REDACTED]""#));
         assert!(out.contains(r#""api_key":"[REDACTED]""#));
         assert!(out.contains(r#""keep":"ok""#));
+    }
+
+    #[test]
+    fn redact_bearer_token_header() {
+        assert_eq!(
+            redact_kv("Authorization: Bearer abc123xyz"),
+            "Authorization: Bearer [REDACTED]"
+        );
+        assert_eq!(redact_kv("Bearer abc123xyz"), "Bearer [REDACTED]");
     }
 }

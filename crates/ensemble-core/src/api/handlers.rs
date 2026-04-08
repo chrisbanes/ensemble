@@ -176,6 +176,7 @@ mod tests {
         RunningEntry {
             issue_id: "NODE_123".to_string(),
             identifier: "my-repo#42".to_string(),
+            run_id: Some("run-1".to_string()),
             issue: test_issue(),
             session_id: Some("session-abc".to_string()),
             agent_pid: Some("12345".to_string()),
