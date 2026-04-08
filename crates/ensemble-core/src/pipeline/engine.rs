@@ -173,6 +173,18 @@ impl PipelineRun {
         }
     }
 
+    /// Step names in configured DAG order, excluding steps that never started.
+    pub(crate) fn traversed_steps_in_order(&self) -> Vec<String> {
+        self.dag
+            .steps
+            .iter()
+            .filter_map(|step| match self.step_states.get(&step.name) {
+                Some(StepState::Pending) | None => None,
+                Some(_) => Some(step.name.clone()),
+            })
+            .collect()
+    }
+
     /// Returns `true` when every step in the DAG is in the
     /// [`StepState::Passed`] state.
     fn all_passed(&self) -> bool {
