@@ -162,13 +162,11 @@ impl AcpxRuntime {
 
         let prompt_outcome = prompt_result?;
 
-        Ok(
-            detect_worker_result_with_runtime_verdict(
-                request.workspace_path,
-                prompt_outcome.runtime_verdict,
-            )
-            .await,
+        Ok(detect_worker_result_with_runtime_verdict(
+            request.workspace_path,
+            prompt_outcome.runtime_verdict,
         )
+        .await)
     }
 }
 

@@ -191,8 +191,12 @@ pub enum WorkerResult {
     Success {
         runtime_verdict: Option<serde_json::Value>,
     },
-    BlockedOnHuman { request: InteractionRequestDraft },
-    Failed { error: String },
+    BlockedOnHuman {
+        request: InteractionRequestDraft,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 impl WorkerResult {
@@ -299,12 +303,10 @@ mod tests {
 
     #[test]
     fn test_worker_result_is_success() {
-        assert!(
-            WorkerResult::Success {
-                runtime_verdict: None
-            }
-            .is_success()
-        );
+        assert!(WorkerResult::Success {
+            runtime_verdict: None
+        }
+        .is_success());
         assert!(!WorkerResult::BlockedOnHuman {
             request: InteractionRequestDraft {
                 schema_version: 1,

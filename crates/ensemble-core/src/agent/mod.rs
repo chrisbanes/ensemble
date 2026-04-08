@@ -252,6 +252,7 @@ async fn detect_worker_result_with_runtime_verdict(
     }
 }
 
+#[cfg(test)]
 async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
     detect_worker_result_with_runtime_verdict(workspace_path, None).await
 }
@@ -563,11 +564,7 @@ impl AcpAgentRunner {
 
         result?;
 
-        Ok(detect_worker_result_with_runtime_verdict(
-            workspace_path,
-            final_runtime_verdict,
-        )
-        .await)
+        Ok(detect_worker_result_with_runtime_verdict(workspace_path, final_runtime_verdict).await)
     }
 }
 

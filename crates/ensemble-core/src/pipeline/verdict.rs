@@ -68,7 +68,9 @@ pub async fn read_verdict_file(workspace: &Path) -> Result<Option<Verdict>, std:
 /// 2. `.ensemble/verdict.json` in the workspace — checked if ACP yields nothing.
 /// 3. Default to [`Verdict::Approve`] if neither source provides a verdict.
 pub async fn resolve_verdict(acp_verdict: Option<&serde_json::Value>, workspace: &Path) -> Verdict {
-    resolve_verdict_with_source(acp_verdict, workspace).await.verdict
+    resolve_verdict_with_source(acp_verdict, workspace)
+        .await
+        .verdict
 }
 
 /// Resolve the final verdict for a completed step, including the source.
