@@ -289,6 +289,8 @@ This section configures Ensemble's runtime behavior after the agent is launched.
 | `stall_timeout_ms` | integer | `300000` | Timeout for detecting a stalled agent |
 | `inject_verdict_fallback_instructions` | boolean | `true` | Appends Ensemble-owned fallback instructions so agents can write `.ensemble/verdict.json` when no structured runtime verdict is emitted |
 
+`agent.inject_verdict_instructions` is accepted as a shorter alias for `agent.inject_verdict_fallback_instructions`.
+
 `agent.permission_request_policy` only applies to direct ACP runtime paths. If all configured agents resolve to the `acpx` runtime, leave this at its default. In mixed configurations, it still applies only to agents using the direct runtime; to customize permission handling for an `acpx`-resolved agent, switch that agent to `runtime: direct`.
 
 Legacy note: `agent.permission_policy` is still accepted as a deprecated alias for `agent.permission_request_policy` during config parsing.

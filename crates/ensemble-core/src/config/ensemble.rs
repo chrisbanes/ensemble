@@ -288,6 +288,7 @@ pub struct AgentRuntimeConfig {
     #[serde(default = "default_stall_timeout_ms")]
     pub stall_timeout_ms: i64,
     #[serde(default = "default_inject_verdict_fallback_instructions")]
+    #[serde(alias = "inject_verdict_instructions")]
     pub inject_verdict_fallback_instructions: bool,
 }
 
@@ -1979,6 +1980,28 @@ on_success: Done
 on_failure: Failed
 agent:
   inject_verdict_fallback_instructions: false
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        assert!(!config.agent.inject_verdict_fallback_instructions);
+    }
+
+    #[test]
+    fn test_parse_config_with_short_verdict_injection_field_name() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  inject_verdict_instructions: false
 "#;
 
         let config = parse_config(yaml).unwrap();

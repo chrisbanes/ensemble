@@ -584,6 +584,41 @@ JSON
     }
 
     #[tokio::test]
+    async fn run_prompt_returns_runtime_verdict_from_acpx_updates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"turn_complete","verdict":{"verdict":"reject","summary":"lint errors"},"stopReason":"end_turn"}}}
+{"jsonrpc":"2.0","id":14,"result":{"stopReason":"end_turn"}}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        let outcome = client
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                None,
+                |_| async {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.runtime_verdict,
+            Some(serde_json::json!({
+                "verdict": "reject",
+                "summary": "lint errors"
+            }))
+        );
+    }
+
+    #[tokio::test]
     async fn cancelled_stop_reason_is_mapped_to_run_failed() {
         let dir = tempfile::TempDir::new().unwrap();
         let script = write_mock_acpx_script(

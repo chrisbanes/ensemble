@@ -139,6 +139,9 @@ impl AcpAgentRunner {
         workspace_path: &Path,
         interaction_response: Option<&InteractionResponseEnvelope>,
     ) -> Result<(), AgentError> {
+        // Ensure stale verdict data from previous attempts cannot influence the
+        // current run's resolution path.
+        remove_ensemble_file(workspace_path, "verdict.json").await?;
         remove_ensemble_file(workspace_path, "interaction-request.json").await?;
 
         if let Some(interaction_response) = interaction_response {
@@ -1307,6 +1310,29 @@ on_failure: Todo
 
         assert!(prompt.starts_with("hi"));
         assert!(prompt.contains("write .ensemble/verdict.json"));
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_removes_stale_verdict_file() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let ensemble_dir = workspace.path().join(".ensemble");
+        tokio::fs::create_dir_all(&ensemble_dir).await.unwrap();
+        tokio::fs::write(
+            ensemble_dir.join("verdict.json"),
+            r#"{"verdict":"reject","summary":"stale"}"#,
+        )
+        .await
+        .unwrap();
+
+        AcpAgentRunner
+            .prepare_workspace(workspace.path(), None)
+            .await
+            .unwrap();
+
+        let exists = tokio::fs::try_exists(ensemble_dir.join("verdict.json"))
+            .await
+            .unwrap();
+        assert!(!exists, "stale verdict.json should be removed before run");
     }
 
     #[test]

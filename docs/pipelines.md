@@ -94,10 +94,10 @@ Todo → Building → In Review → Done
 
 ## Verdicts
 
-After an agent finishes, Ensemble checks for a verdict:
+After an agent finishes, Ensemble resolves verdicts with this strict precedence:
 
-1. **Runtime verdict (primary)** — the runtime reports a structured verdict in session updates/results
-2. **File fallback** — the agent writes `.ensemble/verdict.json` in the workspace:
+1. **Runtime verdict (primary)** — if the runtime reports a parseable structured verdict, Ensemble uses it.
+2. **File fallback** — only when no runtime verdict is available, Ensemble checks `.ensemble/verdict.json`:
 
 ```json
 {
@@ -114,9 +114,11 @@ or:
 }
 ```
 
-3. **Default** — if no verdict is found, the step is treated as approved
+3. **Default approve** — if neither source provides a verdict, the step is treated as approved.
 
-By default, Ensemble appends fallback verdict instructions to rendered prompts (`agent.inject_verdict_fallback_instructions: true`), so users do not need to manually add `.ensemble/verdict.json` instructions in their templates.
+If both runtime and file verdicts exist, runtime verdict takes precedence and file verdict is ignored.
+
+By default, Ensemble appends fallback verdict instructions to rendered prompts (`agent.inject_verdict_fallback_instructions: true`, alias `agent.inject_verdict_instructions`), so users do not need to manually add `.ensemble/verdict.json` instructions in their templates.
 
 **Approve** means the step passed. The pipeline moves to the next step (or completes).
 
