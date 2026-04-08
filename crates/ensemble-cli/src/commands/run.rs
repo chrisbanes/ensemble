@@ -83,14 +83,14 @@ pub async fn execute(args: RunArgs) -> ExitCode {
     std::env::set_var("ENSEMBLE_HEADLESS", "1");
 
     {
-        let mut document_state = prepared
+        let document_state = prepared
             .app_state
             .config_runtime
             .document_state
-            .write()
+            .read()
             .await;
-        if let Some(config_guard) = document_state.active_config.as_mut() {
-            for repo in &mut config_guard.repos {
+        if let Some(config_guard) = document_state.active_config.as_ref() {
+            for repo in &config_guard.repos {
                 if repo.finalize.enabled && repo.finalize.approval_required {
                     warn!(
                         repo_path = %repo.path,

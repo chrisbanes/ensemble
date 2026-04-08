@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::{mpsc, RwLock};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 
 use crate::agent::cancellation::{
@@ -91,6 +91,7 @@ pub struct Orchestrator {
 }
 
 static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+const FINALIZE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct OrchestratorRuntimeParts {
     pub state: Arc<RwLock<OrchestratorState>>,
@@ -278,6 +279,7 @@ impl Orchestrator {
         }
 
         self.hydrate_waiting_on_human_from_store().await;
+        self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
         let (active_lower, terminal_lower) = {
@@ -971,6 +973,20 @@ impl Orchestrator {
                                     self.append_history_record(record).await;
                                 }
                             } else {
+                                if self.tracker.supports_writes()
+                                    && matches!(
+                                        finalize_state.status,
+                                        FinalizeStatus::Failed | FinalizeStatus::SkippedHeadless
+                                    )
+                                {
+                                    if let Err(e) = self
+                                        .tracker
+                                        .set_issue_state(issue_id, &config.on_failure)
+                                        .await
+                                    {
+                                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state after finalize failure");
+                                    }
+                                }
                                 state.set_finalize_state(issue_id, finalize_state);
                                 state.remove_pipeline_run(issue_id);
                             }
@@ -1412,6 +1428,191 @@ impl Orchestrator {
         }
     }
 
+    async fn process_finalize_retries(&self) {
+        let pending_retries: Vec<(String, String)> = {
+            let state = self.state.read().await;
+            state
+                .finalize
+                .iter()
+                .filter(|(_, finalize)| {
+                    finalize.status == FinalizeStatus::InProgress
+                        || finalize
+                            .repos
+                            .iter()
+                            .any(|repo| repo.status == FinalizeStatus::InProgress)
+                })
+                .map(|(issue_id, finalize)| (issue_id.clone(), finalize.issue_identifier.clone()))
+                .collect()
+        };
+
+        for (issue_id, issue_identifier) in pending_retries {
+            self.retry_finalize_for_issue(&issue_id, &issue_identifier)
+                .await;
+        }
+    }
+
+    async fn retry_finalize_for_issue(&self, issue_id: &str, issue_identifier: &str) {
+        let retry_repo_names: Vec<String> = {
+            let state = self.state.read().await;
+            state
+                .get_finalize_state(issue_id)
+                .map(|finalize| {
+                    finalize
+                        .repos
+                        .iter()
+                        .filter(|repo| repo.status == FinalizeStatus::InProgress)
+                        .map(|repo| repo.repo.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        if retry_repo_names.is_empty() {
+            return;
+        }
+
+        let workspace = match self.workspace_mgr.prepare_workspace(issue_identifier).await {
+            Ok(workspace) => workspace,
+            Err(error) => {
+                let mut state = self.state.write().await;
+                if let Some(finalize) = state.get_finalize_state_mut(issue_id) {
+                    finalize.status = FinalizeStatus::Failed;
+                    for repo in &mut finalize.repos {
+                        if repo.status == FinalizeStatus::InProgress {
+                            repo.status = FinalizeStatus::Failed;
+                            repo.last_error = Some(error.to_string());
+                        }
+                    }
+                }
+                return;
+            }
+        };
+
+        let repo_configs = self.workspace_mgr.repos().clone();
+        let mut outcomes: HashMap<String, Result<(), String>> = HashMap::new();
+
+        for repo_name in &retry_repo_names {
+            let Some(repo_config) = repo_configs.get(repo_name) else {
+                outcomes.insert(
+                    repo_name.clone(),
+                    Err("repo config missing for finalize retry".to_string()),
+                );
+                continue;
+            };
+            let Some(worktree) = workspace.worktrees.get(repo_name) else {
+                outcomes.insert(
+                    repo_name.clone(),
+                    Err("worktree missing for finalize retry".to_string()),
+                );
+                continue;
+            };
+
+            let result = self
+                .execute_finalize_action(
+                    &worktree.path,
+                    &repo_config.git_remote,
+                    &repo_config.branch,
+                    &repo_config.finalize.mode,
+                )
+                .await;
+            outcomes.insert(repo_name.clone(), result);
+        }
+
+        let (final_status, should_complete, last_error) = {
+            let mut state = self.state.write().await;
+            let mut final_status = FinalizeStatus::NotRequired;
+            let mut should_complete = false;
+            let mut last_error: Option<String> = None;
+
+            if let Some(finalize) = state.get_finalize_state_mut(issue_id) {
+                for repo in &mut finalize.repos {
+                    if let Some(result) = outcomes.get(&repo.repo) {
+                        match result {
+                            Ok(()) => {
+                                repo.status = FinalizeStatus::Succeeded;
+                                repo.last_error = None;
+                            }
+                            Err(error) => {
+                                repo.status = FinalizeStatus::Failed;
+                                repo.last_error = Some(error.clone());
+                                last_error = Some(error.clone());
+                            }
+                        }
+                    }
+                }
+
+                final_status = if finalize.repos.is_empty() {
+                    FinalizeStatus::NotRequired
+                } else if finalize
+                    .repos
+                    .iter()
+                    .any(|repo| repo.status == FinalizeStatus::Failed)
+                {
+                    FinalizeStatus::Failed
+                } else if finalize
+                    .repos
+                    .iter()
+                    .any(|repo| repo.status == FinalizeStatus::PendingApproval)
+                {
+                    FinalizeStatus::PendingApproval
+                } else if finalize
+                    .repos
+                    .iter()
+                    .any(|repo| repo.status == FinalizeStatus::InProgress)
+                {
+                    FinalizeStatus::InProgress
+                } else if finalize
+                    .repos
+                    .iter()
+                    .any(|repo| repo.status == FinalizeStatus::SkippedHeadless)
+                {
+                    FinalizeStatus::SkippedHeadless
+                } else {
+                    FinalizeStatus::Succeeded
+                };
+
+                finalize.status = final_status.clone();
+                should_complete = matches!(
+                    final_status,
+                    FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
+                );
+
+                if should_complete {
+                    state.completed.insert(issue_id.to_string());
+                    state.release_claim(issue_id);
+                    state.remove_pipeline_run(issue_id);
+                    state.clear_finalize_state(issue_id);
+                }
+            }
+
+            (final_status, should_complete, last_error)
+        };
+
+        if self.tracker.supports_writes() {
+            let config = self.config.read().await;
+            if should_complete {
+                if let Err(error) = self
+                    .tracker
+                    .set_issue_state(issue_id, &config.on_success)
+                    .await
+                {
+                    warn!(issue_id = %issue_id, error = %error, "failed to set tracker success state after finalize retry");
+                }
+            } else if final_status == FinalizeStatus::Failed {
+                if let Err(error) = self
+                    .tracker
+                    .set_issue_state(issue_id, &config.on_failure)
+                    .await
+                {
+                    warn!(issue_id = %issue_id, error = %error, "failed to set tracker failure state after finalize retry");
+                }
+                if let Some(error) = last_error {
+                    warn!(issue_id = %issue_id, error = %error, "finalize retry failed");
+                }
+            }
+        }
+    }
+
     async fn execute_finalize_action(
         &self,
         repo_path: &std::path::Path,
@@ -1424,8 +1625,15 @@ impl Orchestrator {
             .arg(remote)
             .arg("HEAD")
             .current_dir(repo_path)
-            .output()
+            .output();
+        let push_output = timeout(FINALIZE_COMMAND_TIMEOUT, push_output)
             .await
+            .map_err(|_| {
+                format!(
+                    "git push timed out after {}s",
+                    FINALIZE_COMMAND_TIMEOUT.as_secs()
+                )
+            })?
             .map_err(|error| format!("failed to run git push: {error}"))?;
         if !push_output.status.success() {
             return Err(format!(
@@ -1462,8 +1670,15 @@ impl Orchestrator {
                     base_branch,
                 ])
                 .current_dir(repo_path)
-                .output()
+                .output();
+            let pr_output = timeout(FINALIZE_COMMAND_TIMEOUT, pr_output)
                 .await
+                .map_err(|_| {
+                    format!(
+                        "gh pr create timed out after {}s",
+                        FINALIZE_COMMAND_TIMEOUT.as_secs()
+                    )
+                })?
                 .map_err(|error| format!("failed to run gh pr create: {error}"))?;
             if !pr_output.status.success() {
                 return Err(format!(
