@@ -221,7 +221,9 @@ async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
                     .to_string(),
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
-        None => WorkerResult::Success,
+        None => WorkerResult::Success {
+            runtime_verdict: None,
+        },
     }
 }
 
@@ -607,7 +609,9 @@ mod tests {
                 .await;
 
             if self.should_succeed {
-                Ok(WorkerResult::Success)
+                Ok(WorkerResult::Success {
+                    runtime_verdict: None,
+                })
             } else {
                 Err(AgentError::TurnFailed {
                     reason: "mock failure".to_string(),
@@ -730,7 +734,12 @@ on_failure: Todo
             })
             .await;
 
-        assert!(matches!(result, Ok(WorkerResult::Success)));
+        assert!(matches!(
+            result,
+            Ok(WorkerResult::Success {
+                runtime_verdict: None
+            })
+        ));
 
         let evt = rx.try_recv().unwrap();
         match evt {
@@ -825,7 +834,12 @@ exit 1
             std::env::remove_var("ENSEMBLE_TEST_ACPX_EXECUTABLE");
         }
 
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
         assert!(event_names.contains(&"run_completed".to_string()));
@@ -874,7 +888,12 @@ exit 0
             .await
             .unwrap();
 
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
     }
@@ -1099,7 +1118,12 @@ exit 0
             .unwrap();
 
         let result = detect_worker_result(workspace.path()).await;
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
     }
 
     #[tokio::test]

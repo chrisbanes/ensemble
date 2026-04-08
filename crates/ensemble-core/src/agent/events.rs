@@ -188,14 +188,16 @@ pub enum WorkerEvent {
 /// Outcome of a worker task.
 #[derive(Debug, Clone)]
 pub enum WorkerResult {
-    Success,
+    Success {
+        runtime_verdict: Option<serde_json::Value>,
+    },
     BlockedOnHuman { request: InteractionRequestDraft },
     Failed { error: String },
 }
 
 impl WorkerResult {
     pub fn is_success(&self) -> bool {
-        matches!(self, WorkerResult::Success)
+        matches!(self, WorkerResult::Success { .. })
     }
 }
 
@@ -297,7 +299,12 @@ mod tests {
 
     #[test]
     fn test_worker_result_is_success() {
-        assert!(WorkerResult::Success.is_success());
+        assert!(
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+            .is_success()
+        );
         assert!(!WorkerResult::BlockedOnHuman {
             request: InteractionRequestDraft {
                 schema_version: 1,

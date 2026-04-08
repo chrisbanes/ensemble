@@ -800,7 +800,7 @@ impl Orchestrator {
         };
 
         match result {
-            WorkerResult::Success => {
+            WorkerResult::Success { .. } => {
                 let config = self.config.read().await;
                 info!(
                     issue_id = %issue_id,
@@ -1896,7 +1896,9 @@ mod tests {
                 }
                 return Err(AgentError::TurnCancelled);
             }
-            Ok(WorkerResult::Success)
+            Ok(WorkerResult::Success {
+                runtime_verdict: None,
+            })
         }
     }
 
@@ -2106,7 +2108,13 @@ agent:
 
         // Simulate worker exit
         orchestrator
-            .handle_worker_exit("1", "build", WorkerResult::Success)
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    runtime_verdict: None,
+                },
+            )
             .await;
 
         let state = orchestrator.state.read().await;
@@ -3059,7 +3067,13 @@ agent:
         }
 
         orchestrator
-            .handle_worker_exit("1", "docs", WorkerResult::Success)
+            .handle_worker_exit(
+                "1",
+                "docs",
+                WorkerResult::Success {
+                    runtime_verdict: None,
+                },
+            )
             .await;
 
         let state = orchestrator.state.read().await;

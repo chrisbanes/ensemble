@@ -317,7 +317,12 @@ exit 1
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
 
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
         let mut saw_output = false;
         while let Ok(event) = rx.try_recv() {
             if let WorkerEvent::AgentUpdate { event, .. } = event {
@@ -373,7 +378,12 @@ exit 1
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
 
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
     }
 
     #[tokio::test]
