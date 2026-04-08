@@ -118,6 +118,10 @@ Each row shows:
 
 Retries are inline events in the same list.
 
+Retry rows must be visually distinct from first-attempt rows:
+- show a prominent retry badge (e.g. `Retry` + `Attempt N`)
+- apply retry-specific accent styling so operators can scan for churn quickly
+
 ### Empty/error states
 
 - No events yet: show empty state message
