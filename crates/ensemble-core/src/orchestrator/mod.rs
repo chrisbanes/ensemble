@@ -66,6 +66,7 @@ struct InteractionRequestContext {
 
 const HISTORY_OUTCOME_SUCCEEDED: &str = "succeeded";
 const HISTORY_OUTCOME_FAILED: &str = "failed";
+const HISTORY_OUTCOME_STOPPED: &str = "stopped";
 const HISTORY_VERDICT_APPROVED: &str = "approved";
 const HISTORY_VERDICT_REJECTED: &str = "rejected";
 const HISTORY_VERDICT_FAILED: &str = "failed";
@@ -80,6 +81,7 @@ pub struct Orchestrator {
     interaction_store: InteractionStore,
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
+    history_write_lock: Arc<tokio::sync::Mutex<()>>,
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -141,6 +143,7 @@ impl Orchestrator {
             workspace_mgr: Arc::new(parts.workspace_mgr),
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
+            history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -334,11 +337,24 @@ impl Orchestrator {
 
             // Terminal: terminate and clean workspace
             for issue in reconcile_result.terminate_cleanup {
-                let (identifier, interaction_request_id) = {
+                let history_record = {
                     let mut state = self.state.write().await;
-                    if let Some(entry) = state.remove_running(&issue.id) {
-                        state.add_runtime_seconds(&entry);
+                    let running_entry = state.remove_running(&issue.id);
+                    if let Some(entry) = running_entry.as_ref() {
+                        state.add_runtime_seconds(entry);
                     }
+                    let history_record = running_entry.as_ref().and_then(|entry| {
+                        state.get_pipeline_run(&issue.id).map(|run| {
+                            self.build_history_record(
+                                &issue.id,
+                                HISTORY_OUTCOME_STOPPED,
+                                None,
+                                entry,
+                                run,
+                                Utc::now(),
+                            )
+                        })
+                    });
                     let waiting_entry = state.waiting_on_human.get(&issue.id).cloned();
                     let identifier = waiting_entry
                         .as_ref()
@@ -348,8 +364,9 @@ impl Orchestrator {
                         waiting_entry.map(|entry| entry.interaction_request_id);
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (identifier, interaction_request_id)
+                    (identifier, interaction_request_id, history_record)
                 };
+                let (identifier, interaction_request_id, history_record) = history_record;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
@@ -360,25 +377,49 @@ impl Orchestrator {
                         "failed to clean terminal workspace"
                     );
                 }
+
+                if let Some(record) = history_record {
+                    let config = self.config.read().await;
+                    self.append_history_record(&config, record).await;
+                }
             }
 
             // Non-active: terminate without cleanup
             for issue in reconcile_result.terminate_no_cleanup {
-                let interaction_request_id = {
+                let result = {
                     let mut state = self.state.write().await;
-                    if let Some(entry) = state.remove_running(&issue.id) {
-                        state.add_runtime_seconds(&entry);
+                    let running_entry = state.remove_running(&issue.id);
+                    if let Some(entry) = running_entry.as_ref() {
+                        state.add_runtime_seconds(entry);
                     }
+                    let history_record = running_entry.as_ref().and_then(|entry| {
+                        state.get_pipeline_run(&issue.id).map(|run| {
+                            self.build_history_record(
+                                &issue.id,
+                                HISTORY_OUTCOME_STOPPED,
+                                None,
+                                entry,
+                                run,
+                                Utc::now(),
+                            )
+                        })
+                    });
                     let interaction_request_id = state
                         .waiting_on_human
                         .get(&issue.id)
                         .map(|entry| entry.interaction_request_id.clone());
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    interaction_request_id
+                    (interaction_request_id, history_record)
                 };
+                let (interaction_request_id, history_record) = result;
 
                 self.cancel_open_interaction(interaction_request_id).await;
+
+                if let Some(record) = history_record {
+                    let config = self.config.read().await;
+                    self.append_history_record(&config, record).await;
+                }
             }
         }
 
@@ -1280,8 +1321,8 @@ impl Orchestrator {
     }
 
     async fn append_history_record(&self, config: &EnsembleConfig, record: HistoryRecord) {
-        let history_path = std::path::PathBuf::from(workspace_root_from_config(config))
-            .join("ensemble_history.jsonl");
+        let history_path = workspace_root_from_config(config).join("ensemble_history.jsonl");
+        let _guard = self.history_write_lock.lock().await;
         let writer = HistoryWriter::new(history_path);
         if let Err(error) = writer.append(&record).await {
             warn!(
@@ -1775,12 +1816,13 @@ fn sanitize_interaction_fragment(value: &str) -> String {
         .collect()
 }
 
-fn workspace_root_from_config(config: &EnsembleConfig) -> String {
+fn workspace_root_from_config(config: &EnsembleConfig) -> std::path::PathBuf {
     config
         .workspace
         .root
-        .clone()
-        .unwrap_or_else(default_workspace_root)
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(default_workspace_root()))
 }
 
 #[cfg(test)]
@@ -2180,6 +2222,62 @@ agent:
         assert_eq!(record.outcome, "failed");
         assert_eq!(record.last_error.as_deref(), Some("agent crashed"));
         assert_eq!(record.verdict.as_deref(), Some("failed"));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_does_not_write_history_record_on_retryable_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut raw_config = make_config();
+        raw_config.workspace.root = Some(dir.path().display().to_string());
+        raw_config.max_cycles = 3;
+
+        let config = Arc::new(RwLock::new(raw_config));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), Some(1));
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Failed {
+                    error: "temporary agent crash".to_string(),
+                },
+            )
+            .await;
+
+        let history_path = dir.path().join("ensemble_history.jsonl");
+        assert!(
+            tokio::fs::read_to_string(&history_path).await.is_err(),
+            "retryable failure should not append history"
+        );
     }
 
     #[tokio::test]
@@ -3823,6 +3921,60 @@ agent:
         assert!(!state.is_waiting_on_human("1"));
         assert!(state.get_pipeline_run("1").is_none());
         assert!(!dir.path().join("repo_1").exists());
+    }
+
+    #[tokio::test]
+    async fn handle_tick_writes_history_when_tracker_moves_running_issue_to_terminal() {
+        let mut raw_config = make_config();
+        let dir = tempfile::TempDir::new().unwrap();
+        raw_config.workspace.root = Some(dir.path().display().to_string());
+        let config = Arc::new(RwLock::new(raw_config));
+
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Done")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: issues.clone(),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator.handle_tick().await;
+
+        let history_path = dir.path().join("ensemble_history.jsonl");
+        let contents = tokio::fs::read_to_string(&history_path).await.unwrap();
+        let record = contents
+            .lines()
+            .map(|line| serde_json::from_str::<crate::history::model::HistoryRecord>(line).unwrap())
+            .next()
+            .unwrap();
+
+        assert_eq!(record.issue_id, "1");
+        assert_eq!(record.outcome, "stopped");
     }
 
     #[tokio::test]
