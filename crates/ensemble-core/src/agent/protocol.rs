@@ -18,6 +18,7 @@ pub struct ParsedSessionUpdate {
     pub usage: Option<TokenUsage>,
     pub stop_reason: Option<StopReason>,
     pub permission_request: Option<PermissionRequest>,
+    pub verdict: Option<serde_json::Value>,
 }
 
 /// Parse one stdout line as a JSON-RPC message.
@@ -69,18 +70,21 @@ pub fn parse_session_update(value: &serde_json::Value) -> Option<ParsedSessionUp
     let usage = extract_usage(params, update);
     let stop_reason = extract_stop_reason(params, update);
     let permission_request = extract_permission_request(params, update);
+    let verdict = extract_verdict(params, update);
 
     let parsed = ParsedSessionUpdate {
         output_text,
         usage,
         stop_reason,
         permission_request,
+        verdict,
     };
 
     if parsed.output_text.is_none()
         && parsed.usage.is_none()
         && parsed.stop_reason.is_none()
         && parsed.permission_request.is_none()
+        && parsed.verdict.is_none()
     {
         return None;
     }
@@ -174,6 +178,16 @@ fn extract_permission_request(
         permission_id: permission_id.to_string(),
         description,
     })
+}
+
+fn extract_verdict(
+    params: &serde_json::Value,
+    update: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    update
+        .and_then(|u| u.get("verdict"))
+        .cloned()
+        .or_else(|| params.get("verdict").cloned())
 }
 
 #[cfg(test)]
@@ -276,6 +290,34 @@ mod tests {
             .expect("permission request should be parsed");
         assert_eq!(permission.permission_id, "perm-1");
         assert_eq!(permission.description, "write file");
+    }
+
+    #[test]
+    fn parse_session_update_extracts_verdict_from_params() {
+        let params = json!({
+            "sessionId": "s1",
+            "verdict": {"verdict": "approve"}
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        assert_eq!(parsed.verdict, Some(json!({"verdict":"approve"})));
+    }
+
+    #[test]
+    fn parse_session_update_extracts_verdict_from_nested_update() {
+        let params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "turn_complete",
+                "verdict": {"verdict": "reject", "summary": "tests failed"}
+            }
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        assert_eq!(
+            parsed.verdict,
+            Some(json!({"verdict":"reject","summary":"tests failed"}))
+        );
     }
 
     #[test]

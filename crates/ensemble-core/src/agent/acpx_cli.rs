@@ -14,6 +14,11 @@ pub struct AcpxCli {
     executable: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PromptOutcome {
+    pub runtime_verdict: Option<serde_json::Value>,
+}
+
 impl AcpxCli {
     pub fn new(executable: String) -> Self {
         Self { executable }
@@ -72,7 +77,7 @@ impl AcpxCli {
         prompt: &str,
         model: Option<&str>,
         mut on_event: F,
-    ) -> Result<(), AgentError>
+    ) -> Result<PromptOutcome, AgentError>
     where
         F: FnMut(AgentEvent) -> Fut,
         Fut: Future<Output = ()> + Send,
@@ -123,6 +128,7 @@ impl AcpxCli {
         let mut reader = BufReader::new(stdout).lines();
         let mut saw_terminal_event = false;
         let mut last_usage: Option<TokenUsage> = None;
+        let mut last_runtime_verdict: Option<serde_json::Value> = None;
 
         while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to read acpx stdout: {e}"),
@@ -135,6 +141,9 @@ impl AcpxCli {
             if let Some(update) = parse_session_update_from_message(&message)? {
                 if let Some(usage) = update.usage {
                     last_usage = Some(usage);
+                }
+                if let Some(verdict) = update.verdict {
+                    last_runtime_verdict = Some(verdict);
                 }
                 if let Some(content) = update.output_text {
                     on_event(AgentEvent::OutputChunk {
@@ -197,7 +206,9 @@ impl AcpxCli {
             });
         }
 
-        Ok(())
+        Ok(PromptOutcome {
+            runtime_verdict: last_runtime_verdict,
+        })
     }
 
     pub async fn cancel(
@@ -570,6 +581,41 @@ JSON
                 })
             } if reason == "stop reason: refusal"
         ));
+    }
+
+    #[tokio::test]
+    async fn run_prompt_returns_runtime_verdict_from_acpx_updates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"turn_complete","verdict":{"verdict":"reject","summary":"lint errors"},"stopReason":"end_turn"}}}
+{"jsonrpc":"2.0","id":14,"result":{"stopReason":"end_turn"}}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        let outcome = client
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                None,
+                |_| async {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome.runtime_verdict,
+            Some(serde_json::json!({
+                "verdict": "reject",
+                "summary": "lint errors"
+            }))
+        );
     }
 
     #[tokio::test]

@@ -26,6 +26,12 @@ use events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 use acp_client::{AcpSession, TurnResult};
 use acpx_runtime::AcpxRuntime;
 
+const VERDICT_FALLBACK_INSTRUCTION: &str = "\
+If you cannot return a structured runtime verdict, write .ensemble/verdict.json with:\n\
+{\"verdict\":\"approve\"}\n\
+or\n\
+{\"verdict\":\"reject\",\"summary\":\"<reason>\"}";
+
 pub struct AgentRunRequest<'a> {
     pub config: Arc<EnsembleConfig>,
     pub issue: &'a Issue,
@@ -101,7 +107,7 @@ impl AcpAgentRunner {
 
             let interaction_response = load_interaction_response(workspace_path).await?;
 
-            render_prompt_with_interaction_response(
+            let rendered = render_prompt_with_interaction_response(
                 &template_str,
                 issue,
                 attempt,
@@ -111,7 +117,12 @@ impl AcpAgentRunner {
             )
             .map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
-            })
+            })?;
+
+            Ok(maybe_append_verdict_fallback_instruction(
+                rendered,
+                config.agent.inject_verdict_fallback_instructions,
+            ))
         } else {
             // Continuation turns: send guidance, not the full original prompt
             Ok(format!(
@@ -128,6 +139,9 @@ impl AcpAgentRunner {
         workspace_path: &Path,
         interaction_response: Option<&InteractionResponseEnvelope>,
     ) -> Result<(), AgentError> {
+        // Ensure stale verdict data from previous attempts cannot influence the
+        // current run's resolution path.
+        remove_ensemble_file(workspace_path, "verdict.json").await?;
         remove_ensemble_file(workspace_path, "interaction-request.json").await?;
 
         if let Some(interaction_response) = interaction_response {
@@ -137,6 +151,19 @@ impl AcpAgentRunner {
         }
 
         Ok(())
+    }
+}
+
+fn maybe_append_verdict_fallback_instruction(prompt: String, enabled: bool) -> String {
+    if !enabled || prompt.contains(VERDICT_FALLBACK_INSTRUCTION) {
+        return prompt;
+    }
+
+    let trimmed = prompt.trim_end();
+    if trimmed.is_empty() {
+        VERDICT_FALLBACK_INSTRUCTION.to_string()
+    } else {
+        format!("{trimmed}\n\n{VERDICT_FALLBACK_INSTRUCTION}")
     }
 }
 
@@ -189,7 +216,10 @@ async fn load_interaction_response(
     }
 }
 
-async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
+async fn detect_worker_result_with_runtime_verdict(
+    workspace_path: &Path,
+    runtime_verdict: Option<serde_json::Value>,
+) -> WorkerResult {
     let interaction_path = workspace_path
         .join(".ensemble")
         .join("interaction-request.json");
@@ -221,8 +251,13 @@ async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
                     .to_string(),
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
-        None => WorkerResult::Success,
+        None => WorkerResult::Success { runtime_verdict },
     }
+}
+
+#[cfg(test)]
+async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
+    detect_worker_result_with_runtime_verdict(workspace_path, None).await
 }
 
 async fn write_interaction_response_file(
@@ -440,6 +475,7 @@ impl AcpAgentRunner {
         let max_turns = config.agent.max_turns;
         let mut turn_number: u32 = 1;
 
+        let mut final_runtime_verdict: Option<serde_json::Value> = None;
         let result = loop {
             let prompt = match self
                 .build_prompt(
@@ -472,7 +508,12 @@ impl AcpAgentRunner {
                 .await;
 
             match turn_result {
-                Ok(TurnResult::Completed { .. }) => {
+                Ok(TurnResult::Completed {
+                    runtime_verdict, ..
+                }) => {
+                    if runtime_verdict.is_some() {
+                        final_runtime_verdict = runtime_verdict;
+                    }
                     info!(
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
@@ -482,7 +523,14 @@ impl AcpAgentRunner {
                         "turn completed successfully"
                     );
                 }
-                Ok(TurnResult::Failed { reason, .. }) => {
+                Ok(TurnResult::Failed {
+                    reason,
+                    runtime_verdict,
+                    ..
+                }) => {
+                    if runtime_verdict.is_some() {
+                        final_runtime_verdict = runtime_verdict;
+                    }
                     warn!(
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
@@ -519,7 +567,7 @@ impl AcpAgentRunner {
 
         result?;
 
-        Ok(detect_worker_result(workspace_path).await)
+        Ok(detect_worker_result_with_runtime_verdict(workspace_path, final_runtime_verdict).await)
     }
 }
 
@@ -607,7 +655,9 @@ mod tests {
                 .await;
 
             if self.should_succeed {
-                Ok(WorkerResult::Success)
+                Ok(WorkerResult::Success {
+                    runtime_verdict: None,
+                })
             } else {
                 Err(AgentError::TurnFailed {
                     reason: "mock failure".to_string(),
@@ -730,7 +780,12 @@ on_failure: Todo
             })
             .await;
 
-        assert!(matches!(result, Ok(WorkerResult::Success)));
+        assert!(matches!(
+            result,
+            Ok(WorkerResult::Success {
+                runtime_verdict: None
+            })
+        ));
 
         let evt = rx.try_recv().unwrap();
         match evt {
@@ -825,7 +880,12 @@ exit 1
             std::env::remove_var("ENSEMBLE_TEST_ACPX_EXECUTABLE");
         }
 
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
         assert!(event_names.contains(&"run_completed".to_string()));
@@ -874,7 +934,12 @@ exit 0
             .await
             .unwrap();
 
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
     }
@@ -885,6 +950,28 @@ exit 0
         tokio::fs::write(ensemble_dir.join(name), contents)
             .await
             .unwrap();
+    }
+
+    #[test]
+    fn injects_verdict_block_when_enabled() {
+        let prompt = "Do the work.".to_string();
+        let rendered = maybe_append_verdict_fallback_instruction(prompt, true);
+        assert!(rendered.contains("write .ensemble/verdict.json"));
+    }
+
+    #[test]
+    fn does_not_inject_verdict_block_when_disabled() {
+        let prompt = "Do the work.".to_string();
+        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), false);
+        assert_eq!(rendered, prompt);
+    }
+
+    #[test]
+    fn does_not_duplicate_verdict_block_when_present() {
+        let prompt = format!("Do work.\n\n{VERDICT_FALLBACK_INSTRUCTION}");
+        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), true);
+        assert_eq!(rendered, prompt);
+        assert_eq!(rendered.matches("write .ensemble/verdict.json").count(), 1);
     }
 
     #[tokio::test]
@@ -1099,7 +1186,12 @@ exit 0
             .unwrap();
 
         let result = detect_worker_result(workspace.path()).await;
-        assert!(matches!(result, WorkerResult::Success));
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                runtime_verdict: None
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1157,7 +1249,8 @@ on_failure: Todo
             .await
             .unwrap();
 
-        assert_eq!(prompt, "question: Use staging");
+        assert!(prompt.starts_with("question: Use staging"));
+        assert!(prompt.contains("write .ensemble/verdict.json"));
     }
 
     #[tokio::test]
@@ -1215,7 +1308,31 @@ on_failure: Todo
             .await
             .unwrap();
 
-        assert_eq!(prompt, "hi");
+        assert!(prompt.starts_with("hi"));
+        assert!(prompt.contains("write .ensemble/verdict.json"));
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_removes_stale_verdict_file() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let ensemble_dir = workspace.path().join(".ensemble");
+        tokio::fs::create_dir_all(&ensemble_dir).await.unwrap();
+        tokio::fs::write(
+            ensemble_dir.join("verdict.json"),
+            r#"{"verdict":"reject","summary":"stale"}"#,
+        )
+        .await
+        .unwrap();
+
+        AcpAgentRunner
+            .prepare_workspace(workspace.path(), None)
+            .await
+            .unwrap();
+
+        let exists = tokio::fs::try_exists(ensemble_dir.join("verdict.json"))
+            .await
+            .unwrap();
+        assert!(!exists, "stale verdict.json should be removed before run");
     }
 
     #[test]

@@ -12,6 +12,19 @@ pub enum Verdict {
     Reject { summary: String },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerdictSource {
+    Runtime,
+    File,
+    Default,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedVerdict {
+    pub verdict: Verdict,
+    pub source: VerdictSource,
+}
+
 /// Internal deserialization type for both ACP JSON values and verdict files.
 #[derive(Debug, Deserialize)]
 struct VerdictPayload {
@@ -55,28 +68,52 @@ pub async fn read_verdict_file(workspace: &Path) -> Result<Option<Verdict>, std:
 /// 2. `.ensemble/verdict.json` in the workspace — checked if ACP yields nothing.
 /// 3. Default to [`Verdict::Approve`] if neither source provides a verdict.
 pub async fn resolve_verdict(acp_verdict: Option<&serde_json::Value>, workspace: &Path) -> Verdict {
+    resolve_verdict_with_source(acp_verdict, workspace)
+        .await
+        .verdict
+}
+
+/// Resolve the final verdict for a completed step, including the source.
+pub async fn resolve_verdict_with_source(
+    acp_verdict: Option<&serde_json::Value>,
+    workspace: &Path,
+) -> ResolvedVerdict {
     // 1. Try ACP event.
     if let Some(value) = acp_verdict {
         if let Some(v) = parse_verdict_from_value(value) {
-            return v;
+            return ResolvedVerdict {
+                verdict: v,
+                source: VerdictSource::Runtime,
+            };
         }
     }
 
     // 2. Try file.
     match read_verdict_file(workspace).await {
-        Ok(Some(v)) => return v,
+        Ok(Some(v)) => {
+            return ResolvedVerdict {
+                verdict: v,
+                source: VerdictSource::File,
+            };
+        }
         Ok(None) => {} // file doesn't exist — fall through to default
         Err(e) => {
             // Malformed verdict file — treat as rejection, not silent approval.
-            return Verdict::Reject {
-                summary: format!("failed to parse .ensemble/verdict.json: {e}"),
+            return ResolvedVerdict {
+                verdict: Verdict::Reject {
+                    summary: format!("failed to parse .ensemble/verdict.json: {e}"),
+                },
+                source: VerdictSource::File,
             };
         }
     }
 
     // 3. Default (no ACP verdict, no file).
     warn!("no verdict source found for step, defaulting to Approve");
-    Verdict::Approve
+    ResolvedVerdict {
+        verdict: Verdict::Approve,
+        source: VerdictSource::Default,
+    }
 }
 
 /// Convert a [`VerdictPayload`] into an `Option<Verdict>`.
@@ -185,6 +222,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_verdict_with_source_runtime_takes_priority() {
+        let dir = TempDir::new().unwrap();
+        write_verdict_file(&dir, r#"{"verdict":"reject","summary":"broken"}"#).await;
+
+        let acp = json!({ "verdict": "approve" });
+        let result = resolve_verdict_with_source(Some(&acp), dir.path()).await;
+        assert_eq!(result.verdict, Verdict::Approve);
+        assert_eq!(result.source, VerdictSource::Runtime);
+    }
+
+    #[tokio::test]
     async fn test_resolve_verdict_falls_back_to_file() {
         // No ACP value — file provides the verdict.
         let dir = TempDir::new().unwrap();
@@ -200,11 +248,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_resolve_verdict_with_source_falls_back_to_file() {
+        let dir = TempDir::new().unwrap();
+        write_verdict_file(&dir, r#"{"verdict":"reject","summary":"compile error"}"#).await;
+
+        let result = resolve_verdict_with_source(None, dir.path()).await;
+        assert_eq!(
+            result.verdict,
+            Verdict::Reject {
+                summary: "compile error".to_string()
+            }
+        );
+        assert_eq!(result.source, VerdictSource::File);
+    }
+
+    #[tokio::test]
     async fn test_resolve_verdict_no_source_is_approve() {
         // No ACP, no file — defaults to Approve.
         let dir = TempDir::new().unwrap();
         let result = resolve_verdict(None, dir.path()).await;
         assert_eq!(result, Verdict::Approve);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_verdict_with_source_no_source_is_default_approve() {
+        let dir = TempDir::new().unwrap();
+        let result = resolve_verdict_with_source(None, dir.path()).await;
+        assert_eq!(result.verdict, Verdict::Approve);
+        assert_eq!(result.source, VerdictSource::Default);
     }
 
     #[tokio::test]
