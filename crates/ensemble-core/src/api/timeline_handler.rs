@@ -101,8 +101,14 @@ mod tests {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
         let writer = TimelineWriter::new(temp_dir.path().to_path_buf());
-        writer.append("run-abc", &sample_event("run-abc", 1)).await.unwrap();
-        writer.append("run-abc", &sample_event("run-abc", 2)).await.unwrap();
+        writer
+            .append("run-abc", &sample_event("run-abc", 1))
+            .await
+            .unwrap();
+        writer
+            .append("run-abc", &sample_event("run-abc", 2))
+            .await
+            .unwrap();
 
         let response = get_timeline(
             State(state),

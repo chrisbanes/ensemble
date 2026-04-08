@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,19 @@ pub struct OrchestratorState {
     pub active_states_lower: Vec<String>,
     /// Cached lowercase terminal states for efficient dispatch checking.
     pub terminal_states_lower: Vec<String>,
+    /// Per-run sequence counters for persisted timeline events.
+    pub timeline_sequences: HashMap<String, u64>,
+    /// Stable run IDs per issue across retries within the same orchestration cycle.
+    pub issue_run_ids: HashMap<String, String>,
+}
+
+static ORCH_RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn new_issue_run_id() -> String {
+    format!(
+        "run-{}",
+        ORCH_RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 impl OrchestratorState {
@@ -111,6 +125,8 @@ impl OrchestratorState {
             last_tick_at: None,
             active_states_lower: Vec::new(),
             terminal_states_lower: Vec::new(),
+            timeline_sequences: HashMap::new(),
+            issue_run_ids: HashMap::new(),
         }
     }
 
@@ -132,9 +148,15 @@ impl OrchestratorState {
 
     /// Add a running entry for a dispatched issue.
     pub fn add_running(&mut self, issue: &Issue, attempt: Option<u32>) {
+        let run_id = self
+            .issue_run_ids
+            .entry(issue.id.clone())
+            .or_insert_with(new_issue_run_id)
+            .clone();
         let entry = RunningEntry {
             issue_id: issue.id.clone(),
             identifier: issue.identifier.clone(),
+            run_id: Some(run_id),
             issue: issue.clone(),
             session_id: None,
             agent_pid: None,
@@ -160,6 +182,15 @@ impl OrchestratorState {
     /// Remove a running entry and return it. Returns None if not found.
     pub fn remove_running(&mut self, issue_id: &str) -> Option<RunningEntry> {
         self.running.remove(issue_id)
+    }
+
+    pub fn next_timeline_sequence(&mut self, run_id: &str) -> u64 {
+        let entry = self
+            .timeline_sequences
+            .entry(run_id.to_string())
+            .or_insert(0);
+        *entry += 1;
+        *entry
     }
 
     /// Add an issue ID to the claimed set.
@@ -233,6 +264,9 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        if let Some(run_id) = self.issue_run_ids.remove(issue_id) {
+            self.timeline_sequences.remove(&run_id);
+        }
     }
 
     pub fn set_finalize_state(&mut self, issue_id: &str, finalize: IssueFinalizeState) {
@@ -638,5 +672,41 @@ mod tests {
         state.add_running(&test_issue("1", "Todo"), Some(2));
         assert!(!state.retry_attempts.contains_key("1"));
         assert!(state.is_running("1"));
+    }
+
+    #[test]
+    fn test_run_id_and_sequence_are_stable_across_retries_until_release() {
+        let mut state = OrchestratorState::new(30000, 10);
+        let issue = test_issue("1", "Todo");
+
+        state.add_running(&issue, Some(1));
+        let first_run_id = state
+            .running
+            .get("1")
+            .and_then(|entry| entry.run_id.clone())
+            .expect("run_id should be assigned");
+        assert_eq!(state.next_timeline_sequence(&first_run_id), 1);
+
+        let _ = state.remove_running("1");
+        state.add_retry(RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 2,
+            due_at_ms: 5000,
+            error: Some("retry".to_string()),
+        });
+        state.add_running(&issue, Some(2));
+
+        let second_run_id = state
+            .running
+            .get("1")
+            .and_then(|entry| entry.run_id.clone())
+            .expect("run_id should be reused");
+        assert_eq!(second_run_id, first_run_id);
+        assert_eq!(state.next_timeline_sequence(&second_run_id), 2);
+
+        state.release_claim("1");
+        assert!(state.issue_run_ids.get("1").is_none());
+        assert!(state.timeline_sequences.get(&second_run_id).is_none());
     }
 }

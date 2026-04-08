@@ -151,6 +151,7 @@ pub struct AttemptInfo {
 /// Running session detail for issue detail.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RunningDetail {
+    pub run_id: Option<String>,
     pub session_id: Option<String>,
     pub step_name: Option<String>,
     pub turn_count: u32,
@@ -303,6 +304,7 @@ pub fn build_issue_snapshot(
             })
         });
         RunningDetail {
+            run_id: entry.run_id.clone(),
             session_id: entry.session_id.clone(),
             step_name,
             turn_count: entry.turn_count,
@@ -457,6 +459,7 @@ mod tests {
         RunningEntry {
             issue_id: "NODE_123".to_string(),
             identifier: "my-repo#42".to_string(),
+            run_id: Some("run-1".to_string()),
             issue: test_issue(),
             session_id: Some("session-abc".to_string()),
             agent_pid: Some("12345".to_string()),

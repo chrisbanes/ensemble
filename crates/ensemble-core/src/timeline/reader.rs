@@ -92,11 +92,7 @@ mod tests {
     async fn read_timeline_returns_paginated_events_in_sequence_order() {
         let tmp = NamedTempFile::new().unwrap();
         let path = tmp.path().to_path_buf();
-        write_events(
-            &path,
-            &[sample_event("run-1", 2), sample_event("run-1", 1)],
-        )
-        .await;
+        write_events(&path, &[sample_event("run-1", 2), sample_event("run-1", 1)]).await;
 
         let response = read_timeline(
             &path,

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import {
@@ -9,11 +9,12 @@ import {
   useRespondToInteractionMutation,
   useCancelInteractionMutation,
   useResumeIssueMutation,
+  useTimelineQuery,
 } from "@/hooks";
 import { connectWs } from "@/ws";
 import type { WsStatus } from "@/ws";
 import type { WsEventData, WsPipelineEvent } from "@/ws-types";
-import { isCompletionEvent, normalizePipelineEvent } from "@/ws-events";
+import { isCompletionEvent, normalizePipelineEvent, timelineRecordToEventData } from "@/ws-events";
 import { addNotification, requestPermissionIfNeeded } from "@/notifications";
 import type { InteractionResponseBody } from "@/generated/models";
 import { Button } from "@/components/ui/button";
@@ -53,12 +54,39 @@ export default function IssueDetail() {
   const cancelMutation = useCancelInteractionMutation(identifier);
   const resumeMutation = useResumeIssueMutation(identifier);
 
-  const [events, setEvents] = useState<WsEventData[]>([]);
+  const [liveEvents, setLiveEvents] = useState<WsEventData[]>([]);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState<number | undefined>();
 
   const isLiveRun = data?.running != null;
+  const runId = (data?.running as { run_id?: string } | undefined)?.run_id;
+  const timelineQuery = useTimelineQuery(identifier, runId);
+  const persistedEvents = useMemo(
+    () => (timelineQuery.data?.events ?? []).map(timelineRecordToEventData),
+    [timelineQuery.data?.events],
+  );
+
+  const events = useMemo(() => {
+    const merged = [...persistedEvents, ...liveEvents];
+    const seen = new Set<string>();
+    const deduped: WsEventData[] = [];
+    for (const event of merged) {
+      const key =
+        event.runId && event.sequence != null
+          ? `${event.runId}:${event.sequence}`
+          : `${event.type}:${event.timestamp}:${event.detail}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(event);
+    }
+    return deduped.sort((a, b) => {
+      if (a.runId && b.runId && a.runId === b.runId && a.sequence != null && b.sequence != null) {
+        return a.sequence - b.sequence;
+      }
+      return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+    });
+  }, [liveEvents, persistedEvents]);
 
   useEffect(() => {
     requestPermissionIfNeeded();
@@ -67,10 +95,10 @@ export default function IssueDetail() {
       enabled: isLiveRun,
       onMessage: (msg) => {
         if (msg.type === "snapshot") {
-          setEvents([]);
+          setLiveEvents([]);
         } else if (msg.type === "event") {
           const event = normalizePipelineEvent(msg.data);
-          setEvents((prev) => [event, ...prev]);
+          setLiveEvents((prev) => [...prev, event]);
           triggerNotification(msg.data, identifier);
 
           if (isCompletionEvent(msg.data)) {
@@ -188,6 +216,11 @@ export default function IssueDetail() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <section>
           <h2 className="text-lg font-semibold mb-3">Event Timeline</h2>
+          {timelineQuery.isError && (
+            <p className="mb-2 text-sm text-amber-700">
+              Couldn&apos;t load saved timeline history; showing live events only.
+            </p>
+          )}
           <Card className="p-4 max-h-[600px] overflow-y-auto">
             <EventTimeline events={events} live={isLiveRun} onViewConversation={(idx) => setHighlightIndex(idx)} />
           </Card>

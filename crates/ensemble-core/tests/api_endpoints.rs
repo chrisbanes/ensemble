@@ -94,6 +94,7 @@ fn build_populated_app_state() -> (AppState, TempDir) {
         last_reported_output_tokens: 800,
         last_reported_total_tokens: 2000,
         turn_count: 7,
+        run_id: Some("run-1".to_string()),
         retry_attempt: None,
         started_at: Utc::now(),
     };

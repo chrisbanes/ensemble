@@ -136,7 +136,10 @@ pub fn create_api_router(state: AppState) -> Router {
             "/{identifier}/conversation/{index}",
             get(conversation::get_conversation_message),
         )
-        .route("/{identifier}/timeline", get(timeline_handler::get_timeline))
+        .route(
+            "/{identifier}/timeline",
+            get(timeline_handler::get_timeline),
+        )
         .route("/{identifier}/stop", post(controls::post_stop))
         .route("/{identifier}/retry", post(controls::post_retry))
         .route(

@@ -26,6 +26,7 @@ use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
 use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::observability::events::{EventBus, PipelineEvent};
 use crate::observability::events_contract::{
     elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
     ORCH_TICK_STARTED, STEP_STARTED, TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED,
@@ -34,6 +35,7 @@ use crate::observability::events_contract::{
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
 use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
+use crate::timeline::writer::TimelineWriter;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::finalize::FinalizeMode;
@@ -85,6 +87,8 @@ pub struct Orchestrator {
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
+    event_bus: EventBus,
+    timeline_writer: TimelineWriter,
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -101,6 +105,8 @@ pub struct OrchestratorRuntimeParts {
     pub workspace_mgr: WorkspaceManager,
     pub refresh_requested: Arc<tokio::sync::Notify>,
     pub cancellation_registry: CancellationRegistry,
+    pub event_bus: EventBus,
+    pub workspace_root: std::path::PathBuf,
 }
 
 impl Orchestrator {
@@ -124,6 +130,8 @@ impl Orchestrator {
                 workspace_mgr,
                 refresh_requested,
                 cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: config_dir.to_path_buf(),
             },
             config_dir,
             shutdown_rx,
@@ -148,6 +156,8 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            event_bus: parts.event_bus,
+            timeline_writer: TimelineWriter::new(parts.workspace_root),
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -671,18 +681,36 @@ impl Orchestrator {
         }
 
         // Mark step as running in pipeline
-        {
+        let (run_id, sequence, attempt_num) = {
             let mut state = self.state.write().await;
-            if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
-                run.mark_running(
-                    dispatch.step_name,
-                    format!(
-                        "{}-{}-{}",
-                        issue.id, dispatch.step_name, dispatch.agent_name
-                    ),
-                );
+            let run_context = Self::run_context_for_issue(&mut state, &issue.id);
+            {
+                if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
+                    run.mark_running(
+                        dispatch.step_name,
+                        format!(
+                            "{}-{}-{}",
+                            issue.id, dispatch.step_name, dispatch.agent_name
+                        ),
+                    );
+                }
             }
-        }
+            run_context
+        };
+
+        self.publish_pipeline_event(
+            run_id,
+            sequence,
+            Some(attempt_num),
+            PipelineEvent::StepStarted {
+                issue_identifier: issue.identifier.clone(),
+                timestamp: Utc::now(),
+                step_name: dispatch.step_name.to_string(),
+                agent_name: dispatch.agent_name.to_string(),
+                detail: format!("step started (attempt {})", attempt_num),
+            },
+        )
+        .await;
 
         // Spawn worker task
         let issue_clone = issue.clone();
@@ -756,11 +784,18 @@ impl Orchestrator {
     async fn handle_agent_update(
         &self,
         issue_id: &str,
-        _step_name: &str,
+        step_name: &str,
         event: AgentEvent,
         timestamp: chrono::DateTime<Utc>,
     ) {
         let mut state = self.state.write().await;
+        let issue_identifier = state
+            .running
+            .get(issue_id)
+            .map(|entry| entry.identifier.clone())
+            .unwrap_or_else(|| issue_id.to_string());
+        let (run_id, sequence, attempt_num) = Self::run_context_for_issue(&mut state, issue_id);
+        let mut pipeline_event: Option<PipelineEvent> = None;
 
         // Handle special cases
         match &event {
@@ -769,19 +804,66 @@ impl Orchestrator {
                 agent_pid,
             } => {
                 state.update_session_info(issue_id, session_id, agent_pid.as_deref());
+                pipeline_event = Some(PipelineEvent::SessionStarted {
+                    issue_identifier: issue_identifier.clone(),
+                    timestamp,
+                    detail: format!("session started: {}", session_id),
+                });
             }
             AgentEvent::PromptStarted => {
                 state.increment_turn_count(issue_id);
             }
-            AgentEvent::RunCompleted { usage } | AgentEvent::RunFailed { usage, .. } => {
-                if let Some(u) = usage {
-                    state.update_token_usage(
-                        issue_id,
-                        u.input_tokens,
-                        u.output_tokens,
-                        u.total_tokens,
-                    );
-                }
+            AgentEvent::RunCompleted { usage: Some(u) } => {
+                state.update_token_usage(issue_id, u.input_tokens, u.output_tokens, u.total_tokens);
+            }
+            AgentEvent::RunCompleted { usage: None } => {}
+            AgentEvent::TurnCompleted { usage } => {
+                pipeline_event = Some(PipelineEvent::TurnCompleted {
+                    issue_identifier: issue_identifier.clone(),
+                    timestamp,
+                    turn: state
+                        .running
+                        .get(issue_id)
+                        .map(|e| e.turn_count)
+                        .unwrap_or(0),
+                    detail: "turn completed".to_string(),
+                    conversation_index: None,
+                    tokens_delta: crate::observability::events::TokensDelta {
+                        input: usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
+                        output: usage.as_ref().map(|u| u.output_tokens).unwrap_or(0),
+                    },
+                });
+            }
+            AgentEvent::RunFailed {
+                reason,
+                usage: Some(u),
+                ..
+            } => {
+                state.update_token_usage(issue_id, u.input_tokens, u.output_tokens, u.total_tokens);
+                pipeline_event = Some(PipelineEvent::Error {
+                    issue_identifier: issue_identifier.clone(),
+                    timestamp,
+                    detail: reason.clone(),
+                });
+            }
+            AgentEvent::RunFailed {
+                reason,
+                usage: None,
+                ..
+            } => {
+                pipeline_event = Some(PipelineEvent::Error {
+                    issue_identifier: issue_identifier.clone(),
+                    timestamp,
+                    detail: reason.clone(),
+                });
+            }
+            AgentEvent::OutputChunk { content, .. } => {
+                pipeline_event = Some(PipelineEvent::ToolCall {
+                    issue_identifier: issue_identifier.clone(),
+                    timestamp,
+                    tool_name: step_name.to_string(),
+                    detail: content.chars().take(120).collect(),
+                });
             }
             _ => {}
         }
@@ -793,6 +875,15 @@ impl Orchestrator {
             event.message_for_state().as_deref(),
             timestamp,
         );
+        drop(state);
+
+        if let Some(mut event) = pipeline_event {
+            if let PipelineEvent::TurnCompleted { detail, .. } = &mut event {
+                *detail = format!("turn completed (attempt {})", attempt_num);
+            }
+            self.publish_pipeline_event(run_id, sequence, Some(attempt_num), event)
+                .await;
+        }
     }
 
     /// Handle a worker exit. Integrates with PipelineRun to drive step DAG.
@@ -2228,6 +2319,49 @@ impl Orchestrator {
             }
         }
     }
+
+    async fn publish_pipeline_event(
+        &self,
+        run_id: Option<String>,
+        sequence: Option<u64>,
+        attempt: Option<u32>,
+        event: PipelineEvent,
+    ) {
+        if let (Some(run_id), Some(sequence)) = (run_id, sequence) {
+            let mut record = event.to_timeline_record(&run_id, sequence);
+            if let Some(attempt) = attempt {
+                record.attempt = attempt;
+            }
+            if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
+                warn!(
+                    event = "timeline_persist_failed",
+                    run_id = %run_id,
+                    error = %error,
+                    "failed to persist timeline event"
+                );
+            }
+        }
+        self.event_bus.publish(event);
+    }
+
+    fn run_context_for_issue(
+        state: &mut OrchestratorState,
+        issue_id: &str,
+    ) -> (Option<String>, Option<u64>, u32) {
+        let run_id = state
+            .running
+            .get(issue_id)
+            .and_then(|entry| entry.run_id.clone());
+        let sequence = run_id
+            .as_ref()
+            .map(|run_id| state.next_timeline_sequence(run_id));
+        let attempt = state
+            .running
+            .get(issue_id)
+            .and_then(|entry| entry.retry_attempt)
+            .unwrap_or(1);
+        (run_id, sequence, attempt)
+    }
 }
 
 async fn catch_worker_panic<F>(fut: F, issue_id: &str, step_name: &str) -> WorkerResult
@@ -3265,6 +3399,8 @@ agent:
                 workspace_mgr,
                 refresh_requested: Arc::clone(&refresh_requested),
                 cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: dir.path().to_path_buf(),
             },
             dir.path(),
             shutdown_rx,
@@ -3332,6 +3468,8 @@ agent:
                 workspace_mgr,
                 refresh_requested,
                 cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: dir.path().to_path_buf(),
             },
             dir.path(),
             shutdown_rx,

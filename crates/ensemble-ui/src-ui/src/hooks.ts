@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useGetState, getGetStateQueryKey } from "./generated/api/state/state";
 import { useGetIssueDetail } from "./generated/api/issues/issues";
 import { getGetIssueDetailQueryKey } from "./generated/api/issues/issues";
@@ -39,6 +39,7 @@ import type {
   GuidedConfigForm,
   InteractionRequest,
 } from "./generated/models";
+import { customFetch } from "./fetch-client";
 
 /**
  * The generated orval hooks wrap responses in { data, status, headers }.
@@ -93,6 +94,42 @@ export function useIssueDetailQuery(identifier: string) {
       refetchInterval: 2000,
       enabled: identifier.length > 0,
       select: (resp) => resp.data as IssueDetailSnapshot,
+    },
+  });
+}
+
+export interface TimelineEventRecord {
+  run_id: string;
+  issue_identifier: string;
+  sequence: number;
+  timestamp: string;
+  event_type: string;
+  step_name?: string | null;
+  attempt: number;
+  detail: string;
+  verdict?: string | null;
+  tool_name?: string | null;
+}
+
+export interface TimelineResponse {
+  events: TimelineEventRecord[];
+  total: number;
+  next_cursor?: number | null;
+}
+
+export function useTimelineQuery(identifier: string, runId?: string, limit = 200) {
+  return useQuery({
+    queryKey: ["timeline", identifier, runId, limit],
+    enabled: identifier.length > 0 && (runId?.length ?? 0) > 0,
+    queryFn: async (): Promise<TimelineResponse> => {
+      const params = new URLSearchParams({
+        run_id: runId ?? "",
+        limit: String(limit),
+      });
+      const response = await customFetch<{ data: TimelineResponse }>(
+        `/api/v1/${encodeURIComponent(identifier)}/timeline?${params.toString()}`,
+      );
+      return response.data;
     },
   });
 }
