@@ -74,7 +74,10 @@ mod tests {
 
     #[test]
     fn redact_masks_all_supported_prefixes() {
-        assert_eq!(redact_kv("authorization=abc123"), "authorization=[REDACTED]");
+        assert_eq!(
+            redact_kv("authorization=abc123"),
+            "authorization=[REDACTED]"
+        );
         assert_eq!(redact_kv("token=abc123"), "token=[REDACTED]");
         assert_eq!(redact_kv("password=abc123"), "password=[REDACTED]");
     }

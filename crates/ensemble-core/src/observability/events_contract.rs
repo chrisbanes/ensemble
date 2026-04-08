@@ -31,7 +31,10 @@ mod tests {
         assert_eq!(ORCH_TICK_STARTED, "orchestrator.tick_started");
         assert_eq!(ISSUE_DISPATCH_STARTED, "issue.dispatch_started");
         assert_eq!(TRACKER_TRANSITION_FAILED, "tracker.transition_failed");
-        assert_eq!(WORKSPACE_GIT_COMMAND_STARTED, "workspace.git_command_started");
+        assert_eq!(
+            WORKSPACE_GIT_COMMAND_STARTED,
+            "workspace.git_command_started"
+        );
         assert_eq!(
             WORKSPACE_GIT_COMMAND_FINISHED,
             "workspace.git_command_finished"
