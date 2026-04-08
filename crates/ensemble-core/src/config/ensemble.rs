@@ -1,7 +1,7 @@
 use crate::agent::runtime::RuntimeKind;
 use crate::config::location::default_todo_state_path;
 use crate::error::PipelineError;
-use crate::workspace::push_strategy::PushStrategy;
+use crate::workspace::finalize::RepoFinalizeConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -30,8 +30,6 @@ pub struct EnsembleConfig {
     pub agent: AgentRuntimeConfig,
     #[serde(default)]
     pub human_interaction: HumanInteractionConfig,
-    #[serde(default)]
-    pub push_strategy: PushStrategy,
 }
 
 /// Runtime configuration for blocked-on-human interaction handling.
@@ -71,6 +69,8 @@ pub struct RepoConfig {
     pub branch: String,
     #[serde(default = "default_git_remote")]
     pub git_remote: String,
+    #[serde(default)]
+    pub finalize: RepoFinalizeConfig,
 }
 
 fn default_git_remote() -> String {
@@ -2006,5 +2006,69 @@ agent:
 
         let config = parse_config(yaml).unwrap();
         assert!(!config.agent.inject_verdict_fallback_instructions);
+    }
+
+    #[test]
+    fn parses_repo_finalize_defaults() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).expect("config should parse");
+        let finalize = &config.repos[0].finalize;
+        assert!(finalize.enabled);
+        assert_eq!(
+            finalize.mode,
+            crate::workspace::finalize::FinalizeMode::None
+        );
+        assert!(!finalize.approval_required);
+    }
+
+    #[test]
+    fn parses_repo_finalize_explicit_values() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: /tmp/repo
+    branch: main
+    finalize:
+      enabled: true
+      mode: push_and_pr
+      approval_required: true
+agents:
+  build:
+    executor: claude-code
+    model: sonnet-4
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).expect("config should parse");
+        let finalize = &config.repos[0].finalize;
+        assert!(finalize.enabled);
+        assert_eq!(
+            finalize.mode,
+            crate::workspace::finalize::FinalizeMode::PushAndPr
+        );
+        assert!(finalize.approval_required);
     }
 }
