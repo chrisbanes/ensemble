@@ -1,5 +1,8 @@
 use crate::config::ensemble::RepoConfig;
 use crate::error::WorkspaceError;
+use crate::observability::events_contract::{
+    elapsed_ms, WORKSPACE_PREPARE_FAILED, WORKSPACE_PREPARE_FINISHED, WORKSPACE_PREPARE_STARTED,
+};
 use crate::tracker::model::sanitize_workspace_key;
 use crate::workspace::coordinator::{WorktreeCoordinator, WorktreeInfo};
 use std::collections::HashMap;
@@ -139,6 +142,12 @@ impl WorkspaceManager {
         &self,
         identifier: &str,
     ) -> Result<WorkspaceResult, WorkspaceError> {
+        let prepare_started_at = std::time::Instant::now();
+        info!(
+            event = WORKSPACE_PREPARE_STARTED,
+            issue_identifier = identifier,
+            "preparing workspace"
+        );
         let workspace_key =
             sanitize_workspace_key(identifier).ok_or_else(|| WorkspaceError::CreationFailed {
                 reason: format!("unsafe workspace key from identifier: {identifier:?}"),
@@ -184,24 +193,43 @@ impl WorkspaceManager {
             let coordinator =
                 WorktreeCoordinator::new(self.repos.clone(), branch_date, base_path.clone());
             info!(workspace = %base_path.display(), "preparing worktrees inside workspace");
-            coordinator
-                .prepare_worktrees(identifier)
-                .await
-                .map_err(|e| WorkspaceError::CreationFailed {
-                    reason: format!("worktree preparation failed: {e}"),
-                })?
+            match coordinator.prepare_worktrees(identifier).await {
+                Ok(worktrees) => worktrees,
+                Err(e) => {
+                    warn!(
+                        event = WORKSPACE_PREPARE_FAILED,
+                        issue_identifier = identifier,
+                        duration_ms = elapsed_ms(prepare_started_at),
+                        error = %e,
+                        "workspace preparation failed"
+                    );
+                    return Err(WorkspaceError::CreationFailed {
+                        reason: format!("worktree preparation failed: {e}"),
+                    });
+                }
+            }
         } else {
             HashMap::new()
         };
 
         let created_now = base_created || worktrees.values().any(|w| w.created_now);
 
-        Ok(WorkspaceResult {
+        let result = WorkspaceResult {
             base_path,
             worktrees,
             workspace_key,
             created_now,
-        })
+        };
+
+        info!(
+            event = WORKSPACE_PREPARE_FINISHED,
+            issue_identifier = identifier,
+            duration_ms = elapsed_ms(prepare_started_at),
+            created_now = result.created_now,
+            "workspace prepared"
+        );
+
+        Ok(result)
     }
 
     /// Remove a workspace directory and its worktrees for the given issue identifier.

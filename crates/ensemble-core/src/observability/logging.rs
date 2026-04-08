@@ -17,6 +17,15 @@ use tracing_subscriber::EnvFilter;
 /// - `issue_id`, `issue_identifier` (per-issue spans)
 /// - `session_id` (per-session spans)
 /// - `hook` (hook execution spans)
+///
+/// Event contract:
+/// - `event` should use stable names from `observability::events_contract`
+/// - lifecycle logs should include `run_id` + issue/step context when applicable
+///
+/// Verbosity guidance:
+/// - `info`: lifecycle milestones
+/// - `debug`: dispatch/retry/decision reasoning
+/// - `trace`: protocol/process metadata with redaction helpers
 pub fn init_logging() {
     let filter = build_env_filter();
     let use_json = should_use_json();

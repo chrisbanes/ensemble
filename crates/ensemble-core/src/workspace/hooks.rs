@@ -1,4 +1,7 @@
 use crate::error::WorkspaceError;
+use crate::observability::events_contract::{
+    elapsed_ms, WORKSPACE_HOOK_FAILED, WORKSPACE_HOOK_FINISHED, WORKSPACE_HOOK_STARTED,
+};
 use std::path::Path;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -22,7 +25,13 @@ pub async fn run_hook(
     workspace_path: &Path,
     timeout_ms: u64,
 ) -> Result<(), WorkspaceError> {
-    info!(hook = hook_name, cwd = %workspace_path.display(), "running hook");
+    let started_at = std::time::Instant::now();
+    info!(
+        event = WORKSPACE_HOOK_STARTED,
+        hook = hook_name,
+        cwd = %workspace_path.display(),
+        "running hook"
+    );
 
     let duration = Duration::from_millis(timeout_ms);
 
@@ -46,7 +55,12 @@ pub async fn run_hook(
     match timeout(duration, child).await {
         Ok(Ok(output)) => {
             if output.status.success() {
-                info!(hook = hook_name, "hook completed successfully");
+                info!(
+                    event = WORKSPACE_HOOK_FINISHED,
+                    hook = hook_name,
+                    duration_ms = elapsed_ms(started_at),
+                    "hook completed successfully"
+                );
                 Ok(())
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -60,7 +74,13 @@ pub async fn run_hook(
                     }
                     format!("exit code: {} — {}", output.status, truncated)
                 };
-                warn!(hook = hook_name, %reason, "hook failed");
+                warn!(
+                    event = WORKSPACE_HOOK_FAILED,
+                    hook = hook_name,
+                    duration_ms = elapsed_ms(started_at),
+                    %reason,
+                    "hook failed"
+                );
                 Err(WorkspaceError::HookFailed {
                     hook: hook_name.to_string(),
                     reason,
@@ -69,7 +89,13 @@ pub async fn run_hook(
         }
         Ok(Err(e)) => {
             let reason = format!("failed to execute: {e}");
-            warn!(hook = hook_name, %reason, "hook execution error");
+            warn!(
+                event = WORKSPACE_HOOK_FAILED,
+                hook = hook_name,
+                duration_ms = elapsed_ms(started_at),
+                %reason,
+                "hook execution error"
+            );
             Err(WorkspaceError::HookFailed {
                 hook: hook_name.to_string(),
                 reason,
@@ -78,8 +104,11 @@ pub async fn run_hook(
         Err(_) => {
             // Child future is dropped here, which triggers kill_on_drop
             warn!(
+                event = WORKSPACE_HOOK_FAILED,
                 hook = hook_name,
-                timeout_ms, "hook timed out, process killed"
+                timeout_ms,
+                duration_ms = elapsed_ms(started_at),
+                "hook timed out, process killed"
             );
             Err(WorkspaceError::HookTimedOut {
                 hook: hook_name.to_string(),

@@ -1,5 +1,6 @@
 use tracing::{info, warn};
 
+use crate::observability::events_contract::{ISSUE_RETRY_CANCELLED, ISSUE_RETRY_SCHEDULED};
 use crate::tracker::model::RetryEntry;
 
 use super::state::OrchestratorState;
@@ -39,8 +40,10 @@ pub fn schedule_continuation_retry(
     };
 
     info!(
+        event = ISSUE_RETRY_SCHEDULED,
         issue_id = issue_id,
         identifier = identifier,
+        reason = "continuation",
         delay_ms = CONTINUATION_RETRY_DELAY_MS,
         "scheduling continuation retry"
     );
@@ -63,11 +66,12 @@ pub fn schedule_failure_retry(
 ) -> Option<u64> {
     if attempt >= max_cycles {
         warn!(
+            event = ISSUE_RETRY_CANCELLED,
             issue_id = issue_id,
             identifier = identifier,
             attempt = attempt,
             max_cycles = max_cycles,
-            error = error,
+            reason = normalize_reason(error),
             "max retry cycles reached, not scheduling further retries"
         );
         return None;
@@ -85,11 +89,12 @@ pub fn schedule_failure_retry(
     };
 
     info!(
+        event = ISSUE_RETRY_SCHEDULED,
         issue_id = issue_id,
         identifier = identifier,
         attempt = attempt,
         delay_ms = delay,
-        error = error,
+        reason = normalize_reason(error),
         "scheduling failure retry"
     );
 
@@ -101,6 +106,16 @@ pub fn schedule_failure_retry(
 /// If the entry had a retry_attempt, increment it; otherwise start at 1.
 pub fn next_attempt(current: Option<u32>) -> u32 {
     current.map(|a| a + 1).unwrap_or(1)
+}
+
+fn normalize_reason(reason: &str) -> &str {
+    // Returns either the original borrowed input or a static fallback.
+    // Callers must treat the result as borrowed data and avoid assuming ownership.
+    if reason.trim().is_empty() {
+        "unknown"
+    } else {
+        reason
+    }
 }
 
 /// Get the current time in milliseconds (monotonic-ish for retry scheduling).
@@ -138,6 +153,12 @@ pub fn next_retry_time(state: &OrchestratorState) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_reason_is_non_empty() {
+        let reason = normalize_reason("");
+        assert_eq!(reason, "unknown");
+    }
 
     #[test]
     fn test_calculate_backoff_attempt_1() {
