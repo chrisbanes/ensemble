@@ -210,6 +210,7 @@ This section configures per-agent launch settings. Runtime ACP callback handling
 **Validation rules:**
 - Omit `runtime` to infer it automatically: `acpx_agent` => `acpx`, otherwise `direct`.
 - `runtime: acpx` requires `acpx_agent`.
+- `runtime: acpx` expects JSON-RPC protocol output on stdout; non-JSON-RPC stdout lines are treated as runtime errors.
 - `runtime: direct` requires `executor` and `model`.
 - Provide either `prompt` (inline) or `prompt_template` (file), not both.
 

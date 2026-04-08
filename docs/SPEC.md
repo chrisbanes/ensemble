@@ -542,6 +542,8 @@ Named agent definitions. Each key is the agent role name, each value is an objec
 - `acpx_agent` (string, optional)
   - acpx agent identifier (for example `claude`, `codex`, `gemini`).
   - When set, Ensemble delegates agent communication to acpx unless `runtime: direct` overrides it.
+  - acpx runtime parsing is JSON-RPC-only: stdout protocol lines must be valid JSON-RPC messages.
+    Non-JSON-RPC stdout lines are treated as runtime protocol errors.
 - `executor` (string, optional)
   - ACP-compatible agent executable identifier (for example `claude-code`, `amp`).
   - Required for `direct` runtime.
@@ -1295,6 +1297,8 @@ Line handling requirements:
 - Read protocol messages from stdout only.
 - Buffer partial stdout lines until newline arrives.
 - Attempt JSON parse on complete stdout lines.
+- For `acpx` runtime, accept JSON-RPC 2.0 protocol envelopes only. Reject non-JSON-RPC stdout
+  lines as protocol errors.
 - Stderr is not part of the protocol stream:
   - ignore it or log it as diagnostics
   - do not attempt protocol JSON parsing on stderr

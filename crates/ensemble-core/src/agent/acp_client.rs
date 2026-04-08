@@ -13,6 +13,7 @@ use crate::error::AgentError;
 use super::events::{
     AgentEvent, JsonRpcMessage, RuntimeStream, StopReason, TokenUsage, WorkerEvent,
 };
+use super::protocol;
 
 /// ACP session managing a subprocess and stdio JSON-RPC 2.0 protocol.
 pub struct AcpSession {
@@ -255,6 +256,8 @@ impl AcpSession {
         loop {
             let line = self.read_line().await?;
 
+            // Keep direct deserialization here so malformed JSON can emit
+            // `AgentEvent::Malformed` with the raw original line content.
             let msg: JsonRpcMessage = match serde_json::from_str(&line) {
                 Ok(m) => m,
                 Err(_) => {
@@ -279,6 +282,21 @@ impl AcpSession {
                                 reason: err.message.clone(),
                                 usage: last_usage,
                             });
+                        }
+                        if let Some(stop_reason) = msg
+                            .result
+                            .as_ref()
+                            .and_then(protocol::parse_stop_reason_from_result)
+                        {
+                            return self
+                                .map_stop_reason_to_turn_result(
+                                    stop_reason,
+                                    issue_id,
+                                    step_name,
+                                    event_tx,
+                                    last_usage,
+                                )
+                                .await;
                         }
                         // A prompt response without error means turn completed
                         return Ok(TurnResult::Completed { usage: last_usage });
@@ -326,80 +344,35 @@ impl AcpSession {
                 match method.as_str() {
                     "session/update" => {
                         if let Some(ref params) = msg.params {
-                            // Extract usage if present
-                            if let Some(usage_val) = params.get("usage") {
-                                if let Ok(usage) =
-                                    serde_json::from_value::<TokenUsage>(usage_val.clone())
-                                {
+                            if let Some(parsed) = protocol::parse_session_update(params) {
+                                if let Some(usage) = parsed.usage {
                                     last_usage = Some(usage);
                                 }
-                            }
 
-                            // Check for stopReason
-                            if let Some(stop_str) =
-                                params.get("stopReason").and_then(|v| v.as_str())
-                            {
-                                if let Some(stop_reason) = StopReason::from_str_loose(stop_str) {
-                                    if stop_reason.is_success() {
-                                        Self::emit_event(
-                                            event_tx,
+                                if let Some(stop_reason) = parsed.stop_reason {
+                                    return self
+                                        .map_stop_reason_to_turn_result(
+                                            stop_reason,
                                             issue_id,
                                             step_name,
-                                            AgentEvent::RunCompleted {
-                                                usage: last_usage.clone(),
-                                            },
-                                        )
-                                        .await;
-                                        return Ok(TurnResult::Completed { usage: last_usage });
-                                    } else if stop_reason == StopReason::MaxTokens {
-                                        // max_tokens is a potential continuation, treat as success
-                                        Self::emit_event(
                                             event_tx,
-                                            issue_id,
-                                            step_name,
-                                            AgentEvent::RunCompleted {
-                                                usage: last_usage.clone(),
-                                            },
+                                            last_usage,
                                         )
                                         .await;
-                                        return Ok(TurnResult::Completed { usage: last_usage });
-                                    } else {
-                                        let reason = format!("stop reason: {stop_str}");
-                                        Self::emit_event(
-                                            event_tx,
-                                            issue_id,
-                                            step_name,
-                                            AgentEvent::RunFailed {
-                                                reason: reason.clone(),
-                                                usage: last_usage.clone(),
-                                            },
-                                        )
-                                        .await;
-                                        return Ok(TurnResult::Failed {
-                                            reason,
-                                            usage: last_usage,
-                                        });
-                                    }
                                 }
-                            }
 
-                            // Extract content for update event
-                            let content = params
-                                .get("content")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            if !content.is_empty() {
-                                Self::emit_event(
-                                    event_tx,
-                                    issue_id,
-                                    step_name,
-                                    AgentEvent::OutputChunk {
-                                        stream: RuntimeStream::Stdout,
-                                        content,
-                                    },
-                                )
-                                .await;
+                                if let Some(content) = parsed.output_text {
+                                    Self::emit_event(
+                                        event_tx,
+                                        issue_id,
+                                        step_name,
+                                        AgentEvent::OutputChunk {
+                                            stream: RuntimeStream::Stdout,
+                                            content,
+                                        },
+                                    )
+                                    .await;
+                                }
                             } else {
                                 Self::emit_event(
                                     event_tx,
@@ -423,6 +396,75 @@ impl AcpSession {
                         .await;
                     }
                 }
+            }
+        }
+    }
+
+    async fn map_stop_reason_to_turn_result(
+        &self,
+        stop_reason: StopReason,
+        issue_id: &str,
+        step_name: &str,
+        event_tx: &mpsc::Sender<WorkerEvent>,
+        usage: Option<TokenUsage>,
+    ) -> Result<TurnResult, AgentError> {
+        match stop_reason {
+            StopReason::EndTurn | StopReason::MaxTokens => {
+                Self::emit_event(
+                    event_tx,
+                    issue_id,
+                    step_name,
+                    AgentEvent::RunCompleted {
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
+                Ok(TurnResult::Completed { usage })
+            }
+            StopReason::Cancelled => {
+                let reason = "stop reason: cancelled".to_string();
+                Self::emit_event(
+                    event_tx,
+                    issue_id,
+                    step_name,
+                    AgentEvent::RunFailed {
+                        reason: reason.clone(),
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
+
+                Ok(TurnResult::Failed { reason, usage })
+            }
+            StopReason::Refusal => {
+                let reason = "stop reason: refusal".to_string();
+                Self::emit_event(
+                    event_tx,
+                    issue_id,
+                    step_name,
+                    AgentEvent::RunFailed {
+                        reason: reason.clone(),
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
+
+                Ok(TurnResult::Failed { reason, usage })
+            }
+            StopReason::MaxTurnRequests => {
+                let reason = "stop reason: max_turn_requests".to_string();
+                Self::emit_event(
+                    event_tx,
+                    issue_id,
+                    step_name,
+                    AgentEvent::RunFailed {
+                        reason: reason.clone(),
+                        usage: usage.clone(),
+                    },
+                )
+                .await;
+
+                Ok(TurnResult::Failed { reason, usage })
             }
         }
     }
@@ -772,6 +814,140 @@ done
         }
         // Should have: PromptStarted, OutputChunk or Notification, RunCompleted
         assert!(events.len() >= 2);
+
+        session.kill().await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_handles_nested_session_update_content() {
+        let dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+
+        let script = r#"#!/bin/bash
+while IFS= read -r line; do
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
+
+    if [ "$method" = "initialize" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
+    elif [ "$method" = "session/new" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"nested-session\"}}"
+    elif [ "$method" = "session/prompt" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"nested-session\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello nested\"}}}}"
+        echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"nested-session\",\"update\":{\"sessionUpdate\":\"turn_complete\",\"stopReason\":\"end_turn\",\"usage\":{\"input_tokens\":3,\"output_tokens\":4,\"total_tokens\":7}}}}"
+    fi
+done
+"#;
+        let script_path = write_mock_agent_script(dir.path(), script);
+
+        let mut session = AcpSession::spawn(&script_path, workspace.path())
+            .await
+            .unwrap();
+        session.initialize(15000).await.unwrap();
+        let session_id = session
+            .start_session(
+                workspace.path().to_str().unwrap(),
+                serde_json::json!({}),
+                15000,
+            )
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let result = session
+            .run_turn(
+                &session_id,
+                "Do work",
+                30000,
+                "auto_approve_all",
+                "issue-nested",
+                "build",
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, TurnResult::Completed { .. }));
+
+        let mut saw_output = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate {
+                event: AgentEvent::OutputChunk { content, .. },
+                ..
+            } = evt
+            {
+                if content == "hello nested" {
+                    saw_output = true;
+                }
+            }
+        }
+        assert!(saw_output);
+
+        session.kill().await;
+    }
+
+    #[tokio::test]
+    async fn run_turn_usage_only_update_does_not_emit_notification() {
+        let dir = TempDir::new().unwrap();
+        let workspace = TempDir::new().unwrap();
+
+        let script = r#"#!/bin/bash
+while IFS= read -r line; do
+    method=$(echo "$line" | grep -o '"method":"[^"]*"' | head -1 | sed 's/"method":"//;s/"//')
+    id=$(echo "$line" | grep -o '"id":[0-9]*' | head -1 | sed 's/"id"://')
+
+    if [ "$method" = "initialize" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2025-07-09\"}}"
+    elif [ "$method" = "session/new" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"usage-only-session\"}}"
+    elif [ "$method" = "session/prompt" ]; then
+        echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"usage-only-session\",\"update\":{\"sessionUpdate\":\"usage_update\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}}"
+        echo "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"usage-only-session\",\"stopReason\":\"end_turn\"}}"
+    fi
+done
+"#;
+        let script_path = write_mock_agent_script(dir.path(), script);
+
+        let mut session = AcpSession::spawn(&script_path, workspace.path())
+            .await
+            .unwrap();
+        session.initialize(15000).await.unwrap();
+        let session_id = session
+            .start_session(
+                workspace.path().to_str().unwrap(),
+                serde_json::json!({}),
+                15000,
+            )
+            .await
+            .unwrap();
+
+        let (tx, mut rx) = mpsc::channel(100);
+        let result = session
+            .run_turn(
+                &session_id,
+                "Do work",
+                30000,
+                "auto_approve_all",
+                "issue-usage-only",
+                "build",
+                &tx,
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(result, TurnResult::Completed { .. }));
+
+        let mut saw_notification = false;
+        while let Ok(evt) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate {
+                event: AgentEvent::Notification { .. },
+                ..
+            } = evt
+            {
+                saw_notification = true;
+            }
+        }
+        assert!(!saw_notification);
 
         session.kill().await;
     }
