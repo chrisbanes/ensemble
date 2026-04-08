@@ -84,5 +84,38 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(contents.lines().count(), 1);
+
+        let parsed: TimelineEventRecord =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(parsed.run_id, "run-1");
+        assert_eq!(parsed.sequence, 1);
+        assert_eq!(parsed.event_type, "step_started");
+        assert_eq!(parsed.step_name, Some("build".to_string()));
+    }
+
+    #[tokio::test]
+    async fn append_writes_valid_jsonl_lines() {
+        let temp_dir = TempDir::new().unwrap();
+        let writer = TimelineWriter::new(temp_dir.path().to_path_buf());
+
+        writer
+            .append("run-1", &sample_event("run-1", 1))
+            .await
+            .unwrap();
+        writer
+            .append("run-1", &sample_event("run-1", 2))
+            .await
+            .unwrap();
+
+        let contents = tokio::fs::read_to_string(writer.events_path("run-1"))
+            .await
+            .unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2);
+
+        let first: TimelineEventRecord = serde_json::from_str(lines[0]).unwrap();
+        let second: TimelineEventRecord = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first.sequence, 1);
+        assert_eq!(second.sequence, 2);
     }
 }
