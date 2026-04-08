@@ -1,4 +1,4 @@
-use crate::orchestrator::state::{OrchestratorState, RateLimitSnapshot};
+use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
 use crate::pipeline::engine::{PipelineRun, StepState};
 use crate::tracker::model::{RetryEntry, RunningEntry};
 use chrono::{DateTime, Utc};
@@ -106,6 +106,33 @@ pub struct IssueDetailSnapshot {
     pub retry: Option<RetryRow>,
     pub current_interaction: Option<CurrentInteractionSummary>,
     pub last_error: Option<String>,
+    pub finalize: FinalizeSnapshot,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct FinalizeSnapshot {
+    pub status: String,
+    pub repos: Vec<RepoFinalizeSnapshot>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RepoFinalizeSnapshot {
+    pub repo: String,
+    pub mode: String,
+    pub approval_required: bool,
+    pub status: String,
+    pub last_error: Option<String>,
+}
+
+fn finalize_status_str(status: &FinalizeStatus) -> &'static str {
+    match status {
+        FinalizeStatus::NotRequired => "not_required",
+        FinalizeStatus::PendingApproval => "pending_approval",
+        FinalizeStatus::InProgress => "in_progress",
+        FinalizeStatus::Succeeded => "succeeded",
+        FinalizeStatus::Failed => "failed",
+        FinalizeStatus::SkippedHeadless => "skipped_headless",
+    }
 }
 
 /// Workspace path info for issue detail.
@@ -215,8 +242,16 @@ pub fn build_issue_snapshot(
         .waiting_on_human
         .values()
         .find(|e| e.identifier == identifier);
+    let finalize_entry = state
+        .finalize
+        .iter()
+        .find(|(_, finalize)| finalize.issue_identifier == identifier);
 
-    if running_entry.is_none() && retry_entry.is_none() && waiting_entry.is_none() {
+    if running_entry.is_none()
+        && retry_entry.is_none()
+        && waiting_entry.is_none()
+        && finalize_entry.is_none()
+    {
         return None;
     }
 
@@ -226,6 +261,8 @@ pub fn build_issue_snapshot(
         (entry.issue_id.clone(), entry.identifier.clone())
     } else if let Some(entry) = waiting_entry {
         (entry.issue_id.clone(), entry.identifier.clone())
+    } else if let Some((issue_id, finalize)) = finalize_entry {
+        (issue_id.clone(), finalize.issue_identifier.clone())
     } else {
         return None;
     };
@@ -237,6 +274,8 @@ pub fn build_issue_snapshot(
         "running".to_string()
     } else if waiting_entry.is_some() {
         "waiting_on_human".to_string()
+    } else if let Some((_, finalize)) = finalize_entry {
+        format!("finalize_{}", finalize_status_str(&finalize.status))
     } else {
         "retrying".to_string()
     };
@@ -284,6 +323,27 @@ pub fn build_issue_snapshot(
     let current_interaction = waiting_entry.map(current_interaction_summary);
 
     let last_error = retry_entry.and_then(|e| e.error.clone());
+    let finalize = if let Some((_, finalize_state)) = finalize_entry {
+        FinalizeSnapshot {
+            status: finalize_status_str(&finalize_state.status).to_string(),
+            repos: finalize_state
+                .repos
+                .iter()
+                .map(|repo| RepoFinalizeSnapshot {
+                    repo: repo.repo.clone(),
+                    mode: repo.mode.clone(),
+                    approval_required: repo.approval_required,
+                    status: finalize_status_str(&repo.status).to_string(),
+                    last_error: repo.last_error.clone(),
+                })
+                .collect(),
+        }
+    } else {
+        FinalizeSnapshot {
+            status: "not_required".to_string(),
+            repos: vec![],
+        }
+    };
 
     Some(IssueDetailSnapshot {
         issue_identifier,
@@ -300,6 +360,7 @@ pub fn build_issue_snapshot(
         retry: retry_detail,
         current_interaction,
         last_error,
+        finalize,
     })
 }
 

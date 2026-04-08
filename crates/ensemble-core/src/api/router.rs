@@ -138,6 +138,14 @@ pub fn create_api_router(state: AppState) -> Router {
         )
         .route("/{identifier}/stop", post(controls::post_stop))
         .route("/{identifier}/retry", post(controls::post_retry))
+        .route(
+            "/{identifier}/finalize/approve",
+            post(controls::post_finalize_approve),
+        )
+        .route(
+            "/{identifier}/finalize/retry",
+            post(controls::post_finalize_retry),
+        )
         .route("/issues/{identifier}/resume", post(controls::post_resume))
         .route(
             "/{identifier}",

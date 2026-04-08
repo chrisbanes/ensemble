@@ -104,7 +104,7 @@ Important boundary:
    - Reuses existing worktrees on retry cycles (pulls latest changes).
    - Runs workspace lifecycle hooks.
    - Cleans workspaces and worktrees for terminal issues.
-   - Push strategy (ask, auto_push, manual, pr_only) controls branch handling after success.
+   - Per-repo `finalize` settings control branch publication behavior after pipeline success.
 
 7. `Agent Runner`
    - Creates workspace.

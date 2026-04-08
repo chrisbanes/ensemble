@@ -32,6 +32,7 @@ fn setup_repo(name: &str) -> (TempDir, RepoConfig) {
         path: dir.path().to_string_lossy().to_string(),
         branch: "main".to_string(),
         git_remote: "origin".to_string(),
+        finalize: Default::default(),
     };
 
     (dir, config)
@@ -141,6 +142,7 @@ async fn test_cleanup_worktrees_propagates_failure() {
             path: "/nonexistent/path/to/repo".to_string(),
             branch: "main".to_string(),
             git_remote: "origin".to_string(),
+            finalize: Default::default(),
         },
     )]);
 

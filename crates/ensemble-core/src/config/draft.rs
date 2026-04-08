@@ -264,6 +264,16 @@ pub fn validate_document(document: &serde_yaml::Value) -> DraftValidationReport 
                 });
             }
         }
+
+        if mapping.contains_key("push_strategy") {
+            issues.push(ValidationIssue {
+                kind: ValidationIssueKind::Config,
+                message: "push_strategy has been removed; configure repos[].finalize instead (manual->mode:none, auto_push->mode:push, pr_only->mode:push_and_pr, ask->approval_required:true + explicit mode)".to_string(),
+                section: "workflow".to_string(),
+                field: Some("push_strategy".to_string()),
+                path: Some("push_strategy".to_string()),
+            });
+        }
     }
 
     DraftValidationReport { issues }
@@ -907,5 +917,30 @@ on_failure: Failed
             issue.path.as_deref(),
             Some("agent.permission_request_policy")
         );
+    }
+
+    #[test]
+    fn reports_push_strategy_removed_migration_hint() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+push_strategy: auto_push
+"#;
+
+        let value: serde_yaml::Value = serde_yaml::from_str(yaml).expect("yaml should parse");
+        let report = validate_document(&value);
+        assert!(report.issues.iter().any(|issue| {
+            issue.message.contains("push_strategy has been removed")
+                && issue.message.contains("repos[].finalize")
+        }));
     }
 }

@@ -29,6 +29,8 @@ use utoipa::OpenApi;
         crate::api::interactions::cancel_interaction,
         crate::api::controls::post_stop,
         crate::api::controls::post_retry,
+        crate::api::controls::post_finalize_approve,
+        crate::api::controls::post_finalize_retry,
         crate::api::controls::post_resume,
         crate::api::fs_handler::list_directory,
     ),
@@ -44,8 +46,13 @@ use utoipa::OpenApi;
         crate::observability::snapshot::WorkspaceInfo,
         crate::observability::snapshot::AttemptInfo,
         crate::observability::snapshot::RunningDetail,
+        crate::observability::snapshot::FinalizeSnapshot,
+        crate::observability::snapshot::RepoFinalizeSnapshot,
         // Orchestrator types
         crate::orchestrator::state::RateLimitSnapshot,
+        crate::orchestrator::state::FinalizeStatus,
+        crate::orchestrator::state::RepoFinalizeState,
+        crate::orchestrator::state::IssueFinalizeState,
         // Handler response types
         crate::api::handlers::RefreshResponse,
         crate::api::handlers::ApiError,
@@ -53,6 +60,8 @@ use utoipa::OpenApi;
         // Control types
         crate::api::controls::StopResponse,
         crate::api::controls::RetryResponse,
+        crate::api::controls::FinalizeApproveResponse,
+        crate::api::controls::FinalizeRetryResponse,
         crate::api::controls::ResumeResponse,
         // Interaction types
         crate::api::interactions::InteractionResponseBody,

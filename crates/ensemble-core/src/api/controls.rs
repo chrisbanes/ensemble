@@ -2,7 +2,7 @@ use crate::agent::cancellation::{cancel_issue, clear_issue_cancellation};
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
-use crate::orchestrator::state::OrchestratorState;
+use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -14,6 +14,7 @@ use serde::Serialize;
 enum IssuePresence {
     Running(String),
     Retrying(String),
+    Finalizing(String),
     Missing,
 }
 
@@ -41,6 +42,14 @@ fn find_issue_presence(state: &OrchestratorState, identifier: &str) -> IssuePres
         .map(|entry| entry.issue_id.clone())
     {
         return IssuePresence::Retrying(issue_id);
+    }
+
+    if let Some((issue_id, _)) = state
+        .finalize
+        .iter()
+        .find(|(_, finalize)| finalize.issue_identifier == identifier)
+    {
+        return IssuePresence::Finalizing(issue_id.clone());
     }
 
     IssuePresence::Missing
@@ -110,6 +119,22 @@ pub struct ResumeResponse {
     pub message: String,
 }
 
+/// Response for a successful finalize approval operation.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct FinalizeApproveResponse {
+    pub approved: bool,
+    pub issue_identifier: String,
+    pub message: String,
+}
+
+/// Response for a successful finalize retry operation.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct FinalizeRetryResponse {
+    pub retried: bool,
+    pub issue_identifier: String,
+    pub message: String,
+}
+
 fn interaction_store(state: &AppState) -> InteractionStore {
     let config_dir = state
         .config_runtime
@@ -154,12 +179,19 @@ pub async fn post_stop(
                 ),
             );
         }
+        IssuePresence::Finalizing(_) => {
+            return issue_error_response(
+                StatusCode::CONFLICT,
+                "not_running",
+                format!("issue '{}' is finalizing, not running", identifier),
+            );
+        }
         IssuePresence::Missing => {
             return issue_error_response(
                 StatusCode::NOT_FOUND,
                 "issue_not_found",
                 format!(
-                    "no running or retrying issue with identifier '{}'",
+                    "no running, retrying, or finalizing issue with identifier '{}'",
                     identifier
                 ),
             );
@@ -259,12 +291,19 @@ pub async fn post_retry(
                 ),
             );
         }
+        IssuePresence::Finalizing(_) => {
+            return issue_error_response(
+                StatusCode::CONFLICT,
+                "not_retrying",
+                format!("issue '{}' is finalizing, not retrying", identifier),
+            );
+        }
         IssuePresence::Missing => {
             return issue_error_response(
                 StatusCode::NOT_FOUND,
                 "issue_not_found",
                 format!(
-                    "no running or retrying issue with identifier '{}'",
+                    "no running, retrying, or finalizing issue with identifier '{}'",
                     identifier
                 ),
             );
@@ -285,6 +324,190 @@ pub async fn post_retry(
             retried: true,
             issue_identifier: identifier,
             message: "removed from retry queue, will be re-dispatched on next poll".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/{identifier}/finalize/approve
+#[utoipa::path(
+    post,
+    path = "/api/v1/{identifier}/finalize/approve",
+    operation_id = "postFinalizeApprove",
+    params(("identifier" = String, Path, description = "Issue identifier")),
+    responses(
+        (status = 200, description = "Finalize approved", body = FinalizeApproveResponse),
+        (status = 404, description = "Issue not found", body = ApiError),
+        (status = 409, description = "Issue is not awaiting finalize approval", body = ApiError)
+    ),
+    tag = "controls"
+)]
+pub async fn post_finalize_approve(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
+    let mut lock = state.orchestrator_state.write().await;
+    let issue_id = match find_issue_presence(&lock, &identifier) {
+        IssuePresence::Finalizing(issue_id) => issue_id,
+        IssuePresence::Running(_) | IssuePresence::Retrying(_) => {
+            return issue_error_response(
+                StatusCode::CONFLICT,
+                "not_awaiting_finalize_approval",
+                format!("issue '{}' is not awaiting finalize approval", identifier),
+            );
+        }
+        IssuePresence::Missing => {
+            return issue_error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("no issue with identifier '{}'", identifier),
+            );
+        }
+    };
+
+    let Some(finalize) = lock.get_finalize_state_mut(&issue_id) else {
+        return issue_error_response(
+            StatusCode::CONFLICT,
+            "not_awaiting_finalize_approval",
+            format!("issue '{}' has no finalize state", identifier),
+        );
+    };
+
+    let mut changed = false;
+    for repo in &mut finalize.repos {
+        if repo.status == FinalizeStatus::PendingApproval {
+            repo.last_error = None;
+            repo.status = FinalizeStatus::InProgress;
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return issue_error_response(
+            StatusCode::CONFLICT,
+            "not_awaiting_finalize_approval",
+            format!("issue '{}' has no repos awaiting approval", identifier),
+        );
+    }
+
+    finalize.status = if finalize
+        .repos
+        .iter()
+        .all(|repo| repo.status == FinalizeStatus::Succeeded)
+    {
+        FinalizeStatus::Succeeded
+    } else if finalize
+        .repos
+        .iter()
+        .any(|repo| repo.status == FinalizeStatus::InProgress)
+    {
+        FinalizeStatus::InProgress
+    } else {
+        FinalizeStatus::PendingApproval
+    };
+
+    state.refresh_requested.notify_one();
+
+    (
+        StatusCode::OK,
+        Json(FinalizeApproveResponse {
+            approved: true,
+            issue_identifier: identifier,
+            message: "finalize approved".to_string(),
+        }),
+    )
+        .into_response()
+}
+
+/// POST /api/v1/{identifier}/finalize/retry
+#[utoipa::path(
+    post,
+    path = "/api/v1/{identifier}/finalize/retry",
+    operation_id = "postFinalizeRetry",
+    params(("identifier" = String, Path, description = "Issue identifier")),
+    responses(
+        (status = 200, description = "Finalize retried", body = FinalizeRetryResponse),
+        (status = 404, description = "Issue not found", body = ApiError),
+        (status = 409, description = "Issue has no failed finalize state", body = ApiError)
+    ),
+    tag = "controls"
+)]
+pub async fn post_finalize_retry(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+) -> impl IntoResponse {
+    let mut lock = state.orchestrator_state.write().await;
+    let issue_id = match find_issue_presence(&lock, &identifier) {
+        IssuePresence::Finalizing(issue_id) => issue_id,
+        IssuePresence::Running(_) | IssuePresence::Retrying(_) => {
+            return issue_error_response(
+                StatusCode::CONFLICT,
+                "not_finalize_failed",
+                format!("issue '{}' is not finalizing", identifier),
+            );
+        }
+        IssuePresence::Missing => {
+            return issue_error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("no issue with identifier '{}'", identifier),
+            );
+        }
+    };
+
+    let Some(finalize) = lock.get_finalize_state_mut(&issue_id) else {
+        return issue_error_response(
+            StatusCode::CONFLICT,
+            "not_finalize_failed",
+            format!("issue '{}' has no finalize state", identifier),
+        );
+    };
+
+    let mut changed = false;
+    for repo in &mut finalize.repos {
+        if repo.status == FinalizeStatus::Failed {
+            repo.last_error = None;
+            repo.status = if repo.approval_required {
+                FinalizeStatus::PendingApproval
+            } else {
+                FinalizeStatus::InProgress
+            };
+            changed = true;
+        }
+    }
+
+    if !changed {
+        return issue_error_response(
+            StatusCode::CONFLICT,
+            "not_finalize_failed",
+            format!("issue '{}' has no failed finalize repos", identifier),
+        );
+    }
+
+    finalize.status = if finalize
+        .repos
+        .iter()
+        .all(|repo| repo.status == FinalizeStatus::Succeeded)
+    {
+        FinalizeStatus::Succeeded
+    } else if finalize
+        .repos
+        .iter()
+        .any(|repo| repo.status == FinalizeStatus::InProgress)
+    {
+        FinalizeStatus::InProgress
+    } else {
+        FinalizeStatus::PendingApproval
+    };
+
+    state.refresh_requested.notify_one();
+
+    (
+        StatusCode::OK,
+        Json(FinalizeRetryResponse {
+            retried: true,
+            issue_identifier: identifier,
+            message: "finalize retry queued".to_string(),
         }),
     )
         .into_response()
@@ -446,7 +669,9 @@ mod tests {
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::StepConfig;
-    use crate::orchestrator::state::OrchestratorState;
+    use crate::orchestrator::state::{
+        FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
+    };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
@@ -481,6 +706,25 @@ mod tests {
             find_issue_presence(&state, "missing#1"),
             IssuePresence::Missing
         ));
+
+        state.set_finalize_state(
+            "NODE_789",
+            IssueFinalizeState {
+                issue_identifier: "my-repo#777".to_string(),
+                status: FinalizeStatus::Failed,
+                repos: vec![RepoFinalizeState {
+                    repo: "repo".to_string(),
+                    mode: "push".to_string(),
+                    approval_required: false,
+                    status: FinalizeStatus::Failed,
+                    last_error: Some("push failed".to_string()),
+                }],
+            },
+        );
+        match find_issue_presence(&state, "my-repo#777") {
+            IssuePresence::Finalizing(issue_id) => assert_eq!(issue_id, "NODE_789"),
+            other => panic!("expected finalizing issue, got {other:?}"),
+        }
     }
 
     fn test_issue() -> Issue {
@@ -563,6 +807,50 @@ mod tests {
         app_state
     }
 
+    fn build_app_state_with_finalize_pending() -> AppState {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.set_finalize_state(
+            "NODE_888",
+            IssueFinalizeState {
+                issue_identifier: "my-repo#888".to_string(),
+                status: FinalizeStatus::PendingApproval,
+                repos: vec![RepoFinalizeState {
+                    repo: "repo".to_string(),
+                    mode: "push".to_string(),
+                    approval_required: true,
+                    status: FinalizeStatus::PendingApproval,
+                    last_error: None,
+                }],
+            },
+        );
+
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
+    }
+
+    fn build_app_state_with_finalize_failed() -> AppState {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.set_finalize_state(
+            "NODE_999",
+            IssueFinalizeState {
+                issue_identifier: "my-repo#999".to_string(),
+                status: FinalizeStatus::Failed,
+                repos: vec![RepoFinalizeState {
+                    repo: "repo".to_string(),
+                    mode: "push".to_string(),
+                    approval_required: false,
+                    status: FinalizeStatus::Failed,
+                    last_error: Some("push failed".to_string()),
+                }],
+            },
+        );
+
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn test_stop_running_issue() {
@@ -601,6 +889,36 @@ mod tests {
         let response = post_stop(State(state), Path("nonexistent#999".to_string())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_finalize_approve_transitions_pending_to_in_progress() {
+        let state = build_app_state_with_finalize_pending();
+        let response =
+            post_finalize_approve(State(state.clone()), Path("my-repo#888".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let lock = state.orchestrator_state.read().await;
+        let finalize = lock.get_finalize_state("NODE_888").unwrap();
+        assert_eq!(finalize.status, FinalizeStatus::InProgress);
+        assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
+        assert!(!lock.completed.contains("NODE_888"));
+    }
+
+    #[tokio::test]
+    async fn test_finalize_retry_sets_repo_to_in_progress() {
+        let state = build_app_state_with_finalize_failed();
+        let response =
+            post_finalize_retry(State(state.clone()), Path("my-repo#999".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let lock = state.orchestrator_state.read().await;
+        let finalize = lock.get_finalize_state("NODE_999").unwrap();
+        assert_eq!(finalize.status, FinalizeStatus::InProgress);
+        assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
+        assert!(finalize.repos[0].last_error.is_none());
     }
 
     #[tokio::test]

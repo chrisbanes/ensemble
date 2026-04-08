@@ -97,6 +97,9 @@ tracker:
 repos:
   - path: repos/my-repo    # Relative to config directory
     branch: main
+    finalize:
+      mode: push_and_pr
+      approval_required: true
 
 agents:
   builder:
@@ -190,6 +193,13 @@ List of repositories for workspace setup. Paths can be absolute or relative to t
 |-------|------|---------|-------------|
 | `path` | string | *required* | Path to repository (supports `$VAR`, `~`, and config-relative paths) |
 | `branch` | string | *required* | Branch name to work on |
+| `finalize.enabled` | bool | `true` | Whether post-pipeline finalization is enabled for this repo |
+| `finalize.mode` | string | `none` | Finalization action: `none`, `push`, or `push_and_pr` |
+| `finalize.approval_required` | bool | `false` | Requires explicit approval from web/desktop UI before finalize runs |
+
+**Headless behavior:** if `finalize.approval_required: true` and Ensemble is running headless, startup emits a warning and finalize is skipped for that repo.
+
+**Migration note:** top-level `push_strategy` has been removed. Configure `repos[].finalize` instead.
 
 ### agents
 

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use ensemble_core::api::bootstrap::{
     build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
@@ -8,6 +8,7 @@ use ensemble_core::api::bootstrap::{
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
 use ensemble_core::observability::events::EventBus;
+use ensemble_core::workspace::finalize::FinalizeMode;
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
@@ -77,6 +78,31 @@ pub async fn execute(args: RunArgs) -> ExitCode {
             max_concurrent = config.concurrency.max_concurrent_agents,
             "config loaded successfully"
         );
+    }
+
+    // Mark this runtime as headless so finalize policies can adapt.
+    std::env::set_var("ENSEMBLE_HEADLESS", "1");
+
+    {
+        let document_state = prepared
+            .app_state
+            .config_runtime
+            .document_state
+            .read()
+            .await;
+        if let Some(config_guard) = document_state.active_config.as_ref() {
+            for repo in &config_guard.repos {
+                if repo.finalize.enabled
+                    && !matches!(repo.finalize.mode, FinalizeMode::None)
+                    && repo.finalize.approval_required
+                {
+                    warn!(
+                        repo_path = %repo.path,
+                        "approval-required finalize configured in headless mode; finalize will be skipped"
+                    );
+                }
+            }
+        }
     }
 
     match start_or_replace_registered_orchestrator(&prepared.app_state).await {
