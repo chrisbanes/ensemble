@@ -4,6 +4,9 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+use crate::observability::events_contract::{
+    TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED, TRACKER_TRANSITION_SUCCEEDED,
+};
 use super::model::Issue;
 use super::{IssueTracker, TrackerError};
 
@@ -989,6 +992,13 @@ impl IssueTracker for GithubTracker {
     }
 
     async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+        info!(
+            event = TRACKER_TRANSITION_REQUESTED,
+            issue_id = id,
+            tracker_state_to = state,
+            "github tracker state transition requested"
+        );
+
         if self.project_number.is_some() {
             // Ensure project metadata is discovered (populates project_node_id,
             // status_field_id, and status_option_ids).
@@ -1025,11 +1035,26 @@ impl IssueTracker for GithubTracker {
                 "fieldId": field_id,
                 "optionId": option_id,
             });
-            self.graphql(UPDATE_PROJECT_ITEM_FIELD_MUTATION, variables)
-                .await?;
+            if let Err(error) = self.graphql(UPDATE_PROJECT_ITEM_FIELD_MUTATION, variables).await {
+                warn!(
+                    event = TRACKER_TRANSITION_FAILED,
+                    issue_id = id,
+                    tracker_state_to = state,
+                    error = %error,
+                    "github tracker state transition failed"
+                );
+                return Err(error);
+            }
+            info!(
+                event = TRACKER_TRANSITION_SUCCEEDED,
+                issue_id = id,
+                tracker_state_to = state,
+                "github tracker state transition succeeded"
+            );
             Ok(())
         } else {
             tracing::warn!(
+                event = TRACKER_TRANSITION_FAILED,
                 issue_id = id,
                 target_state = state,
                 "set_issue_state in repo mode: label-based state transitions not yet implemented"

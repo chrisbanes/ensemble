@@ -21,7 +21,8 @@ use crate::agent::cancellation::{
 };
 use crate::observability::events_contract::{
     elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
-    ORCH_TICK_STARTED,
+    ORCH_TICK_STARTED, STEP_STARTED, TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED,
+    TRACKER_TRANSITION_SUCCEEDED,
 };
 use crate::agent::events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
@@ -575,6 +576,7 @@ impl Orchestrator {
         dispatch: StepDispatchContext<'_>,
     ) -> Result<(), EnsembleError> {
         info!(
+            event = STEP_STARTED,
             issue_id = %issue.id,
             identifier = %issue.identifier,
             step = dispatch.step_name,
@@ -585,13 +587,33 @@ impl Orchestrator {
         // Set tracker state if specified by the step
         if let Some(state_name) = dispatch.tracker_state {
             if self.tracker.supports_writes() {
-                if let Err(e) = self.tracker.set_issue_state(&issue.id, state_name).await {
-                    warn!(
-                        issue_id = %issue.id,
-                        state = state_name,
-                        error = %e,
-                        "failed to set tracker state for step dispatch"
-                    );
+                info!(
+                    event = TRACKER_TRANSITION_REQUESTED,
+                    issue_id = %issue.id,
+                    step = dispatch.step_name,
+                    tracker_state_to = state_name,
+                    "requesting tracker state transition"
+                );
+                match self.tracker.set_issue_state(&issue.id, state_name).await {
+                    Ok(()) => {
+                        info!(
+                            event = TRACKER_TRANSITION_SUCCEEDED,
+                            issue_id = %issue.id,
+                            step = dispatch.step_name,
+                            tracker_state_to = state_name,
+                            "tracker state transition succeeded"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            event = TRACKER_TRANSITION_FAILED,
+                            issue_id = %issue.id,
+                            step = dispatch.step_name,
+                            tracker_state_to = state_name,
+                            error = %e,
+                            "failed to set tracker state for step dispatch"
+                        );
+                    }
                 }
             }
         }
