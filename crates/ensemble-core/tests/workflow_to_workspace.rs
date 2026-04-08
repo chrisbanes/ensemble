@@ -159,6 +159,7 @@ async fn test_workflow_with_worktrees() {
         path: repo_dir.path().to_string_lossy().to_string(),
         branch: "main".to_string(),
         git_remote: "origin".to_string(),
+        finalize: Default::default(),
     }];
 
     let mgr = WorkspaceManager::new(ws_dir.path(), Some(repos)).unwrap();

@@ -357,6 +357,7 @@ mod tests {
             path: dir.path().to_string_lossy().to_string(),
             branch: "main".to_string(),
             git_remote: "origin".to_string(),
+            finalize: Default::default(),
         };
 
         (dir, config)
@@ -491,6 +492,7 @@ mod tests {
             path: "/nonexistent/path".to_string(),
             branch: "main".to_string(),
             git_remote: "origin".to_string(),
+            finalize: Default::default(),
         }];
         let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
 
@@ -506,6 +508,7 @@ mod tests {
             path: "/nonexistent/path".to_string(),
             branch: "main".to_string(),
             git_remote: "origin".to_string(),
+            finalize: Default::default(),
         }];
         let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
 

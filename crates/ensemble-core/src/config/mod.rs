@@ -5,4 +5,4 @@ pub mod location;
 pub mod setup;
 pub mod template;
 
-pub use crate::workspace::push_strategy::PushStrategy;
+pub use crate::workspace::finalize::{FinalizeMode, RepoFinalizeConfig};
