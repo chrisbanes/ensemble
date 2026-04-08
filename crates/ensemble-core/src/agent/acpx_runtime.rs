@@ -5,7 +5,7 @@ use crate::error::AgentError;
 
 use super::acpx_cli::AcpxCli;
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
-use super::{detect_worker_result, AgentRunRequest};
+use super::{detect_worker_result_with_runtime_verdict, AgentRunRequest};
 
 pub struct AcpxRuntime {
     cli: AcpxCli,
@@ -160,9 +160,15 @@ impl AcpxRuntime {
         )
         .await;
 
-        prompt_result?;
+        let prompt_outcome = prompt_result?;
 
-        Ok(detect_worker_result(request.workspace_path).await)
+        Ok(
+            detect_worker_result_with_runtime_verdict(
+                request.workspace_path,
+                prompt_outcome.runtime_verdict,
+            )
+            .await,
+        )
     }
 }
 

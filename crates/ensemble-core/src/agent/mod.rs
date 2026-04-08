@@ -189,7 +189,10 @@ async fn load_interaction_response(
     }
 }
 
-async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
+async fn detect_worker_result_with_runtime_verdict(
+    workspace_path: &Path,
+    runtime_verdict: Option<serde_json::Value>,
+) -> WorkerResult {
     let interaction_path = workspace_path
         .join(".ensemble")
         .join("interaction-request.json");
@@ -221,10 +224,12 @@ async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
                     .to_string(),
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
-        None => WorkerResult::Success {
-            runtime_verdict: None,
-        },
+        None => WorkerResult::Success { runtime_verdict },
     }
+}
+
+async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
+    detect_worker_result_with_runtime_verdict(workspace_path, None).await
 }
 
 async fn write_interaction_response_file(
@@ -442,6 +447,7 @@ impl AcpAgentRunner {
         let max_turns = config.agent.max_turns;
         let mut turn_number: u32 = 1;
 
+        let mut final_runtime_verdict: Option<serde_json::Value> = None;
         let result = loop {
             let prompt = match self
                 .build_prompt(
@@ -474,7 +480,12 @@ impl AcpAgentRunner {
                 .await;
 
             match turn_result {
-                Ok(TurnResult::Completed { .. }) => {
+                Ok(TurnResult::Completed {
+                    runtime_verdict, ..
+                }) => {
+                    if runtime_verdict.is_some() {
+                        final_runtime_verdict = runtime_verdict;
+                    }
                     info!(
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
@@ -484,7 +495,14 @@ impl AcpAgentRunner {
                         "turn completed successfully"
                     );
                 }
-                Ok(TurnResult::Failed { reason, .. }) => {
+                Ok(TurnResult::Failed {
+                    reason,
+                    runtime_verdict,
+                    ..
+                }) => {
+                    if runtime_verdict.is_some() {
+                        final_runtime_verdict = runtime_verdict;
+                    }
                     warn!(
                         issue_id = %issue.id,
                         identifier = %issue.identifier,
@@ -521,7 +539,11 @@ impl AcpAgentRunner {
 
         result?;
 
-        Ok(detect_worker_result(workspace_path).await)
+        Ok(detect_worker_result_with_runtime_verdict(
+            workspace_path,
+            final_runtime_verdict,
+        )
+        .await)
     }
 }
 

@@ -38,11 +38,15 @@ pub struct InitializeResult {
 #[derive(Debug)]
 pub enum TurnResult {
     /// Turn completed successfully (end_turn or max_tokens).
-    Completed { usage: Option<TokenUsage> },
+    Completed {
+        usage: Option<TokenUsage>,
+        runtime_verdict: Option<serde_json::Value>,
+    },
     /// Turn failed with a reason.
     Failed {
         reason: String,
         usage: Option<TokenUsage>,
+        runtime_verdict: Option<serde_json::Value>,
     },
 }
 
@@ -254,6 +258,7 @@ impl AcpSession {
         event_tx: &mpsc::Sender<WorkerEvent>,
     ) -> Result<TurnResult, AgentError> {
         let mut last_usage: Option<TokenUsage> = None;
+        let mut last_runtime_verdict: Option<serde_json::Value> = None;
 
         loop {
             let line = self.read_line().await?;
@@ -283,6 +288,7 @@ impl AcpSession {
                             return Ok(TurnResult::Failed {
                                 reason: err.message.clone(),
                                 usage: last_usage,
+                                runtime_verdict: last_runtime_verdict,
                             });
                         }
                         if let Some(stop_reason) = msg
@@ -297,11 +303,15 @@ impl AcpSession {
                                     step_name,
                                     event_tx,
                                     last_usage,
+                                    last_runtime_verdict.clone(),
                                 )
                                 .await;
                         }
                         // A prompt response without error means turn completed
-                        return Ok(TurnResult::Completed { usage: last_usage });
+                        return Ok(TurnResult::Completed {
+                            usage: last_usage,
+                            runtime_verdict: last_runtime_verdict,
+                        });
                     }
                 }
                 continue;
@@ -350,6 +360,9 @@ impl AcpSession {
                                 if let Some(usage) = parsed.usage {
                                     last_usage = Some(usage);
                                 }
+                                if let Some(verdict) = parsed.verdict {
+                                    last_runtime_verdict = Some(verdict);
+                                }
 
                                 if let Some(stop_reason) = parsed.stop_reason {
                                     return self
@@ -359,6 +372,7 @@ impl AcpSession {
                                             step_name,
                                             event_tx,
                                             last_usage,
+                                            last_runtime_verdict.clone(),
                                         )
                                         .await;
                                 }
@@ -409,6 +423,7 @@ impl AcpSession {
         step_name: &str,
         event_tx: &mpsc::Sender<WorkerEvent>,
         usage: Option<TokenUsage>,
+        runtime_verdict: Option<serde_json::Value>,
     ) -> Result<TurnResult, AgentError> {
         match stop_reason {
             StopReason::EndTurn | StopReason::MaxTokens => {
@@ -421,7 +436,10 @@ impl AcpSession {
                     },
                 )
                 .await;
-                Ok(TurnResult::Completed { usage })
+                Ok(TurnResult::Completed {
+                    usage,
+                    runtime_verdict,
+                })
             }
             StopReason::Cancelled => {
                 let reason = "stop reason: cancelled".to_string();
@@ -436,7 +454,11 @@ impl AcpSession {
                 )
                 .await;
 
-                Ok(TurnResult::Failed { reason, usage })
+                Ok(TurnResult::Failed {
+                    reason,
+                    usage,
+                    runtime_verdict,
+                })
             }
             StopReason::Refusal => {
                 let reason = "stop reason: refusal".to_string();
@@ -451,7 +473,11 @@ impl AcpSession {
                 )
                 .await;
 
-                Ok(TurnResult::Failed { reason, usage })
+                Ok(TurnResult::Failed {
+                    reason,
+                    usage,
+                    runtime_verdict,
+                })
             }
             StopReason::MaxTurnRequests => {
                 let reason = "stop reason: max_turn_requests".to_string();
@@ -466,7 +492,11 @@ impl AcpSession {
                 )
                 .await;
 
-                Ok(TurnResult::Failed { reason, usage })
+                Ok(TurnResult::Failed {
+                    reason,
+                    usage,
+                    runtime_verdict,
+                })
             }
         }
     }
@@ -814,7 +844,7 @@ done
             .unwrap();
 
         assert!(turn_result.is_success());
-        if let TurnResult::Completed { usage } = &turn_result {
+        if let TurnResult::Completed { usage, .. } = &turn_result {
             let u = usage.as_ref().unwrap();
             assert_eq!(u.input_tokens, 100);
             assert_eq!(u.output_tokens, 50);
