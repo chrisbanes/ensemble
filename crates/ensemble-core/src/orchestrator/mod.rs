@@ -19,6 +19,10 @@ use crate::agent::cancellation::{
     cancel_all, clear_issue_cancellation, new_cancellation_registry, register_issue_cancellation,
     CancellationRegistry,
 };
+use crate::observability::events_contract::{
+    elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
+    ORCH_TICK_STARTED,
+};
 use crate::agent::events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::EnsembleConfig;
@@ -238,6 +242,9 @@ impl Orchestrator {
 
     /// Handle a poll tick: reconcile, validate, fetch, dispatch.
     async fn handle_tick(&self) {
+        let tick_started_at = std::time::Instant::now();
+        info!(event = ORCH_TICK_STARTED, "orchestrator tick started");
+
         // Initialize state lists lazily (for tests that don't call run())
         {
             let state = self.state.read().await;
@@ -371,6 +378,11 @@ impl Orchestrator {
             Ok(issues) => issues,
             Err(e) => {
                 warn!(error = %e, "failed to fetch candidate issues, skipping dispatch");
+                info!(
+                    event = ORCH_TICK_FINISHED,
+                    duration_ms = elapsed_ms(tick_started_at),
+                    "orchestrator tick finished with fetch error"
+                );
                 return;
             }
         };
@@ -428,6 +440,12 @@ impl Orchestrator {
                 self.dispatch_issue(issue, None).await;
             }
         }
+
+        info!(
+            event = ORCH_TICK_FINISHED,
+            duration_ms = elapsed_ms(tick_started_at),
+            "orchestrator tick finished"
+        );
     }
 
     /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
@@ -448,9 +466,10 @@ impl Orchestrator {
         let action = pipeline_run.start();
 
         info!(
+            event = ISSUE_DISPATCH_STARTED,
             issue_id = %issue.id,
             identifier = %issue.identifier,
-            attempt = ?attempt,
+            cycle = cycle,
             "dispatching issue with pipeline"
         );
 
@@ -510,6 +529,14 @@ impl Orchestrator {
                     .await;
             }
         }
+
+        info!(
+            event = ISSUE_DISPATCH_COMPLETED,
+            issue_id = %issue.id,
+            identifier = %issue.identifier,
+            cycle = cycle,
+            "issue dispatch setup completed"
+        );
     }
 
     async fn prepare_step_workspace(
