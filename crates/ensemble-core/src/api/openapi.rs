@@ -12,6 +12,7 @@ use utoipa::OpenApi;
         crate::api::handlers::get_issue_detail,
         crate::api::handlers::post_refresh,
         crate::api::history_handler::get_history,
+        crate::api::timeline_handler::get_timeline,
         crate::api::config_handler::get_config,
         crate::api::config_edit_handler::validate_yaml,
         crate::api::config_edit_handler::save_yaml,
@@ -119,6 +120,9 @@ use utoipa::OpenApi;
         crate::history::model::HistoryRecord,
         crate::history::model::TokenTotals,
         crate::history::reader::HistoryResponse,
+        // Timeline types
+        crate::timeline::model::TimelineEventRecord,
+        crate::timeline::reader::TimelineResponse,
         // Conversation types
         crate::api::conversation::ConversationResponse,
         crate::api::conversation::ConversationMessage,

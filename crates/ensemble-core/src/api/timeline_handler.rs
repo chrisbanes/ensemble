@@ -1,0 +1,120 @@
+use crate::api::router::AppState;
+use crate::timeline::reader::{read_timeline, TimelineQuery, TimelineResponse};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use std::path::PathBuf;
+
+fn timeline_path(workspace_root: &str, run_id: &str) -> PathBuf {
+    PathBuf::from(workspace_root)
+        .join(".ensemble")
+        .join("runs")
+        .join(run_id)
+        .join("events.jsonl")
+}
+
+/// GET /api/v1/{identifier}/timeline
+///
+/// Returns paginated timeline events for a run.
+#[utoipa::path(
+    get,
+    path = "/api/v1/{identifier}/timeline",
+    operation_id = "getTimeline",
+    params(
+        ("identifier" = String, Path, description = "Issue identifier"),
+        TimelineQuery,
+    ),
+    responses(
+        (status = 200, description = "Timeline events", body = TimelineResponse),
+        (status = 500, description = "Read error", body = crate::api::handlers::ApiError)
+    ),
+    tag = "history"
+)]
+pub async fn get_timeline(
+    State(state): State<AppState>,
+    Path(_identifier): Path<String>,
+    Query(query): Query<TimelineQuery>,
+) -> impl IntoResponse {
+    let path = timeline_path(&state.workspace_root, &query.run_id);
+    match read_timeline(&path, &query).await {
+        Ok(response) => (StatusCode::OK, axum::Json(response)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::api::handlers::api_error(
+                "timeline_read_error",
+                format!("failed to read timeline: {}", e),
+            ),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
+    use crate::timeline::model::TimelineEventRecord;
+    use crate::timeline::writer::TimelineWriter;
+    use chrono::Utc;
+
+    fn build_app_state(workspace_root: String) -> AppState {
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.workspace_root = workspace_root;
+        app_state
+    }
+
+    fn sample_event(run_id: &str, sequence: u64) -> TimelineEventRecord {
+        TimelineEventRecord {
+            run_id: run_id.to_string(),
+            issue_identifier: "repo#1".to_string(),
+            sequence,
+            timestamp: Utc::now(),
+            event_type: "step_started".to_string(),
+            step_name: Some("build".to_string()),
+            attempt: 1,
+            detail: "started build".to_string(),
+            verdict: None,
+            tool_name: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn get_timeline_returns_empty_when_file_missing() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
+        let response = get_timeline(
+            State(state),
+            Path("repo#1".to_string()),
+            Query(TimelineQuery {
+                run_id: "run-missing".to_string(),
+                cursor: None,
+                limit: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_returns_paginated_events_for_run_id() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
+        let writer = TimelineWriter::new(temp_dir.path().to_path_buf());
+        writer.append("run-abc", &sample_event("run-abc", 1)).await.unwrap();
+        writer.append("run-abc", &sample_event("run-abc", 2)).await.unwrap();
+
+        let response = get_timeline(
+            State(state),
+            Path("repo#1".to_string()),
+            Query(TimelineQuery {
+                run_id: "run-abc".to_string(),
+                cursor: Some(0),
+                limit: Some(1),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
