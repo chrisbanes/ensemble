@@ -8,6 +8,7 @@ use ensemble_core::api::bootstrap::{
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
 use ensemble_core::observability::events::EventBus;
+use ensemble_core::workspace::finalize::FinalizeMode;
 
 #[derive(Debug, Clone)]
 pub struct RunArgs {
@@ -91,7 +92,10 @@ pub async fn execute(args: RunArgs) -> ExitCode {
             .await;
         if let Some(config_guard) = document_state.active_config.as_ref() {
             for repo in &config_guard.repos {
-                if repo.finalize.enabled && repo.finalize.approval_required {
+                if repo.finalize.enabled
+                    && !matches!(repo.finalize.mode, FinalizeMode::None)
+                    && repo.finalize.approval_required
+                {
                     warn!(
                         repo_path = %repo.path,
                         "approval-required finalize configured in headless mode; finalize will be skipped"

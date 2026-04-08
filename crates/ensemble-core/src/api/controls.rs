@@ -376,7 +376,8 @@ pub async fn post_finalize_approve(
     let mut changed = false;
     for repo in &mut finalize.repos {
         if repo.status == FinalizeStatus::PendingApproval {
-            repo.status = FinalizeStatus::Succeeded;
+            repo.last_error = None;
+            repo.status = FinalizeStatus::InProgress;
             changed = true;
         }
     }
@@ -389,15 +390,21 @@ pub async fn post_finalize_approve(
         );
     }
 
-    if finalize
+    finalize.status = if finalize
         .repos
         .iter()
         .all(|repo| repo.status == FinalizeStatus::Succeeded)
     {
-        finalize.status = FinalizeStatus::Succeeded;
-        lock.completed.insert(issue_id.clone());
-        lock.release_claim(&issue_id);
-    }
+        FinalizeStatus::Succeeded
+    } else if finalize
+        .repos
+        .iter()
+        .any(|repo| repo.status == FinalizeStatus::InProgress)
+    {
+        FinalizeStatus::InProgress
+    } else {
+        FinalizeStatus::PendingApproval
+    };
 
     state.refresh_requested.notify_one();
 
@@ -885,7 +892,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_finalize_approve_transitions_pending_to_succeeded() {
+    async fn test_finalize_approve_transitions_pending_to_in_progress() {
         let state = build_app_state_with_finalize_pending();
         let response =
             post_finalize_approve(State(state.clone()), Path("my-repo#888".to_string())).await;
@@ -893,8 +900,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let lock = state.orchestrator_state.read().await;
-        assert!(lock.get_finalize_state("NODE_888").is_none());
-        assert!(lock.completed.contains("NODE_888"));
+        let finalize = lock.get_finalize_state("NODE_888").unwrap();
+        assert_eq!(finalize.status, FinalizeStatus::InProgress);
+        assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
+        assert!(!lock.completed.contains("NODE_888"));
     }
 
     #[tokio::test]

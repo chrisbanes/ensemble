@@ -1681,10 +1681,44 @@ impl Orchestrator {
                 })?
                 .map_err(|error| format!("failed to run gh pr create: {error}"))?;
             if !pr_output.status.success() {
-                return Err(format!(
-                    "gh pr create failed: {}",
-                    String::from_utf8_lossy(&pr_output.stderr)
-                ));
+                let pr_create_stderr = String::from_utf8_lossy(&pr_output.stderr).to_string();
+                if pr_create_stderr.contains("already exists") {
+                    let pr_lookup_output = tokio::process::Command::new("gh")
+                        .args([
+                            "pr",
+                            "list",
+                            "--head",
+                            &current_branch,
+                            "--base",
+                            base_branch,
+                            "--state",
+                            "all",
+                            "--json",
+                            "url",
+                            "--limit",
+                            "1",
+                        ])
+                        .current_dir(repo_path)
+                        .output();
+                    let pr_lookup_output = timeout(FINALIZE_COMMAND_TIMEOUT, pr_lookup_output)
+                        .await
+                        .map_err(|_| {
+                            format!(
+                                "gh pr list timed out after {}s",
+                                FINALIZE_COMMAND_TIMEOUT.as_secs()
+                            )
+                        })?
+                        .map_err(|error| format!("failed to run gh pr list: {error}"))?;
+
+                    if pr_lookup_output.status.success() {
+                        let pr_lookup_stdout = String::from_utf8_lossy(&pr_lookup_output.stdout);
+                        if pr_lookup_stdout.trim() != "[]" {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                return Err(format!("gh pr create failed: {pr_create_stderr}"));
             }
         }
 
