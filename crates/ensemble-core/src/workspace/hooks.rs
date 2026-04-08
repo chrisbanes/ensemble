@@ -59,6 +59,7 @@ pub async fn run_hook(
                     event = WORKSPACE_HOOK_FINISHED,
                     hook = hook_name,
                     duration_ms = elapsed_ms(started_at),
+                    detail = %format_hook_log(hook_name, elapsed_ms(started_at), "ok"),
                     "hook completed successfully"
                 );
                 Ok(())
@@ -78,6 +79,7 @@ pub async fn run_hook(
                     event = WORKSPACE_HOOK_FAILED,
                     hook = hook_name,
                     duration_ms = elapsed_ms(started_at),
+                    detail = %format_hook_log(hook_name, elapsed_ms(started_at), "failed"),
                     %reason,
                     "hook failed"
                 );

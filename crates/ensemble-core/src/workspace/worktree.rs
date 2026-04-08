@@ -1,8 +1,9 @@
 use crate::error::WorktreeError;
+use crate::observability::redaction::truncate_for_log;
 use std::path::Path;
 use std::sync::OnceLock;
 use tokio::process::Command;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 static GIT_BINARY: OnceLock<&'static str> = OnceLock::new();
 
@@ -41,7 +42,14 @@ async fn run_git(
     command_label: impl Into<String>,
 ) -> Result<std::process::Output, WorktreeError> {
     let command = command_label.into();
-    Command::new(git_binary())
+    trace!(
+        event = "workspace.git_command_started",
+        repo_path = repo_path,
+        command = %command,
+        "starting git command"
+    );
+
+    let output = Command::new(git_binary())
         .args(args)
         .current_dir(repo_path)
         .output()
@@ -49,10 +57,22 @@ async fn run_git(
         .map_err(|error| {
             error!(error = %error, command = %command, "Failed to spawn git command");
             WorktreeError::GitCommandFailed {
-                command,
+                command: command.clone(),
                 reason: error.to_string(),
             }
-        })
+        })?;
+
+    trace!(
+        event = "workspace.git_command_finished",
+        repo_path = repo_path,
+        command = %command,
+        success = output.status.success(),
+        exit_code = output.status.code(),
+        stderr_preview = %truncate_for_log(&String::from_utf8_lossy(&output.stderr), 200),
+        "finished git command"
+    );
+
+    Ok(output)
 }
 
 fn git_binary() -> &'static str {

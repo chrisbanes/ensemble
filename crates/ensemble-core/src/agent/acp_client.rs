@@ -6,9 +6,11 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 use crate::error::AgentError;
+use crate::observability::events_contract::AGENT_MESSAGE;
+use crate::observability::redaction::{redact_kv, truncate_for_log};
 
 use super::events::{
     AgentEvent, JsonRpcMessage, RuntimeStream, StopReason, TokenUsage, WorkerEvent,
@@ -596,7 +598,13 @@ impl AcpSession {
         let line = serde_json::to_string(msg).map_err(|e| AgentError::IoError {
             reason: format!("json serialize error: {e}"),
         })?;
-        debug!(msg = %line, "sending JSON-RPC");
+        trace!(
+            event = AGENT_MESSAGE,
+            direction = "outbound",
+            bytes = line.len(),
+            preview = %truncate_for_log(&redact_kv(&line), 160),
+            "sending JSON-RPC"
+        );
 
         let mut buf = Vec::with_capacity(line.len() + 1);
         buf.extend_from_slice(line.as_bytes());
@@ -632,7 +640,13 @@ impl AcpSession {
         }
 
         let trimmed = line.trim_end().to_string();
-        debug!(line = %trimmed, "received from agent");
+        trace!(
+            event = AGENT_MESSAGE,
+            direction = "inbound",
+            bytes = trimmed.len(),
+            preview = %truncate_for_log(&redact_kv(&trimmed), 160),
+            "received from agent"
+        );
         Ok(trimmed)
     }
 
