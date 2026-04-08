@@ -33,7 +33,7 @@ use crate::observability::events_contract::{
 };
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
-use crate::pipeline::verdict::resolve_verdict;
+use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::manager::WorkspaceManager;
@@ -800,7 +800,7 @@ impl Orchestrator {
         };
 
         match result {
-            WorkerResult::Success { .. } => {
+            WorkerResult::Success { runtime_verdict } => {
                 let config = self.config.read().await;
                 info!(
                     issue_id = %issue_id,
@@ -817,15 +817,36 @@ impl Orchestrator {
                         .map(|i| i.identifier.as_str())
                         .unwrap_or(issue_id),
                 );
-                let verdict = match workspace_path {
-                    Some(wp) => resolve_verdict(None, &wp).await,
-                    None => crate::pipeline::verdict::Verdict::Approve,
+                let resolved = match workspace_path {
+                    Some(wp) => resolve_verdict_with_source(runtime_verdict.as_ref(), &wp).await,
+                    None => crate::pipeline::verdict::ResolvedVerdict {
+                        verdict: Verdict::Approve,
+                        source: VerdictSource::Default,
+                    },
                 };
+                let verdict_value = match &resolved.verdict {
+                    Verdict::Approve => "approve",
+                    Verdict::Reject { .. } => "reject",
+                };
+                info!(
+                    issue_id = %issue_id,
+                    step = step_name,
+                    verdict_source = ?resolved.source,
+                    verdict_value,
+                    "resolved step verdict"
+                );
+                if matches!(resolved.source, VerdictSource::Default) {
+                    warn!(
+                        issue_id = %issue_id,
+                        step = step_name,
+                        "no runtime or file verdict found; defaulting to approve"
+                    );
+                }
 
                 // Drive the pipeline
                 let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                     Some((
-                        run.step_completed(step_name, verdict),
+                        run.step_completed(step_name, resolved.verdict),
                         state.get_pipeline_config(issue_id).cloned(),
                     ))
                 } else {
@@ -2126,12 +2147,17 @@ agent:
     }
 
     #[tokio::test]
+<<<<<<< HEAD
     async fn test_orchestrator_writes_history_record_on_completion() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut raw_config = make_config();
         raw_config.workspace.root = Some(dir.path().display().to_string());
 
         let config = Arc::new(RwLock::new(raw_config));
+=======
+    async fn test_worker_exit_runtime_verdict_overrides_file_verdict() {
+        let config = Arc::new(RwLock::new(make_config()));
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
@@ -2139,6 +2165,10 @@ agent:
             observed_commands: None,
             cancellation_probe: None,
         });
+<<<<<<< HEAD
+=======
+        let dir = tempfile::TempDir::new().unwrap();
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -2153,6 +2183,7 @@ agent:
 
         {
             let cfg = config.read().await;
+<<<<<<< HEAD
             let dag = build_dag(&cfg.steps).unwrap();
             let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
@@ -2188,6 +2219,49 @@ agent:
         raw_config.max_cycles = 1;
 
         let config = Arc::new(RwLock::new(raw_config));
+=======
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        let workspace = orchestrator
+            .workspace_mgr
+            .workspace_path("repo#1")
+            .expect("workspace path");
+        tokio::fs::create_dir_all(workspace.join(".ensemble"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            workspace.join(".ensemble").join("verdict.json"),
+            r#"{"verdict":"reject","summary":"broken"}"#,
+        )
+        .await
+        .unwrap();
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    runtime_verdict: Some(serde_json::json!({"verdict":"approve"})),
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.completed.contains("1"));
+        assert!(!state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn test_worker_exit_uses_file_verdict_when_runtime_missing() {
+        let config = Arc::new(RwLock::new(make_config()));
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
@@ -2195,6 +2269,10 @@ agent:
             observed_commands: None,
             cancellation_probe: None,
         });
+<<<<<<< HEAD
+=======
+        let dir = tempfile::TempDir::new().unwrap();
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
@@ -2209,10 +2287,16 @@ agent:
 
         {
             let cfg = config.read().await;
+<<<<<<< HEAD
+=======
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
             let dag = build_dag(&cfg.steps).unwrap();
             let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
             pipeline_run.mark_running("build", "session-1".to_string());
+<<<<<<< HEAD
 
             let mut state = orchestrator.state.write().await;
             state.add_running(&test_issue("1", "Todo"), Some(1));
@@ -2282,22 +2366,50 @@ agent:
             state.add_running(&test_issue("1", "Todo"), Some(1));
             state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
         }
+=======
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        let workspace = orchestrator
+            .workspace_mgr
+            .workspace_path("repo#1")
+            .expect("workspace path");
+        tokio::fs::create_dir_all(workspace.join(".ensemble"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            workspace.join(".ensemble").join("verdict.json"),
+            r#"{"verdict":"reject","summary":"broken"}"#,
+        )
+        .await
+        .unwrap();
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
 
         orchestrator
             .handle_worker_exit(
                 "1",
                 "build",
+<<<<<<< HEAD
                 WorkerResult::Failed {
                     error: "temporary agent crash".to_string(),
+=======
+                WorkerResult::Success {
+                    runtime_verdict: None,
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
                 },
             )
             .await;
 
+<<<<<<< HEAD
         let history_path = dir.path().join("ensemble_history.jsonl");
         assert!(
             tokio::fs::read_to_string(&history_path).await.is_err(),
             "retryable failure should not append history"
         );
+=======
+        let state = orchestrator.state.read().await;
+        assert!(state.retry_attempts.contains_key("1"));
+>>>>>>> e748d36 (feat: resolve step verdicts runtime-first in orchestrator)
     }
 
     #[tokio::test]
