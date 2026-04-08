@@ -4,11 +4,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
+use super::model::Issue;
+use super::{IssueTracker, TrackerError};
 use crate::observability::events_contract::{
     TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED, TRACKER_TRANSITION_SUCCEEDED,
 };
-use super::model::Issue;
-use super::{IssueTracker, TrackerError};
 
 // --- GraphQL query constants ---
 
@@ -1035,7 +1035,10 @@ impl IssueTracker for GithubTracker {
                 "fieldId": field_id,
                 "optionId": option_id,
             });
-            if let Err(error) = self.graphql(UPDATE_PROJECT_ITEM_FIELD_MUTATION, variables).await {
+            if let Err(error) = self
+                .graphql(UPDATE_PROJECT_ITEM_FIELD_MUTATION, variables)
+                .await
+            {
                 warn!(
                     event = TRACKER_TRANSITION_FAILED,
                     issue_id = id,

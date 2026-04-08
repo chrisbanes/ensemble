@@ -19,16 +19,16 @@ use crate::agent::cancellation::{
     cancel_all, clear_issue_cancellation, new_cancellation_registry, register_issue_cancellation,
     CancellationRegistry,
 };
-use crate::observability::events_contract::{
-    elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
-    ORCH_TICK_STARTED, STEP_STARTED, TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED,
-    TRACKER_TRANSITION_SUCCEEDED,
-};
 use crate::agent::events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::EnsembleConfig;
 use crate::error::{AgentError, EnsembleError};
 use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::observability::events_contract::{
+    elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
+    ORCH_TICK_STARTED, STEP_STARTED, TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED,
+    TRACKER_TRANSITION_SUCCEEDED,
+};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{PipelineAction, PipelineRun};
 use crate::pipeline::verdict::resolve_verdict;
