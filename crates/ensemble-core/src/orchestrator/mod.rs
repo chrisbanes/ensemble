@@ -64,6 +64,12 @@ struct InteractionRequestContext {
     step_tracker_state: Option<String>,
 }
 
+const HISTORY_OUTCOME_SUCCEEDED: &str = "succeeded";
+const HISTORY_OUTCOME_FAILED: &str = "failed";
+const HISTORY_VERDICT_APPROVED: &str = "approved";
+const HISTORY_VERDICT_REJECTED: &str = "rejected";
+const HISTORY_VERDICT_FAILED: &str = "failed";
+
 /// The main orchestrator that manages the poll-dispatch-reconcile loop.
 pub struct Orchestrator {
     state: Arc<RwLock<OrchestratorState>>,
@@ -861,7 +867,7 @@ impl Orchestrator {
                                 .map(|(entry, run)| {
                                     self.build_history_record(
                                         issue_id,
-                                        "succeeded",
+                                        HISTORY_OUTCOME_SUCCEEDED,
                                         None,
                                         entry,
                                         run,
@@ -898,21 +904,8 @@ impl Orchestrator {
                                 "pipeline failed"
                             );
                             let completed_at = Utc::now();
-                            let history_record = state
-                                .running
-                                .get(issue_id)
-                                .zip(state.get_pipeline_run(issue_id))
-                                .map(|(entry, run)| {
-                                    self.build_history_record(
-                                        issue_id,
-                                        "failed",
-                                        Some(reason.clone()),
-                                        entry,
-                                        run,
-                                        completed_at,
-                                    )
-                                });
                             let mut final_failure = false;
+                            let mut history_record = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                                 let retry_scheduled = schedule_failure_retry(
@@ -925,6 +918,18 @@ impl Orchestrator {
                                     &reason,
                                 );
                                 final_failure = retry_scheduled.is_none();
+                                if final_failure {
+                                    history_record = state.get_pipeline_run(issue_id).map(|run| {
+                                        self.build_history_record(
+                                            issue_id,
+                                            HISTORY_OUTCOME_FAILED,
+                                            Some(reason.clone()),
+                                            &entry,
+                                            run,
+                                            completed_at,
+                                        )
+                                    });
+                                }
                                 if retry_scheduled.is_none() && self.tracker.supports_writes() {
                                     if let Err(e) = self
                                         .tracker
@@ -1009,21 +1014,8 @@ impl Orchestrator {
                 }
 
                 let completed_at = Utc::now();
-                let history_record = state
-                    .running
-                    .get(issue_id)
-                    .zip(state.get_pipeline_run(issue_id))
-                    .map(|(entry, run)| {
-                        self.build_history_record(
-                            issue_id,
-                            "failed",
-                            Some(error.clone()),
-                            entry,
-                            run,
-                            completed_at,
-                        )
-                    });
                 let mut final_failure = false;
+                let mut history_record = None;
 
                 if let Some(entry) = state.remove_running(issue_id) {
                     state.add_runtime_seconds(&entry);
@@ -1037,6 +1029,18 @@ impl Orchestrator {
                         &error,
                     );
                     final_failure = retry_scheduled.is_none();
+                    if final_failure {
+                        history_record = state.get_pipeline_run(issue_id).map(|run| {
+                            self.build_history_record(
+                                issue_id,
+                                HISTORY_OUTCOME_FAILED,
+                                Some(error.clone()),
+                                &entry,
+                                run,
+                                completed_at,
+                            )
+                        });
+                    }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
                         if let Err(e) = self
                             .tracker
@@ -1242,9 +1246,37 @@ impl Orchestrator {
             started_at: running_entry.started_at,
             completed_at,
             last_error,
-            verdict: None,
+            verdict: Self::history_verdict(run),
             workspace_path,
         }
+    }
+
+    fn history_verdict(run: &PipelineRun) -> Option<String> {
+        if run
+            .step_states
+            .values()
+            .any(|state| matches!(state, StepState::Rejected { .. }))
+        {
+            return Some(HISTORY_VERDICT_REJECTED.to_string());
+        }
+
+        if run
+            .step_states
+            .values()
+            .any(|state| matches!(state, StepState::Failed { .. }))
+        {
+            return Some(HISTORY_VERDICT_FAILED.to_string());
+        }
+
+        if run
+            .step_states
+            .values()
+            .all(|state| matches!(state, StepState::Passed))
+        {
+            return Some(HISTORY_VERDICT_APPROVED.to_string());
+        }
+
+        None
     }
 
     async fn append_history_record(&self, config: &EnsembleConfig, record: HistoryRecord) {
@@ -2084,6 +2116,70 @@ agent:
 
         assert_eq!(record.issue_id, "1");
         assert_eq!(record.outcome, "succeeded");
+        assert_eq!(record.verdict.as_deref(), Some("approved"));
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_writes_history_record_on_terminal_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut raw_config = make_config();
+        raw_config.workspace.root = Some(dir.path().display().to_string());
+        raw_config.max_cycles = 1;
+
+        let config = Arc::new(RwLock::new(raw_config));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), Some(1));
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Failed {
+                    error: "agent crashed".to_string(),
+                },
+            )
+            .await;
+
+        let history_path = dir.path().join("ensemble_history.jsonl");
+        let contents = tokio::fs::read_to_string(&history_path).await.unwrap();
+        let record = contents
+            .lines()
+            .map(|line| serde_json::from_str::<crate::history::model::HistoryRecord>(line).unwrap())
+            .next()
+            .unwrap();
+
+        assert_eq!(record.issue_id, "1");
+        assert_eq!(record.outcome, "failed");
+        assert_eq!(record.last_error.as_deref(), Some("agent crashed"));
+        assert_eq!(record.verdict.as_deref(), Some("failed"));
     }
 
     #[tokio::test]
