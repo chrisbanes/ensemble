@@ -96,7 +96,7 @@ Todo → Building → In Review → Done
 
 After an agent finishes, Ensemble checks for a verdict:
 
-1. **ACP protocol** — the agent reports a verdict in its session response (preferred)
+1. **Runtime verdict (primary)** — the runtime reports a structured verdict in session updates/results
 2. **File fallback** — the agent writes `.ensemble/verdict.json` in the workspace:
 
 ```json
@@ -115,6 +115,8 @@ or:
 ```
 
 3. **Default** — if no verdict is found, the step is treated as approved
+
+By default, Ensemble appends fallback verdict instructions to rendered prompts (`agent.inject_verdict_fallback_instructions: true`), so users do not need to manually add `.ensemble/verdict.json` instructions in their templates.
 
 **Approve** means the step passed. The pipeline moves to the next step (or completes).
 
