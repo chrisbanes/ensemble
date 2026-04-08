@@ -26,6 +26,12 @@ use events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
 use acp_client::{AcpSession, TurnResult};
 use acpx_runtime::AcpxRuntime;
 
+const VERDICT_FALLBACK_INSTRUCTION: &str = "\
+If you cannot return a structured runtime verdict, write .ensemble/verdict.json with:\n\
+{\"verdict\":\"approve\"}\n\
+or\n\
+{\"verdict\":\"reject\",\"summary\":\"<reason>\"}";
+
 pub struct AgentRunRequest<'a> {
     pub config: Arc<EnsembleConfig>,
     pub issue: &'a Issue,
@@ -101,7 +107,7 @@ impl AcpAgentRunner {
 
             let interaction_response = load_interaction_response(workspace_path).await?;
 
-            render_prompt_with_interaction_response(
+            let rendered = render_prompt_with_interaction_response(
                 &template_str,
                 issue,
                 attempt,
@@ -111,7 +117,12 @@ impl AcpAgentRunner {
             )
             .map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
-            })
+            })?;
+
+            Ok(maybe_append_verdict_fallback_instruction(
+                rendered,
+                config.agent.inject_verdict_fallback_instructions,
+            ))
         } else {
             // Continuation turns: send guidance, not the full original prompt
             Ok(format!(
@@ -137,6 +148,19 @@ impl AcpAgentRunner {
         }
 
         Ok(())
+    }
+}
+
+fn maybe_append_verdict_fallback_instruction(prompt: String, enabled: bool) -> String {
+    if !enabled || prompt.contains(VERDICT_FALLBACK_INSTRUCTION) {
+        return prompt;
+    }
+
+    let trimmed = prompt.trim_end();
+    if trimmed.is_empty() {
+        VERDICT_FALLBACK_INSTRUCTION.to_string()
+    } else {
+        format!("{trimmed}\n\n{VERDICT_FALLBACK_INSTRUCTION}")
     }
 }
 
@@ -928,6 +952,28 @@ exit 0
             .unwrap();
     }
 
+    #[test]
+    fn injects_verdict_block_when_enabled() {
+        let prompt = "Do the work.".to_string();
+        let rendered = maybe_append_verdict_fallback_instruction(prompt, true);
+        assert!(rendered.contains("write .ensemble/verdict.json"));
+    }
+
+    #[test]
+    fn does_not_inject_verdict_block_when_disabled() {
+        let prompt = "Do the work.".to_string();
+        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), false);
+        assert_eq!(rendered, prompt);
+    }
+
+    #[test]
+    fn does_not_duplicate_verdict_block_when_present() {
+        let prompt = format!("Do work.\n\n{VERDICT_FALLBACK_INSTRUCTION}");
+        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), true);
+        assert_eq!(rendered, prompt);
+        assert_eq!(rendered.matches("write .ensemble/verdict.json").count(), 1);
+    }
+
     #[tokio::test]
     async fn detects_interaction_request_file_and_returns_blocked_result() {
         let workspace = tempfile::TempDir::new().unwrap();
@@ -1203,7 +1249,8 @@ on_failure: Todo
             .await
             .unwrap();
 
-        assert_eq!(prompt, "question: Use staging");
+        assert!(prompt.starts_with("question: Use staging"));
+        assert!(prompt.contains("write .ensemble/verdict.json"));
     }
 
     #[tokio::test]
@@ -1261,7 +1308,8 @@ on_failure: Todo
             .await
             .unwrap();
 
-        assert_eq!(prompt, "hi");
+        assert!(prompt.starts_with("hi"));
+        assert!(prompt.contains("write .ensemble/verdict.json"));
     }
 
     #[test]
