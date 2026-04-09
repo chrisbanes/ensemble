@@ -28,10 +28,11 @@ use crate::config::ensemble::EnsembleConfig;
 use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
-use crate::history_store::store::HistoryStore;
+use crate::interaction::model::{
+    AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionResponse,
+};
 use crate::interaction::{
-    InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
-    InteractionStore,
+    parse_interaction_command, InteractionCommand, InteractionStatus, InteractionStore,
 };
 use crate::observability::events::{EventBus, PipelineEvent};
 use crate::observability::events_contract::{
@@ -330,6 +331,7 @@ impl Orchestrator {
         }
 
         self.hydrate_waiting_on_human_from_store().await;
+        self.process_waiting_interaction_commands().await;
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
@@ -1499,6 +1501,38 @@ impl Orchestrator {
         interaction.agent_output_tokens = waiting_output_tokens;
         interaction.agent_total_tokens = waiting_total_tokens;
         self.interaction_store.create(interaction.clone()).await?;
+        let root_body = format_interaction_thread_root_comment(&interaction);
+        match self
+            .tracker
+            .create_interaction_thread_root(&interaction.issue_id, &root_body)
+            .await
+        {
+            Ok(root) => {
+                if let Err(error) = self
+                    .interaction_store
+                    .attach_thread_metadata(
+                        &interaction.id,
+                        root.comment_id.clone(),
+                        root.comment_url.clone(),
+                    )
+                    .await
+                {
+                    warn!(
+                        interaction_id = %interaction.id,
+                        error = %error,
+                        "failed to persist interaction thread metadata"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    interaction_id = %interaction.id,
+                    issue_id = %interaction.issue_id,
+                    error = %error,
+                    "failed to create interaction thread root comment"
+                );
+            }
+        }
 
         let mut state = self.state.write().await;
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
@@ -1749,6 +1783,212 @@ impl Orchestrator {
         .await;
 
         Ok(())
+    }
+
+    async fn process_waiting_interaction_commands(&self) {
+        let waiting_entries = {
+            let state = self.state.read().await;
+            state
+                .waiting_on_human
+                .values()
+                .cloned()
+                .collect::<Vec<WaitingOnHumanEntry>>()
+        };
+
+        for waiting in waiting_entries {
+            let mut interaction = match self
+                .interaction_store
+                .get(&waiting.interaction_request_id)
+                .await
+            {
+                Ok(Some(interaction)) => interaction,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(
+                        interaction_id = %waiting.interaction_request_id,
+                        error = %error,
+                        "failed to load interaction while processing thread commands"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(root_comment_id) = interaction.thread_root_comment_id.clone() else {
+                continue;
+            };
+
+            let comments = match self
+                .tracker
+                .list_comments_after(&interaction.issue_id, &root_comment_id)
+                .await
+            {
+                Ok(comments) => comments,
+                Err(error) => {
+                    warn!(
+                        interaction_id = %interaction.id,
+                        issue_id = %interaction.issue_id,
+                        error = %error,
+                        "failed to list interaction thread comments"
+                    );
+                    continue;
+                }
+            };
+
+            for comment in comments {
+                if interaction
+                    .accepted_command
+                    .as_ref()
+                    .is_some_and(|accepted| accepted.comment_id == comment.comment_id)
+                    || interaction
+                        .ignored_commands
+                        .iter()
+                        .any(|ignored| ignored.comment_id == comment.comment_id)
+                {
+                    continue;
+                }
+
+                if comment
+                    .updated_at
+                    .zip(comment.created_at)
+                    .is_some_and(|(updated, created)| updated > created)
+                {
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                None,
+                                &comment,
+                                "edited_comments_not_supported",
+                        )
+                        .await;
+                    continue;
+                }
+
+                let parsed = match parse_interaction_command(&comment.body) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                None,
+                                &comment,
+                                "not_a_supported_command",
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                let response = match response_from_command(&interaction.kind, &parsed) {
+                    Some(response) => response,
+                    None => {
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                Some(parsed.command_name()),
+                                &comment,
+                                "command_invalid_for_interaction_kind",
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                if interaction.accepted_command.is_some() {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            Some(parsed.command_name()),
+                            &comment,
+                            "interaction_already_locked",
+                        )
+                        .await;
+                    continue;
+                }
+
+                let accepted_result = self
+                    .interaction_store
+                    .accept_first_command(
+                        &interaction.id,
+                        AcceptedInteractionCommand {
+                            command: parsed.command_name().to_string(),
+                            raw_body: comment.body.clone(),
+                            author: comment.author.clone(),
+                            comment_id: comment.comment_id.clone(),
+                            received_at: comment.created_at.unwrap_or_else(Utc::now),
+                        },
+                    )
+                    .await;
+
+                match accepted_result {
+                    Ok(updated) => interaction = updated,
+                    Err(error) => {
+                        warn!(
+                            interaction_id = %interaction.id,
+                            error = %error,
+                            "failed to accept interaction command"
+                        );
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                Some(parsed.command_name()),
+                                &comment,
+                                "interaction_already_locked",
+                            )
+                            .await;
+                        continue;
+                    }
+                }
+
+                match self.interaction_store.resolve(&interaction.id, response).await {
+                    Ok(updated) => interaction = updated,
+                    Err(error) => {
+                        warn!(
+                            interaction_id = %interaction.id,
+                            error = %error,
+                            "failed to resolve interaction from thread command"
+                        );
+                        continue;
+                    }
+                }
+
+                let mut state = self.state.write().await;
+                state.queue_resume(&interaction.issue_id);
+            }
+        }
+    }
+
+    async fn append_ignored_command(
+        &self,
+        interaction: &crate::interaction::model::InteractionRequest,
+        command: Option<&str>,
+        comment: &crate::tracker::model::TrackerComment,
+        reason: &str,
+    ) -> crate::interaction::model::InteractionRequest {
+        match self
+            .interaction_store
+            .append_ignored_command(
+                &interaction.id,
+                IgnoredInteractionCommand {
+                    command: command.map(ToString::to_string),
+                    raw_body: comment.body.clone(),
+                    author: comment.author.clone(),
+                    comment_id: comment.comment_id.clone(),
+                    received_at: comment.created_at.unwrap_or_else(Utc::now),
+                    reason: reason.to_string(),
+                },
+            )
+            .await
+        {
+            Ok(updated) => updated,
+            Err(error) => {
+                warn!(
+                    interaction_id = %interaction.id,
+                    error = %error,
+                    "failed to append ignored interaction command"
+                );
+                interaction.clone()
+            }
+        }
     }
 
     async fn hydrate_waiting_on_human_from_store(&self) {
@@ -3269,6 +3509,95 @@ fn build_interaction_request(
     }
 }
 
+fn format_interaction_thread_root_comment(
+    interaction: &crate::interaction::InteractionRequest,
+) -> String {
+    format!(
+        concat!(
+            "Ensemble requires input to continue.\n\n",
+            "**Interaction ID:** `{}`\n",
+            "**Kind:** `{}`\n\n",
+            "{}\n\n",
+            "Valid commands:\n",
+            "- `/approve`\n",
+            "- `/reject <reason>`\n",
+            "- `/answer <text>`\n\n",
+            "<!-- ensemble:interaction:{} -->"
+        ),
+        interaction.id,
+        match interaction.kind {
+            InteractionKind::Question => "question",
+            InteractionKind::Approval => "approval",
+            InteractionKind::Handoff => "handoff",
+        },
+        interaction.body,
+        interaction.id
+    )
+}
+
+fn response_from_command(
+    kind: &InteractionKind,
+    command: &InteractionCommand,
+) -> Option<InteractionResponse> {
+    match (kind, command) {
+        (InteractionKind::Question, InteractionCommand::Answer { text }) => {
+            Some(InteractionResponse::Question {
+                response_schema_version: 1,
+                text: text.clone(),
+                selected_option: None,
+            })
+        }
+        (InteractionKind::Approval, InteractionCommand::Approve) => {
+            Some(InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved: true,
+                reason: None,
+            })
+        }
+        (InteractionKind::Approval, InteractionCommand::Reject { reason }) => {
+            Some(InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved: false,
+                reason: Some(reason.clone()),
+            })
+        }
+        (InteractionKind::Handoff, InteractionCommand::Approve) => Some(InteractionResponse::Handoff {
+            response_schema_version: 1,
+            completed: true,
+            notes: None,
+        }),
+        (InteractionKind::Handoff, InteractionCommand::Reject { reason }) => {
+            Some(InteractionResponse::Handoff {
+                response_schema_version: 1,
+                completed: false,
+                notes: Some(reason.clone()),
+            })
+        }
+        (InteractionKind::Handoff, InteractionCommand::Answer { text }) => {
+            Some(InteractionResponse::Handoff {
+                response_schema_version: 1,
+                completed: true,
+                notes: Some(text.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+trait InteractionCommandExt {
+    fn command_name(&self) -> &'static str;
+}
+
+impl InteractionCommandExt for InteractionCommand {
+    fn command_name(&self) -> &'static str {
+        match self {
+            InteractionCommand::Approve => "/approve",
+            InteractionCommand::Reject { .. } => "/reject",
+            InteractionCommand::Answer { .. } => "/answer",
+        }
+    }
+}
+
 fn sanitize_interaction_fragment(value: &str) -> String {
     value
         .chars()
@@ -3305,6 +3634,11 @@ mod tests {
         issues: Arc<RwLock<Vec<Issue>>>,
     }
 
+    struct CommandMockTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        comments: Arc<RwLock<Vec<crate::tracker::model::TrackerComment>>>,
+    }
+
     #[async_trait]
     impl IssueTracker for MockTracker {
         async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
@@ -3332,6 +3666,76 @@ mod tests {
                 .filter(|i| ids.contains(&i.id))
                 .cloned()
                 .collect())
+        }
+
+        async fn create_interaction_thread_root(
+            &self,
+            id: &str,
+            _body: &str,
+        ) -> Result<crate::tracker::model::InteractionThreadRoot, TrackerError> {
+            Ok(crate::tracker::model::InteractionThreadRoot {
+                comment_id: format!("root-{id}"),
+                comment_url: None,
+            })
+        }
+
+        async fn list_comments_after(
+            &self,
+            _id: &str,
+            _after_comment_id: &str,
+        ) -> Result<Vec<crate::tracker::model::TrackerComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for CommandMockTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self.issues.read().await.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            let states_lower: Vec<String> = states.iter().map(|s| s.to_lowercase()).collect();
+            Ok(issues
+                .iter()
+                .filter(|i| states_lower.contains(&i.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|i| ids.contains(&i.id))
+                .cloned()
+                .collect())
+        }
+
+        async fn create_interaction_thread_root(
+            &self,
+            id: &str,
+            _body: &str,
+        ) -> Result<crate::tracker::model::InteractionThreadRoot, TrackerError> {
+            Ok(crate::tracker::model::InteractionThreadRoot {
+                comment_id: format!("root-{id}"),
+                comment_url: None,
+            })
+        }
+
+        async fn list_comments_after(
+            &self,
+            _id: &str,
+            _after_comment_id: &str,
+        ) -> Result<Vec<crate::tracker::model::TrackerComment>, TrackerError> {
+            Ok(self.comments.read().await.clone())
         }
     }
 
@@ -5851,6 +6255,94 @@ agent:
         assert!(state.is_running("1"));
         assert!(!state.is_waiting_on_human("1"));
         assert!(!state.is_resume_requested("1"));
+    }
+
+    #[tokio::test]
+    async fn thread_answer_command_resolves_open_interaction_on_tick() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let comment_ts = Utc::now();
+        let comments = Arc::new(RwLock::new(vec![crate::tracker::model::TrackerComment {
+            comment_id: "c-1".to_string(),
+            body: "/answer use staging".to_string(),
+            author: "alice".to_string(),
+            created_at: Some(comment_ts),
+            updated_at: Some(comment_ts),
+        }]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(CommandMockTracker { issues, comments });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let cfg = config.read().await;
+            state.init_state_lists(&cfg);
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                retry_attempt: None,
+                requested_at: Utc::now(),
+            });
+        }
+
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: None,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: Some("root-1".to_string()),
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let interaction = store.get("interaction-1").await.unwrap().unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Resolved);
+        assert!(interaction.accepted_command.is_some());
+        assert!(matches!(
+            interaction.response,
+            Some(InteractionResponse::Question { .. })
+        ));
     }
 
     #[tokio::test]
