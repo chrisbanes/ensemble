@@ -205,13 +205,30 @@ Todo file issue format:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `api_key` | string | — | Notion integration token (recommend `$NOTION_API_KEY`) |
-| `database_id` | string | — | Notion database ID to read/write |
-| `notion_version` | string | `2022-06-28` | Notion API version header |
-| `title_property` | string | `Name` | Title property name in the database |
-| `status_property` | string | `Status` | Select/status property used for tracker state transitions |
-| `enabled_property` | string | `Ready to Implement` | Opt-in property required for candidate selection |
-| `enabled_value_bool` | bool | `true` | Required value for `enabled_property` when selecting candidates |
+| `notion.api_key` | string | — | Notion integration token (recommend `$NOTION_API_KEY`) |
+| `notion.database_id` | string | — | Notion database ID to read/write |
+| `notion.version` | string | `2022-06-28` | Notion API version header |
+| `notion.title_property` | string | `Name` | Title property name in the database |
+| `notion.status_property` | string | `Status` | Select/status property used for tracker state transitions |
+| `notion.enabled_property` | string | `Ready to Implement` | Opt-in property required for candidate selection |
+| `notion.enabled_value_bool` | bool | `true` | Required value for `enabled_property` when selecting candidates |
+
+Example:
+
+```yaml
+tracker:
+  kind: notion
+  notion:
+    api_key: $NOTION_API_KEY
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+    version: "2022-06-28"
+    title_property: Name
+    status_property: Status
+    enabled_property: Ready to Implement
+    enabled_value_bool: true
+```
+
+Legacy flat keys (`tracker.database_id`, `tracker.notion_version`, etc.) are still accepted for backwards compatibility, but new configs should use `tracker.notion.*`.
 
 Notion candidate selection is based on:
 - `status_property` in `active_states`

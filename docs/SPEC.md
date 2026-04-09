@@ -525,21 +525,21 @@ A Notion database tracker that reads pages as issues and writes workflow updates
 
 Fields:
 
-- `api_key` (string)
+- `notion.api_key` (string)
   - Required. Notion integration token.
   - May be a literal token or `$VAR_NAME`.
-- `database_id` (string)
+- `notion.database_id` (string)
   - Required. Notion database ID.
-- `notion_version` (string, optional)
+- `notion.version` (string, optional)
   - Default: `2022-06-28`.
   - Sent as `Notion-Version` request header.
-- `title_property` (string, optional)
+- `notion.title_property` (string, optional)
   - Default: `Name`.
-- `status_property` (string, optional)
+- `notion.status_property` (string, optional)
   - Default: `Status`.
-- `enabled_property` (string, optional)
+- `notion.enabled_property` (string, optional)
   - Default: `Ready to Implement`.
-- `enabled_value_bool` (bool, optional)
+- `notion.enabled_value_bool` (bool, optional)
   - Default: `true`.
   - Candidate pages must match this value for `enabled_property`.
 
@@ -881,12 +881,13 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`
 - `tracker.project_number`: integer, optional; GitHub Projects v2 board number
 - `tracker.labels_filter`: list of strings, optional; restrict candidates to issues with these labels
-- `tracker.database_id`: string, required when `tracker.kind=notion`
-- `tracker.notion_version`: string, default `2022-06-28` when `tracker.kind=notion`
-- `tracker.title_property`: string, default `Name` when `tracker.kind=notion`
-- `tracker.status_property`: string, default `Status` when `tracker.kind=notion`
-- `tracker.enabled_property`: string, default `Ready to Implement` when `tracker.kind=notion`
-- `tracker.enabled_value_bool`: bool, default `true` when `tracker.kind=notion`
+- `tracker.notion.api_key`: string or `$VAR`, required when `tracker.kind=notion`
+- `tracker.notion.database_id`: string, required when `tracker.kind=notion`
+- `tracker.notion.version`: string, default `2022-06-28` when `tracker.kind=notion`
+- `tracker.notion.title_property`: string, default `Name` when `tracker.kind=notion`
+- `tracker.notion.status_property`: string, default `Status` when `tracker.kind=notion`
+- `tracker.notion.enabled_property`: string, default `Ready to Implement` when `tracker.kind=notion`
+- `tracker.notion.enabled_value_bool`: bool, default `true` when `tracker.kind=notion`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Done", "Closed"]`
 - `agents.<name>.acpx_agent`: string, optional; acpx agent identifier (alternative to executor)
