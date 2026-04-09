@@ -41,6 +41,12 @@ pub enum PipelineEvent {
         tool_name: String,
         detail: String,
     },
+    Output {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        detail: String,
+    },
     Error {
         issue_identifier: String,
         timestamp: DateTime<Utc>,
@@ -83,6 +89,9 @@ impl PipelineEvent {
             | Self::ToolCall {
                 issue_identifier, ..
             }
+            | Self::Output {
+                issue_identifier, ..
+            }
             | Self::Error {
                 issue_identifier, ..
             }
@@ -102,13 +111,19 @@ impl PipelineEvent {
             | Self::StepCompleted { timestamp, .. }
             | Self::TurnCompleted { timestamp, .. }
             | Self::ToolCall { timestamp, .. }
+            | Self::Output { timestamp, .. }
             | Self::Error { timestamp, .. }
             | Self::RetryScheduled { timestamp, .. }
             | Self::Complete { timestamp, .. } => *timestamp,
         }
     }
 
-    pub fn to_timeline_record(&self, run_id: &str, sequence: u64) -> TimelineEventRecord {
+    pub fn to_timeline_record(
+        &self,
+        run_id: &str,
+        sequence: u64,
+        attempt: u32,
+    ) -> TimelineEventRecord {
         match self {
             Self::SessionStarted {
                 issue_identifier,
@@ -121,7 +136,7 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "session_started".to_string(),
                 step_name: None,
-                attempt: 1,
+                attempt,
                 detail: detail.clone(),
                 verdict: None,
                 tool_name: None,
@@ -139,7 +154,7 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "step_started".to_string(),
                 step_name: Some(step_name.clone()),
-                attempt: 1,
+                attempt,
                 detail: detail.clone(),
                 verdict: None,
                 tool_name: None,
@@ -157,7 +172,7 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "step_completed".to_string(),
                 step_name: Some(step_name.clone()),
-                attempt: 1,
+                attempt,
                 detail: detail.clone(),
                 verdict: verdict.clone(),
                 tool_name: None,
@@ -174,7 +189,7 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "turn_completed".to_string(),
                 step_name: None,
-                attempt: 1,
+                attempt,
                 detail: detail.clone(),
                 verdict: None,
                 tool_name: None,
@@ -191,10 +206,27 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "tool_call".to_string(),
                 step_name: None,
-                attempt: 1,
+                attempt,
                 detail: detail.clone(),
                 verdict: None,
                 tool_name: Some(tool_name.clone()),
+            },
+            Self::Output {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "output".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
             },
             Self::Error {
                 issue_identifier,
@@ -207,7 +239,7 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "error".to_string(),
                 step_name: None,
-                attempt: 1,
+                attempt,
                 detail: detail.clone(),
                 verdict: None,
                 tool_name: None,
@@ -240,7 +272,7 @@ impl PipelineEvent {
                 timestamp: *timestamp,
                 event_type: "complete".to_string(),
                 step_name: None,
-                attempt: 1,
+                attempt,
                 detail: outcome.clone(),
                 verdict: Some(outcome.clone()),
                 tool_name: None,
@@ -324,7 +356,7 @@ mod tests {
             detail: "retry".into(),
         };
 
-        let record = event.to_timeline_record("run-1", 7);
+        let record = event.to_timeline_record("run-1", 7, 2);
         assert_eq!(record.run_id, "run-1");
         assert_eq!(record.sequence, 7);
         assert_eq!(record.attempt, 2);
@@ -340,7 +372,7 @@ mod tests {
             timestamp: ts,
             detail: "session started".into(),
         };
-        let session_record = session_started.to_timeline_record("run-1", 1);
+        let session_record = session_started.to_timeline_record("run-1", 1, 1);
         assert_eq!(session_record.event_type, "session_started");
         assert_eq!(session_record.run_id, "run-1");
         assert_eq!(session_record.sequence, 1);
@@ -352,7 +384,7 @@ mod tests {
             agent_name: "agent-1".into(),
             detail: "step started".into(),
         };
-        let step_record = step_started.to_timeline_record("run-1", 2);
+        let step_record = step_started.to_timeline_record("run-1", 2, 1);
         assert_eq!(step_record.event_type, "step_started");
         assert_eq!(step_record.step_name, Some("build".into()));
 
@@ -363,7 +395,7 @@ mod tests {
             detail: "step completed".into(),
             verdict: Some("approved".into()),
         };
-        let completed_record = step_completed.to_timeline_record("run-1", 3);
+        let completed_record = step_completed.to_timeline_record("run-1", 3, 1);
         assert_eq!(completed_record.event_type, "step_completed");
         assert_eq!(completed_record.verdict, Some("approved".into()));
 
@@ -378,7 +410,8 @@ mod tests {
                 output: 200,
             },
         };
-        let turn_record = turn_completed.to_timeline_record("run-1", 4);
+        let turn_record = turn_completed.to_timeline_record("run-1", 4, 3);
+        assert_eq!(turn_record.attempt, 3);
         assert_eq!(turn_record.event_type, "turn_completed");
 
         let tool_call = PipelineEvent::ToolCall {
@@ -387,16 +420,27 @@ mod tests {
             tool_name: "bash".into(),
             detail: "ls".into(),
         };
-        let tool_record = tool_call.to_timeline_record("run-1", 5);
+        let tool_record = tool_call.to_timeline_record("run-1", 5, 1);
         assert_eq!(tool_record.event_type, "tool_call");
         assert_eq!(tool_record.tool_name, Some("bash".into()));
+
+        let output_event = PipelineEvent::Output {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            step_name: "build".into(),
+            detail: "stdout".into(),
+        };
+        let output_record = output_event.to_timeline_record("run-1", 6, 2);
+        assert_eq!(output_record.event_type, "output");
+        assert_eq!(output_record.step_name, Some("build".into()));
+        assert_eq!(output_record.attempt, 2);
 
         let error_event = PipelineEvent::Error {
             issue_identifier: "repo#1".into(),
             timestamp: ts,
             detail: "something failed".into(),
         };
-        let error_record = error_event.to_timeline_record("run-1", 6);
+        let error_record = error_event.to_timeline_record("run-1", 7, 1);
         assert_eq!(error_record.event_type, "error");
 
         let complete = PipelineEvent::Complete {
@@ -404,7 +448,8 @@ mod tests {
             timestamp: ts,
             outcome: "succeeded".into(),
         };
-        let complete_record = complete.to_timeline_record("run-1", 7);
+        let complete_record = complete.to_timeline_record("run-1", 8, 4);
+        assert_eq!(complete_record.attempt, 4);
         assert_eq!(complete_record.event_type, "complete");
         assert_eq!(complete_record.detail, "succeeded");
 
@@ -414,7 +459,7 @@ mod tests {
             attempt: 3,
             detail: "retrying".into(),
         };
-        let retry_record = retry.to_timeline_record("run-1", 8);
+        let retry_record = retry.to_timeline_record("run-1", 9, 99);
         assert_eq!(retry_record.event_type, "retry_scheduled");
         assert_eq!(retry_record.attempt, 3);
     }

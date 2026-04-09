@@ -75,7 +75,14 @@ export default function IssueDetail() {
       const key =
         event.runId && event.sequence != null
           ? `${event.runId}:${event.sequence}`
-          : `${event.type}:${event.timestamp}:${event.detail}`;
+          : [
+              event.type,
+              event.timestamp,
+              event.detail,
+              event.stepName ?? "",
+              event.attempt ?? "",
+              event.conversationIndex ?? "",
+            ].join(":");
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(event);
@@ -84,7 +91,11 @@ export default function IssueDetail() {
       if (a.runId && b.runId && a.runId === b.runId && a.sequence != null && b.sequence != null) {
         return a.sequence - b.sequence;
       }
-      return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      const tsDelta = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      if (tsDelta !== 0) {
+        return tsDelta;
+      }
+      return (a.sequence ?? 0) - (b.sequence ?? 0);
     });
   }, [liveEvents, persistedEvents]);
 
