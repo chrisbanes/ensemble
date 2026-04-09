@@ -228,8 +228,6 @@ tracker:
     enabled_value_bool: true
 ```
 
-Legacy flat keys (`tracker.database_id`, `tracker.notion_version`, etc.) are still accepted for backwards compatibility, but new configs should use `tracker.notion.*`.
-
 Notion candidate selection is based on:
 - `status_property` in `active_states`
 - `enabled_property == enabled_value_bool`

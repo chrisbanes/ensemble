@@ -167,7 +167,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::TrackerConfig;
+    use crate::config::ensemble::{NotionTrackerConfig, TrackerConfig};
     use crate::test_support::env::ENV_LOCK;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -210,12 +210,6 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
-            database_id: None,
-            notion_version: "2022-06-28".to_string(),
-            title_property: "Name".to_string(),
-            status_property: "Status".to_string(),
-            enabled_property: "Ready to Implement".to_string(),
-            enabled_value_bool: true,
         }
     }
 
@@ -232,12 +226,6 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
-            database_id: None,
-            notion_version: "2022-06-28".to_string(),
-            title_property: "Name".to_string(),
-            status_property: "Status".to_string(),
-            enabled_property: "Ready to Implement".to_string(),
-            enabled_value_bool: true,
         }
     }
 
@@ -277,12 +265,6 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
-            database_id: None,
-            notion_version: "2022-06-28".to_string(),
-            title_property: "Name".to_string(),
-            status_property: "Status".to_string(),
-            enabled_property: "Ready to Implement".to_string(),
-            enabled_value_bool: true,
         };
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::MissingPath)));
@@ -354,17 +336,19 @@ mod tests {
             path: None,
             endpoint: None,
             gh_hostname: None,
-            api_key: Some("secret".to_string()),
+            api_key: None,
             repository: None,
             project_number: None,
             labels_filter: vec![],
-            notion: None,
-            database_id: None,
-            notion_version: "2022-06-28".to_string(),
-            title_property: "Name".to_string(),
-            status_property: "Status".to_string(),
-            enabled_property: "Ready to Implement".to_string(),
-            enabled_value_bool: true,
+            notion: Some(NotionTrackerConfig {
+                api_key: Some("secret".to_string()),
+                database_id: None,
+                version: "2022-06-28".to_string(),
+                title_property: "Name".to_string(),
+                status_property: "Status".to_string(),
+                enabled_property: "Ready to Implement".to_string(),
+                enabled_value_bool: true,
+            }),
         };
 
         let result = create_tracker(&config);
@@ -385,12 +369,6 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
-            database_id: None,
-            notion_version: "2022-06-28".to_string(),
-            title_property: "Name".to_string(),
-            status_property: "Status".to_string(),
-            enabled_property: "Ready to Implement".to_string(),
-            enabled_value_bool: true,
         };
 
         let result = create_tracker(&config);

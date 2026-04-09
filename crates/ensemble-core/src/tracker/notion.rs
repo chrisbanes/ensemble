@@ -305,12 +305,6 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
-            database_id: Some("deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
-            notion_version: "2022-06-28".to_string(),
-            title_property: "Name".to_string(),
-            status_property: "Status".to_string(),
-            enabled_property: "Ready to Implement".to_string(),
-            enabled_value_bool: true,
         };
         NotionTracker::new(
             "token".to_string(),
