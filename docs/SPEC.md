@@ -146,7 +146,7 @@ Ensemble is easiest to port when kept in these layers:
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (GitHub for `tracker.kind: github` in this specification version).
+- Issue tracker API (GitHub and/or Notion depending on `tracker.kind`).
 - Local filesystem for workspaces and logs.
 - Optional workspace population tooling (for example Git CLI, if used).
 - Coding-agent executable that speaks the Agent Client Protocol (ACP) over stdio (JSON-RPC 2.0,
@@ -424,7 +424,7 @@ Common fields (all tracker kinds):
 
 - `kind` (string)
   - Required for dispatch.
-  - Supported values: `todo_file`, `github`
+  - Supported values: `todo_file`, `github`, `notion`
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
@@ -518,6 +518,38 @@ GitHub auth host resolution (for `gh auth token` fallback):
 3. `ENSEMBLE_GH_HOST`
 4. `GH_HOST`
 5. `github.com`
+
+##### `tracker.kind == "notion"`
+
+A Notion database tracker that reads pages as issues and writes workflow updates back to Notion.
+
+Fields:
+
+- `api_key` (string)
+  - Required. Notion integration token.
+  - May be a literal token or `$VAR_NAME`.
+- `database_id` (string)
+  - Required. Notion database ID.
+- `notion_version` (string, optional)
+  - Default: `2022-06-28`.
+  - Sent as `Notion-Version` request header.
+- `title_property` (string, optional)
+  - Default: `Name`.
+- `status_property` (string, optional)
+  - Default: `Status`.
+- `enabled_property` (string, optional)
+  - Default: `Ready to Implement`.
+- `enabled_value_bool` (bool, optional)
+  - Default: `true`.
+  - Candidate pages must match this value for `enabled_property`.
+
+Selection behavior:
+- Candidates: `status_property` in `active_states` AND `enabled_property == enabled_value_bool`.
+- Terminal lookup: by requested states from `status_property`.
+
+Write behavior:
+- `set_issue_state` updates `status_property`.
+- `add_comment` writes a page comment.
 
 #### 5.3.2 `repos` (list of objects, optional)
 
@@ -841,7 +873,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 
 - Config directory resolution: `--config-dir` > `ENSEMBLE_CONFIG_DIR` > platform default
 - Config file: `<config_dir>/config.yaml`
-- `tracker.kind`: string, required; supported values: `todo_file`, `github`
+- `tracker.kind`: string, required; supported values: `todo_file`, `github`, `notion`
 - `tracker.path`: string, default `~/ensemble/TODO.md`; path to todo file when `tracker.kind=todo_file`
 - `tracker.endpoint`: string, default `https://api.github.com/graphql` when `tracker.kind=github`
 - `tracker.api_key`: string or `$VAR`, canonical env `GITHUB_TOKEN` when `tracker.kind=github`
@@ -849,6 +881,12 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`
 - `tracker.project_number`: integer, optional; GitHub Projects v2 board number
 - `tracker.labels_filter`: list of strings, optional; restrict candidates to issues with these labels
+- `tracker.database_id`: string, required when `tracker.kind=notion`
+- `tracker.notion_version`: string, default `2022-06-28` when `tracker.kind=notion`
+- `tracker.title_property`: string, default `Name` when `tracker.kind=notion`
+- `tracker.status_property`: string, default `Status` when `tracker.kind=notion`
+- `tracker.enabled_property`: string, default `Ready to Implement` when `tracker.kind=notion`
+- `tracker.enabled_value_bool`: bool, default `true` when `tracker.kind=notion`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Done", "Closed"]`
 - `agents.<name>.acpx_agent`: string, optional; acpx agent identifier (alternative to executor)

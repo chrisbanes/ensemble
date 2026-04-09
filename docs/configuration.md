@@ -157,7 +157,7 @@ Defines where Ensemble reads and writes issues.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `kind` | string | *required* | Tracker backend: `"github"` or `"todo_file"` |
+| `kind` | string | *required* | Tracker backend: `"github"`, `"todo_file"`, or `"notion"` |
 | `active_states` | list of strings | `["Todo", "In Progress"]` | States that make issues eligible for dispatch |
 | `terminal_states` | list of strings | `["Done", "Closed"]` | States that mean an issue is finished |
 
@@ -200,6 +200,26 @@ Todo file issue format:
 - Auto-generated IDs follow a stable `state-position` format (for example `todo-0`).
 - When a no-ID item is moved between states, Ensemble may rewrite it to bracket form
   (`- [generated-id] Title`) to stabilize future state transitions.
+
+**Notion fields** (when `kind: notion`):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `api_key` | string | — | Notion integration token (recommend `$NOTION_API_KEY`) |
+| `database_id` | string | — | Notion database ID to read/write |
+| `notion_version` | string | `2022-06-28` | Notion API version header |
+| `title_property` | string | `Name` | Title property name in the database |
+| `status_property` | string | `Status` | Select/status property used for tracker state transitions |
+| `enabled_property` | string | `Ready to Implement` | Opt-in property required for candidate selection |
+| `enabled_value_bool` | bool | `true` | Required value for `enabled_property` when selecting candidates |
+
+Notion candidate selection is based on:
+- `status_property` in `active_states`
+- `enabled_property == enabled_value_bool`
+
+Notion writes:
+- `set_issue_state` updates `status_property`
+- `add_comment` posts a page comment
 
 ### repos
 
