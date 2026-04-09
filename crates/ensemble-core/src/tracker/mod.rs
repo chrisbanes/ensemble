@@ -73,7 +73,15 @@ pub trait IssueTracker: Send + Sync {
 /// Resolve a GitHub API token using the configured precedence:
 /// explicit token, then `$GITHUB_TOKEN`, then `gh auth token`.
 pub fn resolve_github_token(explicit: Option<&str>) -> Option<String> {
-    auth::resolve_github_token(explicit)
+    resolve_github_token_for_endpoint(explicit, None)
+}
+
+/// Resolve a GitHub API token using the configured precedence and endpoint-aware host mapping.
+pub fn resolve_github_token_for_endpoint(
+    explicit: Option<&str>,
+    endpoint: Option<&str>,
+) -> Option<String> {
+    auth::resolve_github_token(explicit, endpoint)
 }
 
 /// Create an `IssueTracker` implementation based on the tracker config.
@@ -106,18 +114,22 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
             Ok(Box::new(tracker))
         }
         "github" => {
-            let token = resolve_github_token(config.api_key.as_deref())
-                .ok_or(TrackerError::MissingApiKey)?;
+            let endpoint = config
+                .endpoint
+                .clone()
+                .unwrap_or_else(|| "https://api.github.com/graphql".to_string());
+            let token = resolve_github_token_for_endpoint(
+                config.api_key.as_deref(),
+                Some(endpoint.as_str()),
+            )
+            .ok_or(TrackerError::MissingApiKey)?;
             let repository = config
                 .repository
                 .as_ref()
                 .ok_or(TrackerError::MissingRepository)?;
 
             let tracker = github::GithubTracker::new(
-                config
-                    .endpoint
-                    .clone()
-                    .unwrap_or_else(|| "https://api.github.com/graphql".to_string()),
+                endpoint,
                 token,
                 repository.clone(),
                 config.project_number,
