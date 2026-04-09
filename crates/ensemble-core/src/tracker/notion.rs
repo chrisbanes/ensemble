@@ -420,4 +420,32 @@ mod tests {
             .await
             .unwrap();
     }
+
+    #[tokio::test]
+    async fn notion_429_maps_to_api_status_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let err = tracker.fetch_candidate_issues().await.unwrap_err();
+        assert!(matches!(err, TrackerError::ApiStatus { status: 429, .. }));
+    }
+
+    #[tokio::test]
+    async fn notion_401_maps_to_api_status_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let err = tracker.fetch_candidate_issues().await.unwrap_err();
+        assert!(matches!(err, TrackerError::ApiStatus { status: 401, .. }));
+    }
 }
