@@ -222,6 +222,64 @@ impl IssueTracker for NotionTracker {
     fn supports_writes(&self) -> bool {
         true
     }
+
+    async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+        let url = format!("{}/v1/pages/{id}", self.base_url);
+        let resp = self
+            .notion_request(self.client.patch(url))
+            .json(&json!({
+                "properties": {
+                    self.status_property.clone(): {
+                        "select": { "name": state }
+                    }
+                }
+            }))
+            .send()
+            .await
+            .map_err(|error| TrackerError::ApiRequestFailed {
+                reason: error.to_string(),
+            })?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status().as_u16();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read response body".to_string());
+            Err(TrackerError::ApiStatus { status, body })
+        }
+    }
+
+    async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
+        let url = format!("{}/v1/comments", self.base_url);
+        let resp = self
+            .notion_request(self.client.post(url))
+            .json(&json!({
+                "parent": { "page_id": id },
+                "rich_text": [{
+                    "type": "text",
+                    "text": { "content": body }
+                }]
+            }))
+            .send()
+            .await
+            .map_err(|error| TrackerError::ApiRequestFailed {
+                reason: error.to_string(),
+            })?;
+
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status().as_u16();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "failed to read response body".to_string());
+            Err(TrackerError::ApiStatus { status, body })
+        }
+    }
 }
 
 #[cfg(test)]
@@ -229,7 +287,7 @@ mod tests {
     use super::*;
     use crate::tracker::IssueTracker;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_tracker(server_uri: &str) -> NotionTracker {
@@ -328,5 +386,38 @@ mod tests {
         assert_eq!(issues[0].id, "page-a");
         assert_eq!(issues[0].state, "In Progress");
         assert_eq!(issues[0].title, "A task");
+    }
+
+    #[tokio::test]
+    async fn set_issue_state_updates_status_property() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/pages/page-a"))
+            .and(body_string_contains("\"Status\""))
+            .and(body_string_contains("\"In Review\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "page-a"})))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        tracker.set_issue_state("page-a", "In Review").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_comment_posts_to_page_comments_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/comments"))
+            .and(body_string_contains("\"page_id\":\"page-a\""))
+            .and(body_string_contains("hello from ensemble"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "comment-1"})))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        tracker
+            .add_comment("page-a", "hello from ensemble")
+            .await
+            .unwrap();
     }
 }
