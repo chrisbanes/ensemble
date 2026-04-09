@@ -22,6 +22,7 @@
 | `crates/ensemble-core/src/tracker/mod.rs` | Extend tracker trait with interaction-thread helpers (create thread, list new replies) |
 | `crates/ensemble-core/src/tracker/github.rs` | Implement GitHub adapter for root comment creation and comment polling/parsing |
 | `crates/ensemble-core/src/tracker/todo_file.rs` | Return explicit unsupported behavior for thread command operations |
+| `crates/ensemble-core/src/tracker/notion.rs` | Return explicit unsupported behavior for thread command operations (v1 GitHub-only thread support) |
 | `crates/ensemble-core/src/orchestrator/mod.rs` | Create interaction threads on block + resolve from thread commands during ticks |
 | `crates/ensemble-core/src/orchestrator/state.rs` | Track per-issue interaction-thread polling cursor/checkpoint |
 | `crates/ensemble-core/src/config/ensemble.rs` | Add interaction command policy config + prompt policy injection config |
@@ -182,7 +183,11 @@ Implement:
 
 Return `TrackerError::WritesNotSupported` (or explicit unsupported variant) for thread command operations.
 
-- [ ] **Step 5: Re-run tests**
+- [ ] **Step 5: Implement notion fallback behavior**
+
+Return `TrackerError::WritesNotSupported` (or explicit unsupported variant) for thread command operations so v1 semantics remain explicit across non-GitHub trackers.
+
+- [ ] **Step 6: Re-run tests**
 
 Run:
 ```bash
@@ -190,10 +195,10 @@ cargo test -p ensemble-core tracker::github -- --nocapture
 ```
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add crates/ensemble-core/src/tracker/mod.rs crates/ensemble-core/src/tracker/github.rs crates/ensemble-core/src/tracker/todo_file.rs crates/ensemble-core/src/tracker/model.rs
+git add crates/ensemble-core/src/tracker/mod.rs crates/ensemble-core/src/tracker/github.rs crates/ensemble-core/src/tracker/todo_file.rs crates/ensemble-core/src/tracker/notion.rs crates/ensemble-core/src/tracker/model.rs
 git commit -m "Add tracker interaction thread APIs and GitHub implementation"
 ```
 
@@ -439,4 +444,3 @@ git commit -m "Finalize threaded interaction command support"
 - Documentation updates: covered in Task 7.
 
 No spec gaps identified for the scoped v1 feature.
-
