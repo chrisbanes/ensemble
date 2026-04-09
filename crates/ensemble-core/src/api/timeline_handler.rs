@@ -5,6 +5,13 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use std::path::PathBuf;
 
+fn is_safe_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 fn timeline_path(workspace_root: &str, run_id: &str) -> PathBuf {
     PathBuf::from(workspace_root)
         .join(".ensemble")
@@ -32,11 +39,22 @@ fn timeline_path(workspace_root: &str, run_id: &str) -> PathBuf {
 )]
 pub async fn get_timeline(
     State(state): State<AppState>,
-    Path(_identifier): Path<String>,
+    Path(identifier): Path<String>,
     Query(query): Query<TimelineQuery>,
 ) -> impl IntoResponse {
+    if !is_safe_run_id(&query.run_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            crate::api::handlers::api_error(
+                "invalid_run_id",
+                "run_id contains unsupported characters".to_string(),
+            ),
+        )
+            .into_response();
+    }
+
     let path = timeline_path(&state.workspace_root, &query.run_id);
-    match read_timeline(&path, &query).await {
+    match read_timeline(&path, &query, Some(&identifier)).await {
         Ok(response) => (StatusCode::OK, axum::Json(response)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -117,6 +135,47 @@ mod tests {
                 run_id: "run-abc".to_string(),
                 cursor: Some(0),
                 limit: Some(1),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_rejects_unsafe_run_id() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
+        let response = get_timeline(
+            State(state),
+            Path("repo#1".to_string()),
+            Query(TimelineQuery {
+                run_id: "../etc/passwd".to_string(),
+                cursor: None,
+                limit: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_scopes_results_to_path_identifier() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
+        let writer = TimelineWriter::new(temp_dir.path().to_path_buf());
+        let mut wrong_issue = sample_event("run-abc", 1);
+        wrong_issue.issue_identifier = "repo#other".to_string();
+        writer.append("run-abc", &wrong_issue).await.unwrap();
+
+        let response = get_timeline(
+            State(state),
+            Path("repo#1".to_string()),
+            Query(TimelineQuery {
+                run_id: "run-abc".to_string(),
+                cursor: Some(0),
+                limit: Some(10),
             }),
         )
         .await

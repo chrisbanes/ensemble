@@ -58,10 +58,20 @@ export default function IssueDetail() {
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [highlightIndex, setHighlightIndex] = useState<number | undefined>();
+  const [lastKnownRunId, setLastKnownRunId] = useState("");
 
   const isLiveRun = data?.running != null;
-  const runId = (data?.running as { run_id?: string } | undefined)?.run_id;
-  const timelineQuery = useTimelineQuery(identifier, runId);
+  const currentRunId = (data?.running as { run_id?: string } | undefined)?.run_id;
+  useEffect(() => {
+    if (currentRunId) {
+      setLastKnownRunId((previousRunId) =>
+        previousRunId === currentRunId ? previousRunId : currentRunId,
+      );
+    }
+  }, [currentRunId]);
+
+  const effectiveRunId = currentRunId ?? lastKnownRunId;
+  const timelineQuery = useTimelineQuery(identifier, effectiveRunId);
   const persistedEvents = useMemo(
     () => (timelineQuery.data?.events ?? []).map(timelineRecordToEventData),
     [timelineQuery.data?.events],
@@ -75,7 +85,14 @@ export default function IssueDetail() {
       const key =
         event.runId && event.sequence != null
           ? `${event.runId}:${event.sequence}`
-          : `${event.type}:${event.timestamp}:${event.detail}`;
+          : [
+              event.type,
+              event.timestamp,
+              event.detail,
+              event.stepName ?? "",
+              event.attempt ?? "",
+              event.conversationIndex ?? "",
+            ].join(":");
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(event);
@@ -84,7 +101,11 @@ export default function IssueDetail() {
       if (a.runId && b.runId && a.runId === b.runId && a.sequence != null && b.sequence != null) {
         return a.sequence - b.sequence;
       }
-      return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      const tsDelta = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+      if (tsDelta !== 0) {
+        return tsDelta;
+      }
+      return (a.sequence ?? 0) - (b.sequence ?? 0);
     });
   }, [liveEvents, persistedEvents]);
 

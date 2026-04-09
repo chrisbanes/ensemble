@@ -11,6 +11,7 @@ interface EventTimelineProps {
 const dotColors: Record<string, string> = {
   turn_completed: "bg-green-500",
   tool_call: "bg-purple-500",
+  output: "bg-indigo-500",
   step_started: "bg-blue-500",
   step_completed: "bg-blue-500",
   verdict: "bg-yellow-500",

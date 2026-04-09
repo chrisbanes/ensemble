@@ -21,6 +21,7 @@ pub struct TimelineResponse {
 pub async fn read_timeline(
     path: &Path,
     query: &TimelineQuery,
+    issue_identifier: Option<&str>,
 ) -> Result<TimelineResponse, std::io::Error> {
     let contents = match tokio::fs::read_to_string(path).await {
         Ok(contents) => contents,
@@ -38,6 +39,11 @@ pub async fn read_timeline(
         .lines()
         .filter_map(|line| serde_json::from_str::<TimelineEventRecord>(line).ok())
         .filter(|event| event.run_id == query.run_id)
+        .filter(|event| {
+            issue_identifier
+                .map(|identifier| event.issue_identifier == identifier)
+                .unwrap_or(true)
+        })
         .collect();
     events.sort_by_key(|event| event.sequence);
 
@@ -101,6 +107,7 @@ mod tests {
                 cursor: Some(0),
                 limit: Some(1),
             },
+            None,
         )
         .await
         .unwrap();
@@ -126,11 +133,45 @@ mod tests {
                 cursor: Some(0),
                 limit: Some(50),
             },
+            None,
         )
         .await
         .unwrap();
 
         assert_eq!(response.events.len(), 1);
         assert_eq!(response.events[0].sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn read_timeline_filters_by_issue_identifier_when_provided() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        write_events(
+            &path,
+            &[
+                sample_event("run-1", 1),
+                TimelineEventRecord {
+                    issue_identifier: "repo#2".to_string(),
+                    ..sample_event("run-1", 2)
+                },
+            ],
+        )
+        .await;
+
+        let response = read_timeline(
+            &path,
+            &TimelineQuery {
+                run_id: "run-1".to_string(),
+                cursor: None,
+                limit: None,
+            },
+            Some("repo#1"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.total, 1);
+        assert_eq!(response.events.len(), 1);
+        assert_eq!(response.events[0].issue_identifier, "repo#1");
     }
 }

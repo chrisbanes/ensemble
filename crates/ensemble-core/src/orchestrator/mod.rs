@@ -701,7 +701,7 @@ impl Orchestrator {
         self.publish_pipeline_event(
             run_id,
             sequence,
-            Some(attempt_num),
+            attempt_num,
             PipelineEvent::StepStarted {
                 issue_identifier: issue.identifier.clone(),
                 timestamp: Utc::now(),
@@ -826,7 +826,7 @@ impl Orchestrator {
                         .get(issue_id)
                         .map(|e| e.turn_count)
                         .unwrap_or(0),
-                    detail: "turn completed".to_string(),
+                    detail: format!("turn completed (attempt {})", attempt_num),
                     conversation_index: None,
                     tokens_delta: crate::observability::events::TokensDelta {
                         input: usage.as_ref().map(|u| u.input_tokens).unwrap_or(0),
@@ -834,23 +834,15 @@ impl Orchestrator {
                     },
                 });
             }
-            AgentEvent::RunFailed {
-                reason,
-                usage: Some(u),
-                ..
-            } => {
-                state.update_token_usage(issue_id, u.input_tokens, u.output_tokens, u.total_tokens);
-                pipeline_event = Some(PipelineEvent::Error {
-                    issue_identifier: issue_identifier.clone(),
-                    timestamp,
-                    detail: reason.clone(),
-                });
-            }
-            AgentEvent::RunFailed {
-                reason,
-                usage: None,
-                ..
-            } => {
+            AgentEvent::RunFailed { reason, usage, .. } => {
+                if let Some(u) = usage {
+                    state.update_token_usage(
+                        issue_id,
+                        u.input_tokens,
+                        u.output_tokens,
+                        u.total_tokens,
+                    );
+                }
                 pipeline_event = Some(PipelineEvent::Error {
                     issue_identifier: issue_identifier.clone(),
                     timestamp,
@@ -858,10 +850,10 @@ impl Orchestrator {
                 });
             }
             AgentEvent::OutputChunk { content, .. } => {
-                pipeline_event = Some(PipelineEvent::ToolCall {
+                pipeline_event = Some(PipelineEvent::Output {
                     issue_identifier: issue_identifier.clone(),
                     timestamp,
-                    tool_name: step_name.to_string(),
+                    step_name: step_name.to_string(),
                     detail: content.chars().take(120).collect(),
                 });
             }
@@ -877,11 +869,8 @@ impl Orchestrator {
         );
         drop(state);
 
-        if let Some(mut event) = pipeline_event {
-            if let PipelineEvent::TurnCompleted { detail, .. } = &mut event {
-                *detail = format!("turn completed (attempt {})", attempt_num);
-            }
-            self.publish_pipeline_event(run_id, sequence, Some(attempt_num), event)
+        if let Some(event) = pipeline_event {
+            self.publish_pipeline_event(run_id, sequence, attempt_num, event)
                 .await;
         }
     }
@@ -2324,14 +2313,21 @@ impl Orchestrator {
         &self,
         run_id: Option<String>,
         sequence: Option<u64>,
-        attempt: Option<u32>,
+        attempt: u32,
         event: PipelineEvent,
     ) {
-        if let (Some(run_id), Some(sequence)) = (run_id, sequence) {
-            let mut record = event.to_timeline_record(&run_id, sequence);
-            if let Some(attempt) = attempt {
-                record.attempt = attempt;
-            }
+        let timeline_entry = if let (Some(run_id), Some(sequence)) = (run_id, sequence) {
+            Some((
+                run_id.clone(),
+                event.to_timeline_record(&run_id, sequence, attempt),
+            ))
+        } else {
+            None
+        };
+
+        self.event_bus.publish(event);
+
+        if let Some((run_id, record)) = timeline_entry {
             if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
                 warn!(
                     event = "timeline_persist_failed",
@@ -2341,7 +2337,6 @@ impl Orchestrator {
                 );
             }
         }
-        self.event_bus.publish(event);
     }
 
     fn run_context_for_issue(
@@ -5251,5 +5246,159 @@ agent:
             .expect_err("resume should fail for missing step");
 
         assert!(error.to_string().contains("missing-step"));
+    }
+
+    #[tokio::test]
+    async fn publish_pipeline_event_broadcasts_without_run_context() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut rx = orchestrator.event_bus.subscribe();
+
+        orchestrator
+            .publish_pipeline_event(
+                None,
+                None,
+                1,
+                PipelineEvent::SessionStarted {
+                    issue_identifier: "repo#1".into(),
+                    timestamp: Utc::now(),
+                    detail: "started".into(),
+                },
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event should be published")
+            .expect("receiver should get event");
+        assert_eq!(received.issue_identifier(), "repo#1");
+    }
+
+    #[tokio::test]
+    async fn publish_pipeline_event_still_broadcasts_when_timeline_write_fails() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        std::fs::write(dir.path().join(".ensemble"), "blocked").unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut rx = orchestrator.event_bus.subscribe();
+
+        orchestrator
+            .publish_pipeline_event(
+                Some("run-1".into()),
+                Some(1),
+                2,
+                PipelineEvent::TurnCompleted {
+                    issue_identifier: "repo#1".into(),
+                    timestamp: Utc::now(),
+                    turn: 1,
+                    detail: "turn completed".into(),
+                    conversation_index: None,
+                    tokens_delta: crate::observability::events::TokensDelta {
+                        input: 10,
+                        output: 20,
+                    },
+                },
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event should be published despite persist failure")
+            .expect("receiver should get event");
+        assert_eq!(received.issue_identifier(), "repo#1");
+        assert!(!orchestrator.timeline_writer.events_path("run-1").exists());
+    }
+
+    #[tokio::test]
+    async fn publish_pipeline_event_persists_and_broadcasts_with_run_context() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut rx = orchestrator.event_bus.subscribe();
+
+        orchestrator
+            .publish_pipeline_event(
+                Some("run-1".into()),
+                Some(11),
+                3,
+                PipelineEvent::Output {
+                    issue_identifier: "repo#1".into(),
+                    timestamp: Utc::now(),
+                    step_name: "build".into(),
+                    detail: "streamed output".into(),
+                },
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event should be published")
+            .expect("receiver should get event");
+        assert_eq!(received.issue_identifier(), "repo#1");
+
+        let path = orchestrator.timeline_writer.events_path("run-1");
+        assert!(path.exists());
+        let contents = tokio::fs::read_to_string(path).await.unwrap();
+        let record: crate::timeline::model::TimelineEventRecord =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(record.sequence, 11);
+        assert_eq!(record.attempt, 3);
+        assert_eq!(record.event_type, "output");
+        assert_eq!(record.step_name.as_deref(), Some("build"));
     }
 }
