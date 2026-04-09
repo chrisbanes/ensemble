@@ -147,10 +147,13 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
             Ok(Box::new(tracker))
         }
         "notion" => {
-            let token = config.api_key.clone().ok_or(TrackerError::MissingApiKey)?;
+            let token = config
+                .notion_api_key()
+                .map(ToOwned::to_owned)
+                .ok_or(TrackerError::MissingApiKey)?;
             let database_id = config
-                .database_id
-                .clone()
+                .notion_database_id()
+                .map(ToOwned::to_owned)
                 .ok_or(TrackerError::MissingDatabaseId)?;
             let tracker = notion::NotionTracker::new(token, database_id, config);
             Ok(Box::new(tracker))
@@ -206,6 +209,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
             database_id: None,
             notion_version: "2022-06-28".to_string(),
             title_property: "Name".to_string(),
@@ -227,6 +231,7 @@ mod tests {
             repository,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
             database_id: None,
             notion_version: "2022-06-28".to_string(),
             title_property: "Name".to_string(),
@@ -271,6 +276,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
             database_id: None,
             notion_version: "2022-06-28".to_string(),
             title_property: "Name".to_string(),
@@ -352,6 +358,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
             database_id: None,
             notion_version: "2022-06-28".to_string(),
             title_property: "Name".to_string(),
@@ -377,6 +384,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
             database_id: None,
             notion_version: "2022-06-28".to_string(),
             title_property: "Name".to_string(),

@@ -32,11 +32,11 @@ impl NotionTracker {
             database_id,
             active_states: config.active_states.clone(),
             _terminal_states: config.terminal_states.clone(),
-            status_property: config.status_property.clone(),
-            title_property: config.title_property.clone(),
-            enabled_property: config.enabled_property.clone(),
-            enabled_value_bool: config.enabled_value_bool,
-            notion_version: config.notion_version.clone(),
+            status_property: config.notion_status_property().to_string(),
+            title_property: config.notion_title_property().to_string(),
+            enabled_property: config.notion_enabled_property().to_string(),
+            enabled_value_bool: config.notion_enabled_value_bool(),
+            notion_version: config.notion_version().to_string(),
         }
     }
 
@@ -304,6 +304,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
             database_id: Some("deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
             notion_version: "2022-06-28".to_string(),
             title_property: "Name".to_string(),

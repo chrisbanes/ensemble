@@ -125,6 +125,9 @@ pub struct TrackerConfig {
     pub project_number: Option<i64>,
     #[serde(default)]
     pub labels_filter: Vec<String>,
+    #[serde(default)]
+    pub notion: Option<NotionTrackerConfig>,
+    /// Legacy flat field for `tracker.notion.database_id`.
     pub database_id: Option<String>,
     #[serde(default = "default_notion_version")]
     pub notion_version: String,
@@ -136,6 +139,24 @@ pub struct TrackerConfig {
     pub enabled_property: String,
     #[serde(default = "default_notion_enabled_value_bool")]
     pub enabled_value_bool: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct NotionTrackerConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled_property: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled_value_bool: Option<bool>,
 }
 
 fn default_active_states() -> Vec<String> {
@@ -179,6 +200,7 @@ impl std::fmt::Debug for TrackerConfig {
             .field("repository", &self.repository)
             .field("project_number", &self.project_number)
             .field("labels_filter", &self.labels_filter)
+            .field("notion", &self.notion)
             .field("database_id", &self.database_id)
             .field("notion_version", &self.notion_version)
             .field("title_property", &self.title_property)
@@ -186,6 +208,57 @@ impl std::fmt::Debug for TrackerConfig {
             .field("enabled_property", &self.enabled_property)
             .field("enabled_value_bool", &self.enabled_value_bool)
             .finish()
+    }
+}
+
+impl TrackerConfig {
+    pub fn notion_api_key(&self) -> Option<&str> {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.api_key.as_deref())
+            .or(self.api_key.as_deref())
+    }
+
+    pub fn notion_database_id(&self) -> Option<&str> {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.database_id.as_deref())
+            .or(self.database_id.as_deref())
+    }
+
+    pub fn notion_version(&self) -> &str {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.version.as_deref())
+            .unwrap_or(self.notion_version.as_str())
+    }
+
+    pub fn notion_title_property(&self) -> &str {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.title_property.as_deref())
+            .unwrap_or(self.title_property.as_str())
+    }
+
+    pub fn notion_status_property(&self) -> &str {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.status_property.as_deref())
+            .unwrap_or(self.status_property.as_str())
+    }
+
+    pub fn notion_enabled_property(&self) -> &str {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.enabled_property.as_deref())
+            .unwrap_or(self.enabled_property.as_str())
+    }
+
+    pub fn notion_enabled_value_bool(&self) -> bool {
+        self.notion
+            .as_ref()
+            .and_then(|config| config.enabled_value_bool)
+            .unwrap_or(self.enabled_value_bool)
     }
 }
 
@@ -456,6 +529,15 @@ impl EnsembleConfig {
         } else if self.tracker.kind == "github" {
             // Only auto-resolve $GITHUB_TOKEN for github tracker
             self.tracker.api_key = resolve_env_var("$GITHUB_TOKEN", dotenv_map);
+        }
+
+        if let Some(notion) = self.tracker.notion.as_mut() {
+            if let Some(ref raw) = notion.api_key {
+                notion.api_key = resolve_env_var(raw, dotenv_map);
+            }
+            if let Some(ref raw) = notion.database_id {
+                notion.database_id = resolve_env_var(raw, dotenv_map);
+            }
         }
 
         // tracker.path: $VAR + ~ expansion, with default for todo_file
@@ -889,6 +971,86 @@ on_failure: Failed
         assert_eq!(config.tracker.title_property, "Name");
         assert_eq!(config.tracker.enabled_property, "Ready to Implement");
         assert!(config.tracker.enabled_value_bool);
+    }
+
+    #[test]
+    fn test_parse_notion_tracker_config_namespaced_values() {
+        let yaml = r#"
+tracker:
+  kind: notion
+  notion:
+    api_key: $NOTION_API_KEY
+    database_id: cafebabecafebabecafebabecafebabe
+    version: "2022-06-28"
+    title_property: "Task Name"
+    status_property: "Workflow"
+    enabled_property: "Ready"
+    enabled_value_bool: true
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        let notion = config.tracker.notion.as_ref().unwrap();
+        assert_eq!(
+            notion.database_id.as_deref(),
+            Some("cafebabecafebabecafebabecafebabe")
+        );
+        assert_eq!(notion.version.as_deref(), Some("2022-06-28"));
+        assert_eq!(notion.title_property.as_deref(), Some("Task Name"));
+        assert_eq!(notion.status_property.as_deref(), Some("Workflow"));
+        assert_eq!(notion.enabled_property.as_deref(), Some("Ready"));
+        assert_eq!(notion.enabled_value_bool, Some(true));
+    }
+
+    #[test]
+    fn test_notion_namespaced_values_override_legacy_flat_fields() {
+        let yaml = r#"
+tracker:
+  kind: notion
+  api_key: legacy-api-key
+  database_id: legacy-db
+  notion_version: "legacy-version"
+  title_property: "Legacy Title"
+  status_property: "Legacy Status"
+  enabled_property: "Legacy Enabled"
+  enabled_value_bool: false
+  notion:
+    api_key: nested-api-key
+    database_id: nested-db
+    version: "nested-version"
+    title_property: "Nested Title"
+    status_property: "Nested Status"
+    enabled_property: "Nested Enabled"
+    enabled_value_bool: true
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.tracker.notion_api_key(), Some("nested-api-key"));
+        assert_eq!(config.tracker.notion_database_id(), Some("nested-db"));
+        assert_eq!(config.tracker.notion_version(), "nested-version");
+        assert_eq!(config.tracker.notion_title_property(), "Nested Title");
+        assert_eq!(config.tracker.notion_status_property(), "Nested Status");
+        assert_eq!(config.tracker.notion_enabled_property(), "Nested Enabled");
+        assert!(config.tracker.notion_enabled_value_bool());
     }
 
     #[test]
