@@ -11,3 +11,6 @@ pub mod timeline;
 pub mod tracker;
 pub mod ui;
 pub mod workspace;
+
+#[cfg(test)]
+pub(crate) mod test_support;

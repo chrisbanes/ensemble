@@ -493,6 +493,10 @@ Fields:
   - Canonical environment variable: `GITHUB_TOKEN`.
   - The token must have `repo` and `project` scopes (or fine-grained equivalents).
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
+  - If missing after config/env resolution, fallback to `gh auth token --hostname <host>`.
+- `gh_hostname` (string, optional)
+  - Explicit hostname override for `gh auth token --hostname`.
+  - Useful when API endpoint host and auth host differ.
 - `repository` (string)
   - Required for dispatch.
   - Format: `owner/repo` (for example `acme/my-project`).
@@ -507,6 +511,13 @@ Fields:
 - `active_states` / `terminal_states`
   - When `project_number` is set, these match the project board's Status field values.
   - When `project_number` is omitted, these are matched against issue labels.
+
+GitHub auth host resolution (for `gh auth token` fallback):
+1. `tracker.gh_hostname` (if set)
+2. host parsed from `tracker.endpoint` (`api.github.com` maps to `github.com`)
+3. `ENSEMBLE_GH_HOST`
+4. `GH_HOST`
+5. `github.com`
 
 #### 5.3.2 `repos` (list of objects, optional)
 
@@ -816,7 +827,7 @@ Validation checks:
 - Config directory and `config.yaml` can be resolved and read.
 - YAML can be parsed.
 - `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution (when required by the selected tracker kind).
+- For `tracker.kind=github`, token resolution succeeds via: `tracker.api_key` (after `$` resolution), then `GITHUB_TOKEN`, then `gh auth token`.
 - `tracker.repository` is present when required by the selected tracker kind.
 - `agents` map is non-empty and each agent has exactly one prompt source.
 - `steps` list is non-empty, all agent references resolve, all dependencies resolve, no cycles.
@@ -834,6 +845,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `tracker.path`: string, default `~/ensemble/TODO.md`; path to todo file when `tracker.kind=todo_file`
 - `tracker.endpoint`: string, default `https://api.github.com/graphql` when `tracker.kind=github`
 - `tracker.api_key`: string or `$VAR`, canonical env `GITHUB_TOKEN` when `tracker.kind=github`
+- `tracker.gh_hostname`: string, optional; explicit host for `gh auth token --hostname` fallback
 - `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`
 - `tracker.project_number`: integer, optional; GitHub Projects v2 board number
 - `tracker.labels_filter`: list of strings, optional; restrict candidates to issues with these labels

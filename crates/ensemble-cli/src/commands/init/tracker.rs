@@ -1,5 +1,6 @@
 use ensemble_core::config::ensemble::EnsembleConfig;
 use ensemble_core::config::location::default_todo_state_path;
+use ensemble_core::tracker::resolve_github_token_for_endpoint;
 use std::path::PathBuf;
 
 use inquire::{MultiSelect, Password, Select, Text};
@@ -102,15 +103,21 @@ async fn ask_github_tracker(
     // Check for $GITHUB_TOKEN in env.
     // `api_token` is only Some when the user enters the token interactively.
     // When loaded from env, api_token is None and the token is not written to .env.
-    let (token, api_token) = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        println!("GitHub token ($GITHUB_TOKEN detected ✓)");
-        (t, None)
-    } else {
-        let t = Password::new("GitHub token (not found in $GITHUB_TOKEN — enter now):")
-            .with_help_message("The token will be stored in .env and exported as $GITHUB_TOKEN")
-            .prompt()?;
-        (t.clone(), Some(t))
-    };
+    let endpoint = existing.and_then(|c| c.tracker.endpoint.as_deref());
+    let gh_hostname = existing.and_then(|c| c.tracker.gh_hostname.as_deref());
+    let (token, api_token) =
+        if let Some((token, source)) = resolve_env_or_gh_token(endpoint, gh_hostname) {
+            match source {
+                GithubTokenSource::Env => println!("GitHub token ($GITHUB_TOKEN detected ✓)"),
+                GithubTokenSource::Gh => println!("GitHub token (from gh auth token ✓)"),
+            }
+            (token, None)
+        } else {
+            let t = Password::new("GitHub token (not found in $GITHUB_TOKEN — enter now):")
+                .with_help_message("The token will be stored in .env and exported as $GITHUB_TOKEN")
+                .prompt()?;
+            (t.clone(), Some(t))
+        };
 
     // api_key_env is used in the generated config to reference the env var
     let api_key_env = "GITHUB_TOKEN".to_string();
@@ -156,6 +163,26 @@ async fn ask_github_tracker(
         on_success,
         on_failure,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GithubTokenSource {
+    Env,
+    Gh,
+}
+
+fn resolve_env_or_gh_token(
+    endpoint: Option<&str>,
+    gh_hostname: Option<&str>,
+) -> Option<(String, GithubTokenSource)> {
+    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+        if !t.trim().is_empty() {
+            return Some((t, GithubTokenSource::Env));
+        }
+    }
+
+    resolve_github_token_for_endpoint(None, endpoint, gh_hostname)
+        .map(|t| (t, GithubTokenSource::Gh))
 }
 
 /// Default status names used when GitHub API is unavailable or no board is specified.
@@ -390,6 +417,9 @@ fn extract_status_options_from_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_default_statuses() {
@@ -475,6 +505,27 @@ mod tests {
                 assert_eq!(path, PathBuf::from("TODO.md"));
             }
             _ => panic!("expected TodoFile variant"),
+        }
+    }
+
+    #[test]
+    fn resolve_env_or_gh_token_ignores_blank_env_values() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let original_token = std::env::var("GITHUB_TOKEN").ok();
+        let original_gh_bin = std::env::var("ENSEMBLE_GH_BIN").ok();
+        std::env::set_var("GITHUB_TOKEN", "   ");
+        std::env::set_var("ENSEMBLE_GH_BIN", "__missing_gh_binary__");
+
+        let resolved = resolve_env_or_gh_token(None, None);
+        assert!(resolved.is_none());
+
+        match original_token {
+            Some(value) => std::env::set_var("GITHUB_TOKEN", value),
+            None => std::env::remove_var("GITHUB_TOKEN"),
+        }
+        match original_gh_bin {
+            Some(value) => std::env::set_var("ENSEMBLE_GH_BIN", value),
+            None => std::env::remove_var("ENSEMBLE_GH_BIN"),
         }
     }
 }
