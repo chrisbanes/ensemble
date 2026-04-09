@@ -1852,12 +1852,12 @@ impl Orchestrator {
                     .zip(comment.created_at)
                     .is_some_and(|(updated, created)| updated > created)
                 {
-                        interaction = self
-                            .append_ignored_command(
-                                &interaction,
-                                None,
-                                &comment,
-                                "edited_comments_not_supported",
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            None,
+                            &comment,
+                            "edited_comments_not_supported",
                         )
                         .await;
                     continue;
@@ -1939,7 +1939,11 @@ impl Orchestrator {
                     }
                 }
 
-                match self.interaction_store.resolve(&interaction.id, response).await {
+                match self
+                    .interaction_store
+                    .resolve(&interaction.id, response)
+                    .await
+                {
                     Ok(updated) => interaction = updated,
                     Err(error) => {
                         warn!(
@@ -3561,11 +3565,13 @@ fn response_from_command(
                 reason: Some(reason.clone()),
             })
         }
-        (InteractionKind::Handoff, InteractionCommand::Approve) => Some(InteractionResponse::Handoff {
-            response_schema_version: 1,
-            completed: true,
-            notes: None,
-        }),
+        (InteractionKind::Handoff, InteractionCommand::Approve) => {
+            Some(InteractionResponse::Handoff {
+                response_schema_version: 1,
+                completed: true,
+                notes: None,
+            })
+        }
         (InteractionKind::Handoff, InteractionCommand::Reject { reason }) => {
             Some(InteractionResponse::Handoff {
                 response_schema_version: 1,

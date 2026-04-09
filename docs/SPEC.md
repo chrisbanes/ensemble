@@ -1473,16 +1473,17 @@ Optional client-side tool extension:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
-Issue-scoped waiting on user input requirement:
+Human interaction requirement:
 
-- If the agent requests user input (via `.ensemble/interaction-request.json`), pause only that
-  issue and persist the interaction request details.
-- "Pending input" in this specification refers to an open blocking interaction record, not a
-  separate interaction kind.
-- The wait may be indefinite at the Ensemble layer; operator response is submitted via
-  `POST /api/v1/issues/{identifier}/input`.
-- Responses remain internal to Ensemble by default (not automatically posted back to the tracker).
-- Other issues continue running; no global orchestrator pause is required.
+- If an agent run blocks for human input, Ensemble persists an interaction request in its own state.
+- Ensemble mirrors that request to the tracker as a dedicated root comment thread.
+- Only thread replies are eligible for command intake, using strict slash commands:
+  - `/approve`
+  - `/reject <reason>`
+  - `/answer <text>`
+- Command parsing uses original posted body text only; edited comment content is ignored.
+- First valid command wins immediately (request-level lock). Later valid/invalid commands are ignored
+  for state transitions and may be audited as ignored events.
 
 ### 10.6 Timeouts and Error Mapping
 
@@ -1555,6 +1556,18 @@ Write operations:
    - Used to surface pipeline results (for example failure summaries, rejection reasons).
    - Default implementation returns `WritesNotSupported` error.
    - Trackers without a comment concept (for example `todo_file`) may leave this unimplemented.
+
+Optional interaction-thread operations (recommended for trackers with comment threads):
+
+7. `create_interaction_thread_root(issue_id, body)`
+   - Creates the root comment used as the interaction thread anchor.
+   - Returns tracker metadata (comment ID + URL) for later polling.
+   - Backends that do not support this should return `WritesNotSupported`.
+
+8. `list_comments_after(issue_id, after_comment_id)`
+   - Lists comments newer than a given anchor comment.
+   - Used by orchestrator ticks to ingest slash commands for open interactions.
+   - Backends that do not support this should return `WritesNotSupported`.
 
 ### 11.2 Query Semantics (GitHub)
 
@@ -1705,7 +1718,26 @@ instructions for:
 - continuation run after a successful prior session
 - retry after error/timeout/stall
 
-### 12.4 Failure Semantics
+### 12.4 Runtime Policy Injection
+
+Implementations may append runtime-owned instruction blocks after template rendering.
+
+At minimum, Ensemble v1 appends:
+
+- verdict fallback instructions (enabled by default)
+- interaction-policy guidance (enabled by default), including:
+  - prefer batched clarification requests instead of one-by-one ping-pong
+  - this is a soft preference, not a strict prohibition
+  - each question should include question/why/default
+
+Interaction-policy config behavior:
+
+- global enable/disable toggle
+- optional global replacement text
+- per-agent and per-step overrides with modes: `inherit`, `custom`, `off`
+- precedence: step override > agent override > global default
+
+### 12.5 Failure Semantics
 
 If prompt rendering fails:
 

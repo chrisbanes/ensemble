@@ -147,6 +147,12 @@ polling:
 agent:
   max_turns: 20
   turn_timeout_ms: 3600000
+  inject_interaction_policy_instructions: true
+  interaction_policy_overrides:
+    agents:
+      reviewer:
+        mode: custom
+        text: "Ask one clarifying question at a time for this review step."
 ```
 
 ## Reference
@@ -372,8 +378,18 @@ This section configures Ensemble's runtime behavior after the agent is launched.
 | `read_timeout_ms` | integer | `5000` | Timeout for reading agent output |
 | `stall_timeout_ms` | integer | `300000` | Timeout for detecting a stalled agent |
 | `inject_verdict_fallback_instructions` | boolean | `true` | Appends Ensemble-owned fallback instructions so agents can write `.ensemble/verdict.json` when no structured runtime verdict is emitted |
+| `inject_interaction_policy_instructions` | boolean | `true` | Automatically appends Ensemble interaction policy guidance to prompts (batched clarifications as a soft preference) |
+| `interaction_policy_text` | string | built-in default | Optional global replacement text for the injected interaction policy block |
+| `interaction_policy_overrides.agents.<agent>.mode` | string | `inherit` | Per-agent override mode: `inherit`, `custom`, or `off` |
+| `interaction_policy_overrides.agents.<agent>.text` | string | — | Required for useful `custom` overrides; policy text appended for that agent |
+| `interaction_policy_overrides.steps.<step>.mode` | string | `inherit` | Per-step override mode. Step override wins over agent override |
+| `interaction_policy_overrides.steps.<step>.text` | string | — | Required for useful `custom` per-step overrides |
 
 `agent.inject_verdict_instructions` is accepted as a shorter alias for `agent.inject_verdict_fallback_instructions`.
+
+Interaction policy override precedence is: `step override` → `agent override` → global `agent.*` defaults.
+
+Use `mode: off` to suppress auto-injection for a specific agent or step.
 
 `agent.permission_request_policy` only applies to direct ACP runtime paths. If all configured agents resolve to the `acpx` runtime, leave this at its default. In mixed configurations, it still applies only to agents using the direct runtime; to customize permission handling for an `acpx`-resolved agent, switch that agent to `runtime: direct`.
 
