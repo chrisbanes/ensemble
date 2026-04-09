@@ -1,5 +1,6 @@
 use ensemble_core::config::ensemble::EnsembleConfig;
 use ensemble_core::config::location::default_todo_state_path;
+use ensemble_core::tracker::resolve_github_token;
 use std::path::PathBuf;
 
 use inquire::{MultiSelect, Password, Select, Text};
@@ -104,6 +105,9 @@ async fn ask_github_tracker(
     // When loaded from env, api_token is None and the token is not written to .env.
     let (token, api_token) = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         println!("GitHub token ($GITHUB_TOKEN detected ✓)");
+        (t, None)
+    } else if let Some(t) = resolve_github_token(None) {
+        println!("GitHub token (from gh auth token ✓)");
         (t, None)
     } else {
         let t = Password::new("GitHub token (not found in $GITHUB_TOKEN — enter now):")
