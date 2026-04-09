@@ -3262,6 +3262,10 @@ fn build_interaction_request(
         agent_total_tokens: 0,
         requested_at,
         resolved_at: None,
+        thread_root_comment_id: None,
+        thread_root_comment_url: None,
+        accepted_command: None,
+        ignored_commands: vec![],
     }
 }
 
@@ -5715,6 +5719,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -5829,6 +5837,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -5906,6 +5918,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6081,6 +6097,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6165,6 +6185,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6283,6 +6307,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6391,6 +6419,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6501,6 +6533,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6614,6 +6650,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6949,6 +6989,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7017,6 +7061,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7118,6 +7166,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7282,6 +7334,10 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
