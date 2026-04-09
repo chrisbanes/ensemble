@@ -1,6 +1,7 @@
 mod auth;
 pub mod github;
 pub mod model;
+pub mod notion;
 pub mod todo_file;
 
 use crate::config::ensemble::TrackerConfig;
@@ -18,6 +19,8 @@ pub enum TrackerError {
     MissingApiKey,
     #[error("missing tracker repository")]
     MissingRepository,
+    #[error("missing tracker database_id")]
+    MissingDatabaseId,
     #[error("missing tracker path for todo_file kind")]
     MissingPath,
     #[error("TODO file parent directory does not exist: {path}")]
@@ -141,6 +144,15 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
                 config.terminal_states.clone(),
                 config.labels_filter.clone(),
             )?;
+            Ok(Box::new(tracker))
+        }
+        "notion" => {
+            let token = config.api_key.clone().ok_or(TrackerError::MissingApiKey)?;
+            let database_id = config
+                .database_id
+                .clone()
+                .ok_or(TrackerError::MissingDatabaseId)?;
+            let tracker = notion::NotionTracker::new(token, database_id, config);
             Ok(Box::new(tracker))
         }
         other => Err(TrackerError::UnsupportedKind {
@@ -325,6 +337,31 @@ mod tests {
 
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::MissingRepository)));
+    }
+
+    #[test]
+    fn test_create_notion_tracker_missing_database_id() {
+        let config = TrackerConfig {
+            kind: "notion".to_string(),
+            active_states: vec!["Todo".to_string()],
+            terminal_states: vec!["Done".to_string()],
+            path: None,
+            endpoint: None,
+            gh_hostname: None,
+            api_key: Some("secret".to_string()),
+            repository: None,
+            project_number: None,
+            labels_filter: vec![],
+            database_id: None,
+            notion_version: "2022-06-28".to_string(),
+            title_property: "Name".to_string(),
+            status_property: "Status".to_string(),
+            enabled_property: "Ready to Implement".to_string(),
+            enabled_value_bool: true,
+        };
+
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::MissingDatabaseId)));
     }
 
     #[test]
