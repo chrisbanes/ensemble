@@ -3,7 +3,10 @@ use crate::config::ensemble::TrackerConfig;
 use crate::tracker::model::Issue;
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::Url;
 use serde_json::{json, Value};
+use std::time::Duration;
+use tokio::time::sleep;
 
 /// Notion issue tracker adapter.
 pub struct NotionTracker {
@@ -12,12 +15,13 @@ pub struct NotionTracker {
     base_url: String,
     database_id: String,
     active_states: Vec<String>,
-    _terminal_states: Vec<String>,
     status_property: String,
     title_property: String,
     enabled_property: String,
     enabled_value_bool: bool,
     notion_version: String,
+    max_retries: u32,
+    initial_retry_delay: Duration,
 }
 
 impl NotionTracker {
@@ -31,12 +35,13 @@ impl NotionTracker {
                 .unwrap_or_else(|| "https://api.notion.com".to_string()),
             database_id,
             active_states: config.active_states.clone(),
-            _terminal_states: config.terminal_states.clone(),
             status_property: config.notion_status_property().to_string(),
             title_property: config.notion_title_property().to_string(),
             enabled_property: config.notion_enabled_property().to_string(),
             enabled_value_bool: config.notion_enabled_value_bool(),
             notion_version: config.notion_version().to_string(),
+            max_retries: 3,
+            initial_retry_delay: Duration::from_millis(250),
         }
     }
 
@@ -46,73 +51,224 @@ impl NotionTracker {
             .header(CONTENT_TYPE, "application/json")
     }
 
-    async fn query_database(&self) -> Result<Vec<Value>, TrackerError> {
-        let url = format!("{}/v1/databases/{}/query", self.base_url, self.database_id);
-        let resp = self
-            .notion_request(self.client.post(url))
-            .json(&json!({}))
-            .send()
-            .await
-            .map_err(|error| TrackerError::ApiRequestFailed {
-                reason: error.to_string(),
-            })?;
+    fn is_retryable_status(status: u16) -> bool {
+        status == 429 || (500..=599).contains(&status)
+    }
 
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read response body".to_string());
-            return Err(TrackerError::ApiStatus {
-                status: status.as_u16(),
-                body,
-            });
+    fn database_query_url(&self) -> Result<String, TrackerError> {
+        let mut base =
+            Url::parse(&self.base_url).map_err(|error| TrackerError::UnexpectedPayload {
+                reason: format!("invalid base URL '{}': {error}", self.base_url),
+            })?;
+        {
+            let mut segments =
+                base.path_segments_mut()
+                    .map_err(|_| TrackerError::UnexpectedPayload {
+                        reason: "invalid URL path segments".to_string(),
+                    })?;
+            segments.clear();
+            segments.push("v1");
+            segments.push("databases");
+            segments.push(&self.database_id);
+            segments.push("query");
+        }
+        Ok(base.to_string())
+    }
+
+    fn page_url(&self, id: &str) -> Result<Url, TrackerError> {
+        let mut base =
+            Url::parse(&self.base_url).map_err(|error| TrackerError::UnexpectedPayload {
+                reason: format!("invalid base URL '{}': {error}", self.base_url),
+            })?;
+        {
+            let mut segments =
+                base.path_segments_mut()
+                    .map_err(|_| TrackerError::UnexpectedPayload {
+                        reason: "invalid URL path segments".to_string(),
+                    })?;
+            segments.clear();
+            segments.push("v1");
+            segments.push("pages");
+            segments.push(id);
+        }
+        Ok(base)
+    }
+
+    async fn send_json_with_retry<F>(&self, mut build_request: F) -> Result<Value, TrackerError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        let mut delay = self.initial_retry_delay;
+        for attempt in 0..=self.max_retries {
+            let response =
+                build_request()
+                    .send()
+                    .await
+                    .map_err(|error| TrackerError::ApiRequestFailed {
+                        reason: error.to_string(),
+                    });
+
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    return resp
+                        .json()
+                        .await
+                        .map_err(|error| TrackerError::UnexpectedPayload {
+                            reason: error.to_string(),
+                        });
+                }
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "failed to read response body".to_string());
+
+                    if attempt < self.max_retries && Self::is_retryable_status(status) {
+                        sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+
+                    return Err(TrackerError::ApiStatus { status, body });
+                }
+                Err(err) => {
+                    if attempt < self.max_retries {
+                        sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
         }
 
-        let payload: Value =
-            resp.json()
-                .await
-                .map_err(|error| TrackerError::UnexpectedPayload {
-                    reason: error.to_string(),
-                })?;
+        Err(TrackerError::ApiRequestFailed {
+            reason: "retry loop exhausted unexpectedly".to_string(),
+        })
+    }
 
-        let results = payload
-            .get("results")
-            .and_then(Value::as_array)
+    async fn send_unit_with_retry<F>(&self, mut build_request: F) -> Result<(), TrackerError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        let mut delay = self.initial_retry_delay;
+        for attempt in 0..=self.max_retries {
+            let response =
+                build_request()
+                    .send()
+                    .await
+                    .map_err(|error| TrackerError::ApiRequestFailed {
+                        reason: error.to_string(),
+                    });
+
+            match response {
+                Ok(resp) if resp.status().is_success() => return Ok(()),
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let body = resp
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "failed to read response body".to_string());
+
+                    if attempt < self.max_retries && Self::is_retryable_status(status) {
+                        sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+
+                    return Err(TrackerError::ApiStatus { status, body });
+                }
+                Err(err) => {
+                    if attempt < self.max_retries {
+                        sleep(delay).await;
+                        delay *= 2;
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+
+        Err(TrackerError::ApiRequestFailed {
+            reason: "retry loop exhausted unexpectedly".to_string(),
+        })
+    }
+
+    fn require_state(&self, page: &Value) -> Result<String, TrackerError> {
+        self.extract_state(page)
             .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "missing results array".to_string(),
-            })?;
+                reason: format!(
+                    "status property '{}' missing or invalid on page {}",
+                    self.status_property,
+                    page.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>")
+                ),
+            })
+    }
 
-        Ok(results.clone())
+    fn require_enabled(&self, page: &Value) -> Result<bool, TrackerError> {
+        self.extract_enabled(page)
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "enabled property '{}' missing or invalid on page {}",
+                    self.enabled_property,
+                    page.get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("<unknown>")
+                ),
+            })
+    }
+
+    async fn query_database(&self) -> Result<Vec<Value>, TrackerError> {
+        let mut all_results = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let body = match &cursor {
+                Some(cursor) => json!({ "start_cursor": cursor }),
+                None => json!({}),
+            };
+            let query_url = self.database_query_url()?;
+            let payload = self
+                .send_json_with_retry(|| {
+                    self.notion_request(self.client.post(query_url.clone()))
+                        .json(&body)
+                })
+                .await?;
+
+            let results = payload
+                .get("results")
+                .and_then(Value::as_array)
+                .ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: "missing results array".to_string(),
+                })?;
+            all_results.extend(results.iter().cloned());
+
+            let has_more = payload
+                .get("has_more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+
+            if !has_more {
+                break;
+            }
+
+            let next_cursor = payload
+                .get("next_cursor")
+                .and_then(Value::as_str)
+                .ok_or(TrackerError::MissingEndCursor)?;
+            cursor = Some(next_cursor.to_string());
+        }
+
+        Ok(all_results)
     }
 
     async fn fetch_page(&self, id: &str) -> Result<Value, TrackerError> {
-        let url = format!("{}/v1/pages/{id}", self.base_url);
-        let resp = self
-            .notion_request(self.client.get(url))
-            .send()
+        let page_url = self.page_url(id)?;
+        self.send_json_with_retry(|| self.notion_request(self.client.get(page_url.clone())))
             .await
-            .map_err(|error| TrackerError::ApiRequestFailed {
-                reason: error.to_string(),
-            })?;
-
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read response body".to_string());
-            return Err(TrackerError::ApiStatus {
-                status: status.as_u16(),
-                body,
-            });
-        }
-
-        resp.json()
-            .await
-            .map_err(|error| TrackerError::UnexpectedPayload {
-                reason: error.to_string(),
-            })
     }
 
     fn page_to_issue(&self, page: &Value) -> Result<Issue, TrackerError> {
@@ -123,11 +279,7 @@ impl NotionTracker {
         })?;
 
         let title = self.extract_title(page).unwrap_or_else(|| id.to_string());
-        let state = self
-            .extract_state(page)
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: format!("status property '{}' missing", self.status_property),
-            })?;
+        let state = self.require_state(page)?;
 
         Ok(Issue {
             id: id.to_string(),
@@ -180,12 +332,8 @@ impl IssueTracker for NotionTracker {
         let mut issues = Vec::new();
 
         for page in &pages {
-            let Some(state) = self.extract_state(page) else {
-                continue;
-            };
-            let Some(enabled) = self.extract_enabled(page) else {
-                continue;
-            };
+            let state = self.require_state(page)?;
+            let enabled = self.require_enabled(page)?;
 
             if self.active_states.contains(&state) && enabled == self.enabled_value_bool {
                 issues.push(self.page_to_issue(page)?);
@@ -200,9 +348,7 @@ impl IssueTracker for NotionTracker {
         let mut issues = Vec::new();
 
         for page in &pages {
-            let Some(state) = self.extract_state(page) else {
-                continue;
-            };
+            let state = self.require_state(page)?;
 
             if states.contains(&state) {
                 issues.push(self.page_to_issue(page)?);
@@ -226,61 +372,46 @@ impl IssueTracker for NotionTracker {
     }
 
     async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
-        let url = format!("{}/v1/pages/{id}", self.base_url);
-        let resp = self
-            .notion_request(self.client.patch(url))
-            .json(&json!({
-                "properties": {
-                    self.status_property.clone(): {
-                        "select": { "name": state }
+        let page_url = self.page_url(id)?;
+        self.send_unit_with_retry(|| {
+            self.notion_request(self.client.patch(page_url.clone()))
+                .json(&json!({
+                    "properties": {
+                        self.status_property.clone(): {
+                            "select": { "name": state }
+                        }
                     }
-                }
-            }))
-            .send()
-            .await
-            .map_err(|error| TrackerError::ApiRequestFailed {
-                reason: error.to_string(),
-            })?;
-
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            let status = resp.status().as_u16();
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read response body".to_string());
-            Err(TrackerError::ApiStatus { status, body })
-        }
+                }))
+        })
+        .await
     }
 
     async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
-        let url = format!("{}/v1/comments", self.base_url);
-        let resp = self
-            .notion_request(self.client.post(url))
-            .json(&json!({
-                "parent": { "page_id": id },
-                "rich_text": [{
-                    "type": "text",
-                    "text": { "content": body }
-                }]
-            }))
-            .send()
-            .await
-            .map_err(|error| TrackerError::ApiRequestFailed {
-                reason: error.to_string(),
+        let mut url =
+            Url::parse(&self.base_url).map_err(|error| TrackerError::UnexpectedPayload {
+                reason: format!("invalid base URL '{}': {error}", self.base_url),
             })?;
-
-        if resp.status().is_success() {
-            Ok(())
-        } else {
-            let status = resp.status().as_u16();
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "failed to read response body".to_string());
-            Err(TrackerError::ApiStatus { status, body })
+        {
+            let mut segments =
+                url.path_segments_mut()
+                    .map_err(|_| TrackerError::UnexpectedPayload {
+                        reason: "invalid URL path segments".to_string(),
+                    })?;
+            segments.clear();
+            segments.push("v1");
+            segments.push("comments");
         }
+        self.send_unit_with_retry(|| {
+            self.notion_request(self.client.post(url.clone()))
+                .json(&json!({
+                    "parent": { "page_id": id },
+                    "rich_text": [{
+                        "type": "text",
+                        "text": { "content": body }
+                    }]
+                }))
+        })
+        .await
     }
 }
 
@@ -304,7 +435,15 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
-            notion: None,
+            notion: Some(crate::config::ensemble::NotionTrackerConfig {
+                api_key: Some("token".to_string()),
+                database_id: Some("deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+                version: "2022-06-28".to_string(),
+                title_property: "Name".to_string(),
+                status_property: "Status".to_string(),
+                enabled_property: "Ready to Implement".to_string(),
+                enabled_value_bool: true,
+            }),
         };
         NotionTracker::new(
             "token".to_string(),
@@ -386,6 +525,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_issues_by_states_filters_requested_states() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {
+                        "id": "page-a",
+                        "properties": {
+                            "Name": { "title": [ { "plain_text": "A task" } ] },
+                            "Status": { "select": { "name": "Todo" } },
+                            "Ready to Implement": { "checkbox": true }
+                        }
+                    },
+                    {
+                        "id": "page-b",
+                        "properties": {
+                            "Name": { "title": [ { "plain_text": "B task" } ] },
+                            "Status": { "select": { "name": "Done" } },
+                            "Ready to Implement": { "checkbox": true }
+                        }
+                    }
+                ],
+                "has_more": false
+            })))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let issues = tracker
+            .fetch_issues_by_states(&["Done".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "page-b");
+        assert_eq!(issues[0].state, "Done");
+    }
+
+    #[tokio::test]
     async fn set_issue_state_updates_status_property() {
         let server = MockServer::start().await;
         Mock::given(method("PATCH"))
@@ -436,6 +615,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_on_429_then_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("rate limited"))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "page-a",
+                    "properties": {
+                        "Name": { "title": [ { "plain_text": "A task" } ] },
+                        "Status": { "select": { "name": "Todo" } },
+                        "Ready to Implement": { "checkbox": true }
+                    }
+                }],
+                "has_more": false
+            })))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let issues = tracker.fetch_candidate_issues().await.unwrap();
+        assert_eq!(issues.len(), 1);
+    }
+
+    #[tokio::test]
     async fn notion_401_maps_to_api_status_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -447,5 +656,78 @@ mod tests {
         let tracker = make_tracker(&server.uri());
         let err = tracker.fetch_candidate_issues().await.unwrap_err();
         assert!(matches!(err, TrackerError::ApiStatus { status: 401, .. }));
+    }
+
+    #[tokio::test]
+    async fn query_database_paginates_until_complete() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "page-a",
+                    "properties": {
+                        "Name": { "title": [ { "plain_text": "A task" } ] },
+                        "Status": { "select": { "name": "Todo" } },
+                        "Ready to Implement": { "checkbox": true }
+                    }
+                }],
+                "has_more": true,
+                "next_cursor": "next-cursor"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "page-b",
+                    "properties": {
+                        "Name": { "title": [ { "plain_text": "B task" } ] },
+                        "Status": { "select": { "name": "Todo" } },
+                        "Ready to Implement": { "checkbox": true }
+                    }
+                }],
+                "has_more": false
+            })))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let issues = tracker.fetch_candidate_issues().await.unwrap();
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].id, "page-a");
+        assert_eq!(issues[1].id, "page-b");
+    }
+
+    #[tokio::test]
+    async fn missing_enabled_property_returns_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "id": "page-a",
+                    "properties": {
+                        "Name": { "title": [ { "plain_text": "A task" } ] },
+                        "Status": { "select": { "name": "Todo" } }
+                    }
+                }],
+                "has_more": false
+            })))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let err = tracker.fetch_candidate_issues().await.unwrap_err();
+        assert!(matches!(err, TrackerError::UnexpectedPayload { .. }));
+    }
+
+    #[test]
+    fn page_url_encodes_path_segment() {
+        let tracker = make_tracker("http://example.com");
+        let url = tracker.page_url("page/with/slash").unwrap();
+        assert!(url.as_str().contains("page%2Fwith%2Fslash"));
     }
 }
