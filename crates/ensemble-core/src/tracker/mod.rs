@@ -1,6 +1,7 @@
 mod auth;
 pub mod github;
 pub mod model;
+pub mod notion;
 pub mod todo_file;
 
 use crate::config::ensemble::TrackerConfig;
@@ -13,20 +14,22 @@ pub enum TrackerError {
     #[error("unsupported tracker kind: {kind}")]
     UnsupportedKind { kind: String },
     #[error(
-        "missing tracker API key (set tracker.api_key, set GITHUB_TOKEN, or authenticate gh with `gh auth login`)"
+        "missing tracker API key (set tracker.api_key for github, tracker.notion.api_key for notion, set GITHUB_TOKEN, or authenticate gh with `gh auth login`)"
     )]
     MissingApiKey,
     #[error("missing tracker repository")]
     MissingRepository,
+    #[error("missing tracker.notion.database_id")]
+    MissingDatabaseId,
     #[error("missing tracker path for todo_file kind")]
     MissingPath,
     #[error("TODO file parent directory does not exist: {path}")]
     MissingParentDirectory { path: String },
     #[error("I/O error: {reason}")]
     IoError { reason: String },
-    #[error("GitHub API request failed: {reason}")]
+    #[error("tracker API request failed: {reason}")]
     ApiRequestFailed { reason: String },
-    #[error("GitHub API returned status {status}: {body}")]
+    #[error("tracker API returned status {status}: {body}")]
     ApiStatus { status: u16, body: String },
     #[error("GitHub GraphQL errors: {errors}")]
     GraphqlErrors { errors: String },
@@ -143,6 +146,18 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
             )?;
             Ok(Box::new(tracker))
         }
+        "notion" => {
+            let token = config
+                .notion_api_key()
+                .map(ToOwned::to_owned)
+                .ok_or(TrackerError::MissingApiKey)?;
+            let database_id = config
+                .notion_database_id()
+                .map(ToOwned::to_owned)
+                .ok_or(TrackerError::MissingDatabaseId)?;
+            let tracker = notion::NotionTracker::new(token, database_id, config);
+            Ok(Box::new(tracker))
+        }
         other => Err(TrackerError::UnsupportedKind {
             kind: other.to_string(),
         }),
@@ -152,7 +167,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::TrackerConfig;
+    use crate::config::ensemble::{NotionTrackerConfig, TrackerConfig};
     use crate::test_support::env::ENV_LOCK;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -194,6 +209,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
         }
     }
 
@@ -209,6 +225,7 @@ mod tests {
             repository,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
         }
     }
 
@@ -247,6 +264,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
         };
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::MissingPath)));
@@ -310,6 +328,34 @@ mod tests {
     }
 
     #[test]
+    fn test_create_notion_tracker_missing_database_id() {
+        let config = TrackerConfig {
+            kind: "notion".to_string(),
+            active_states: vec!["Todo".to_string()],
+            terminal_states: vec!["Done".to_string()],
+            path: None,
+            endpoint: None,
+            gh_hostname: None,
+            api_key: None,
+            repository: None,
+            project_number: None,
+            labels_filter: vec![],
+            notion: Some(NotionTrackerConfig {
+                api_key: Some("secret".to_string()),
+                database_id: None,
+                version: "2022-06-28".to_string(),
+                title_property: "Name".to_string(),
+                status_property: "Status".to_string(),
+                enabled_property: "Ready to Implement".to_string(),
+                enabled_value_bool: true,
+            }),
+        };
+
+        let result = create_tracker(&config);
+        assert!(matches!(result, Err(TrackerError::MissingDatabaseId)));
+    }
+
+    #[test]
     fn test_create_unsupported_kind() {
         let config = TrackerConfig {
             kind: "linear".to_string(),
@@ -322,6 +368,7 @@ mod tests {
             repository: None,
             project_number: None,
             labels_filter: vec![],
+            notion: None,
         };
 
         let result = create_tracker(&config);

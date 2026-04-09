@@ -157,7 +157,7 @@ Defines where Ensemble reads and writes issues.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `kind` | string | *required* | Tracker backend: `"github"` or `"todo_file"` |
+| `kind` | string | *required* | Tracker backend: `"github"`, `"todo_file"`, or `"notion"` |
 | `active_states` | list of strings | `["Todo", "In Progress"]` | States that make issues eligible for dispatch |
 | `terminal_states` | list of strings | `["Done", "Closed"]` | States that mean an issue is finished |
 
@@ -168,7 +168,7 @@ Defines where Ensemble reads and writes issues.
 | `repository` | string | — | GitHub repo in `owner/name` format |
 | `api_key` | string | — | GitHub token (use `$GITHUB_TOKEN`). If missing, Ensemble falls back to `gh auth token`. |
 | `project_number` | integer | — | GitHub Projects v2 project number |
-| `endpoint` | string | `https://api.github.com/graphql` | Custom GitHub API endpoint (for GitHub Enterprise) |
+| `endpoint` | string | `https://api.github.com/graphql` | Custom tracker API endpoint. For GitHub, this is the GraphQL endpoint (for GitHub Enterprise). For Notion, this overrides the Notion API base URL (`https://api.notion.com` by default). |
 | `gh_hostname` | string | — | Hostname passed to `gh auth token --hostname` (overrides endpoint-derived host) |
 | `labels_filter` | list of strings | `[]` | Only process issues with these labels |
 
@@ -200,6 +200,43 @@ Todo file issue format:
 - Auto-generated IDs follow a stable `state-position` format (for example `todo-0`).
 - When a no-ID item is moved between states, Ensemble may rewrite it to bracket form
   (`- [generated-id] Title`) to stabilize future state transitions.
+
+**Notion fields** (when `kind: notion`):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `notion.api_key` | string | — | Notion integration token (recommend `$NOTION_API_KEY`) |
+| `notion.database_id` | string | — | Notion database ID to read/write |
+| `notion.version` | string | `2022-06-28` | Notion API version header |
+| `notion.title_property` | string | `Name` | Title property name in the database |
+| `notion.status_property` | string | `Status` | Select/status property used for tracker state transitions |
+| `notion.enabled_property` | string | `Ready to Implement` | Opt-in property required for candidate selection |
+| `notion.enabled_value_bool` | bool | `true` | Required value for `enabled_property` when selecting candidates |
+
+When `kind: notion`, `tracker.endpoint` may be used to override the Notion API base URL (default `https://api.notion.com`).
+
+Example:
+
+```yaml
+tracker:
+  kind: notion
+  notion:
+    api_key: $NOTION_API_KEY
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+    version: "2022-06-28"
+    title_property: Name
+    status_property: Status
+    enabled_property: Ready to Implement
+    enabled_value_bool: true
+```
+
+Notion candidate selection is based on:
+- `status_property` in `active_states`
+- `enabled_property == enabled_value_bool`
+
+Notion writes:
+- `set_issue_state` updates `status_property`
+- `add_comment` posts a page comment
 
 ### repos
 
