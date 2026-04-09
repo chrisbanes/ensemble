@@ -99,10 +99,9 @@ pub struct OrchestratorState {
 static ORCH_RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 fn new_issue_run_id() -> String {
-    format!(
-        "run-{}",
-        ORCH_RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-    )
+    let issued_at_ms = Utc::now().timestamp_millis();
+    let counter = ORCH_RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("run-{issued_at_ms}-{counter}")
 }
 
 impl OrchestratorState {

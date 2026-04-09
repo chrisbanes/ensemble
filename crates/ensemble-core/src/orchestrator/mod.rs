@@ -2316,8 +2316,18 @@ impl Orchestrator {
         attempt: u32,
         event: PipelineEvent,
     ) {
-        if let (Some(run_id), Some(sequence)) = (run_id, sequence) {
-            let record = event.to_timeline_record(&run_id, sequence, attempt);
+        let timeline_entry = if let (Some(run_id), Some(sequence)) = (run_id, sequence) {
+            Some((
+                run_id.clone(),
+                event.to_timeline_record(&run_id, sequence, attempt),
+            ))
+        } else {
+            None
+        };
+
+        self.event_bus.publish(event);
+
+        if let Some((run_id, record)) = timeline_entry {
             if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
                 warn!(
                     event = "timeline_persist_failed",
@@ -2327,7 +2337,6 @@ impl Orchestrator {
                 );
             }
         }
-        self.event_bus.publish(event);
     }
 
     fn run_context_for_issue(

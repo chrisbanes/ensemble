@@ -49,22 +49,25 @@ export function normalizePipelineEvent(event: WsPipelineEvent): WsEventData {
       ? Number(event.detail.match(/attempt\s+(\d+)/i)?.[1] ?? NaN)
       : NaN;
 
-  return {
+  const normalized: WsEventData = {
     type: event.event_type,
     timestamp: event.timestamp,
     detail: event.detail ?? event.event_type,
-    runId: typeof event.run_id === "string" ? event.run_id : undefined,
-    sequence: typeof event.sequence === "number" ? event.sequence : undefined,
-    stepName: typeof event.step_name === "string" ? event.step_name : undefined,
-    attempt:
-      typeof event.attempt === "number"
-        ? event.attempt
-        : Number.isFinite(inferredAttempt)
-          ? inferredAttempt
-          : undefined,
-    conversationIndex:
-      typeof event.conversation_index === "number" ? event.conversation_index : undefined,
   };
+
+  if (typeof event.run_id === "string") normalized.runId = event.run_id;
+  if (typeof event.sequence === "number") normalized.sequence = event.sequence;
+  if (typeof event.step_name === "string") normalized.stepName = event.step_name;
+  if (typeof event.attempt === "number") {
+    normalized.attempt = event.attempt;
+  } else if (Number.isFinite(inferredAttempt)) {
+    normalized.attempt = inferredAttempt;
+  }
+  if (typeof event.conversation_index === "number") {
+    normalized.conversationIndex = event.conversation_index;
+  }
+
+  return normalized;
 }
 
 export function timelineRecordToEventData(event: TimelineEventRecord): WsEventData {
