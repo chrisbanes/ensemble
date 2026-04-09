@@ -61,13 +61,14 @@ fn gh_hostname(endpoint: Option<&str>, configured_hostname: Option<&str>) -> Str
     std::env::var("ENSEMBLE_GH_HOST")
         .ok()
         .or_else(|| std::env::var("GH_HOST").ok())
-        .filter(|v| !v.trim().is_empty())
+        .and_then(|v| normalize_token(Some(v.as_str())))
         .unwrap_or_else(|| "github.com".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::env::ENV_LOCK;
 
     #[test]
     fn normalize_token_trims_and_filters_empty_values() {
@@ -101,5 +102,21 @@ mod tests {
             gh_hostname(Some("https://api.github.com/graphql"), Some("ghe.internal")),
             "ghe.internal".to_string()
         );
+    }
+
+    #[test]
+    fn gh_hostname_trims_env_host_values() {
+        let _lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let original = std::env::var("ENSEMBLE_GH_HOST").ok();
+        std::env::set_var("ENSEMBLE_GH_HOST", "  ghe.env.example.com  ");
+
+        assert_eq!(gh_hostname(None, None), "ghe.env.example.com".to_string());
+
+        match original {
+            Some(value) => std::env::set_var("ENSEMBLE_GH_HOST", value),
+            None => std::env::remove_var("ENSEMBLE_GH_HOST"),
+        }
     }
 }

@@ -168,7 +168,7 @@ Defines where Ensemble reads and writes issues.
 | `repository` | string | — | GitHub repo in `owner/name` format |
 | `api_key` | string | — | GitHub token (use `$GITHUB_TOKEN`). If missing, Ensemble falls back to `gh auth token`. |
 | `project_number` | integer | — | GitHub Projects v2 project number |
-| `endpoint` | string | — | Custom GitHub API endpoint (for GitHub Enterprise) |
+| `endpoint` | string | `https://api.github.com/graphql` | Custom GitHub API endpoint (for GitHub Enterprise) |
 | `gh_hostname` | string | — | Hostname passed to `gh auth token --hostname` (overrides endpoint-derived host) |
 | `labels_filter` | list of strings | `[]` | Only process issues with these labels |
 

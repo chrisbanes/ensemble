@@ -12,7 +12,9 @@ use model::Issue;
 pub enum TrackerError {
     #[error("unsupported tracker kind: {kind}")]
     UnsupportedKind { kind: String },
-    #[error("missing tracker API key")]
+    #[error(
+        "missing tracker API key (set tracker.api_key, set GITHUB_TOKEN, or authenticate gh with `gh auth login`)"
+    )]
     MissingApiKey,
     #[error("missing tracker repository")]
     MissingRepository,
@@ -151,11 +153,9 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
 mod tests {
     use super::*;
     use crate::config::ensemble::TrackerConfig;
+    use crate::test_support::env::ENV_LOCK;
     use std::path::PathBuf;
-    use std::sync::Mutex;
     use tempfile::TempDir;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -265,7 +265,9 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker_missing_api_key() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env_lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", None);
         let _gh_guard = EnvVarGuard::set("ENSEMBLE_GH_BIN", Some("__missing_gh_binary__"));
         let config = github_config(None, Some("acme/repo".to_string()));
@@ -276,7 +278,9 @@ mod tests {
 
     #[test]
     fn test_resolve_github_token_prefers_explicit_over_env() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env_lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", Some("from-env"));
         assert_eq!(
             resolve_github_token(Some("from-config")).as_deref(),
@@ -286,7 +290,9 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker_uses_env_token_when_api_key_missing() {
-        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
+        let _env_lock = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", Some("from-env"));
         let _gh_guard = EnvVarGuard::set("ENSEMBLE_GH_BIN", Some("__missing_gh_binary__"));
         let config = github_config(None, Some("acme/repo".to_string()));

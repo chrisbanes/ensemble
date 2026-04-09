@@ -649,12 +649,11 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::env::ENV_LOCK;
     use std::io;
     use std::sync::Arc;
     use std::sync::Mutex;
     use tracing_subscriber::fmt::writer::MakeWriter;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     const ENV_VARS: &[&str] = &[
         "GITHUB_TOKEN",
@@ -706,7 +705,9 @@ mod tests {
 
     impl EnvGuard {
         fn lock(vars: &[&'static str]) -> Self {
-            let guard = ENV_LOCK.lock().unwrap();
+            let guard = ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let saved = vars
                 .iter()
                 .map(|&key| (key, std::env::var(key).ok()))
@@ -1004,7 +1005,9 @@ human_interaction:
 
     #[test]
     fn env_guard_restores_tracked_vars() {
-        let guard = ENV_LOCK.lock().unwrap();
+        let guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         std::env::set_var("GITHUB_TOKEN", "before");
         let saved = vec![("GITHUB_TOKEN", std::env::var("GITHUB_TOKEN").ok())];
 
