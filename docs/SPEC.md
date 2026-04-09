@@ -875,7 +875,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - Config file: `<config_dir>/config.yaml`
 - `tracker.kind`: string, required; supported values: `todo_file`, `github`, `notion`
 - `tracker.path`: string, default `~/ensemble/TODO.md`; path to todo file when `tracker.kind=todo_file`
-- `tracker.endpoint`: string, default `https://api.github.com/graphql` when `tracker.kind=github`
+- `tracker.endpoint`: string; defaults to `https://api.github.com/graphql` when `tracker.kind=github`, and `https://api.notion.com` when `tracker.kind=notion`
 - `tracker.api_key`: string or `$VAR`, canonical env `GITHUB_TOKEN` when `tracker.kind=github`
 - `tracker.gh_hostname`: string, optional; explicit host for `gh auth token --hostname` fallback
 - `tracker.repository`: string (`owner/repo`), required when `tracker.kind=github`

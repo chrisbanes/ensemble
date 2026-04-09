@@ -168,7 +168,7 @@ Defines where Ensemble reads and writes issues.
 | `repository` | string | — | GitHub repo in `owner/name` format |
 | `api_key` | string | — | GitHub token (use `$GITHUB_TOKEN`). If missing, Ensemble falls back to `gh auth token`. |
 | `project_number` | integer | — | GitHub Projects v2 project number |
-| `endpoint` | string | `https://api.github.com/graphql` | Custom GitHub API endpoint (for GitHub Enterprise) |
+| `endpoint` | string | `https://api.github.com/graphql` | Custom tracker API endpoint. For GitHub, this is the GraphQL endpoint (for GitHub Enterprise). For Notion, this overrides the Notion API base URL (`https://api.notion.com` by default). |
 | `gh_hostname` | string | — | Hostname passed to `gh auth token --hostname` (overrides endpoint-derived host) |
 | `labels_filter` | list of strings | `[]` | Only process issues with these labels |
 
@@ -212,6 +212,8 @@ Todo file issue format:
 | `notion.status_property` | string | `Status` | Select/status property used for tracker state transitions |
 | `notion.enabled_property` | string | `Ready to Implement` | Opt-in property required for candidate selection |
 | `notion.enabled_value_bool` | bool | `true` | Required value for `enabled_property` when selecting candidates |
+
+When `kind: notion`, `tracker.endpoint` may be used to override the Notion API base URL (default `https://api.notion.com`).
 
 Example:
 

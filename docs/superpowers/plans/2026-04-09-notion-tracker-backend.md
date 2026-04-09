@@ -33,9 +33,10 @@ fn test_parse_notion_tracker_config_with_defaults_and_overrides() {
     let yaml = r#"
 tracker:
   kind: notion
-  api_key: $NOTION_API_KEY
-  database_id: deadbeefdeadbeefdeadbeefdeadbeef
-  enabled_property: Ready to Implement
+  notion:
+    api_key: $NOTION_API_KEY
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+    enabled_property: Ready to Implement
 agents:
   build:
     executor: claude-code
@@ -50,11 +51,11 @@ on_failure: Failed
 
     let config = parse_config(yaml).unwrap();
     assert_eq!(config.tracker.kind, "notion");
-    assert_eq!(config.tracker.database_id.as_deref(), Some("deadbeefdeadbeefdeadbeefdeadbeef"));
-    assert_eq!(config.tracker.status_property.as_deref(), Some("Status"));
-    assert_eq!(config.tracker.title_property.as_deref(), Some("Name"));
-    assert_eq!(config.tracker.enabled_property.as_deref(), Some("Ready to Implement"));
-    assert_eq!(config.tracker.enabled_value_bool, Some(true));
+    assert_eq!(config.tracker.notion.as_ref().and_then(|n| n.database_id.as_deref()), Some("deadbeefdeadbeefdeadbeefdeadbeef"));
+    assert_eq!(config.tracker.notion.as_ref().map(|n| n.status_property.as_str()), Some("Status"));
+    assert_eq!(config.tracker.notion.as_ref().map(|n| n.title_property.as_str()), Some("Name"));
+    assert_eq!(config.tracker.notion.as_ref().map(|n| n.enabled_property.as_str()), Some("Ready to Implement"));
+    assert_eq!(config.tracker.notion.as_ref().map(|n| n.enabled_value_bool), Some(true));
 }
 ```
 
@@ -83,17 +84,25 @@ pub struct TrackerConfig {
     pub labels_filter: Vec<String>,
 
     // notion-specific
-    pub database_id: Option<String>,
-    pub notion_version: Option<String>,
-    pub title_property: Option<String>,
-    pub status_property: Option<String>,
-    pub enabled_property: Option<String>,
-    #[serde(default = "default_enabled_value_bool")]
-    pub enabled_value_bool: Option<bool>,
+    #[serde(default)]
+    pub notion: Option<NotionTrackerConfig>,
 }
 
-fn default_enabled_value_bool() -> Option<bool> {
-    Some(true)
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct NotionTrackerConfig {
+    #[serde(skip_serializing)]
+    pub api_key: Option<String>,
+    pub database_id: Option<String>,
+    #[serde(default = "default_notion_version")]
+    pub version: String,
+    #[serde(default = "default_notion_title_property")]
+    pub title_property: String,
+    #[serde(default = "default_notion_status_property")]
+    pub status_property: String,
+    #[serde(default = "default_notion_enabled_property")]
+    pub enabled_property: String,
+    #[serde(default = "default_notion_enabled_value_bool")]
+    pub enabled_value_bool: bool,
 }
 ```
 
@@ -131,13 +140,16 @@ fn test_create_notion_tracker_missing_database_id() {
         repository: None,
         project_number: None,
         labels_filter: vec![],
-        database_id: None,
-        notion_version: None,
-        title_property: Some("Name".into()),
-        status_property: Some("Status".into()),
-        enabled_property: Some("Ready to Implement".into()),
-        enabled_value_bool: Some(true),
         api_key: Some("secret".into()),
+        notion: Some(NotionTrackerConfig {
+            api_key: Some("secret".into()),
+            database_id: None,
+            version: "2022-06-28".into(),
+            title_property: "Name".into(),
+            status_property: "Status".into(),
+            enabled_property: "Ready to Implement".into(),
+            enabled_value_bool: true,
+        }),
     };
 
     let result = create_tracker(&config);
@@ -170,8 +182,8 @@ pub enum TrackerError {
 }
 
 "notion" => {
-    let token = config.api_key.clone().ok_or(TrackerError::MissingApiKey)?;
-    let database_id = config.database_id.clone().ok_or(TrackerError::MissingDatabaseId)?;
+    let token = config.notion_api_key().map(ToOwned::to_owned).ok_or(TrackerError::MissingApiKey)?;
+    let database_id = config.notion_database_id().map(ToOwned::to_owned).ok_or(TrackerError::MissingDatabaseId)?;
     let tracker = notion::NotionTracker::new(token, database_id, config)?;
     Ok(Box::new(tracker))
 }
@@ -441,7 +453,7 @@ rtk git commit -m "Add Notion tracker error mapping and resilience tests"
 ```md
 ##### `tracker.kind == "notion"`
 A Notion database-backed tracker.
-Required: `database_id`, `api_key`.
+Required: `tracker.notion.database_id`, `tracker.notion.api_key`.
 Supports writes: yes (`set_issue_state`, `add_comment`).
 Candidate filter: status in `active_states` and opt-in property enabled.
 ```
@@ -451,15 +463,16 @@ Candidate filter: status in `active_states` and opt-in property enabled.
 ```yaml
 tracker:
   kind: notion
-  api_key: $NOTION_API_KEY
-  database_id: deadbeefdeadbeefdeadbeefdeadbeef
-  status_property: Status
-  enabled_property: Ready to Implement
+  notion:
+    api_key: $NOTION_API_KEY
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+    status_property: Status
+    enabled_property: Ready to Implement
 ```
 
 - [ ] **Step 3: Run docs sanity checks**
 
-Run: `rtk rg -n "tracker.kind == \"notion\"|database_id|enabled_property" docs/SPEC.md docs/configuration.md`
+Run: `rtk rg -n "tracker.kind == \"notion\"|tracker.notion.database_id|tracker.notion.enabled_property" docs/SPEC.md docs/configuration.md`
 Expected: Matches in both files.
 
 - [ ] **Step 4: Commit**

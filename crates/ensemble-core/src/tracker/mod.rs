@@ -14,12 +14,12 @@ pub enum TrackerError {
     #[error("unsupported tracker kind: {kind}")]
     UnsupportedKind { kind: String },
     #[error(
-        "missing tracker API key (set tracker.api_key, set GITHUB_TOKEN, or authenticate gh with `gh auth login`)"
+        "missing tracker API key (set tracker.api_key for github, tracker.notion.api_key for notion, set GITHUB_TOKEN, or authenticate gh with `gh auth login`)"
     )]
     MissingApiKey,
     #[error("missing tracker repository")]
     MissingRepository,
-    #[error("missing tracker database_id")]
+    #[error("missing tracker.notion.database_id")]
     MissingDatabaseId,
     #[error("missing tracker path for todo_file kind")]
     MissingPath,
@@ -27,9 +27,9 @@ pub enum TrackerError {
     MissingParentDirectory { path: String },
     #[error("I/O error: {reason}")]
     IoError { reason: String },
-    #[error("GitHub API request failed: {reason}")]
+    #[error("tracker API request failed: {reason}")]
     ApiRequestFailed { reason: String },
-    #[error("GitHub API returned status {status}: {body}")]
+    #[error("tracker API returned status {status}: {body}")]
     ApiStatus { status: u16, body: String },
     #[error("GitHub GraphQL errors: {errors}")]
     GraphqlErrors { errors: String },

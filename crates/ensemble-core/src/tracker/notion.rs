@@ -26,8 +26,12 @@ pub struct NotionTracker {
 
 impl NotionTracker {
     pub fn new(token: String, database_id: String, config: &TrackerConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            client: reqwest::Client::new(),
+            client,
             token,
             base_url: config
                 .endpoint
@@ -221,20 +225,87 @@ impl NotionTracker {
             })
     }
 
-    async fn query_database(&self) -> Result<Vec<Value>, TrackerError> {
+    fn state_filter(&self, states: &[String], field: &str) -> Value {
+        let terms: Vec<Value> = states
+            .iter()
+            .map(|state| {
+                json!({
+                    "property": self.status_property,
+                    field: {
+                        "equals": state
+                    }
+                })
+            })
+            .collect();
+
+        match terms.len() {
+            0 => json!({}),
+            1 => terms[0].clone(),
+            _ => json!({ "or": terms }),
+        }
+    }
+
+    fn candidate_filter(&self, states: &[String], field: &str) -> Value {
+        json!({
+            "and": [
+                self.state_filter(states, field),
+                {
+                    "property": self.enabled_property,
+                    "checkbox": {
+                        "equals": self.enabled_value_bool
+                    }
+                }
+            ]
+        })
+    }
+
+    async fn query_database_for_states(
+        &self,
+        states: &[String],
+        include_enabled_filter: bool,
+    ) -> Result<Vec<Value>, TrackerError> {
+        let mut last_error = None;
+
+        for status_field in ["status", "select"] {
+            let filter = if include_enabled_filter {
+                self.candidate_filter(states, status_field)
+            } else {
+                self.state_filter(states, status_field)
+            };
+
+            match self.query_database(Some(filter)).await {
+                Ok(results) => return Ok(results),
+                Err(err @ TrackerError::ApiStatus { status: 400, .. }) => {
+                    last_error = Some(err);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        Err(
+            last_error.unwrap_or_else(|| TrackerError::UnexpectedPayload {
+                reason: "failed to query Notion with either status/select filters".to_string(),
+            }),
+        )
+    }
+
+    async fn query_database(&self, filter: Option<Value>) -> Result<Vec<Value>, TrackerError> {
         let mut all_results = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
-            let body = match &cursor {
-                Some(cursor) => json!({ "start_cursor": cursor }),
-                None => json!({}),
-            };
+            let mut body = serde_json::Map::new();
+            if let Some(cursor) = &cursor {
+                body.insert("start_cursor".to_string(), json!(cursor));
+            }
+            if let Some(filter) = &filter {
+                body.insert("filter".to_string(), filter.clone());
+            }
             let query_url = self.database_query_url()?;
             let payload = self
                 .send_json_with_retry(|| {
                     self.notion_request(self.client.post(query_url.clone()))
-                        .json(&body)
+                        .json(&Value::Object(body.clone()))
                 })
                 .await?;
 
@@ -309,11 +380,20 @@ impl NotionTracker {
     }
 
     fn extract_state(&self, page: &Value) -> Option<String> {
-        page.get("properties")
-            .and_then(|properties| properties.get(&self.status_property))
-            .and_then(|value| value.get("select"))
+        let property = page
+            .get("properties")
+            .and_then(|properties| properties.get(&self.status_property))?;
+
+        property
+            .get("select")
             .and_then(|select| select.get("name"))
             .and_then(Value::as_str)
+            .or_else(|| {
+                property
+                    .get("status")
+                    .and_then(|status| status.get("name"))
+                    .and_then(Value::as_str)
+            })
             .map(ToString::to_string)
     }
 
@@ -323,12 +403,61 @@ impl NotionTracker {
             .and_then(|value| value.get("checkbox"))
             .and_then(Value::as_bool)
     }
+
+    fn state_property_update(&self, page: &Value, state: &str) -> Result<Value, TrackerError> {
+        let property = page
+            .get("properties")
+            .and_then(|properties| properties.get(&self.status_property))
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "missing status property '{}' in page payload",
+                    self.status_property
+                ),
+            })?;
+
+        let property_type = property.get("type").and_then(Value::as_str).or_else(|| {
+            if property.get("status").is_some() {
+                Some("status")
+            } else if property.get("select").is_some() {
+                Some("select")
+            } else {
+                None
+            }
+        });
+
+        match property_type {
+            Some("status") => Ok(json!({
+                self.status_property.clone(): {
+                    "status": { "name": state }
+                }
+            })),
+            Some("select") => Ok(json!({
+                self.status_property.clone(): {
+                    "select": { "name": state }
+                }
+            })),
+            Some(other) => Err(TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "status property '{}' has unsupported type '{}'",
+                    self.status_property, other
+                ),
+            }),
+            None => Err(TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "status property '{}' missing Notion type metadata",
+                    self.status_property
+                ),
+            }),
+        }
+    }
 }
 
 #[async_trait]
 impl IssueTracker for NotionTracker {
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
-        let pages = self.query_database().await?;
+        let pages = self
+            .query_database_for_states(&self.active_states, true)
+            .await?;
         let mut issues = Vec::new();
 
         for page in &pages {
@@ -344,7 +473,7 @@ impl IssueTracker for NotionTracker {
     }
 
     async fn fetch_issues_by_states(&self, states: &[String]) -> Result<Vec<Issue>, TrackerError> {
-        let pages = self.query_database().await?;
+        let pages = self.query_database_for_states(states, false).await?;
         let mut issues = Vec::new();
 
         for page in &pages {
@@ -372,15 +501,13 @@ impl IssueTracker for NotionTracker {
     }
 
     async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+        let page = self.fetch_page(id).await?;
+        let properties = self.state_property_update(&page, state)?;
         let page_url = self.page_url(id)?;
         self.send_unit_with_retry(|| {
             self.notion_request(self.client.patch(page_url.clone()))
                 .json(&json!({
-                    "properties": {
-                        self.status_property.clone(): {
-                            "select": { "name": state }
-                        }
-                    }
+                    "properties": properties
                 }))
         })
         .await
@@ -525,6 +652,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_issue_states_by_ids_supports_status_property_type() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/pages/page-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "page-a",
+                "properties": {
+                    "Name": { "title": [ { "plain_text": "A task" } ] },
+                    "Status": { "status": { "name": "In Progress" } }
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let issues = tracker
+            .fetch_issue_states_by_ids(&["page-a".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].state, "In Progress");
+    }
+
+    #[tokio::test]
     async fn fetch_issues_by_states_filters_requested_states() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -567,10 +719,53 @@ mod tests {
     #[tokio::test]
     async fn set_issue_state_updates_status_property() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/pages/page-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "page-a",
+                "properties": {
+                    "Status": {
+                        "type": "select",
+                        "select": { "name": "Todo" }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
         Mock::given(method("PATCH"))
             .and(path("/v1/pages/page-a"))
             .and(body_string_contains("\"Status\""))
-            .and(body_string_contains("\"In Review\""))
+            .and(body_string_contains("\"select\":{\"name\":\"In Review\"}"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "page-a"})))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        tracker
+            .set_issue_state("page-a", "In Review")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_issue_state_uses_status_payload_when_status_property_type_is_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/pages/page-a"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "page-a",
+                "properties": {
+                    "Status": {
+                        "type": "status",
+                        "status": { "name": "Todo" }
+                    }
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/pages/page-a"))
+            .and(body_string_contains("\"status\":{\"name\":\"In Review\"}"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "page-a"})))
             .mount(&server)
             .await;
@@ -699,6 +894,26 @@ mod tests {
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].id, "page-a");
         assert_eq!(issues[1].id, "page-b");
+    }
+
+    #[tokio::test]
+    async fn fetch_candidate_issues_query_uses_server_side_filters() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/databases/deadbeefdeadbeefdeadbeefdeadbeef/query"))
+            .and(body_string_contains("\"filter\""))
+            .and(body_string_contains("\"Status\""))
+            .and(body_string_contains("\"Ready to Implement\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [],
+                "has_more": false
+            })))
+            .mount(&server)
+            .await;
+
+        let tracker = make_tracker(&server.uri());
+        let issues = tracker.fetch_candidate_issues().await.unwrap();
+        assert!(issues.is_empty());
     }
 
     #[tokio::test]

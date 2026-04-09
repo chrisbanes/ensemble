@@ -129,9 +129,10 @@ pub struct TrackerConfig {
     pub notion: Option<NotionTrackerConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct NotionTrackerConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
+    #[schema(write_only)]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub database_id: Option<String>,
@@ -145,6 +146,20 @@ pub struct NotionTrackerConfig {
     pub enabled_property: String,
     #[serde(default = "default_notion_enabled_value_bool")]
     pub enabled_value_bool: bool,
+}
+
+impl std::fmt::Debug for NotionTrackerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotionTrackerConfig")
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("database_id", &self.database_id)
+            .field("version", &self.version)
+            .field("title_property", &self.title_property)
+            .field("status_property", &self.status_property)
+            .field("enabled_property", &self.enabled_property)
+            .field("enabled_value_bool", &self.enabled_value_bool)
+            .finish()
+    }
 }
 
 fn default_active_states() -> Vec<String> {
@@ -617,7 +632,16 @@ fn reject_legacy_notion_tracker_keys(
         return Ok(());
     };
 
+    let is_notion = tracker
+        .get(serde_yaml::Value::String("kind".to_string()))
+        .and_then(serde_yaml::Value::as_str)
+        == Some("notion");
+    if !is_notion {
+        return Ok(());
+    }
+
     let legacy_keys = [
+        "api_key",
         "database_id",
         "notion_version",
         "title_property",
@@ -1060,6 +1084,85 @@ on_failure: Failed
         assert!(result.is_err());
         let error = result.unwrap_err().to_string();
         assert!(error.contains("legacy Notion tracker keys"));
+    }
+
+    #[test]
+    fn test_parse_rejects_legacy_flat_notion_api_key_for_notion_kind() {
+        let yaml = r#"
+tracker:
+  kind: notion
+  api_key: legacy-api-key
+  notion:
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let result = parse_config(yaml);
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("legacy Notion tracker keys"));
+        assert!(error.contains("api_key"));
+    }
+
+    #[test]
+    fn test_notion_api_key_not_serialized() {
+        let yaml = r#"
+tracker:
+  kind: notion
+  notion:
+    api_key: secret-notion-token
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        let serialized = serde_json::to_string(&config).unwrap();
+        assert!(!serialized.contains("secret-notion-token"));
+        assert!(!serialized.contains("\"api_key\""));
+    }
+
+    #[test]
+    fn test_tracker_debug_redacts_notion_api_key() {
+        let yaml = r#"
+tracker:
+  kind: notion
+  notion:
+    api_key: secret-notion-token
+    database_id: deadbeefdeadbeefdeadbeefdeadbeef
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        let debug = format!("{:?}", config.tracker);
+        assert!(!debug.contains("secret-notion-token"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

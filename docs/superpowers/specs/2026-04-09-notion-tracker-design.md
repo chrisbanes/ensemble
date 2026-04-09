@@ -46,25 +46,26 @@ Add `notion` fields to tracker config:
 ```yaml
 tracker:
   kind: notion
-  api_key: $NOTION_API_KEY
-  notion_version: "2022-06-28"  # optional, default pinned in code
-  database_id: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # required
+  notion:
+    api_key: $NOTION_API_KEY
+    version: "2022-06-28"  # optional, default pinned in code
+    database_id: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # required
 
   active_states: ["Todo", "In Progress"]
   terminal_states: ["Done", "Canceled"]
 
   # Hybrid defaults (all optional overrides)
-  title_property: "Name"
-  status_property: "Status"
-  enabled_property: "Ready to Implement"
-  enabled_value: true
+    title_property: "Name"
+    status_property: "Status"
+    enabled_property: "Ready to Implement"
+    enabled_value_bool: true
 ```
 
 ### Validation rules
-- `api_key` and `database_id` are required for `tracker.kind: notion`.
-- `status_property` must exist and be a status/select-compatible property.
-- `title_property` must exist and be readable as title text.
-- `enabled_property` must exist and support configured `enabled_value` type.
+- `tracker.notion.api_key` and `tracker.notion.database_id` are required for `tracker.kind: notion`.
+- `tracker.notion.status_property` must exist and be a status/select-compatible property.
+- `tracker.notion.title_property` must exist and be readable as title text.
+- `tracker.notion.enabled_property` must exist and support configured `enabled_value_bool` type.
 - If pipeline uses `tracker_state` / `on_success` / `on_failure`, each configured state must map to a valid Notion status option.
 
 ## Data Mapping
@@ -78,7 +79,7 @@ tracker:
 ### Candidate selection
 Database query filter is:
 1. `status_property` in `active_states`, and
-2. `enabled_property == enabled_value`.
+2. `enabled_property == enabled_value_bool`.
 
 ### Terminal fetch
 `fetch_terminal_issues` filters by `terminal_states` (same opt-in filter preserved for consistency).
