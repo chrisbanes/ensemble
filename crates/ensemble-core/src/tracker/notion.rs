@@ -69,9 +69,12 @@ impl NotionTracker {
             });
         }
 
-        let payload: Value = resp.json().await.map_err(|error| TrackerError::UnexpectedPayload {
-            reason: error.to_string(),
-        })?;
+        let payload: Value =
+            resp.json()
+                .await
+                .map_err(|error| TrackerError::UnexpectedPayload {
+                    reason: error.to_string(),
+                })?;
 
         let results = payload
             .get("results")
@@ -113,12 +116,11 @@ impl NotionTracker {
     }
 
     fn page_to_issue(&self, page: &Value) -> Result<Issue, TrackerError> {
-        let id = page
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
+        let id = page.get("id").and_then(Value::as_str).ok_or_else(|| {
+            TrackerError::UnexpectedPayload {
                 reason: "page.id missing".to_string(),
-            })?;
+            }
+        })?;
 
         let title = self.extract_title(page).unwrap_or_else(|| id.to_string());
         let state = self
@@ -400,7 +402,10 @@ mod tests {
             .await;
 
         let tracker = make_tracker(&server.uri());
-        tracker.set_issue_state("page-a", "In Review").await.unwrap();
+        tracker
+            .set_issue_state("page-a", "In Review")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
