@@ -125,6 +125,17 @@ pub struct TrackerConfig {
     pub project_number: Option<i64>,
     #[serde(default)]
     pub labels_filter: Vec<String>,
+    pub database_id: Option<String>,
+    #[serde(default = "default_notion_version")]
+    pub notion_version: String,
+    #[serde(default = "default_notion_title_property")]
+    pub title_property: String,
+    #[serde(default = "default_notion_status_property")]
+    pub status_property: String,
+    #[serde(default = "default_notion_enabled_property")]
+    pub enabled_property: String,
+    #[serde(default = "default_notion_enabled_value_bool")]
+    pub enabled_value_bool: bool,
 }
 
 fn default_active_states() -> Vec<String> {
@@ -133,6 +144,26 @@ fn default_active_states() -> Vec<String> {
 
 fn default_terminal_states() -> Vec<String> {
     vec!["Done".to_string(), "Closed".to_string()]
+}
+
+fn default_notion_version() -> String {
+    "2022-06-28".to_string()
+}
+
+fn default_notion_title_property() -> String {
+    "Name".to_string()
+}
+
+fn default_notion_status_property() -> String {
+    "Status".to_string()
+}
+
+fn default_notion_enabled_property() -> String {
+    "Ready to Implement".to_string()
+}
+
+fn default_notion_enabled_value_bool() -> bool {
+    true
 }
 
 impl std::fmt::Debug for TrackerConfig {
@@ -148,6 +179,12 @@ impl std::fmt::Debug for TrackerConfig {
             .field("repository", &self.repository)
             .field("project_number", &self.project_number)
             .field("labels_filter", &self.labels_filter)
+            .field("database_id", &self.database_id)
+            .field("notion_version", &self.notion_version)
+            .field("title_property", &self.title_property)
+            .field("status_property", &self.status_property)
+            .field("enabled_property", &self.enabled_property)
+            .field("enabled_value_bool", &self.enabled_value_bool)
             .finish()
     }
 }
@@ -820,6 +857,38 @@ on_failure: Failed
         assert_eq!(config.steps[1].tracker_state.as_deref(), Some("Review"));
         assert_eq!(config.concurrency.max_concurrent_agents, 8);
         assert_eq!(config.concurrency.max_step_parallelism, 4);
+    }
+
+    #[test]
+    fn test_parse_notion_tracker_config_with_defaults_and_overrides() {
+        let yaml = r#"
+tracker:
+  kind: notion
+  api_key: $NOTION_API_KEY
+  database_id: deadbeefdeadbeefdeadbeefdeadbeef
+  enabled_property: Ready to Implement
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing"
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(config.tracker.kind, "notion");
+        assert_eq!(
+            config.tracker.database_id.as_deref(),
+            Some("deadbeefdeadbeefdeadbeefdeadbeef")
+        );
+        assert_eq!(config.tracker.status_property, "Status");
+        assert_eq!(config.tracker.title_property, "Name");
+        assert_eq!(config.tracker.enabled_property, "Ready to Implement");
+        assert!(config.tracker.enabled_value_bool);
     }
 
     #[test]

@@ -16,6 +16,12 @@ fn todo_file_tracker_config(path: std::path::PathBuf) -> TrackerConfig {
         repository: None,
         project_number: None,
         labels_filter: vec![],
+        database_id: None,
+        notion_version: "2022-06-28".to_string(),
+        title_property: "Name".to_string(),
+        status_property: "Status".to_string(),
+        enabled_property: "Ready to Implement".to_string(),
+        enabled_value_bool: true,
     }
 }
 
@@ -175,6 +181,12 @@ async fn test_factory_rejects_unsupported_kind() {
         repository: None,
         project_number: None,
         labels_filter: vec![],
+        database_id: None,
+        notion_version: "2022-06-28".to_string(),
+        title_property: "Name".to_string(),
+        status_property: "Status".to_string(),
+        enabled_property: "Ready to Implement".to_string(),
+        enabled_value_bool: true,
     };
 
     let result = create_tracker(&config);
