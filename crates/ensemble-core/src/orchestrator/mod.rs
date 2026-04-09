@@ -5252,4 +5252,102 @@ agent:
 
         assert!(error.to_string().contains("missing-step"));
     }
+
+    #[tokio::test]
+    async fn publish_pipeline_event_broadcasts_without_run_context() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut rx = orchestrator.event_bus.subscribe();
+
+        orchestrator
+            .publish_pipeline_event(
+                None,
+                None,
+                None,
+                PipelineEvent::SessionStarted {
+                    issue_identifier: "repo#1".into(),
+                    timestamp: Utc::now(),
+                    detail: "started".into(),
+                },
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event should be published")
+            .expect("receiver should get event");
+        assert_eq!(received.issue_identifier(), "repo#1");
+    }
+
+    #[tokio::test]
+    async fn publish_pipeline_event_still_broadcasts_when_timeline_write_fails() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        std::fs::write(dir.path().join(".ensemble"), "blocked").unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut rx = orchestrator.event_bus.subscribe();
+
+        orchestrator
+            .publish_pipeline_event(
+                Some("run-1".into()),
+                Some(1),
+                Some(2),
+                PipelineEvent::TurnCompleted {
+                    issue_identifier: "repo#1".into(),
+                    timestamp: Utc::now(),
+                    turn: 1,
+                    detail: "turn completed".into(),
+                    conversation_index: None,
+                    tokens_delta: crate::observability::events::TokensDelta {
+                        input: 10,
+                        output: 20,
+                    },
+                },
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .expect("event should be published despite persist failure")
+            .expect("receiver should get event");
+        assert_eq!(received.issue_identifier(), "repo#1");
+        assert!(!orchestrator.timeline_writer.events_path("run-1").exists());
+    }
 }
