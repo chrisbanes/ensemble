@@ -73,15 +73,16 @@ pub trait IssueTracker: Send + Sync {
 /// Resolve a GitHub API token using the configured precedence:
 /// explicit token, then `$GITHUB_TOKEN`, then `gh auth token`.
 pub fn resolve_github_token(explicit: Option<&str>) -> Option<String> {
-    resolve_github_token_for_endpoint(explicit, None)
+    resolve_github_token_for_endpoint(explicit, None, None)
 }
 
 /// Resolve a GitHub API token using the configured precedence and endpoint-aware host mapping.
 pub fn resolve_github_token_for_endpoint(
     explicit: Option<&str>,
     endpoint: Option<&str>,
+    configured_hostname: Option<&str>,
 ) -> Option<String> {
-    auth::resolve_github_token(explicit, endpoint)
+    auth::resolve_github_token(explicit, endpoint, configured_hostname)
 }
 
 /// Create an `IssueTracker` implementation based on the tracker config.
@@ -121,6 +122,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
             let token = resolve_github_token_for_endpoint(
                 config.api_key.as_deref(),
                 Some(endpoint.as_str()),
+                config.gh_hostname.as_deref(),
             )
             .ok_or(TrackerError::MissingApiKey)?;
             let repository = config
@@ -150,7 +152,10 @@ mod tests {
     use super::*;
     use crate::config::ensemble::TrackerConfig;
     use std::path::PathBuf;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -184,6 +189,7 @@ mod tests {
             terminal_states: vec!["Done".to_string(), "Closed".to_string()],
             path: Some(path),
             endpoint: None,
+            gh_hostname: None,
             api_key: None,
             repository: None,
             project_number: None,
@@ -198,6 +204,7 @@ mod tests {
             terminal_states: vec!["Done".to_string(), "Closed".to_string()],
             path: None,
             endpoint: None,
+            gh_hostname: None,
             api_key,
             repository,
             project_number: None,
@@ -235,6 +242,7 @@ mod tests {
             terminal_states: vec!["Done".to_string()],
             path: None,
             endpoint: None,
+            gh_hostname: None,
             api_key: None,
             repository: None,
             project_number: None,
@@ -257,6 +265,7 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker_missing_api_key() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
         let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", None);
         let _gh_guard = EnvVarGuard::set("ENSEMBLE_GH_BIN", Some("__missing_gh_binary__"));
         let config = github_config(None, Some("acme/repo".to_string()));
@@ -267,6 +276,7 @@ mod tests {
 
     #[test]
     fn test_resolve_github_token_prefers_explicit_over_env() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
         let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", Some("from-env"));
         assert_eq!(
             resolve_github_token(Some("from-config")).as_deref(),
@@ -276,6 +286,7 @@ mod tests {
 
     #[test]
     fn test_create_github_tracker_uses_env_token_when_api_key_missing() {
+        let _env_lock = ENV_LOCK.lock().expect("env lock poisoned");
         let _token_guard = EnvVarGuard::set("GITHUB_TOKEN", Some("from-env"));
         let _gh_guard = EnvVarGuard::set("ENSEMBLE_GH_BIN", Some("__missing_gh_binary__"));
         let config = github_config(None, Some("acme/repo".to_string()));
@@ -300,6 +311,7 @@ mod tests {
             terminal_states: vec![],
             path: None,
             endpoint: None,
+            gh_hostname: None,
             api_key: None,
             repository: None,
             project_number: None,

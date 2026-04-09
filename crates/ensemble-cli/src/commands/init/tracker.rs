@@ -104,10 +104,11 @@ async fn ask_github_tracker(
     // `api_token` is only Some when the user enters the token interactively.
     // When loaded from env, api_token is None and the token is not written to .env.
     let endpoint = existing.and_then(|c| c.tracker.endpoint.as_deref());
+    let gh_hostname = existing.and_then(|c| c.tracker.gh_hostname.as_deref());
     let (token, api_token) = if let Ok(t) = std::env::var("GITHUB_TOKEN") {
         println!("GitHub token ($GITHUB_TOKEN detected ✓)");
         (t, None)
-    } else if let Some(t) = resolve_github_token_for_endpoint(None, endpoint) {
+    } else if let Some(t) = resolve_github_token_for_endpoint(None, endpoint, gh_hostname) {
         println!("GitHub token (from gh auth token ✓)");
         (t, None)
     } else {

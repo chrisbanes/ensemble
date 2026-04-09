@@ -118,6 +118,7 @@ pub struct TrackerConfig {
     #[schema(value_type = Option<String>)]
     pub path: Option<PathBuf>,
     pub endpoint: Option<String>,
+    pub gh_hostname: Option<String>,
     #[serde(skip_serializing)]
     pub api_key: Option<String>,
     pub repository: Option<String>,
@@ -142,6 +143,7 @@ impl std::fmt::Debug for TrackerConfig {
             .field("terminal_states", &self.terminal_states)
             .field("path", &self.path)
             .field("endpoint", &self.endpoint)
+            .field("gh_hostname", &self.gh_hostname)
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("repository", &self.repository)
             .field("project_number", &self.project_number)
