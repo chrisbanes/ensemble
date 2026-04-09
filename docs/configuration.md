@@ -84,6 +84,8 @@ tracker:
   kind: github
   repository: acme/my-repo
   api_key: $GITHUB_TOKEN
+  # Optional override for `gh auth token --hostname ...` fallback:
+  # gh_hostname: github.com
   project_number: 42
   active_states:
     - Todo
@@ -164,10 +166,24 @@ Defines where Ensemble reads and writes issues.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `repository` | string | — | GitHub repo in `owner/name` format |
-| `api_key` | string | — | GitHub token (use `$GITHUB_TOKEN`) |
+| `api_key` | string | — | GitHub token (use `$GITHUB_TOKEN`). If missing, Ensemble falls back to `gh auth token`. |
 | `project_number` | integer | — | GitHub Projects v2 project number |
 | `endpoint` | string | — | Custom GitHub API endpoint (for GitHub Enterprise) |
+| `gh_hostname` | string | — | Hostname passed to `gh auth token --hostname` (overrides endpoint-derived host) |
 | `labels_filter` | list of strings | `[]` | Only process issues with these labels |
+
+**GitHub auth resolution order** (`kind: github`):
+
+1. `tracker.api_key` (including `$VAR` expansion)
+2. `GITHUB_TOKEN`
+3. `gh auth token --hostname <resolved host>`
+
+Hostname resolution for step 3:
+1. `tracker.gh_hostname` (if set)
+2. host derived from `tracker.endpoint` (`api.github.com` maps to `github.com`)
+3. `ENSEMBLE_GH_HOST`
+4. `GH_HOST`
+5. `github.com`
 
 **Todo file fields** (when `kind: todo_file`):
 
