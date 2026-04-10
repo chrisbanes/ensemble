@@ -136,7 +136,7 @@ fn test_interaction(id: &str, issue_id: &str, issue_identifier: &str) -> Interac
         agent_name: "reviewer".to_string(),
         step_depends: vec!["build".to_string()],
         step_tracker_state: Some("In Review".to_string()),
-        kind: InteractionKind::Question,
+        kind: InteractionKind::BrainstormPrompt,
         status: InteractionStatus::Open,
         blocking: true,
         awaiting_resume: true,
