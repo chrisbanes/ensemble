@@ -463,21 +463,6 @@ impl Orchestrator {
         };
 
         for issue in resume_candidates {
-            let maybe_waiting = {
-                let state = self.state.read().await;
-                state.waiting_on_human.get(&issue.id).cloned()
-            };
-            if let Some(waiting) = maybe_waiting {
-                self.event_bus.publish(PipelineEvent::InputSubmitted {
-                    issue_identifier: issue.identifier.clone(),
-                    timestamp: Utc::now(),
-                    step_name: waiting.step_name.clone(),
-                    detail: format!(
-                        "input submitted for interaction {}",
-                        waiting.interaction_request_id
-                    ),
-                });
-            }
             match self.resume_blocked_issue(&issue).await {
                 Ok(()) => {
                     let mut state = self.state.write().await;

@@ -304,6 +304,9 @@ export function useIssueInputMutation(identifier?: string) {
       }
       return customFetch(`/api/v1/issues/${encodeURIComponent(identifier)}/input`, {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({ response }),
       });
     },

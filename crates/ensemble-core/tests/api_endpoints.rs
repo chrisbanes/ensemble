@@ -1043,3 +1043,107 @@ async fn issue_detail_includes_pending_input_summary() {
         "interaction-pending"
     );
 }
+
+#[tokio::test]
+async fn issue_input_supports_rejection_outcome_for_approval_gate() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+
+    let mut interaction = test_interaction("interaction-approval", "NODE_900", "my-repo#900");
+    interaction.kind = InteractionKind::ApprovalGate;
+    create_interaction(&app_state, interaction).await;
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_900".to_string(),
+            identifier: "my-repo#900".to_string(),
+            interaction_request_id: "interaction-approval".to_string(),
+            step_name: "review".to_string(),
+            kind: InteractionKind::ApprovalGate,
+            prompt: "Approve deployment?".to_string(),
+            agent_name: "reviewer".to_string(),
+            retry_attempt: Some(1),
+            requested_at: Utc::now(),
+        });
+    }
+
+    let base_url = start_test_server(app_state.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%23900/input", base_url))
+        .json(&serde_json::json!({ "response": "Not ready", "outcome": "reject" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let interaction = InteractionStore::new(config_dir)
+        .get("interaction-approval")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        interaction.response,
+        Some(InteractionResponse::Approval {
+            response_schema_version: 1,
+            approved: false,
+            reason: Some("Not ready".to_string()),
+        })
+    );
+}
+
+#[tokio::test]
+async fn issue_input_rejects_invalid_outcome() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+
+    let mut interaction =
+        test_interaction("interaction-invalid-outcome", "NODE_900", "my-repo#900");
+    interaction.kind = InteractionKind::ApprovalGate;
+    create_interaction(&app_state, interaction).await;
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_900".to_string(),
+            identifier: "my-repo#900".to_string(),
+            interaction_request_id: "interaction-invalid-outcome".to_string(),
+            step_name: "review".to_string(),
+            kind: InteractionKind::ApprovalGate,
+            prompt: "Approve deployment?".to_string(),
+            agent_name: "reviewer".to_string(),
+            retry_attempt: Some(1),
+            requested_at: Utc::now(),
+        });
+    }
+
+    let base_url = start_test_server(app_state.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%23900/input", base_url))
+        .json(&serde_json::json!({ "response": "No", "outcome": "maybe" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 400);
+
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let interaction = InteractionStore::new(config_dir)
+        .get("interaction-invalid-outcome")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(interaction.status, InteractionStatus::Open);
+}

@@ -57,7 +57,7 @@ Issue snapshot payload gains `pending_input`:
 - `context`: optional structured fields (step, attempt, agent, etc.)
 
 Submit response endpoint:
-- `POST /api/issues/:id/input`
+- `POST /api/v1/issues/{identifier}/input`
 - Body: `{ response: string }`
 
 Validation:

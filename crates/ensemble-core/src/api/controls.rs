@@ -4,6 +4,7 @@ use crate::api::router::AppState;
 use crate::interaction::{
     InteractionKind, InteractionResponse, InteractionStatus, InteractionStore,
 };
+use crate::observability::events::PipelineEvent;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -124,6 +125,7 @@ pub struct ResumeResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IssueInputRequest {
     pub response: String,
+    pub outcome: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -687,6 +689,7 @@ pub async fn post_resume(
     request_body = IssueInputRequest,
     responses(
         (status = 200, description = "Input accepted and resume queued", body = IssueInputResponse),
+        (status = 400, description = "Invalid input outcome", body = ApiError),
         (status = 404, description = "Issue not found", body = ApiError),
         (status = 409, description = "Issue cannot accept input", body = ApiError)
     ),
@@ -782,16 +785,36 @@ pub async fn post_issue_input(
             text: payload.response.clone(),
             selected_option: None,
         },
-        InteractionKind::ApprovalGate => InteractionResponse::Approval {
-            response_schema_version: 1,
-            approved: true,
-            reason: Some(payload.response.clone()),
+        InteractionKind::ApprovalGate => match parse_approval_outcome(payload.outcome.as_deref()) {
+            Ok(approved) => InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved,
+                reason: Some(payload.response.clone()),
+            },
+            Err(message) => {
+                return issue_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input_outcome",
+                    message,
+                );
+            }
         },
-        InteractionKind::ManualDecision => InteractionResponse::Handoff {
-            response_schema_version: 1,
-            completed: true,
-            notes: Some(payload.response.clone()),
-        },
+        InteractionKind::ManualDecision => {
+            match parse_manual_decision_outcome(payload.outcome.as_deref()) {
+                Ok(completed) => InteractionResponse::Handoff {
+                    response_schema_version: 1,
+                    completed,
+                    notes: Some(payload.response.clone()),
+                },
+                Err(message) => {
+                    return issue_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_input_outcome",
+                        message,
+                    );
+                }
+            }
+        }
     };
 
     if let Err(error) = store.resolve(&interaction.id, response).await {
@@ -809,6 +832,15 @@ pub async fn post_issue_input(
         let mut lock = state.orchestrator_state.write().await;
         lock.queue_resume(&waiting_entry.issue_id);
     }
+    state.event_bus.publish(PipelineEvent::InputSubmitted {
+        issue_identifier: identifier.clone(),
+        timestamp: chrono::Utc::now(),
+        step_name: waiting_entry.step_name.clone(),
+        detail: format!(
+            "input submitted for interaction {}",
+            waiting_entry.interaction_request_id
+        ),
+    });
 
     state.refresh_requested.notify_one();
 
@@ -824,6 +856,26 @@ pub async fn post_issue_input(
         ),
     )
         .into_response()
+}
+
+fn parse_approval_outcome(outcome: Option<&str>) -> Result<bool, String> {
+    match outcome {
+        None | Some("approve") | Some("approved") => Ok(true),
+        Some("reject") | Some("rejected") => Ok(false),
+        Some(other) => Err(format!(
+            "unsupported approval outcome '{other}'; expected one of: approve, approved, reject, rejected"
+        )),
+    }
+}
+
+fn parse_manual_decision_outcome(outcome: Option<&str>) -> Result<bool, String> {
+    match outcome {
+        None | Some("complete") | Some("completed") => Ok(true),
+        Some("pending") | Some("incomplete") => Ok(false),
+        Some(other) => Err(format!(
+            "unsupported manual decision outcome '{other}'; expected one of: complete, completed, pending, incomplete"
+        )),
+    }
 }
 
 #[cfg(test)]
