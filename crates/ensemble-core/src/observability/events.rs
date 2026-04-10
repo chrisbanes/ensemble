@@ -189,6 +189,8 @@ impl PipelineEvent {
         sequence: u64,
         attempt: u32,
     ) -> TimelineEventRecord {
+        // `attempt` is the orchestrator run-level attempt for this issue/run_id,
+        // not an event-local counter (for example turn index).
         match self {
             Self::SessionStarted {
                 issue_identifier,

@@ -18,6 +18,14 @@ pub struct TimelineResponse {
     pub next_cursor: Option<usize>,
 }
 
+/// Read timeline events from a JSONL file with optional filtering and pagination.
+///
+/// Returns an empty response if the file does not exist.
+/// Malformed lines are silently skipped.
+///
+/// Current implementation loads the full file into memory before filtering.
+/// This is acceptable for v1 and small/medium logs, but long-running deployments
+/// should consider rotation and eventual streaming/indexed reads.
 pub async fn read_timeline(
     path: &Path,
     query: &TimelineQuery,

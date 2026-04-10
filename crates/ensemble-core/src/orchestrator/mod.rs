@@ -2189,6 +2189,9 @@ impl Orchestrator {
         {
             FinalizeStatus::SkippedHeadless
         } else {
+            // Initial finalize execution in this method is synchronous per repo,
+            // so issue-level `InProgress` is not expected here. `InProgress`
+            // is used later for operator-approved/retry flows.
             FinalizeStatus::Succeeded
         };
 

@@ -114,4 +114,34 @@ mod tests {
             ParseInteractionCommandError::UnknownCommand
         );
     }
+
+    #[test]
+    fn rejects_malformed_known_command_variants() {
+        assert_eq!(
+            parse_interaction_command("/approve now").unwrap_err(),
+            ParseInteractionCommandError::UnknownCommand
+        );
+        assert_eq!(
+            parse_interaction_command("/reject: no").unwrap_err(),
+            ParseInteractionCommandError::UnknownCommand
+        );
+    }
+
+    #[test]
+    fn parser_is_case_sensitive() {
+        assert_eq!(
+            parse_interaction_command("/Approve").unwrap_err(),
+            ParseInteractionCommandError::UnknownCommand
+        );
+    }
+
+    #[test]
+    fn parser_treats_unclosed_quotes_as_plain_text_payload() {
+        assert_eq!(
+            parse_interaction_command("/answer \"staging").unwrap(),
+            InteractionCommand::Answer {
+                text: "\"staging".to_string(),
+            }
+        );
+    }
 }
