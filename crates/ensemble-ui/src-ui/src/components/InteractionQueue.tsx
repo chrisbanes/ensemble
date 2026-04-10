@@ -33,7 +33,7 @@ export default function InteractionQueue({ interactions }: InteractionQueueProps
   if (interactions.length === 0) {
     return (
       <div className="text-center py-8 text-muted-foreground">
-        No pending interaction requests.
+        No issues need input.
       </div>
     );
   }

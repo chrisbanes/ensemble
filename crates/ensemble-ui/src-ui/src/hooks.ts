@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useGetState, getGetStateQueryKey } from "./generated/api/state/state";
 import { useGetIssueDetail } from "./generated/api/issues/issues";
 import { getGetIssueDetailQueryKey } from "./generated/api/issues/issues";
@@ -291,6 +291,30 @@ export function useResumeIssueMutation(identifier?: string) {
           });
         }
       },
+    },
+  });
+}
+
+export function useIssueInputMutation(identifier?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (response: string) => {
+      if (!identifier) {
+        throw new Error("issue identifier is required");
+      }
+      return customFetch(`/api/v1/issues/${encodeURIComponent(identifier)}/input`, {
+        method: "POST",
+        body: JSON.stringify({ response }),
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
+      queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
+      if (identifier) {
+        queryClient.invalidateQueries({
+          queryKey: getGetIssueDetailQueryKey(identifier),
+        });
+      }
     },
   });
 }

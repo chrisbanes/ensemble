@@ -16,7 +16,7 @@ function interaction(overrides: Partial<InteractionRequest> = {}): InteractionRe
     agent_name: "reviewer",
     step_depends: ["build"],
     step_tracker_state: null,
-    kind: "question",
+    kind: "brainstorm_prompt",
     status: "open",
     blocking: true,
     awaiting_resume: true,
@@ -32,57 +32,53 @@ function interaction(overrides: Partial<InteractionRequest> = {}): InteractionRe
 }
 
 describe("InteractionPanel", () => {
-  it("renders question interactions with text response form", () => {
+  it("renders interactions with unified text input form", () => {
     renderWithProviders(
       <InteractionPanel
         interaction={interaction()}
         issueIdentifier="my-repo#42"
-        onRespond={vi.fn()}
+        onSubmitInput={vi.fn()}
         onCancel={vi.fn()}
-        onResume={vi.fn()}
       />,
       { route: "/" },
     );
 
     expect(screen.getByText("Need clarification")).toBeInTheDocument();
     expect(screen.getByLabelText("Response")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Send Response" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Input" })).toBeInTheDocument();
   });
 
-  it("renders approval interactions with approve and reject actions", () => {
+  it("renders approval interactions with unified submit action", () => {
     renderWithProviders(
       <InteractionPanel
         interaction={interaction({
-          kind: "approval",
+          kind: "approval_gate",
           title: "Ready to ship?",
           body: "Approve or reject this rollout.",
           options: [],
         })}
         issueIdentifier="my-repo#42"
-        onRespond={vi.fn()}
+        onSubmitInput={vi.fn()}
         onCancel={vi.fn()}
-        onResume={vi.fn()}
       />,
       { route: "/" },
     );
 
-    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Input" })).toBeInTheDocument();
   });
 
-  it("shows resume button only when interaction is resolved", () => {
+  it("hides input actions when interaction is resolved", () => {
     const { rerender } = renderWithProviders(
       <InteractionPanel
         interaction={interaction()}
         issueIdentifier="my-repo#42"
-        onRespond={vi.fn()}
+        onSubmitInput={vi.fn()}
         onCancel={vi.fn()}
-        onResume={vi.fn()}
       />,
       { route: "/" },
     );
 
-    expect(screen.queryByRole("button", { name: "Resume Issue" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Submit Input" })).toBeInTheDocument();
 
     rerender(
       <InteractionPanel
@@ -97,12 +93,12 @@ describe("InteractionPanel", () => {
           resolved_at: "2026-04-04T11:00:00Z",
         })}
         issueIdentifier="my-repo#42"
-        onRespond={vi.fn()}
+        onSubmitInput={vi.fn()}
         onCancel={vi.fn()}
-        onResume={vi.fn()}
       />,
     );
 
-    expect(screen.getByRole("button", { name: "Resume Issue" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Submit Input" })).not.toBeInTheDocument();
+    expect(screen.getByText(/Latest response:/)).toBeInTheDocument();
   });
 });

@@ -16,7 +16,7 @@ function interaction(overrides: Partial<InteractionRequest> = {}): InteractionRe
     agent_name: "reviewer",
     step_depends: ["build"],
     step_tracker_state: null,
-    kind: "question",
+    kind: "brainstorm_prompt",
     status: "open",
     blocking: true,
     awaiting_resume: true,
@@ -39,7 +39,7 @@ describe("InteractionQueue", () => {
     );
 
     expect(screen.getByText("my-repo#42")).toBeInTheDocument();
-    expect(screen.getByText("question")).toBeInTheDocument();
+    expect(screen.getByText("brainstorm_prompt")).toBeInTheDocument();
     expect(screen.getByText("Need clarification")).toBeInTheDocument();
     expect(screen.getByText("review")).toBeInTheDocument();
     expect(screen.getByText("Blocking")).toBeInTheDocument();
@@ -50,7 +50,7 @@ describe("InteractionQueue", () => {
     renderWithProviders(<InteractionQueue interactions={[]} />, { route: "/" });
 
     expect(
-      screen.getByText("No pending interaction requests."),
+      screen.getByText("No issues need input."),
     ).toBeInTheDocument();
   });
 });
