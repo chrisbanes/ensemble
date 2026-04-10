@@ -780,7 +780,7 @@ async fn get_interaction_by_id() {
     let json: serde_json::Value = response.json().await.unwrap();
     assert_eq!(json["id"], "interaction-detail");
     assert_eq!(json["issue_identifier"], "my-repo#77");
-    assert_eq!(json["kind"], "question");
+    assert_eq!(json["kind"], "brainstorm_prompt");
 }
 
 #[tokio::test]
@@ -905,6 +905,9 @@ async fn resume_blocked_issue_requeues_issue() {
             identifier: "my-repo#77".to_string(),
             interaction_request_id: "interaction-resume".to_string(),
             step_name: "review".to_string(),
+            kind: InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
             retry_attempt: Some(1),
             requested_at: Utc::now(),
         });
@@ -926,4 +929,117 @@ async fn resume_blocked_issue_requeues_issue() {
     assert!(state.is_waiting_on_human("NODE_789"));
     assert!(state.is_claimed("NODE_789"));
     assert!(state.is_resume_requested("NODE_789"));
+}
+
+#[tokio::test]
+async fn issue_input_resolves_interaction_and_queues_resume() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-input", "NODE_900", "my-repo#900"),
+    )
+    .await;
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_900".to_string(),
+            identifier: "my-repo#900".to_string(),
+            interaction_request_id: "interaction-input".to_string(),
+            step_name: "review".to_string(),
+            kind: InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
+            retry_attempt: Some(1),
+            requested_at: Utc::now(),
+        });
+    }
+
+    let base_url = start_test_server(app_state.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%23900/input", base_url))
+        .json(&serde_json::json!({ "response": "Use staging" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let state = app_state.orchestrator_state.read().await;
+    assert!(state.is_resume_requested("NODE_900"));
+    drop(state);
+
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let interaction = InteractionStore::new(config_dir)
+        .get("interaction-input")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(interaction.status, InteractionStatus::Resolved);
+}
+
+#[tokio::test]
+async fn issue_input_returns_conflict_when_issue_is_not_waiting() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    let base_url = start_test_server(app_state).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%2342/input", base_url))
+        .json(&serde_json::json!({ "response": "Use staging" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 409);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["error"]["code"], "invalid_input_state");
+}
+
+#[tokio::test]
+async fn issue_detail_includes_pending_input_summary() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-pending", "NODE_123", "my-repo#42"),
+    )
+    .await;
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_123".to_string(),
+            identifier: "my-repo#42".to_string(),
+            interaction_request_id: "interaction-pending".to_string(),
+            step_name: "review".to_string(),
+            kind: InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "reviewer".to_string(),
+            retry_attempt: Some(1),
+            requested_at: Utc::now(),
+        });
+    }
+
+    let base_url = start_test_server(app_state).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/api/v1/my-repo%2342", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["pending_input"]["kind"], "brainstorm_prompt");
+    assert_eq!(
+        json["pending_input"]["context"]["interaction_request_id"],
+        "interaction-pending"
+    );
 }

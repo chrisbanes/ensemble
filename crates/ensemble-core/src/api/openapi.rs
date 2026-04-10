@@ -33,6 +33,7 @@ use utoipa::OpenApi;
         crate::api::controls::post_finalize_approve,
         crate::api::controls::post_finalize_retry,
         crate::api::controls::post_resume,
+        crate::api::controls::post_issue_input,
         crate::api::fs_handler::list_directory,
     ),
     components(schemas(
@@ -49,6 +50,8 @@ use utoipa::OpenApi;
         crate::observability::snapshot::RunningDetail,
         crate::observability::snapshot::FinalizeSnapshot,
         crate::observability::snapshot::RepoFinalizeSnapshot,
+        crate::observability::snapshot::PendingInputSummary,
+        crate::observability::snapshot::PendingInputContext,
         // Orchestrator types
         crate::orchestrator::state::RateLimitSnapshot,
         crate::orchestrator::state::FinalizeStatus,
@@ -64,6 +67,8 @@ use utoipa::OpenApi;
         crate::api::controls::FinalizeApproveResponse,
         crate::api::controls::FinalizeRetryResponse,
         crate::api::controls::ResumeResponse,
+        crate::api::controls::IssueInputRequest,
+        crate::api::controls::IssueInputResponse,
         // Interaction types
         crate::api::interactions::InteractionResponseBody,
         crate::interaction::model::InteractionKind,

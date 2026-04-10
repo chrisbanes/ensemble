@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::interaction::model::InteractionKind;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +16,9 @@ pub struct WaitingOnHumanEntry {
     pub identifier: String,
     pub interaction_request_id: String,
     pub step_name: String,
+    pub kind: InteractionKind,
+    pub prompt: String,
+    pub agent_name: String,
     pub retry_attempt: Option<u32>,
     pub requested_at: DateTime<Utc>,
 }
@@ -527,6 +531,9 @@ mod tests {
             identifier: "repo#1".to_string(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "build".to_string(),
+            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
             retry_attempt: None,
             requested_at: Utc::now(),
         });
@@ -554,6 +561,9 @@ mod tests {
             identifier: "repo#1".to_string(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "build".to_string(),
+            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
             retry_attempt: None,
             requested_at: Utc::now(),
         });

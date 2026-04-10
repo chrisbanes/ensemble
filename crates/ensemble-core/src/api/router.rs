@@ -152,6 +152,10 @@ pub fn create_api_router(state: AppState) -> Router {
         )
         .route("/issues/{identifier}/resume", post(controls::post_resume))
         .route(
+            "/issues/{identifier}/input",
+            post(controls::post_issue_input),
+        )
+        .route(
             "/{identifier}",
             get(handlers::get_issue_detail)
                 .post(handlers::method_not_allowed)

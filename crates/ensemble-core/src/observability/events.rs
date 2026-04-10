@@ -47,6 +47,25 @@ pub enum PipelineEvent {
         step_name: String,
         detail: String,
     },
+    InputRequested {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        kind: String,
+        detail: String,
+    },
+    InputSubmitted {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        detail: String,
+    },
+    InputResumed {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        detail: String,
+    },
     Error {
         issue_identifier: String,
         timestamp: DateTime<Utc>,
@@ -92,6 +111,15 @@ impl PipelineEvent {
             | Self::Output {
                 issue_identifier, ..
             }
+            | Self::InputRequested {
+                issue_identifier, ..
+            }
+            | Self::InputSubmitted {
+                issue_identifier, ..
+            }
+            | Self::InputResumed {
+                issue_identifier, ..
+            }
             | Self::Error {
                 issue_identifier, ..
             }
@@ -112,6 +140,9 @@ impl PipelineEvent {
             | Self::TurnCompleted { timestamp, .. }
             | Self::ToolCall { timestamp, .. }
             | Self::Output { timestamp, .. }
+            | Self::InputRequested { timestamp, .. }
+            | Self::InputSubmitted { timestamp, .. }
+            | Self::InputResumed { timestamp, .. }
             | Self::Error { timestamp, .. }
             | Self::RetryScheduled { timestamp, .. }
             | Self::Complete { timestamp, .. } => *timestamp,
@@ -222,6 +253,58 @@ impl PipelineEvent {
                 sequence,
                 timestamp: *timestamp,
                 event_type: "output".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::InputRequested {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+                ..
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "input_requested".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::InputSubmitted {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "input_submitted".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::InputResumed {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "input_resumed".to_string(),
                 step_name: Some(step_name.clone()),
                 attempt,
                 detail: detail.clone(),

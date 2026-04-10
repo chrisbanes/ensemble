@@ -495,11 +495,19 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_waiting_open", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt(
+                "int_waiting_open",
+                "issue-1",
+                "ACME-1",
+            ))
             .await
             .unwrap();
         store
-            .create(sample_brainstorm_prompt("int_waiting_resolved", "issue-2", "ACME-2"))
+            .create(sample_brainstorm_prompt(
+                "int_waiting_resolved",
+                "issue-2",
+                "ACME-2",
+            ))
             .await
             .unwrap();
         store

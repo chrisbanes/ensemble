@@ -232,6 +232,9 @@ mod tests {
             identifier: issue.identifier.clone(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "build".to_string(),
+            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
             retry_attempt: None,
             requested_at: Utc::now(),
         });
