@@ -310,7 +310,7 @@ mod tests {
         assert!(!WorkerResult::BlockedOnHuman {
             request: InteractionRequestDraft {
                 schema_version: 1,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 blocking: true,
                 title: "Need input".to_string(),
                 body: "Pick an environment".to_string(),

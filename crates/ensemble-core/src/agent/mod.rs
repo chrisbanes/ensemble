@@ -996,7 +996,7 @@ exit 0
 
         match result {
             WorkerResult::BlockedOnHuman { request } => {
-                assert_eq!(request.kind, InteractionKind::Question);
+                assert_eq!(request.kind, InteractionKind::BrainstormPrompt);
                 assert_eq!(request.title, "Choose target environment");
             }
             other => panic!("expected blocked result, got {other:?}"),
@@ -1075,7 +1075,7 @@ exit 0
         let response = InteractionResponseEnvelope {
             schema_version: 1,
             interaction_id: "int_123".to_string(),
-            kind: InteractionKind::Question,
+            kind: InteractionKind::BrainstormPrompt,
             response: InteractionResponse::Question {
                 response_schema_version: 1,
                 text: "Use staging".to_string(),
@@ -1117,7 +1117,7 @@ exit 0
         let response = InteractionResponseEnvelope {
             schema_version: 1,
             interaction_id: "int_runtime".to_string(),
-            kind: InteractionKind::Question,
+            kind: InteractionKind::BrainstormPrompt,
             response: InteractionResponse::Question {
                 response_schema_version: 1,
                 text: "Use staging".to_string(),
@@ -1143,7 +1143,7 @@ exit 0
             &InteractionResponseEnvelope {
                 schema_version: 1,
                 interaction_id: "int_stale".to_string(),
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 response: InteractionResponse::Question {
                     response_schema_version: 1,
                     text: "stale".to_string(),
@@ -1225,7 +1225,7 @@ on_failure: Todo
             &InteractionResponseEnvelope {
                 schema_version: 1,
                 interaction_id: "int_456".to_string(),
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 response: InteractionResponse::Question {
                     response_schema_version: 1,
                     text: "Use staging".to_string(),
@@ -1259,7 +1259,7 @@ on_failure: Todo
         let response = InteractionResponseEnvelope {
             schema_version: 1,
             interaction_id: "int_roundtrip".to_string(),
-            kind: InteractionKind::Question,
+            kind: InteractionKind::BrainstormPrompt,
             response: InteractionResponse::Question {
                 response_schema_version: 1,
                 text: "Use staging".to_string(),
@@ -1284,7 +1284,7 @@ on_failure: Todo
             &InteractionResponseEnvelope {
                 schema_version: 1,
                 interaction_id: "int_789".to_string(),
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 response: InteractionResponse::Question {
                     response_schema_version: 1,
                     text: "Use staging".to_string(),

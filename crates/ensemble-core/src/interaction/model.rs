@@ -4,9 +4,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionKind {
-    Question,
-    Approval,
-    Handoff,
+    #[serde(alias = "question")]
+    BrainstormPrompt,
+    #[serde(alias = "approval")]
+    ApprovalGate,
+    #[serde(alias = "handoff")]
+    ManualDecision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

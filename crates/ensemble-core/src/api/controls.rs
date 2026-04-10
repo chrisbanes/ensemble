@@ -1,14 +1,17 @@
 use crate::agent::cancellation::{cancel_issue, clear_issue_cancellation};
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
-use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::interaction::{
+    InteractionKind, InteractionResponse, InteractionStatus, InteractionStore,
+};
+use crate::observability::events::PipelineEvent;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePresence {
@@ -115,6 +118,19 @@ pub struct RetryResponse {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ResumeResponse {
     pub resumed: bool,
+    pub issue_identifier: String,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct IssueInputRequest {
+    pub response: String,
+    pub outcome: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct IssueInputResponse {
+    pub submitted: bool,
     pub issue_identifier: String,
     pub message: String,
 }
@@ -660,6 +676,206 @@ pub async fn post_resume(
         ),
     )
         .into_response()
+}
+
+/// POST /api/v1/issues/{identifier}/input
+///
+/// Records a human response for a waiting issue and queues resume on the next tick.
+#[utoipa::path(
+    post,
+    path = "/api/v1/issues/{identifier}/input",
+    operation_id = "postIssueInput",
+    params(("identifier" = String, Path, description = "Issue identifier")),
+    request_body = IssueInputRequest,
+    responses(
+        (status = 200, description = "Input accepted and resume queued", body = IssueInputResponse),
+        (status = 400, description = "Invalid input outcome", body = ApiError),
+        (status = 404, description = "Issue not found", body = ApiError),
+        (status = 409, description = "Issue cannot accept input", body = ApiError)
+    ),
+    tag = "controls"
+)]
+pub async fn post_issue_input(
+    State(state): State<AppState>,
+    Path(identifier): Path<String>,
+    Json(payload): Json<IssueInputRequest>,
+) -> impl IntoResponse {
+    let waiting_entry = {
+        let lock = state.orchestrator_state.read().await;
+        let waiting_entry = lock
+            .waiting_on_human
+            .values()
+            .find(|entry| entry.identifier == identifier)
+            .cloned();
+        let issue_presence = find_issue_presence(&lock, &identifier);
+        (waiting_entry, issue_presence)
+    };
+
+    let (waiting_entry, issue_presence) = waiting_entry;
+    let Some(waiting_entry) = waiting_entry else {
+        if issue_presence == IssuePresence::Missing {
+            return issue_error_response(
+                StatusCode::NOT_FOUND,
+                "issue_not_found",
+                format!("no known issue with identifier '{identifier}'"),
+            );
+        }
+
+        return issue_error_response(
+            StatusCode::CONFLICT,
+            "invalid_input_state",
+            format!("issue '{identifier}' is not waiting on human input"),
+        );
+    };
+
+    let store = interaction_store(&state);
+    let interaction = match store.get(&waiting_entry.interaction_request_id).await {
+        Ok(Some(interaction)) => interaction,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "interaction_not_found",
+                        &format!(
+                            "interaction not found: {}",
+                            waiting_entry.interaction_request_id
+                        ),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::to_value(ApiError::new(
+                        "interaction_store_error",
+                        &error.to_string(),
+                    ))
+                    .unwrap(),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    if interaction.status != InteractionStatus::Open {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::to_value(ApiError::new(
+                    "invalid_input_state",
+                    &format!(
+                        "issue '{}' cannot accept input because interaction '{}' is not open",
+                        identifier, interaction.id
+                    ),
+                ))
+                .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    let response = match interaction.kind {
+        InteractionKind::BrainstormPrompt => InteractionResponse::Question {
+            response_schema_version: 1,
+            text: payload.response.clone(),
+            selected_option: None,
+        },
+        InteractionKind::ApprovalGate => match parse_approval_outcome(payload.outcome.as_deref()) {
+            Ok(approved) => InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved,
+                reason: Some(payload.response.clone()),
+            },
+            Err(message) => {
+                return issue_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_input_outcome",
+                    message,
+                );
+            }
+        },
+        InteractionKind::ManualDecision => {
+            match parse_manual_decision_outcome(payload.outcome.as_deref()) {
+                Ok(completed) => InteractionResponse::Handoff {
+                    response_schema_version: 1,
+                    completed,
+                    notes: Some(payload.response.clone()),
+                },
+                Err(message) => {
+                    return issue_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_input_outcome",
+                        message,
+                    );
+                }
+            }
+        }
+    };
+
+    if let Err(error) = store.resolve(&interaction.id, response).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::to_value(ApiError::new("invalid_input_state", &error.to_string()))
+                    .unwrap(),
+            ),
+        )
+            .into_response();
+    }
+
+    {
+        let mut lock = state.orchestrator_state.write().await;
+        lock.queue_resume(&waiting_entry.issue_id);
+    }
+    state.event_bus.publish(PipelineEvent::InputSubmitted {
+        issue_identifier: identifier.clone(),
+        timestamp: chrono::Utc::now(),
+        step_name: waiting_entry.step_name.clone(),
+        detail: format!(
+            "input submitted for interaction {}",
+            waiting_entry.interaction_request_id
+        ),
+    });
+
+    state.refresh_requested.notify_one();
+
+    (
+        StatusCode::OK,
+        Json(
+            serde_json::to_value(IssueInputResponse {
+                submitted: true,
+                issue_identifier: identifier,
+                message: "input accepted and issue queued for resume".to_string(),
+            })
+            .unwrap(),
+        ),
+    )
+        .into_response()
+}
+
+fn parse_approval_outcome(outcome: Option<&str>) -> Result<bool, String> {
+    match outcome {
+        None | Some("approve") | Some("approved") => Ok(true),
+        Some("reject") | Some("rejected") => Ok(false),
+        Some(other) => Err(format!(
+            "unsupported approval outcome '{other}'; expected one of: approve, approved, reject, rejected"
+        )),
+    }
+}
+
+fn parse_manual_decision_outcome(outcome: Option<&str>) -> Result<bool, String> {
+    match outcome {
+        None | Some("complete") | Some("completed") => Ok(true),
+        Some("pending") | Some("incomplete") => Ok(false),
+        Some(other) => Err(format!(
+            "unsupported manual decision outcome '{other}'; expected one of: complete, completed, pending, incomplete"
+        )),
+    }
 }
 
 #[cfg(test)]

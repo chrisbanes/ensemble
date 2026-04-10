@@ -6,9 +6,8 @@ import {
   useStopMutation,
   useRetryMutation,
   useInteractionDetailQuery,
-  useRespondToInteractionMutation,
+  useIssueInputMutation,
   useCancelInteractionMutation,
-  useResumeIssueMutation,
   useTimelineQuery,
 } from "@/hooks";
 import { connectWs } from "@/ws";
@@ -16,7 +15,6 @@ import type { WsStatus } from "@/ws";
 import type { WsEventData, WsPipelineEvent } from "@/ws-types";
 import { isCompletionEvent, normalizePipelineEvent, timelineRecordToEventData } from "@/ws-events";
 import { addNotification, requestPermissionIfNeeded } from "@/notifications";
-import type { InteractionResponseBody } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
@@ -46,13 +44,15 @@ function formatTokens(n: number): string {
 export default function IssueDetail() {
   const { identifier = "" } = useParams<{ identifier: string }>();
   const { data, isLoading, isError, error } = useIssueDetailQuery(identifier);
-  const interactionId = data?.current_interaction?.interaction_request_id ?? "";
+  const interactionId =
+    data?.pending_input?.context.interaction_request_id ??
+    data?.current_interaction?.interaction_request_id ??
+    "";
   const { data: interaction } = useInteractionDetailQuery(interactionId);
   const stopMutation = useStopMutation();
   const retryMutation = useRetryMutation();
-  const respondMutation = useRespondToInteractionMutation(identifier);
+  const inputMutation = useIssueInputMutation(identifier);
   const cancelMutation = useCancelInteractionMutation(identifier);
-  const resumeMutation = useResumeIssueMutation(identifier);
 
   const [liveEvents, setLiveEvents] = useState<WsEventData[]>([]);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
@@ -221,14 +221,10 @@ export default function IssueDetail() {
             <InteractionPanel
               interaction={interaction}
               issueIdentifier={identifier}
-              onRespond={(payload: InteractionResponseBody) =>
-                respondMutation.mutate({ id: interaction.id, data: payload })
-              }
+              onSubmitInput={(response) => inputMutation.mutate(response)}
               onCancel={() => cancelMutation.mutate({ id: interaction.id })}
-              onResume={() => resumeMutation.mutate({ identifier })}
-              isResponding={respondMutation.isPending}
+              isSubmitting={inputMutation.isPending}
               isCancelling={cancelMutation.isPending}
-              isResuming={resumeMutation.isPending}
             />
           </Card>
         </section>

@@ -45,6 +45,22 @@ pub struct CurrentInteractionSummary {
     pub requested_at: DateTime<Utc>,
 }
 
+/// Preferred issue-detail pending input summary for UI resume flow.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PendingInputSummary {
+    pub kind: String,
+    pub prompt: String,
+    pub requested_at: DateTime<Utc>,
+    pub context: PendingInputContext,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct PendingInputContext {
+    pub interaction_request_id: String,
+    pub step_name: String,
+    pub agent_name: String,
+}
+
 /// A single row in the running sessions list.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RunningSessionRow {
@@ -104,6 +120,8 @@ pub struct IssueDetailSnapshot {
     pub attempts: AttemptInfo,
     pub running: Option<RunningDetail>,
     pub retry: Option<RetryRow>,
+    pub pending_input: Option<PendingInputSummary>,
+    /// Deprecated compatibility field. Prefer `pending_input`.
     pub current_interaction: Option<CurrentInteractionSummary>,
     pub last_error: Option<String>,
     pub finalize: FinalizeSnapshot,
@@ -322,6 +340,7 @@ pub fn build_issue_snapshot(
     });
 
     let retry_detail = retry_entry.map(retry_entry_to_row);
+    let pending_input = waiting_entry.map(pending_input_summary);
     let current_interaction = waiting_entry.map(current_interaction_summary);
 
     let last_error = retry_entry.and_then(|e| e.error.clone());
@@ -360,6 +379,7 @@ pub fn build_issue_snapshot(
         },
         running: running_detail,
         retry: retry_detail,
+        pending_input,
         current_interaction,
         last_error,
         finalize,
@@ -429,6 +449,26 @@ fn current_interaction_summary(
         interaction_request_id: entry.interaction_request_id.clone(),
         step_name: entry.step_name.clone(),
         requested_at: entry.requested_at,
+    }
+}
+
+fn pending_input_summary(
+    entry: &crate::orchestrator::state::WaitingOnHumanEntry,
+) -> PendingInputSummary {
+    PendingInputSummary {
+        kind: match &entry.kind {
+            crate::interaction::InteractionKind::BrainstormPrompt => "brainstorm_prompt",
+            crate::interaction::InteractionKind::ApprovalGate => "approval_gate",
+            crate::interaction::InteractionKind::ManualDecision => "manual_decision",
+        }
+        .to_string(),
+        prompt: entry.prompt.clone(),
+        requested_at: entry.requested_at,
+        context: PendingInputContext {
+            interaction_request_id: entry.interaction_request_id.clone(),
+            step_name: entry.step_name.clone(),
+            agent_name: entry.agent_name.clone(),
+        },
     }
 }
 
@@ -509,6 +549,9 @@ mod tests {
             identifier: "my-repo#77".to_string(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "review".to_string(),
+            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
             retry_attempt: None,
             requested_at: Utc::now(),
         });
@@ -743,6 +786,9 @@ mod tests {
             identifier: entry.identifier,
             interaction_request_id: "interaction-1".to_string(),
             step_name: "review".to_string(),
+            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
             retry_attempt: Some(3),
             requested_at: Utc::now(),
         });

@@ -25,6 +25,10 @@ When a step runs, Ensemble:
 3. Waits for the agent to finish
 4. Collects a verdict (approve or reject)
 
+If a step requests operator input, Ensemble records a **Needs Input** interaction and pauses only
+that issue. The operator can submit a response from Web/Tauri, and the orchestrator resumes the
+issue on the next tick while other issues continue.
+
 ## Sequential and parallel steps
 
 **Sequential (default):** Steps run one after another in list order. Each step implicitly depends on the one before it.

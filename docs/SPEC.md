@@ -1386,9 +1386,8 @@ Permission and user-input behavior on direct ACP paths is governed by `agent.per
 Policy requirements:
 
 - Each implementation should document its chosen permission and operator-confirmation posture.
-- Permission requests and user-input scenarios must not leave a run stalled indefinitely. An
-  implementation should either satisfy them, surface them to an operator, auto-resolve them, or
-  fail the run according to its documented policy.
+- Permission requests and user-input scenarios must not leave the orchestrator globally stalled.
+  User-input waits should be issue-scoped, with other issues continuing to make progress.
 
 Direct ACP permission handling:
 
@@ -1405,7 +1404,9 @@ Direct ACP permission handling:
 Example high-trust behavior:
 
 - Respond with `allow_always` for all `session/request_permission` callbacks.
-- Treat user-input-required scenarios as hard failure.
+- When the agent emits an interaction request (`.ensemble/interaction-request.json`), persist it as
+  a blocking interaction (`brainstorm_prompt`, `approval_gate`, or `manual_decision`) and wait for
+  operator response.
 
 Unsupported tool calls:
 
@@ -1456,11 +1457,16 @@ Optional client-side tool extension:
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
 
-Hard failure on user input requirement:
+Issue-scoped waiting on user input requirement:
 
-- If the agent requests user input (for example via a turn ending that expects further human
-  guidance), fail the run attempt immediately.
-- Ensemble is an unattended automation service; interactive input is not supported.
+- If the agent requests user input (via `.ensemble/interaction-request.json`), pause only that
+  issue and persist the interaction request details.
+- "Pending input" in this specification refers to an open blocking interaction record, not a
+  separate interaction kind.
+- The wait may be indefinite at the Ensemble layer; operator response is submitted via
+  `POST /api/v1/issues/{identifier}/input`.
+- Responses remain internal to Ensemble by default (not automatically posted back to the tracker).
+- Other issues continue running; no global orchestrator pause is required.
 
 ### 10.6 Timeouts and Error Mapping
 
@@ -1480,7 +1486,6 @@ Error mapping (recommended normalized categories):
 - `response_error`
 - `turn_failed`
 - `turn_cancelled`
-- `turn_input_required`
 
 ### 10.7 Agent Runner Contract
 

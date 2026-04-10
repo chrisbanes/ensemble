@@ -100,8 +100,6 @@ pub enum AgentError {
     TurnFailed { reason: String },
     #[error("turn cancelled")]
     TurnCancelled,
-    #[error("turn requires user input")]
-    TurnInputRequired,
     #[error("session startup failed: {reason}")]
     SessionStartupFailed { reason: String },
     #[error("io error: {reason}")]

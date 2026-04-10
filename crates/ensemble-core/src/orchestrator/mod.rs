@@ -25,7 +25,7 @@ use crate::config::ensemble::EnsembleConfig;
 use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
-use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::interaction::{InteractionKind, InteractionStatus, InteractionStore};
 use crate::observability::events::{EventBus, PipelineEvent};
 use crate::observability::events_contract::{
     elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
@@ -1294,6 +1294,7 @@ impl Orchestrator {
         self.interaction_store.create(interaction.clone()).await?;
 
         let mut state = self.state.write().await;
+        let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
         if let Some(run) = state.get_pipeline_run_mut(issue_id) {
             run.step_blocked_on_human(step_name, interaction.id.clone());
         }
@@ -1316,9 +1317,27 @@ impl Orchestrator {
             identifier: issue.identifier.clone(),
             interaction_request_id: interaction.id,
             step_name: step_name.to_string(),
+            kind: interaction.kind.clone(),
+            prompt: interaction.body.clone(),
+            agent_name: interaction.agent_name.clone(),
             retry_attempt,
             requested_at: interaction.requested_at,
         });
+        drop(state);
+
+        self.publish_pipeline_event(
+            run_id,
+            sequence,
+            attempt,
+            PipelineEvent::InputRequested {
+                issue_identifier: issue.identifier.clone(),
+                timestamp: Utc::now(),
+                step_name: step_name.to_string(),
+                kind: interaction_kind_name(&interaction.kind).to_string(),
+                detail: interaction.title.clone(),
+            },
+        )
+        .await;
 
         Ok(())
     }
@@ -1343,6 +1362,9 @@ impl Orchestrator {
                 identifier: interaction.issue_identifier.clone(),
                 interaction_request_id: interaction.id.clone(),
                 step_name: interaction.step_name.clone(),
+                kind: interaction.kind.clone(),
+                prompt: interaction.body.clone(),
+                agent_name: interaction.agent_name.clone(),
                 retry_attempt: Some(interaction.pipeline_cycle.max(1)),
                 requested_at: interaction.requested_at,
             });
@@ -1934,6 +1956,9 @@ impl Orchestrator {
                 identifier: issue.identifier.clone(),
                 interaction_request_id: interaction.id.clone(),
                 step_name: interaction.step_name.clone(),
+                kind: interaction.kind.clone(),
+                prompt: interaction.body.clone(),
+                agent_name: interaction.agent_name.clone(),
                 retry_attempt: Some(interaction.pipeline_cycle.max(1)),
                 requested_at: interaction.requested_at,
             });
@@ -2177,6 +2202,21 @@ impl Orchestrator {
 
         let mut state = self.state.write().await;
         state.remove_waiting_on_human(&issue.id);
+        let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, &issue.id);
+        drop(state);
+
+        self.publish_pipeline_event(
+            run_id,
+            sequence,
+            attempt,
+            PipelineEvent::InputResumed {
+                issue_identifier: issue.identifier.clone(),
+                timestamp: Utc::now(),
+                step_name: current_step.name.clone(),
+                detail: format!("resumed from interaction {}", interaction.id),
+            },
+        )
+        .await;
 
         Ok(())
     }
@@ -2424,6 +2464,14 @@ fn sanitize_interaction_fragment(value: &str) -> String {
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
         .collect()
+}
+
+fn interaction_kind_name(kind: &InteractionKind) -> &'static str {
+    match kind {
+        InteractionKind::BrainstormPrompt => "brainstorm_prompt",
+        InteractionKind::ApprovalGate => "approval_gate",
+        InteractionKind::ManualDecision => "manual_decision",
+    }
 }
 
 #[cfg(test)]
@@ -3614,7 +3662,7 @@ agent:
                 WorkerResult::BlockedOnHuman {
                     request: InteractionRequestDraft {
                         schema_version: 1,
-                        kind: InteractionKind::Question,
+                        kind: InteractionKind::BrainstormPrompt,
                         blocking: true,
                         title: "Need input".to_string(),
                         body: "Choose environment".to_string(),
@@ -3675,7 +3723,7 @@ agent:
                 WorkerResult::BlockedOnHuman {
                     request: InteractionRequestDraft {
                         schema_version: 1,
-                        kind: InteractionKind::Question,
+                        kind: InteractionKind::BrainstormPrompt,
                         blocking: true,
                         title: "Need input".to_string(),
                         body: "Choose environment".to_string(),
@@ -3754,7 +3802,7 @@ agent:
                 WorkerResult::BlockedOnHuman {
                     request: InteractionRequestDraft {
                         schema_version: 1,
-                        kind: InteractionKind::Question,
+                        kind: InteractionKind::BrainstormPrompt,
                         blocking: true,
                         title: "Need input".to_string(),
                         body: "Choose environment".to_string(),
@@ -3818,6 +3866,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "review".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -3877,6 +3928,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -3896,7 +3950,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -3972,6 +4026,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -3992,7 +4049,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Resolved,
                 blocking: true,
                 awaiting_resume: true,
@@ -4068,7 +4125,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4140,7 +4197,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4219,7 +4276,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec!["build".to_string()],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4305,6 +4362,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -4323,7 +4383,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4399,6 +4459,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-2".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: Some(1),
                 requested_at: Utc::now(),
             });
@@ -4417,7 +4480,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4495,6 +4558,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -4513,7 +4579,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4589,6 +4655,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -4612,7 +4681,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4693,6 +4762,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -4905,6 +4977,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -4923,7 +4998,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -4986,7 +5061,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -5055,6 +5130,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: Some(1),
                 requested_at: Utc::now(),
             });
@@ -5073,7 +5151,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,
@@ -5144,6 +5222,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: Some(1),
                 requested_at: Utc::now(),
             });
@@ -5196,6 +5277,9 @@ agent:
                 identifier: "repo#1".to_string(),
                 interaction_request_id: "interaction-1".to_string(),
                 step_name: "missing-step".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
                 retry_attempt: None,
                 requested_at: Utc::now(),
             });
@@ -5214,7 +5298,7 @@ agent:
                 agent_name: "builder".to_string(),
                 step_depends: vec![],
                 step_tracker_state: None,
-                kind: InteractionKind::Question,
+                kind: InteractionKind::BrainstormPrompt,
                 status: InteractionStatus::Open,
                 blocking: true,
                 awaiting_resume: true,

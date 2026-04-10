@@ -92,7 +92,7 @@ export default function Dashboard() {
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold mb-3">Pending Interactions</h2>
+        <h2 className="text-lg font-semibold mb-3">Needs Input</h2>
         <Card>
           <InteractionQueue interactions={interactions} />
         </Card>

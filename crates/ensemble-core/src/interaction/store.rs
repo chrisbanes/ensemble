@@ -273,13 +273,13 @@ fn validate_response_kind(
     let valid = matches!(
         (kind, response),
         (
-            InteractionKind::Question,
+            InteractionKind::BrainstormPrompt,
             InteractionResponse::Question { .. }
         ) | (
-            InteractionKind::Approval,
+            InteractionKind::ApprovalGate,
             InteractionResponse::Approval { .. }
         ) | (
-            InteractionKind::Handoff,
+            InteractionKind::ManualDecision,
             InteractionResponse::Handoff { .. }
         )
     );
@@ -296,9 +296,9 @@ fn validate_response_kind(
 
 fn interaction_kind_name(kind: &InteractionKind) -> &'static str {
     match kind {
-        InteractionKind::Question => "question",
-        InteractionKind::Approval => "approval",
-        InteractionKind::Handoff => "handoff",
+        InteractionKind::BrainstormPrompt => "brainstorm_prompt",
+        InteractionKind::ApprovalGate => "approval_gate",
+        InteractionKind::ManualDecision => "manual_decision",
     }
 }
 
@@ -332,7 +332,11 @@ mod tests {
     use tempfile::tempdir;
     use tokio::sync::Barrier;
 
-    fn sample_question(id: &str, issue_id: &str, issue_identifier: &str) -> InteractionRequest {
+    fn sample_brainstorm_prompt(
+        id: &str,
+        issue_id: &str,
+        issue_identifier: &str,
+    ) -> InteractionRequest {
         InteractionRequest {
             id: id.to_string(),
             schema_version: 1,
@@ -344,7 +348,7 @@ mod tests {
             agent_name: "reviewer".to_string(),
             step_depends: vec![],
             step_tracker_state: None,
-            kind: InteractionKind::Question,
+            kind: InteractionKind::BrainstormPrompt,
             status: InteractionStatus::Open,
             blocking: true,
             awaiting_resume: true,
@@ -362,7 +366,7 @@ mod tests {
     async fn saves_and_loads_interaction_request() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_question("int_123", "issue-1", "ACME-1");
+        let interaction = sample_brainstorm_prompt("int_123", "issue-1", "ACME-1");
 
         store.create(interaction.clone()).await.unwrap();
 
@@ -380,12 +384,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stores_brainstorm_prompt_interaction() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        let interaction = sample_brainstorm_prompt("int_brainstorm", "issue-1", "ACME-1");
+
+        let saved = store.create(interaction).await.unwrap();
+        assert_eq!(saved.kind, InteractionKind::BrainstormPrompt);
+
+        let loaded = store.get("int_brainstorm").await.unwrap().unwrap();
+        assert_eq!(loaded.kind, InteractionKind::BrainstormPrompt);
+    }
+
+    #[tokio::test]
     async fn lists_only_open_interactions() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_question("int_open", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt("int_open", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -402,7 +419,7 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.status, InteractionStatus::Resolved);
 
-        let second = sample_question("int_open_2", "issue-2", "ACME-2");
+        let second = sample_brainstorm_prompt("int_open_2", "issue-2", "ACME-2");
         store.create(second.clone()).await.unwrap();
 
         let open = store.list_open().await.unwrap();
@@ -416,7 +433,7 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_question("int_invalid", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt("int_invalid", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -436,12 +453,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reject_second_resolution_when_already_resolved() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+
+        store
+            .create(sample_brainstorm_prompt("int_resolve", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        store
+            .resolve(
+                "int_resolve",
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: Some("staging".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .resolve(
+                "int_resolve",
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use production".to_string(),
+                    selected_option: Some("production".to_string()),
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, InteractionError::AlreadyResolved { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_awaiting_resume_returns_only_open_waiting_records() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+
+        store
+            .create(sample_brainstorm_prompt(
+                "int_waiting_open",
+                "issue-1",
+                "ACME-1",
+            ))
+            .await
+            .unwrap();
+        store
+            .create(sample_brainstorm_prompt(
+                "int_waiting_resolved",
+                "issue-2",
+                "ACME-2",
+            ))
+            .await
+            .unwrap();
+        store
+            .resolve(
+                "int_waiting_resolved",
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "resolved".to_string(),
+                    selected_option: None,
+                },
+            )
+            .await
+            .unwrap();
+        store.mark_resumed("int_waiting_resolved").await.unwrap();
+
+        let waiting = store.list_awaiting_resume().await.unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(waiting[0].id, "int_waiting_open");
+        assert_eq!(waiting[0].status, InteractionStatus::Open);
+    }
+
+    #[tokio::test]
     async fn cancels_existing_interaction() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_question("int_cancel", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt("int_cancel", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -459,12 +553,12 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_question("int_one", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt("int_one", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
         let err = store
-            .create(sample_question("int_two", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt("int_two", "issue-1", "ACME-1"))
             .await
             .unwrap_err();
 
@@ -484,14 +578,14 @@ mod tests {
         let first = tokio::spawn(async move {
             first_barrier.wait().await;
             first_store
-                .create(sample_question("int_one", "issue-1", "ACME-1"))
+                .create(sample_brainstorm_prompt("int_one", "issue-1", "ACME-1"))
                 .await
         });
 
         let second = tokio::spawn(async move {
             second_barrier.wait().await;
             second_store
-                .create(sample_question("int_two", "issue-1", "ACME-1"))
+                .create(sample_brainstorm_prompt("int_two", "issue-1", "ACME-1"))
                 .await
         });
 
@@ -516,7 +610,7 @@ mod tests {
     async fn atomic_write_replaces_file_without_leaving_temp_file() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_question("int_atomic", "issue-1", "ACME-1");
+        let interaction = sample_brainstorm_prompt("int_atomic", "issue-1", "ACME-1");
         let shared_temp_path = store.interactions_dir().join("int_atomic.json.tmp");
 
         store.write_interaction(&interaction).await.unwrap();
@@ -538,12 +632,12 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_question("int_dup", "issue-1", "ACME-1"))
+            .create(sample_brainstorm_prompt("int_dup", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
         let err = store
-            .create(sample_question("int_dup", "issue-2", "ACME-2"))
+            .create(sample_brainstorm_prompt("int_dup", "issue-2", "ACME-2"))
             .await
             .unwrap_err();
 
@@ -557,7 +651,7 @@ mod tests {
     async fn write_interaction_ignores_stale_shared_temp_name() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_question("int_tmp", "issue-1", "ACME-1");
+        let interaction = sample_brainstorm_prompt("int_tmp", "issue-1", "ACME-1");
         let stale_path = store.interactions_dir().join("int_tmp.json.tmp");
 
         tokio::fs::create_dir_all(store.interactions_dir())

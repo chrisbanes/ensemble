@@ -1,5 +1,5 @@
 import { useState, type ChangeEvent } from "react";
-import type { InteractionRequest, InteractionResponseBody } from "@/generated/models";
+import type { InteractionRequest } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
@@ -7,12 +7,10 @@ import { Textarea } from "@/components/ui/textarea";
 interface InteractionPanelProps {
   interaction: InteractionRequest;
   issueIdentifier: string;
-  onRespond: (payload: InteractionResponseBody) => void;
+  onSubmitInput: (response: string) => void;
   onCancel: () => void;
-  onResume: () => void;
-  isResponding?: boolean;
+  isSubmitting?: boolean;
   isCancelling?: boolean;
-  isResuming?: boolean;
 }
 
 function renderResponseSummary(interaction: InteractionRequest) {
@@ -35,12 +33,10 @@ function renderResponseSummary(interaction: InteractionRequest) {
 export default function InteractionPanel({
   interaction,
   issueIdentifier,
-  onRespond,
+  onSubmitInput,
   onCancel,
-  onResume,
-  isResponding = false,
+  isSubmitting = false,
   isCancelling = false,
-  isResuming = false,
 }: InteractionPanelProps) {
   const [textResponse, setTextResponse] = useState("");
 
@@ -86,7 +82,7 @@ export default function InteractionPanel({
         </div>
       )}
 
-      {!isResolved && interaction.kind === "question" && (
+      {!isResolved && (
         <div className="space-y-3">
           <label htmlFor="interaction-response" className="text-sm font-medium">
             Response
@@ -101,86 +97,15 @@ export default function InteractionPanel({
           />
           <div className="flex flex-wrap gap-2">
             <Button
-              onClick={() =>
-                onRespond({
-                  kind: "question",
-                  response_schema_version: 1,
-                  text: textResponse,
-                  selected_option: null,
-                })
-              }
-              disabled={isResponding || textResponse.trim().length === 0}
+              onClick={() => onSubmitInput(textResponse)}
+              disabled={isSubmitting || textResponse.trim().length === 0}
             >
-              Send Response
+              Submit Input
             </Button>
             <Button variant="outline" onClick={onCancel} disabled={isCancelling}>
               Cancel Request
             </Button>
           </div>
-        </div>
-      )}
-
-      {!isResolved && interaction.kind === "approval" && (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={() =>
-              onRespond({
-                kind: "approval",
-                response_schema_version: 1,
-                approved: true,
-                reason: null,
-              })
-            }
-            disabled={isResponding}
-          >
-            Approve
-          </Button>
-          <Button
-            variant="outline"
-            onClick={() =>
-              onRespond({
-                kind: "approval",
-                response_schema_version: 1,
-                approved: false,
-                reason: "Needs changes",
-              })
-            }
-            disabled={isResponding}
-          >
-            Reject
-          </Button>
-          <Button variant="outline" onClick={onCancel} disabled={isCancelling}>
-            Cancel Request
-          </Button>
-        </div>
-      )}
-
-      {!isResolved && interaction.kind === "handoff" && (
-        <div className="flex flex-wrap gap-2">
-          <Button
-            onClick={() =>
-              onRespond({
-                kind: "handoff",
-                response_schema_version: 1,
-                completed: true,
-                notes: textResponse || null,
-              })
-            }
-            disabled={isResponding}
-          >
-            Mark Complete
-          </Button>
-          <Button variant="outline" onClick={onCancel} disabled={isCancelling}>
-            Cancel Request
-          </Button>
-        </div>
-      )}
-
-      {isResolved && (
-        <div className="flex flex-wrap gap-2">
-          <Button onClick={onResume} disabled={isResuming}>
-            Resume Issue
-          </Button>
         </div>
       )}
     </div>
