@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 enum IssuePresence {
     Running(String),
     Retrying(String),
+    // Includes all finalize terminal/non-terminal variants (including
+    // `SkippedHeadless`) because control endpoints only need to know that
+    // the issue is in finalize flow rather than active run/retry flow.
     Finalizing(String),
     Missing,
 }
