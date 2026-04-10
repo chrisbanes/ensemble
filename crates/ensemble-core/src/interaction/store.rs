@@ -149,6 +149,16 @@ impl InteractionStore {
             .await?
             .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
 
+        match interaction.status {
+            InteractionStatus::Resolved => {
+                return Err(InteractionError::AlreadyResolved { id: id.to_string() });
+            }
+            InteractionStatus::Cancelled => {
+                return Err(InteractionError::AlreadyCancelled { id: id.to_string() });
+            }
+            InteractionStatus::Open => {}
+        }
+
         if interaction.accepted_command.is_some() {
             return Err(InteractionError::CommandAlreadyAccepted { id: id.to_string() });
         }
@@ -802,6 +812,63 @@ mod tests {
         let loaded = store.get("int_ignored").await.unwrap().unwrap();
         assert_eq!(loaded.ignored_commands.len(), 1);
         assert_eq!(loaded.ignored_commands[0].reason, "already_resolved");
+    }
+
+    #[tokio::test]
+    async fn cannot_accept_command_when_interaction_is_resolved_or_cancelled() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(sample_question("int_closed", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+        store
+            .resolve(
+                "int_closed",
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "answer".to_string(),
+                    selected_option: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .accept_first_command(
+                "int_closed",
+                AcceptedInteractionCommand {
+                    command: "/approve".to_string(),
+                    raw_body: "/approve".to_string(),
+                    author: "alice".to_string(),
+                    comment_id: "c1".to_string(),
+                    received_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, InteractionError::AlreadyResolved { .. }));
+
+        store
+            .create(sample_question("int_cancelled", "issue-2", "ACME-2"))
+            .await
+            .unwrap();
+        store.cancel("int_cancelled").await.unwrap();
+
+        let err = store
+            .accept_first_command(
+                "int_cancelled",
+                AcceptedInteractionCommand {
+                    command: "/approve".to_string(),
+                    raw_body: "/approve".to_string(),
+                    author: "alice".to_string(),
+                    comment_id: "c2".to_string(),
+                    received_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, InteractionError::AlreadyCancelled { .. }));
     }
 
     #[tokio::test]

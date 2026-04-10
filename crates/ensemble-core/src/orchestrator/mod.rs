@@ -1833,6 +1833,9 @@ impl Orchestrator {
                     continue;
                 }
             };
+            // v1 currently asks the tracker adapter for comments after the root anchor.
+            // If this becomes expensive on very long-lived issues, add a persisted
+            // per-interaction checkpoint to avoid repeated full-history scans.
 
             for comment in comments {
                 if interaction
@@ -1844,6 +1847,23 @@ impl Orchestrator {
                         .iter()
                         .any(|ignored| ignored.comment_id == comment.comment_id)
                 {
+                    continue;
+                }
+
+                let marker_prefix = "<!-- ensemble:interaction:";
+                if comment.body.contains(marker_prefix)
+                    && !comment
+                        .body
+                        .contains(&format!("{marker_prefix}{} -->", interaction.id))
+                {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            None,
+                            &comment,
+                            "interaction_marker_mismatch",
+                        )
+                        .await;
                     continue;
                 }
 
@@ -6352,6 +6372,95 @@ agent:
             interaction.response,
             Some(InteractionResponse::Question { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn thread_command_with_mismatched_interaction_marker_is_ignored() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let comment_ts = Utc::now();
+        let comments = Arc::new(RwLock::new(vec![crate::tracker::model::TrackerComment {
+            comment_id: "c-2".to_string(),
+            body: "/answer use staging\n<!-- ensemble:interaction:other-id -->".to_string(),
+            author: "alice".to_string(),
+            created_at: Some(comment_ts),
+            updated_at: Some(comment_ts),
+        }]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(CommandMockTracker { issues, comments });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let cfg = config.read().await;
+            state.init_state_lists(&cfg);
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                retry_attempt: None,
+                requested_at: Utc::now(),
+            });
+        }
+
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: None,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: Some("root-1".to_string()),
+                thread_root_comment_url: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let interaction = store.get("interaction-1").await.unwrap().unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Open);
+        assert!(interaction.accepted_command.is_none());
+        assert_eq!(interaction.ignored_commands.len(), 1);
+        assert_eq!(
+            interaction.ignored_commands[0].reason,
+            "interaction_marker_mismatch"
+        );
     }
 
     #[tokio::test]

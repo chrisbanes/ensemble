@@ -1195,17 +1195,19 @@ impl IssueTracker for GithubTracker {
                 })?;
 
             for node in nodes {
+                let comment_id = node.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    TrackerError::UnexpectedPayload {
+                        reason: "missing issue comment id".to_string(),
+                    }
+                })?;
+                let body = node.get("body").and_then(Value::as_str).ok_or_else(|| {
+                    TrackerError::UnexpectedPayload {
+                        reason: "missing issue comment body".to_string(),
+                    }
+                })?;
                 comments.push(TrackerComment {
-                    comment_id: node
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    body: node
-                        .get("body")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
+                    comment_id: comment_id.to_string(),
+                    body: body.to_string(),
                     author: node
                         .pointer("/author/login")
                         .and_then(Value::as_str)
@@ -1246,7 +1248,11 @@ impl IssueTracker for GithubTracker {
             }
         }
 
-        comments.sort_by_key(|comment| comment.created_at);
+        comments.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.comment_id.cmp(&right.comment_id))
+        });
         if let Some(anchor_index) = comments
             .iter()
             .position(|comment| comment.comment_id == after_comment_id)
@@ -2447,5 +2453,48 @@ mod tests {
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].comment_id, "C_2");
         assert_eq!(comments[0].author, "alice");
+    }
+
+    #[tokio::test]
+    async fn list_comments_after_rejects_missing_required_comment_fields() {
+        let server = MockServer::start().await;
+
+        let response = graphql_response(json!({
+            "node": {
+                "comments": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [
+                        {
+                            "id": "C_1",
+                            "body": "root",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                            "author": { "login": "bot" }
+                        },
+                        {
+                            "id": "C_2",
+                            "createdAt": "2026-01-01T00:01:00Z",
+                            "updatedAt": "2026-01-01T00:01:00Z",
+                            "author": { "login": "alice" }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let err = tracker
+            .list_comments_after("ISSUE_NODE_1", "C_1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, TrackerError::UnexpectedPayload { .. }));
+        assert!(err.to_string().contains("missing issue comment body"));
     }
 }
