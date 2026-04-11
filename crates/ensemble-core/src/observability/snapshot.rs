@@ -485,6 +485,7 @@ fn pending_input_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::ConcurrencyConfig;
     use crate::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
     use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
@@ -539,7 +540,7 @@ mod tests {
     }
 
     fn build_test_state() -> OrchestratorState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state
             .running
             .insert("NODE_123".to_string(), test_running_entry());
@@ -705,7 +706,7 @@ mod tests {
 
     #[test]
     fn test_build_snapshot_empty_state() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let snapshot = build_state_snapshot(&state);
         assert_eq!(snapshot.counts.running, 0);
@@ -843,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_build_snapshot_poll_fields() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         // No tick yet
         let snapshot = build_state_snapshot(&state);
         assert_eq!(snapshot.poll_interval_ms, 30000);

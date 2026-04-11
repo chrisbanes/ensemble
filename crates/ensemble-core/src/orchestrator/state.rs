@@ -5,7 +5,7 @@ use crate::interaction::model::InteractionKind;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ensemble::EnsembleConfig;
+use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig};
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
@@ -129,17 +129,17 @@ fn new_issue_run_id() -> String {
 
 impl OrchestratorState {
     /// Create a new OrchestratorState with the given config values.
-    pub fn new(poll_interval_ms: u64, max_concurrent_agents: u32) -> Self {
+    pub fn new(poll_interval_ms: u64, config: &ConcurrencyConfig) -> Self {
         Self {
             poll_interval_ms,
-            max_concurrent_agents,
+            max_concurrent_agents: config.max_concurrent_agents,
             running: HashMap::new(),
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
             waiting_on_human: HashMap::new(),
             resume_requested: HashSet::new(),
             completed: HashMap::new(),
-            completed_expiry_secs: 259200,
+            completed_expiry_secs: config.completed_expiry_secs,
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
@@ -467,6 +467,7 @@ impl OrchestratorState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::ConcurrencyConfig;
 
     fn test_issue(id: &str, state: &str) -> Issue {
         crate::tracker::model::test_helpers::test_issue(id, state)
@@ -474,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_new_state() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         assert_eq!(state.poll_interval_ms, 30000);
         assert_eq!(state.max_concurrent_agents, 10);
         assert!(state.running.is_empty());
@@ -489,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_add_running() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, None);
@@ -501,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_remove_running() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, None);
@@ -515,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_release_claim() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, None);
@@ -527,7 +528,7 @@ mod tests {
 
     #[test]
     fn test_add_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let retry = RetryEntry {
             issue_id: "1".to_string(),
@@ -545,7 +546,7 @@ mod tests {
 
     #[test]
     fn test_remove_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let retry = RetryEntry {
             issue_id: "1".to_string(),
@@ -564,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_add_waiting_on_human_keeps_claimed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: "1".to_string(),
@@ -588,7 +589,7 @@ mod tests {
 
     #[test]
     fn test_queue_and_clear_resume_request() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         state.queue_resume("1");
         assert!(state.is_resume_requested("1"));
@@ -599,7 +600,7 @@ mod tests {
 
     #[test]
     fn test_release_claim_clears_waiting_on_human() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: "1".to_string(),
             identifier: "repo#1".to_string(),
@@ -626,7 +627,7 @@ mod tests {
 
     #[test]
     fn test_update_session_info() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -639,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_update_agent_event() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -654,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_increment_turn_count() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -667,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_update_token_usage_with_deltas() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -691,7 +692,7 @@ mod tests {
 
     #[test]
     fn test_running_count_in_state() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue("1", "Todo"), None);
         state.add_running(&test_issue("2", "Todo"), None);
         state.add_running(&test_issue("3", "In Progress"), None);
@@ -703,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_running_issue_ids() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue("a", "Todo"), None);
         state.add_running(&test_issue("b", "Todo"), None);
 
@@ -714,7 +715,7 @@ mod tests {
 
     #[test]
     fn test_add_running_clears_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let retry = RetryEntry {
             issue_id: "1".to_string(),
@@ -733,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_run_id_and_sequence_are_stable_across_retries_until_release() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, Some(1));
@@ -769,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_add_completed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         state.add_completed(
             "issue-1".to_string(),
@@ -787,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired_completed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.completed_expiry_secs = 1;
 
         state.add_completed(
@@ -807,7 +808,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_expired_completed_keeps_valid() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.completed_expiry_secs = 10;
 
         state.add_completed(

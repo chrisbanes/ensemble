@@ -56,25 +56,20 @@ impl OrchestratorRuntime {
 pub fn orchestrator_state_from_document(
     document_state: &ConfigDocumentState,
 ) -> Arc<RwLock<OrchestratorState>> {
-    let (poll_interval_ms, max_concurrent_agents) = document_state
+    let (poll_interval_ms, concurrency) = document_state
         .active_config
         .as_ref()
-        .map(|config| {
-            (
-                config.polling.interval_ms,
-                config.concurrency.max_concurrent_agents,
-            )
-        })
+        .map(|config| (config.polling.interval_ms, config.concurrency.clone()))
         .unwrap_or_else(|| {
             (
                 PollingConfig::default().interval_ms,
-                ConcurrencyConfig::default().max_concurrent_agents,
+                ConcurrencyConfig::default(),
             )
         });
 
     Arc::new(RwLock::new(OrchestratorState::new(
         poll_interval_ms,
-        max_concurrent_agents,
+        &concurrency,
     )))
 }
 

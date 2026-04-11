@@ -124,7 +124,9 @@ impl Orchestrator {
         config_dir: &Path,
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
-        let state = Arc::new(RwLock::new(OrchestratorState::new(30_000, 10)));
+        let concurrency = config.blocking_read().concurrency.clone();
+        let poll_interval_ms = config.blocking_read().polling.interval_ms;
+        let state = Arc::new(RwLock::new(OrchestratorState::new(poll_interval_ms, &concurrency)));
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
         Self::new_with_state(
             OrchestratorRuntimeParts {
@@ -3088,7 +3090,7 @@ mod tests {
     use crate::agent::events::{
         AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
     };
-    use crate::config::ensemble::parse_config;
+    use crate::config::ensemble::{parse_config, ConcurrencyConfig};
     use crate::error::AgentError;
     use crate::interaction::{
         InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
@@ -4271,7 +4273,7 @@ agent:
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(RwLock::new(OrchestratorState::new(60_000, 10)));
+        let state = Arc::new(RwLock::new(OrchestratorState::new(60_000, &ConcurrencyConfig::default())));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(
@@ -4340,7 +4342,7 @@ agent:
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(RwLock::new(OrchestratorState::new(100, 10)));
+        let state = Arc::new(RwLock::new(OrchestratorState::new(100, &ConcurrencyConfig::default())));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(

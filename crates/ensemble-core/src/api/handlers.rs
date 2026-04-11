@@ -150,6 +150,7 @@ pub async fn method_not_allowed() -> (StatusCode, Json<ApiError>) {
 mod tests {
     use super::*;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
+    use crate::config::ensemble::ConcurrencyConfig;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
@@ -206,7 +207,7 @@ mod tests {
     }
 
     fn build_populated_state() -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state
             .running
             .insert("NODE_123".to_string(), test_running_entry());

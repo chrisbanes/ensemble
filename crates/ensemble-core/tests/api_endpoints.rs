@@ -5,6 +5,7 @@ use chrono::Utc;
 use ensemble_core::agent::cancellation::new_cancellation_registry;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+use ensemble_core::config::ensemble::ConcurrencyConfig;
 use ensemble_core::interaction::model::{
     InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
     InteractionStatus,
@@ -108,7 +109,7 @@ fn build_populated_app_state() -> (AppState, TempDir) {
         error: Some("no available orchestrator slots".to_string()),
     };
 
-    let mut state = OrchestratorState::new(30000, 10);
+    let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
     state.running.insert("NODE_123".to_string(), running_entry);
     state
         .retry_attempts
@@ -385,7 +386,7 @@ async fn test_get_refresh_returns_405() {
 #[tokio::test]
 async fn test_get_state_empty_system() {
     let temp_dir = TempDir::new().unwrap();
-    let state = OrchestratorState::new(30000, 10);
+    let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
     let config_path = temp_dir.path().join("ensemble_test_config.yaml");
     let mut app_state = build_app_state(&temp_dir, state, parsed_document_state(config_path));
@@ -418,7 +419,7 @@ async fn test_get_state_empty_system() {
 
 fn build_empty_app_state() -> (AppState, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let state = OrchestratorState::new(30000, 10);
+    let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
     let config_path = temp_dir.path().join("ensemble_test_config.yaml");
     let mut app_state = build_app_state(&temp_dir, state, parsed_document_state(config_path));
     app_state.workspace_root = temp_dir.path().join("workspaces").display().to_string();
@@ -448,7 +449,7 @@ async fn test_api_unknown_route_returns_json_404() {
 
 fn build_app_state_without_config() -> (AppState, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let state = OrchestratorState::new(30000, 10);
+    let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
     let config_path = temp_dir.path().join("nonexistent_config.yaml");
     let document_state = ConfigDocumentState {
         path: config_path.clone(),
