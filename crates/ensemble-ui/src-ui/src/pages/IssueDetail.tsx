@@ -22,6 +22,8 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import EventTimeline from "@/components/EventTimeline";
 import ConversationViewer from "@/components/ConversationViewer";
 import InteractionPanel from "@/components/InteractionPanel";
+import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
+import IssueInfoSection from "@/components/IssueInfoSection";
 
 function triggerNotification(event: WsPipelineEvent, identifier: string) {
   const detail = event.detail ?? event.event_type;
@@ -207,55 +209,75 @@ export default function IssueDetail() {
         </Card>
       </div>
 
-      {data.last_error && (
-        <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
-          <h3 className="text-sm font-medium text-red-800 dark:text-red-200">Last Error</h3>
-          <p className="mt-1 text-sm text-red-700 dark:text-red-300">{data.last_error}</p>
+      {data.workflow_steps && data.workflow_steps.length > 0 && (
+        <div className="mb-4">
+          <WorkflowStepsSidebar
+            steps={data.workflow_steps}
+            issueIdentifier={identifier}
+            currentStep={data.running?.step_name ?? undefined}
+          />
         </div>
       )}
 
-      {interaction && (
-        <section>
-          <h2 className="text-lg font-semibold mb-3">Interaction</h2>
-          <Card className="p-4">
-            <InteractionPanel
-              interaction={interaction}
-              issueIdentifier={identifier}
-              onSubmitInput={(response) => inputMutation.mutate(response)}
-              onCancel={() => cancelMutation.mutate({ id: interaction.id })}
-              isSubmitting={inputMutation.isPending}
-              isCancelling={cancelMutation.isPending}
-            />
-          </Card>
-        </section>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <section>
-          <h2 className="text-lg font-semibold mb-3">Event Timeline</h2>
-          {timelineQuery.isError && (
-            <p className="mb-2 text-sm text-amber-700">
-              Couldn&apos;t load saved timeline history; showing live events only.
-            </p>
+      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+        <div className="space-y-4">
+          {data.issue && (
+            <IssueInfoSection issue={data.issue} />
           )}
-          <Card className="p-4 max-h-[600px] overflow-y-auto">
-            <EventTimeline events={events} live={isLiveRun} onViewConversation={(idx) => setHighlightIndex(idx)} />
-          </Card>
-        </section>
+        </div>
 
-        <section>
-          <h2 className="text-lg font-semibold mb-3">Conversation</h2>
-          <Card className="p-4 max-h-[600px] overflow-y-auto">
-            <ConversationViewer identifier={identifier} scrollToIndex={highlightIndex} />
+        <div className="lg:col-span-3 space-y-6">
+          {data.last_error && (
+            <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
+              <h3 className="text-sm font-medium text-red-800 dark:text-red-200">Last Error</h3>
+              <p className="mt-1 text-sm text-red-700 dark:text-red-300">{data.last_error}</p>
+            </div>
+          )}
+
+          {interaction && (
+            <section>
+              <h2 className="text-lg font-semibold mb-3">Interaction</h2>
+              <Card className="p-4">
+                <InteractionPanel
+                  interaction={interaction}
+                  issueIdentifier={identifier}
+                  onSubmitInput={(response) => inputMutation.mutate(response)}
+                  onCancel={() => cancelMutation.mutate({ id: interaction.id })}
+                  isSubmitting={inputMutation.isPending}
+                  isCancelling={cancelMutation.isPending}
+                />
+              </Card>
+            </section>
+          )}
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <section>
+              <h2 className="text-lg font-semibold mb-3">Event Timeline</h2>
+              {timelineQuery.isError && (
+                <p className="mb-2 text-sm text-amber-700">
+                  Couldn&apos;t load saved timeline history; showing live events only.
+                </p>
+              )}
+              <Card className="p-4 max-h-[600px] overflow-y-auto">
+                <EventTimeline events={events} live={isLiveRun} onViewConversation={(idx) => setHighlightIndex(idx)} />
+              </Card>
+            </section>
+
+            <section>
+              <h2 className="text-lg font-semibold mb-3">Conversation</h2>
+              <Card className="p-4 max-h-[600px] overflow-y-auto">
+                <ConversationViewer identifier={identifier} scrollToIndex={highlightIndex} />
+              </Card>
+            </section>
+          </div>
+
+          <Card className="p-4">
+            <span className="text-sm text-muted-foreground">
+              Workspace: <code className="bg-muted px-1 rounded">{data.workspace.path}</code>
+            </span>
           </Card>
-        </section>
+        </div>
       </div>
-
-      <Card className="p-4">
-        <span className="text-sm text-muted-foreground">
-          Workspace: <code className="bg-muted px-1 rounded">{data.workspace.path}</code>
-        </span>
-      </Card>
 
       <ConfirmDialog
         open={showStopConfirm}

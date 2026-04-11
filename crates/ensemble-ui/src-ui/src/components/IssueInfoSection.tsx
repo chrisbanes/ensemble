@@ -4,10 +4,10 @@ import { ExternalLink } from "lucide-react";
 
 interface IssueInfo {
   title: string;
-  description?: string;
+  description?: string | null;
   labels: string[];
-  priority?: number;
-  url?: string;
+  priority?: number | null;
+  url?: string | null;
 }
 
 interface IssueInfoSectionProps {
