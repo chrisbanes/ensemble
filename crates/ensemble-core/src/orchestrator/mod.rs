@@ -276,6 +276,12 @@ impl Orchestrator {
         let tick_started_at = std::time::Instant::now();
         info!(event = ORCH_TICK_STARTED, "orchestrator tick started");
 
+        // Cleanup expired completed entries
+        {
+            let mut state = self.state.write().await;
+            state.cleanup_expired_completed();
+        }
+
         // Initialize state lists lazily (for tests that don't call run())
         {
             let state = self.state.read().await;
@@ -1035,12 +1041,13 @@ impl Orchestrator {
                                     )
                                 });
 
-                            let completed_identifier = if let Some(entry) = state.remove_running(issue_id) {
-                                state.add_runtime_seconds(&entry);
-                                Some(entry.identifier)
-                            } else {
-                                None
-                            };
+                            let completed_identifier =
+                                if let Some(entry) = state.remove_running(issue_id) {
+                                    state.add_runtime_seconds(&entry);
+                                    Some(entry.identifier)
+                                } else {
+                                    None
+                                };
 
                             if finalize_state.status == FinalizeStatus::Succeeded
                                 || finalize_state.status == FinalizeStatus::NotRequired
@@ -1057,7 +1064,11 @@ impl Orchestrator {
                                 state.release_claim(issue_id);
                                 state.remove_pipeline_run(issue_id);
                                 if let Some(identifier) = completed_identifier {
-                                    state.add_completed(issue_id.to_string(), identifier, "completed_succeeded".to_string());
+                                    state.add_completed(
+                                        issue_id.to_string(),
+                                        identifier,
+                                        "completed_succeeded".to_string(),
+                                    );
                                 }
                                 state.clear_finalize_state(issue_id);
 
@@ -1094,8 +1105,10 @@ impl Orchestrator {
                             let completed_at = Utc::now();
                             let mut final_failure = false;
                             let mut history_record = None;
+                            let mut completed_identifier = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
+                                completed_identifier = Some(entry.identifier.clone());
                                 let retry_scheduled = schedule_failure_retry(
                                     &mut state,
                                     issue_id,
@@ -1129,6 +1142,15 @@ impl Orchestrator {
                                 }
                             }
                             state.remove_pipeline_run(issue_id);
+                            if final_failure {
+                                if let Some(identifier) = completed_identifier {
+                                    state.add_completed(
+                                        issue_id.to_string(),
+                                        identifier,
+                                        "completed_failed".to_string(),
+                                    );
+                                }
+                            }
 
                             drop(state);
                             if final_failure {
@@ -1245,8 +1267,10 @@ impl Orchestrator {
                 let completed_at = Utc::now();
                 let mut final_failure = false;
                 let mut history_record = None;
+                let mut completed_identifier = None;
 
                 if let Some(entry) = state.remove_running(issue_id) {
+                    completed_identifier = Some(entry.identifier.clone());
                     state.add_runtime_seconds(&entry);
                     let retry_scheduled = schedule_failure_retry(
                         &mut state,
@@ -1281,6 +1305,15 @@ impl Orchestrator {
                     }
                 }
                 state.remove_pipeline_run(issue_id);
+                if final_failure {
+                    if let Some(identifier) = completed_identifier {
+                        state.add_completed(
+                            issue_id.to_string(),
+                            identifier,
+                            "completed_failed".to_string(),
+                        );
+                    }
+                }
 
                 drop(state);
                 if final_failure {
@@ -1941,7 +1974,11 @@ impl Orchestrator {
                         .get_finalize_state(issue_id)
                         .map(|f| f.issue_identifier.clone())
                         .unwrap_or_else(|| issue_id.to_string());
-                    state.add_completed(issue_id.to_string(), identifier, "completed_succeeded".to_string());
+                    state.add_completed(
+                        issue_id.to_string(),
+                        identifier,
+                        "completed_succeeded".to_string(),
+                    );
                     state.release_claim(issue_id);
                     state.remove_pipeline_run(issue_id);
                     state.clear_finalize_state(issue_id);
@@ -2657,7 +2694,11 @@ impl Orchestrator {
                             ) {
                                 state.release_claim(&issue.id);
                                 state.remove_pipeline_run(&issue.id);
-                                state.add_completed(issue.id.clone(), issue.identifier.clone(), "completed_succeeded".to_string());
+                                state.add_completed(
+                                    issue.id.clone(),
+                                    issue.identifier.clone(),
+                                    "completed_succeeded".to_string(),
+                                );
                                 state.clear_finalize_state(&issue.id);
 
                                 (
@@ -2724,7 +2765,11 @@ impl Orchestrator {
 
                             state.release_claim(&issue.id);
                             state.remove_pipeline_run(&issue.id);
-                            state.add_completed(issue.id.clone(), issue.identifier.clone(), "completed_failed".to_string());
+                            state.add_completed(
+                                issue.id.clone(),
+                                issue.identifier.clone(),
+                                "completed_failed".to_string(),
+                            );
                             state.clear_finalize_state(&issue.id);
 
                             history_record
