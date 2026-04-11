@@ -547,11 +547,9 @@ Recommended v1 HTTP endpoints:
   - returns list of interaction summaries
 - `GET /api/v1/interactions/{id}`
   - returns the full interaction record
-- `POST /api/v1/interactions/{id}/respond`
-  - request body depends on interaction kind
-  - resolves the interaction when valid
-- `POST /api/v1/interactions/{id}/cancel`
-  - cancels the interaction
+- `POST /api/v1/issues/{identifier}/input`
+  - request body uses a normalized shape such as `{ "response": "...", "outcome": "approve" }`
+  - `outcome` is interaction-kind-specific and resolves the blocking interaction when valid
 - `POST /api/v1/issues/{identifier}/resume`
   - re-enqueues a resolved blocked issue for redispatch
 
@@ -637,7 +635,7 @@ The interaction statuses should be interpreted as follows:
 
 `cancelled` is distinct from a negative approval response:
 
-- approval rejection lives inside the `InteractionResponse::Approval { approved: false, ... }` payload
+- approval rejection lives inside the normalized response payload, for example `outcome: "reject"`
 - `cancelled` is an operational abort that can apply to any interaction kind
 
 ## Recommendation

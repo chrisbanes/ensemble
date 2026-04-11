@@ -182,7 +182,7 @@ If a step succeeds and has no approval gate, or does not request one under `when
 
 If a step succeeds and triggers approval:
 
-1. mark the step complete
+1. mark the step successful but not yet finally passed
 2. persist a pending approval checkpoint
 3. optionally write the approval mirror tracker state
 4. do not dispatch downstream steps yet
@@ -193,7 +193,8 @@ If a step succeeds and triggers approval:
 Minimum actions:
 
 - **Approve**: continue pipeline execution from the next step
-- **Reject**: do not continue; return to a configured rework state or leave awaiting operator intervention
+- **Reject**: do not continue; treat the gate as a pipeline failure and transition through
+  `on_failure`
 
 This checkpoint must survive restart just like other human-interaction state.
 
@@ -226,12 +227,18 @@ Recommended meanings:
 - `Done`: pipeline succeeded
 - `Failed`: pipeline failed terminally
 
-For dispatch eligibility, prefer keeping active states narrow:
+For dispatch eligibility, include all states that should be restart-recoverable after a process
+restart. A conservative local workflow can use:
 
 - `Todo`
+- `Planning`
+- `Plan Review`
 - `Ready`
+- `In Progress`
+- `Review`
 
-This keeps orchestration entry states separate from in-flight mirror states.
+If you narrow `active_states`, make sure no in-flight or approval-hold state can become stranded
+after restart.
 
 ## Artifact Model
 
