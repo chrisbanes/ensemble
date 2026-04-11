@@ -190,6 +190,7 @@ pub enum WorkerEvent {
 pub enum WorkerResult {
     Success {
         runtime_verdict: Option<serde_json::Value>,
+        approval_request: Option<StepApprovalRequestDraft>,
     },
     BlockedOnHuman {
         request: InteractionRequestDraft,
@@ -217,6 +218,16 @@ pub struct InteractionRequestDraft {
     pub options: Vec<String>,
     #[serde(default)]
     pub artifacts: Vec<String>,
+}
+
+/// Draft approval request emitted by an agent in `.ensemble/approval-request.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepApprovalRequestDraft {
+    pub schema_version: u32,
+    pub title: String,
+    pub body: String,
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// JSON-RPC 2.0 message types for ACP protocol parsing.
@@ -304,7 +315,8 @@ mod tests {
     #[test]
     fn test_worker_result_is_success() {
         assert!(WorkerResult::Success {
-            runtime_verdict: None
+            runtime_verdict: None,
+            approval_request: None,
         }
         .is_success());
         assert!(!WorkerResult::BlockedOnHuman {
@@ -338,6 +350,18 @@ mod tests {
 
         assert_eq!(draft.options, Vec::<String>::new());
         assert_eq!(draft.artifacts, Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_step_approval_request_draft_deserializes_state_default() {
+        let draft: StepApprovalRequestDraft = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "title": "Approve plan",
+            "body": "Please review."
+        }))
+        .unwrap();
+
+        assert_eq!(draft.state, None);
     }
 
     #[test]

@@ -287,8 +287,22 @@ Pipeline step definitions. Each step invokes one agent.
 | `agent` | string | *required* | Name of an agent defined in `agents` |
 | `depends` | list of strings | — | Steps this depends on. Omit for sequential order. Use `[]` for no dependencies (root step). |
 | `tracker_state` | string | — | Tracker state to write when this step starts |
+| `approval.mode` | string | — | Optional post-step approval policy: `always` or `when_requested_by_agent` |
+| `approval.state` | string | — | Optional tracker state to mirror while waiting for approval |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
+
+**Example with approval gate:**
+
+```yaml
+steps:
+  - name: plan
+    agent: planner
+    tracker_state: Planning
+    approval:
+      mode: when_requested_by_agent
+      state: Plan Review
+```
 
 ### on_success / on_failure
 

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::config::ensemble::StepConfig;
+use crate::config::ensemble::{StepApprovalConfig, StepConfig};
 use crate::error::PipelineError;
 
 /// A single step in the resolved DAG, with its explicit dependency list.
@@ -9,6 +9,7 @@ pub struct DagStep {
     pub name: String,
     pub agent: String,
     pub tracker_state: Option<String>,
+    pub approval: Option<StepApprovalConfig>,
     pub depends: Vec<String>,
 }
 
@@ -71,6 +72,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             name: step.name.clone(),
             agent: step.agent.clone(),
             tracker_state: step.tracker_state.clone(),
+            approval: step.approval.clone(),
             depends: deps,
         });
     }
@@ -158,6 +160,7 @@ mod tests {
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
+            approval: None,
         }
     }
 
@@ -167,6 +170,7 @@ mod tests {
             agent: agent.to_string(),
             depends: Some(vec![]), // explicit root
             tracker_state: None,
+            approval: None,
         }
     }
 
@@ -307,5 +311,32 @@ mod tests {
         assert!(roots.contains(&"lint"));
         assert!(roots.contains(&"build"));
         assert!(!roots.contains(&"test"));
+    }
+
+    #[test]
+    fn preserves_step_approval_metadata() {
+        let steps = vec![StepConfig {
+            name: "plan".to_string(),
+            agent: "planner".to_string(),
+            depends: None,
+            tracker_state: Some("Planning".to_string()),
+            approval: Some(StepApprovalConfig {
+                mode: crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent,
+                state: Some("Plan Review".to_string()),
+            }),
+        }];
+
+        let dag = build_dag(&steps).unwrap();
+        let plan = dag.steps.iter().find(|s| s.name == "plan").unwrap();
+
+        let approval = plan
+            .approval
+            .as_ref()
+            .expect("approval metadata should be preserved");
+        assert_eq!(
+            approval.mode,
+            crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent
+        );
+        assert_eq!(approval.state.as_deref(), Some("Plan Review"));
     }
 }

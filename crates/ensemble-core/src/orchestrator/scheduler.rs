@@ -236,6 +236,10 @@ mod tests {
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: None,
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
 

@@ -662,6 +662,10 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
                 "agent_role": step.agent,
                 "depends": step.depends.clone().unwrap_or_default(),
                 "tracker_state": step.tracker_state,
+                "approval": step.approval.as_ref().map(|approval| serde_json::json!({
+                    "mode": approval.mode,
+                    "state": approval.state,
+                })),
             })
         })
         .collect();
@@ -1118,6 +1122,56 @@ on_failure: Failed
         assert_eq!(response.defaults["agents"][0]["role"], "builder");
         assert_eq!(response.defaults["agents"][0]["acpx_agent"], "codex");
         assert_eq!(response.defaults["steps"][0]["name"], "build");
+    }
+
+    #[tokio::test]
+    async fn test_get_setup_defaults_includes_step_approval_in_response() {
+        let (state, _temp_dir) = test_app_state();
+        *state.config_runtime.document_state.write().await = ConfigDocumentState {
+            path: state.config_runtime.config_path.clone(),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(
+                crate::config::ensemble::parse_config(
+                    r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agents:
+  planner:
+    acpx_agent: claude
+    prompt: Plan.
+steps:
+  - name: plan
+    agent: planner
+    tracker_state: Planning
+    approval:
+      mode: when_requested_by_agent
+      state: Plan Review
+on_success: Done
+on_failure: Failed
+"#,
+                )
+                .unwrap(),
+            ),
+            validation: DraftValidationReport::default(),
+        };
+
+        let (status, Json(response)) = get_setup_defaults(axum::extract::State(state)).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            response.defaults["steps"][0]["approval"],
+            serde_json::json!({
+                "mode": "when_requested_by_agent",
+                "state": "Plan Review"
+            })
+        );
     }
 
     #[tokio::test]

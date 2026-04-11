@@ -284,6 +284,22 @@ pub struct AgentConfig {
     pub reasoning_level: Option<String>,
 }
 
+/// Approval gate metadata for a pipeline step.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct StepApprovalConfig {
+    pub mode: StepApprovalMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// Approval mode for a pipeline step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StepApprovalMode {
+    Always,
+    WhenRequestedByAgent,
+}
+
 /// A single step in the pipeline DAG.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct StepConfig {
@@ -293,6 +309,8 @@ pub struct StepConfig {
     /// previous step). `Some(vec![])` means "no dependencies" (explicit root).
     pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<StepApprovalConfig>,
 }
 
 /// Concurrency limits for the pipeline orchestrator.
@@ -930,6 +948,53 @@ on_failure: Failed
         assert_eq!(config.steps[0].agent, "build");
         assert_eq!(config.on_success, "Done");
         assert_eq!(config.on_failure, "Failed");
+    }
+
+    #[test]
+    fn parses_step_approval_config_from_yaml() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  plan:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Plan the work."
+steps:
+  - name: plan
+    agent: plan
+    tracker_state: Planning
+    approval:
+      mode: when_requested_by_agent
+      state: Plan Review
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let approval = config.steps[0].approval.as_ref().unwrap();
+        assert_eq!(approval.mode, StepApprovalMode::WhenRequestedByAgent);
+        assert_eq!(approval.state.as_deref(), Some("Plan Review"));
+    }
+
+    #[test]
+    fn defaults_step_approval_to_none() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  plan:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Plan the work."
+steps:
+  - name: plan
+    agent: plan
+    tracker_state: Planning
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert!(config.steps[0].approval.is_none());
     }
 
     #[test]

@@ -125,6 +125,8 @@ pub struct ResumeResponse {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IssueInputRequest {
     pub response: String,
+    /// Required for approval_gate/manual_decision interactions; use
+    /// approve/reject or complete/pending. Omit for brainstorm-style prompts.
     pub outcome: Option<String>,
 }
 
@@ -860,8 +862,12 @@ pub async fn post_issue_input(
 
 fn parse_approval_outcome(outcome: Option<&str>) -> Result<bool, String> {
     match outcome {
-        None | Some("approve") | Some("approved") => Ok(true),
+        Some("approve") | Some("approved") => Ok(true),
         Some("reject") | Some("rejected") => Ok(false),
+        None => Err(
+            "approval outcome is required; expected one of: approve, approved, reject, rejected"
+                .to_string(),
+        ),
         Some(other) => Err(format!(
             "unsupported approval outcome '{other}'; expected one of: approve, approved, reject, rejected"
         )),
@@ -870,8 +876,12 @@ fn parse_approval_outcome(outcome: Option<&str>) -> Result<bool, String> {
 
 fn parse_manual_decision_outcome(outcome: Option<&str>) -> Result<bool, String> {
     match outcome {
-        None | Some("complete") | Some("completed") => Ok(true),
+        Some("complete") | Some("completed") => Ok(true),
         Some("pending") | Some("incomplete") => Ok(false),
+        None => Err(
+            "manual decision outcome is required; expected one of: complete, completed, pending, incomplete"
+                .to_string(),
+        ),
         Some(other) => Err(format!(
             "unsupported manual decision outcome '{other}'; expected one of: complete, completed, pending, incomplete"
         )),
@@ -885,8 +895,10 @@ mod tests {
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::StepConfig;
+    use crate::interaction::{InteractionRequest, InteractionResumeStrategy};
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
+        WaitingOnHumanEntry,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
@@ -982,6 +994,7 @@ mod tests {
             agent: "build".to_string(),
             depends: None,
             tracker_state: None,
+            approval: None,
         }])
         .unwrap();
 
@@ -991,6 +1004,136 @@ mod tests {
     async fn response_json(response: axum::response::Response) -> serde_json::Value {
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    async fn build_app_state_with_waiting_approval_gate() -> (AppState, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+        tokio::fs::write(&config_path, "tracker:\n  kind: todo_file\n")
+            .await
+            .unwrap();
+        let config_dir = temp_dir.path().to_path_buf();
+
+        let mut state = OrchestratorState::new(30000, 10);
+        state.add_claimed("NODE_123");
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_123".to_string(),
+            identifier: "my-repo#42".to_string(),
+            interaction_request_id: "approval-1".to_string(),
+            step_name: "build".to_string(),
+            kind: InteractionKind::ApprovalGate,
+            prompt: "Please review the build output".to_string(),
+            agent_name: "build".to_string(),
+            retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: chrono::Utc::now(),
+        });
+
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state.config_runtime.config_path = config_path.clone();
+
+        InteractionStore::new(config_dir)
+            .create(InteractionRequest {
+                id: "approval-1".to_string(),
+                schema_version: 1,
+                issue_id: "NODE_123".to_string(),
+                issue_identifier: "my-repo#42".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "build".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::ApprovalGate,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::AdvanceAfterStep,
+                title: "Approve build".to_string(),
+                body: "Please review the build output".to_string(),
+                options: vec!["approve".to_string(), "reject".to_string()],
+                artifacts: vec![],
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: chrono::Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        (app_state, temp_dir)
+    }
+
+    async fn build_app_state_with_waiting_manual_decision() -> (AppState, tempfile::TempDir) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+        tokio::fs::write(&config_path, "tracker:\n  kind: todo_file\n")
+            .await
+            .unwrap();
+        let config_dir = temp_dir.path().to_path_buf();
+
+        let mut state = OrchestratorState::new(30000, 10);
+        state.add_claimed("NODE_123");
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_123".to_string(),
+            identifier: "my-repo#42".to_string(),
+            interaction_request_id: "decision-1".to_string(),
+            step_name: "build".to_string(),
+            kind: InteractionKind::ManualDecision,
+            prompt: "Should we proceed?".to_string(),
+            agent_name: "build".to_string(),
+            retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: chrono::Utc::now(),
+        });
+
+        let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state.config_runtime.config_path = config_path.clone();
+
+        InteractionStore::new(config_dir)
+            .create(InteractionRequest {
+                id: "decision-1".to_string(),
+                schema_version: 1,
+                issue_id: "NODE_123".to_string(),
+                issue_identifier: "my-repo#42".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "build".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::ManualDecision,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need decision".to_string(),
+                body: "Should we proceed?".to_string(),
+                options: vec!["complete".to_string(), "pending".to_string()],
+                artifacts: vec![],
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: chrono::Utc::now(),
+                resolved_at: None,
+            })
+            .await
+            .unwrap();
+
+        (app_state, temp_dir)
     }
 
     fn build_app_state_with_running_pid(agent_pid: Option<&str>) -> AppState {
@@ -1258,5 +1401,100 @@ mod tests {
         let response = post_retry(State(state), Path("my-repo#42".to_string())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn test_issue_input_accepts_approval_outcome_for_post_step_gate() {
+        let (state, _temp_dir) = build_app_state_with_waiting_approval_gate().await;
+
+        let response = post_issue_input(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Json(IssueInputRequest {
+                response: "looks good".to_string(),
+                outcome: Some("approve".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["submitted"], true);
+
+        let store = interaction_store(&state);
+        let interaction = store
+            .get("approval-1")
+            .await
+            .unwrap()
+            .expect("interaction should be persisted");
+        assert_eq!(interaction.status, InteractionStatus::Resolved);
+        assert_eq!(
+            interaction.response,
+            Some(InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved: true,
+                reason: Some("looks good".to_string()),
+            })
+        );
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.is_resume_requested("NODE_123"));
+    }
+
+    #[tokio::test]
+    async fn test_issue_input_rejects_missing_outcome_for_approval_gate() {
+        let (state, _temp_dir) = build_app_state_with_waiting_approval_gate().await;
+
+        let response = post_issue_input(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Json(IssueInputRequest {
+                response: "looks good".to_string(),
+                outcome: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_input_outcome");
+
+        let store = interaction_store(&state);
+        let interaction = store
+            .get("approval-1")
+            .await
+            .unwrap()
+            .expect("interaction should still exist");
+        assert_eq!(interaction.status, InteractionStatus::Open);
+    }
+
+    #[tokio::test]
+    async fn test_issue_input_rejects_missing_outcome_for_manual_decision() {
+        let (state, _temp_dir) = build_app_state_with_waiting_manual_decision().await;
+
+        let response = post_issue_input(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Json(IssueInputRequest {
+                response: "still thinking".to_string(),
+                outcome: None,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "invalid_input_outcome");
+
+        let store = interaction_store(&state);
+        let interaction = store
+            .get("decision-1")
+            .await
+            .unwrap()
+            .expect("interaction should still exist");
+        assert_eq!(interaction.status, InteractionStatus::Open);
     }
 }

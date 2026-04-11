@@ -325,7 +325,8 @@ mod tests {
     use super::InteractionStore;
     use crate::interaction::error::InteractionError;
     use crate::interaction::model::{
-        InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+        InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
+        InteractionStatus,
     };
     use chrono::Utc;
     use std::sync::Arc;
@@ -352,11 +353,16 @@ mod tests {
             status: InteractionStatus::Open,
             blocking: true,
             awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
             title: "Need clarification".to_string(),
             body: "Pick the target environment".to_string(),
             options: vec!["staging".to_string(), "production".to_string()],
             artifacts: vec!["docs/spec.md".to_string()],
             response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
             resolved_at: None,
         }
