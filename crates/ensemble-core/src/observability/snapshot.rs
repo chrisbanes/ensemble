@@ -558,8 +558,9 @@ fn pending_input_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::ConcurrencyConfig;
+    use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig, TrackerConfig};
     use crate::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
+    use crate::pipeline::engine::{PipelineRun, StepState};
     use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
     fn test_issue() -> Issue {
@@ -913,6 +914,105 @@ mod tests {
         let attempts = json.get("attempts").unwrap();
         assert!(attempts.get("restart_count").is_some());
         assert!(attempts.get("current_retry_attempt").is_some());
+
+        assert!(json.get("workflow_steps").is_some());
+        assert!(json.get("issue").is_some());
+
+        let issue = json.get("issue").unwrap();
+        assert!(issue.get("title").is_some());
+        assert!(issue.get("labels").is_some());
+    }
+
+    #[test]
+    fn test_issue_snapshot_with_workflow_steps() {
+        use crate::pipeline::dag::build_dag;
+        use std::sync::Arc;
+
+        let mut state = build_test_state();
+
+        let steps = vec![
+            StepConfig {
+                name: "build".to_string(),
+                agent: "builder".to_string(),
+                depends: None,
+                tracker_state: None,
+                approval: None,
+            },
+            StepConfig {
+                name: "review".to_string(),
+                agent: "reviewer".to_string(),
+                depends: Some(vec!["build".to_string()]),
+                tracker_state: None,
+                approval: None,
+            },
+        ];
+        let config = Arc::new(EnsembleConfig {
+            tracker: TrackerConfig {
+                kind: "todo_file".to_string(),
+                active_states: vec!["In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                path: Some("test.toml".into()),
+                endpoint: None,
+                gh_hostname: None,
+                api_key: None,
+                repository: None,
+                project_number: None,
+                labels_filter: vec![],
+                notion: None,
+            },
+            repos: vec![],
+            agents: HashMap::new(),
+            steps,
+            on_success: "finalize".to_string(),
+            on_failure: "retry".to_string(),
+            concurrency: ConcurrencyConfig::default(),
+            max_cycles: 5,
+            polling: Default::default(),
+            workspace: Default::default(),
+            hooks: Default::default(),
+            agent: Default::default(),
+            human_interaction: Default::default(),
+        });
+
+        let dag = build_dag(&config.steps).expect("valid dag");
+        let mut pipeline_run = PipelineRun::new("NODE_123".to_string(), 1, dag);
+        pipeline_run
+            .step_states
+            .insert("build".to_string(), StepState::Passed);
+        pipeline_run.step_states.insert(
+            "review".to_string(),
+            StepState::Running {
+                session_id: "session-abc".to_string(),
+            },
+        );
+
+        state
+            .pipeline_configs
+            .insert("NODE_123".to_string(), config);
+        state
+            .pipeline_runs
+            .insert("NODE_123".to_string(), pipeline_run);
+
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
+        let json = serde_json::to_value(&detail).unwrap();
+
+        let workflow_steps = json.get("workflow_steps").unwrap().as_array().unwrap();
+        assert_eq!(workflow_steps.len(), 2);
+
+        let build_step = workflow_steps
+            .iter()
+            .find(|s| s.get("name").unwrap() == "build")
+            .unwrap();
+        assert_eq!(build_step.get("state").unwrap(), "passed");
+        assert_eq!(build_step.get("agent").unwrap(), "builder");
+        assert!(build_step.get("can_navigate").unwrap().as_bool().unwrap());
+
+        let review_step = workflow_steps
+            .iter()
+            .find(|s| s.get("name").unwrap() == "review")
+            .unwrap();
+        assert_eq!(review_step.get("state").unwrap(), "running");
+        assert_eq!(review_step.get("agent").unwrap(), "reviewer");
     }
 
     #[test]
