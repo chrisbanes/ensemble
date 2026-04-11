@@ -15,6 +15,9 @@ const variantMap: Record<string, BadgeVariant> = {
   reviewing: "secondary",
   failed: "destructive",
   stopped: "outline",
+  completed_succeeded: "default",
+  completed_failed: "destructive",
+  completed_stopped: "outline",
 };
 
 export default function StatusBadge({ status }: StatusBadgeProps) {
