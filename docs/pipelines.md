@@ -29,6 +29,51 @@ If a step requests operator input, Ensemble records a **Needs Input** interactio
 that issue. The operator can submit a response from Web/Tauri, and the orchestrator resumes the
 issue on the next tick while other issues continue.
 
+## Approval gates
+
+Steps can also pause at an explicit post-step approval boundary:
+
+```yaml
+steps:
+  - name: plan
+    agent: planner
+    tracker_state: Planning
+    approval:
+      mode: when_requested_by_agent
+      state: Plan Review
+  - name: implement
+    agent: builder
+```
+
+How approval gates work:
+
+1. The step runs normally.
+2. If the gate is triggered, Ensemble moves the successful step into an approval hold before it can
+   transition to a final passed or rejected outcome.
+3. If `approval.state` is set, Ensemble mirrors that state to the tracker while waiting.
+4. Downstream steps do not start until a human approves or rejects the gate.
+
+Approval modes:
+
+- `always` pauses after every successful run of that step.
+- `when_requested_by_agent` pauses only when the agent requests approval with `.ensemble/approval-request.json`.
+
+Operator actions:
+
+- **Approve** resumes the pipeline from the next step.
+- **Reject** stops the pipeline and applies `on_failure`.
+
+When submitting input through the API, approval gates require an explicit outcome:
+
+```json
+{
+  "response": "Looks good. Proceed.",
+  "outcome": "approve"
+}
+```
+
+Valid approval outcomes are `approve` and `reject`.
+
 ## Sequential and parallel steps
 
 **Sequential (default):** Steps run one after another in list order. Each step implicitly depends on the one before it.

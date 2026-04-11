@@ -266,12 +266,13 @@ Step states:
 - `Rejected` — agent exited successfully with reject verdict, or rejected at an approval gate
 - `Failed` — agent crashed, timed out, or errored
 
-**Post-step approval checkpoints:** When a step has `approval` configured, the orchestrator
-enters `AwaitingApproval` after the step completes. The orchestrator updates the issue tracker
-state to `approval.state` (if set) and waits. On `approve_gate`: the step transitions to `Passed`
-and downstream steps are dispatched. On `reject_gate`: the step transitions to `Rejected` and the
-pipeline falls back to `on_failure`. The `Rejected` transition does not write a separate rejection
-state — it is treated as a failure in the `on_failure` sense.
+**Post-step approval checkpoints:** When a step succeeds and has `approval` configured, the
+orchestrator may enter `AwaitingApproval` instead of immediately dispatching downstream work. The
+orchestrator updates the issue tracker state to `approval.state` (if set) and waits. On
+`approve_gate`: the step transitions to `Passed` and downstream steps are dispatched. On
+`reject_gate`: the step transitions to `Rejected` and the pipeline falls back to `on_failure`. The
+`Rejected` transition does not write a separate rejection state — it is treated as a failure in the
+`on_failure` sense.
 
 #### 4.1.7 Verdict
 
@@ -1971,11 +1972,41 @@ Minimum endpoints:
     }
     ```
 
+- `POST /api/v1/issues/{identifier}/input`
+  - Submits human input for an issue that is awaiting input (for example an approval gate or
+    manual decision interaction). The orchestrator processes the response on the next tick.
+  - Request body:
+
+    ```json
+    {
+      "response": "Human response text",
+      "outcome": "approve"
+    }
+    ```
+
+    The `outcome` field is required for `ApprovalGate` and `ManualDecision` interactions:
+    - For approval gates: `"approve"` or `"reject"`
+    - For manual decisions: `"complete"` or `"pending"`
+
+  - Suggested response (`202 Accepted`) shape:
+
+    ```json
+    {
+      "accepted": true,
+      "issue_identifier": "MT-649",
+      "submitted_at": "2026-02-24T20:15:30Z"
+    }
+    ```
+
+  - If the issue is not awaiting input, return `409 Conflict` with an error response (for example
+    `{"error":{"code":"not_awaiting_input","message":"..."}}`).
+
 API design notes:
 
 - The JSON shapes above are the recommended baseline for interoperability and debugging ergonomics.
 - Implementations may add fields, but should avoid breaking existing fields within a version.
-- Endpoints should be read-only except for operational triggers like `/refresh`.
+ - Endpoints should be read-only except for operational control endpoints such as `/refresh` and
+   `/issues/{identifier}/input`.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state

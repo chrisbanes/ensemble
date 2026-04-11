@@ -292,6 +292,13 @@ Pipeline step definitions. Each step invokes one agent.
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
 
+Approval behavior:
+
+- `approval.mode: always` pauses after the step succeeds and waits for explicit approval before any downstream step can start.
+- `approval.mode: when_requested_by_agent` pauses only when the agent requests approval by writing `.ensemble/approval-request.json`.
+- `approval.state` is only a tracker mirror for operators. The approval checkpoint inside Ensemble is the source of truth.
+- Approving the gate resumes the pipeline from the next step. Rejecting the gate ends the pipeline through `on_failure`.
+
 **Example with approval gate:**
 
 ```yaml
