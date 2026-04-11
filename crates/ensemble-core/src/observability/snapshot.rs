@@ -266,10 +266,16 @@ pub fn build_issue_snapshot(
         .iter()
         .find(|(_, finalize)| finalize.issue_identifier == identifier);
 
+    let completed_entry = state
+        .completed
+        .values()
+        .find(|e| e.identifier == identifier);
+
     if running_entry.is_none()
         && retry_entry.is_none()
         && waiting_entry.is_none()
         && finalize_entry.is_none()
+        && completed_entry.is_none()
     {
         return None;
     }
@@ -282,6 +288,8 @@ pub fn build_issue_snapshot(
         (entry.issue_id.clone(), entry.identifier.clone())
     } else if let Some((issue_id, finalize)) = finalize_entry {
         (issue_id.clone(), finalize.issue_identifier.clone())
+    } else if let Some(entry) = completed_entry {
+        (entry.issue_id.clone(), entry.identifier.clone())
     } else {
         return None;
     };
@@ -295,6 +303,8 @@ pub fn build_issue_snapshot(
         "waiting_on_human".to_string()
     } else if let Some((_, finalize)) = finalize_entry {
         format!("finalize_{}", finalize_status_str(&finalize.status))
+    } else if let Some(entry) = completed_entry {
+        entry.status.clone()
     } else {
         "retrying".to_string()
     };
