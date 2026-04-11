@@ -16,6 +16,16 @@ describe('formatDuration', () => {
     const result = formatDuration(new Date(Date.now() - 4500000).toISOString());
     expect(result).toMatch(/1h \d+m/);
   });
+
+  it('handles future dates', () => {
+    const futureDate = new Date(Date.now() + 10000).toISOString();
+    expect(formatDuration(futureDate)).toBe('0s');
+  });
+
+  it('handles zero duration', () => {
+    const result = formatDuration(new Date(Date.now()).toISOString());
+    expect(result).toBe('0s');
+  });
 });
 
 describe('formatTokens', () => {
@@ -29,5 +39,17 @@ describe('formatTokens', () => {
 
   it('formats millions with M', () => {
     expect(formatTokens(1500000)).toBe('1.5M');
+  });
+
+  it('formats zero', () => {
+    expect(formatTokens(0)).toBe('0');
+  });
+
+  it('formats exact thousand boundary', () => {
+    expect(formatTokens(1000)).toBe('1.0k');
+  });
+
+  it('handles negative numbers', () => {
+    expect(formatTokens(-100)).toBe('0');
   });
 });

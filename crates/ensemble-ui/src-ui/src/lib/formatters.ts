@@ -4,6 +4,7 @@
  */
 export function formatDuration(startedAt: string): string {
   const ms = Date.now() - new Date(startedAt).getTime();
+  if (ms < 0) return "0s";
   const seconds = Math.floor(ms / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -17,6 +18,7 @@ export function formatDuration(startedAt: string): string {
  * Examples: "500", "1.2k", "1.5M"
  */
 export function formatTokens(n: number): string {
+  if (n < 0) return "0";
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
