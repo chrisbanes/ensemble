@@ -125,6 +125,8 @@ pub struct IssueDetailSnapshot {
     pub current_interaction: Option<CurrentInteractionSummary>,
     pub last_error: Option<String>,
     pub finalize: FinalizeSnapshot,
+    pub workflow_steps: Vec<WorkflowStepInfo>,
+    pub issue: IssueSummary,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -140,6 +142,24 @@ pub struct RepoFinalizeSnapshot {
     pub approval_required: bool,
     pub status: String,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WorkflowStepInfo {
+    pub name: String,
+    pub agent: String,
+    pub dependencies: Vec<String>,
+    pub state: String,
+    pub can_navigate: bool,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct IssueSummary {
+    pub title: String,
+    pub description: Option<String>,
+    pub labels: Vec<String>,
+    pub priority: Option<i32>,
+    pub url: Option<String>,
 }
 
 fn finalize_status_str(status: &FinalizeStatus) -> &'static str {
@@ -376,6 +396,57 @@ pub fn build_issue_snapshot(
         }
     };
 
+    let pipeline_run = state.pipeline_runs.get(&issue_id);
+    let config = state.pipeline_configs.get(&issue_id);
+
+    let workflow_steps = if let Some(config) = config {
+        config
+            .steps
+            .iter()
+            .map(|step| {
+                let state_str = pipeline_run
+                    .and_then(|run| run.step_states.get(&step.name))
+                    .map(|s| match s {
+                        StepState::Pending => "pending",
+                        StepState::Running { .. } => "running",
+                        StepState::Passed => "passed",
+                        StepState::Failed { .. } => "failed",
+                        StepState::BlockedOnHuman { .. } => "waiting",
+                        StepState::AwaitingApproval { .. } => "waiting",
+                        StepState::Rejected { .. } => "rejected",
+                    })
+                    .unwrap_or("pending");
+                WorkflowStepInfo {
+                    name: step.name.clone(),
+                    agent: step.agent.clone(),
+                    dependencies: step.depends.clone().unwrap_or_default(),
+                    state: state_str.to_string(),
+                    can_navigate: pipeline_run
+                        .map(|r| r.step_states.contains_key(&step.name))
+                        .unwrap_or(false),
+                }
+            })
+            .collect()
+    } else {
+        vec![]
+    };
+
+    let issue_summary = running_entry
+        .map(|e| IssueSummary {
+            title: e.issue.title.clone(),
+            description: e.issue.description.clone(),
+            labels: e.issue.labels.clone(),
+            priority: e.issue.priority,
+            url: e.issue.url.clone(),
+        })
+        .unwrap_or_else(|| IssueSummary {
+            title: identifier.to_string(),
+            description: None,
+            labels: vec![],
+            priority: None,
+            url: None,
+        });
+
     Some(IssueDetailSnapshot {
         issue_identifier,
         issue_id,
@@ -393,6 +464,8 @@ pub fn build_issue_snapshot(
         current_interaction,
         last_error,
         finalize,
+        workflow_steps,
+        issue: issue_summary,
     })
 }
 
