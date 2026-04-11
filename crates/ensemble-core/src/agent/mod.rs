@@ -21,7 +21,9 @@ use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
-use events::{AgentEvent, InteractionRequestDraft, WorkerEvent, WorkerResult};
+use events::{
+    AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
+};
 
 use acp_client::{AcpSession, TurnResult};
 use acpx_runtime::AcpxRuntime;
@@ -139,10 +141,11 @@ impl AcpAgentRunner {
         workspace_path: &Path,
         interaction_response: Option<&InteractionResponseEnvelope>,
     ) -> Result<(), AgentError> {
-        // Ensure stale verdict data from previous attempts cannot influence the
-        // current run's resolution path.
+        // Ensure stale verdict and request artifacts from previous attempts
+        // cannot influence the current run's resolution path.
         remove_ensemble_file(workspace_path, "verdict.json").await?;
         remove_ensemble_file(workspace_path, "interaction-request.json").await?;
+        remove_ensemble_file(workspace_path, "approval-request.json").await?;
 
         if let Some(interaction_response) = interaction_response {
             write_interaction_response_file(workspace_path, interaction_response).await?;
@@ -223,6 +226,9 @@ async fn detect_worker_result_with_runtime_verdict(
     let interaction_path = workspace_path
         .join(".ensemble")
         .join("interaction-request.json");
+    let approval_path = workspace_path
+        .join(".ensemble")
+        .join("approval-request.json");
 
     let interaction_request = match tokio::fs::read_to_string(&interaction_path).await {
         Ok(contents) => match serde_json::from_str::<InteractionRequestDraft>(&contents) {
@@ -241,17 +247,41 @@ async fn detect_worker_result_with_runtime_verdict(
         }
     };
 
+    let approval_request = match tokio::fs::read_to_string(&approval_path).await {
+        Ok(contents) => match serde_json::from_str::<StepApprovalRequestDraft>(&contents) {
+            Ok(request) => Some(request),
+            Err(error) => {
+                return WorkerResult::Failed {
+                    error: format!("failed to parse .ensemble/approval-request.json: {error}"),
+                }
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return WorkerResult::Failed {
+                error: format!("failed to read .ensemble/approval-request.json: {error}"),
+            }
+        }
+    };
+
     let verdict_path = workspace_path.join(".ensemble").join("verdict.json");
     let verdict_exists = tokio::fs::try_exists(&verdict_path).await.unwrap_or(false);
 
     match interaction_request {
+        Some(_) if approval_request.is_some() => WorkerResult::Failed {
+            error: "agent produced both .ensemble/interaction-request.json and .ensemble/approval-request.json"
+                .to_string(),
+        },
         Some(_) if verdict_exists => WorkerResult::Failed {
             error:
                 "agent produced both .ensemble/interaction-request.json and .ensemble/verdict.json"
                     .to_string(),
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
-        None => WorkerResult::Success { runtime_verdict },
+        None => WorkerResult::Success {
+            runtime_verdict,
+            approval_request,
+        },
     }
 }
 
@@ -657,6 +687,7 @@ mod tests {
             if self.should_succeed {
                 Ok(WorkerResult::Success {
                     runtime_verdict: None,
+                    approval_request: None,
                 })
             } else {
                 Err(AgentError::TurnFailed {
@@ -783,7 +814,8 @@ on_failure: Todo
         assert!(matches!(
             result,
             Ok(WorkerResult::Success {
-                runtime_verdict: None
+                runtime_verdict: None,
+                ..
             })
         ));
 
@@ -883,7 +915,8 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None
+                runtime_verdict: None,
+                ..
             }
         ));
         let event_names = collect_event_names(&mut rx);
@@ -937,7 +970,8 @@ exit 0
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None
+                runtime_verdict: None,
+                ..
             }
         ));
         let event_names = collect_event_names(&mut rx);
@@ -1026,6 +1060,79 @@ exit 0
             result,
             WorkerResult::Failed { error }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_worker_result_reads_post_step_approval_request() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "approval-request.json",
+            &serde_json::to_string_pretty(&StepApprovalRequestDraft {
+                schema_version: 1,
+                title: "Approve plan".to_string(),
+                body: "The step completed successfully. Please review the plan.".to_string(),
+                state: Some("Plan Review".to_string()),
+            })
+            .unwrap(),
+        )
+        .await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                approval_request: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn detect_worker_result_rejects_both_interaction_and_post_step_approval() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "interaction-request.json",
+            r#"{
+  "schema_version": 1,
+  "kind": "question",
+  "blocking": true,
+  "title": "Need input",
+  "body": "Which environment?"
+}"#,
+        )
+        .await;
+        write_workspace_file(
+            &workspace,
+            "approval-request.json",
+            r#"{
+  "schema_version": 1,
+  "title": "Approve plan",
+  "body": "Please review.",
+  "state": "Plan Review"
+}"#,
+        )
+        .await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        assert!(matches!(result, WorkerResult::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn detect_worker_result_fails_on_invalid_post_step_approval_json() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(&workspace, "approval-request.json", "not json").await;
+
+        let result = detect_worker_result(workspace.path()).await;
+
+        assert!(matches!(
+            result,
+            WorkerResult::Failed { error }
+                if error.contains("failed to parse .ensemble/approval-request.json")
         ));
     }
 
@@ -1189,7 +1296,38 @@ exit 0
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None
+                runtime_verdict: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_removes_stale_post_step_approval_request_before_run() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        write_workspace_file(
+            &workspace,
+            "approval-request.json",
+            r#"{
+  "schema_version": 1,
+  "title": "Stale approval",
+  "body": "Should not leak",
+  "state": "Plan Review"
+}"#,
+        )
+        .await;
+
+        AcpAgentRunner
+            .prepare_workspace(workspace.path(), None)
+            .await
+            .unwrap();
+
+        let result = detect_worker_result(workspace.path()).await;
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                approval_request: None,
+                ..
             }
         ));
     }

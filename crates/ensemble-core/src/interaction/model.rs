@@ -21,6 +21,13 @@ pub enum InteractionStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionResumeStrategy {
+    RerunStep,
+    AdvanceAfterStep,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InteractionResponse {
     Question {
@@ -61,15 +68,29 @@ pub struct InteractionRequest {
     pub blocking: bool,
     #[serde(default = "default_awaiting_resume")]
     pub awaiting_resume: bool,
+    #[serde(default = "default_resume_strategy")]
+    pub resume_strategy: InteractionResumeStrategy,
     pub title: String,
     pub body: String,
     pub options: Vec<String>,
     pub artifacts: Vec<String>,
     pub response: Option<InteractionResponse>,
+    #[serde(default)]
+    pub waiting_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub agent_input_tokens: u64,
+    #[serde(default)]
+    pub agent_output_tokens: u64,
+    #[serde(default)]
+    pub agent_total_tokens: u64,
     pub requested_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
 }
 
 fn default_awaiting_resume() -> bool {
     true
+}
+
+fn default_resume_strategy() -> InteractionResumeStrategy {
+    InteractionResumeStrategy::RerunStep
 }

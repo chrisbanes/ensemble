@@ -12,6 +12,11 @@ pub enum StepState {
     Running { session_id: String },
     /// Step is waiting for a human interaction response before it can resume.
     BlockedOnHuman { interaction_request_id: String },
+    /// Step is waiting for approval on a completed result before downstream
+    /// work can continue.
+    AwaitingApproval {
+        interaction_request_id: Option<String>,
+    },
     /// Step completed and was approved.
     Passed,
     /// Step completed but was rejected by a review agent.
@@ -51,6 +56,12 @@ pub enum PipelineAction {
     BlockedOnHuman {
         step: String,
         interaction_request_id: String,
+    },
+    /// A step has completed but is waiting for approval before downstream
+    /// steps may be dispatched.
+    AwaitingApproval {
+        step: String,
+        approval_state: Option<String>,
     },
     /// All steps have passed — pipeline completed successfully.
     Succeeded,
@@ -108,19 +119,40 @@ impl PipelineRun {
 
     /// Handle a completed step verdict.
     ///
-    /// - [`Verdict::Approve`] → marks the step as [`StepState::Passed`] and
-    ///   checks whether all steps are done or if new steps can be dispatched.
+    /// - [`Verdict::Approve`] → either transitions to
+    ///   [`PipelineAction::AwaitingApproval`] for approval-gated steps, or
+    ///   marks the step as [`StepState::Passed`] and checks whether all steps
+    ///   are done or if new steps can be dispatched.
     /// - [`Verdict::Reject`] → marks the step as [`StepState::Rejected`] and
     ///   returns [`PipelineAction::Failed`].
-    pub fn step_completed(&mut self, step_name: &str, verdict: Verdict) -> PipelineAction {
+    pub fn step_completed(
+        &mut self,
+        step_name: &str,
+        verdict: Verdict,
+        approval_requested: bool,
+    ) -> PipelineAction {
         match verdict {
             Verdict::Approve => {
-                self.step_states
-                    .insert(step_name.to_string(), StepState::Passed);
-                if self.all_passed() {
-                    PipelineAction::Succeeded
+                if self.should_gate_approval(step_name, approval_requested) {
+                    let approval_state = self.approval_state_for(step_name);
+                    self.step_states.insert(
+                        step_name.to_string(),
+                        StepState::AwaitingApproval {
+                            interaction_request_id: None,
+                        },
+                    );
+                    PipelineAction::AwaitingApproval {
+                        step: step_name.to_string(),
+                        approval_state,
+                    }
                 } else {
-                    self.find_dispatchable()
+                    self.step_states
+                        .insert(step_name.to_string(), StepState::Passed);
+                    if self.all_passed() {
+                        PipelineAction::Succeeded
+                    } else {
+                        self.find_dispatchable()
+                    }
                 }
             }
             Verdict::Reject { summary } => {
@@ -135,6 +167,64 @@ impl PipelineRun {
                     reason: summary,
                 }
             }
+        }
+    }
+
+    /// Bind an approval interaction request to a step that is awaiting
+    /// approval.
+    pub fn bind_approval_interaction(
+        &mut self,
+        step_name: &str,
+        interaction_request_id: String,
+    ) -> PipelineAction {
+        if let Some(StepState::AwaitingApproval {
+            interaction_request_id: current_request_id,
+        }) = self.step_states.get_mut(step_name)
+        {
+            if current_request_id.is_none() {
+                *current_request_id = Some(interaction_request_id);
+            }
+        }
+        PipelineAction::Waiting
+    }
+
+    /// Mark an approval gate as approved, transitioning the step to `Passed`
+    /// without re-running it and dispatching any downstream steps.
+    pub fn approve_gate(&mut self, step_name: &str) -> PipelineAction {
+        if !matches!(
+            self.step_states.get(step_name),
+            Some(StepState::AwaitingApproval { .. })
+        ) {
+            return PipelineAction::Waiting;
+        }
+
+        self.step_states
+            .insert(step_name.to_string(), StepState::Passed);
+        if self.all_passed() {
+            PipelineAction::Succeeded
+        } else {
+            self.find_dispatchable()
+        }
+    }
+
+    /// Mark an approval gate as rejected, halting the pipeline.
+    pub fn reject_gate(&mut self, step_name: &str, reason: String) -> PipelineAction {
+        if !matches!(
+            self.step_states.get(step_name),
+            Some(StepState::AwaitingApproval { .. })
+        ) {
+            return PipelineAction::Waiting;
+        }
+
+        self.step_states.insert(
+            step_name.to_string(),
+            StepState::Rejected {
+                summary: reason.clone(),
+            },
+        );
+        PipelineAction::Failed {
+            step: step_name.to_string(),
+            reason,
         }
     }
 
@@ -194,6 +284,34 @@ impl PipelineRun {
             .all(|s| self.step_states.get(&s.name) == Some(&StepState::Passed))
     }
 
+    fn should_gate_approval(&self, step_name: &str, approval_requested: bool) -> bool {
+        matches!(
+            self.dag
+                .steps
+                .iter()
+                .find(|step| step.name == step_name)
+                .and_then(|step| step.approval.as_ref().map(|approval| approval.mode)),
+            Some(crate::config::ensemble::StepApprovalMode::Always)
+        ) || (approval_requested
+            && matches!(
+                self.dag
+                    .steps
+                    .iter()
+                    .find(|step| step.name == step_name)
+                    .and_then(|step| step.approval.as_ref().map(|approval| approval.mode)),
+                Some(crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent)
+            ))
+    }
+
+    fn approval_state_for(&self, step_name: &str) -> Option<String> {
+        self.dag
+            .steps
+            .iter()
+            .find(|step| step.name == step_name)
+            .and_then(|step| step.approval.as_ref())
+            .and_then(|approval| approval.state.clone())
+    }
+
     /// Find all steps that are [`StepState::Pending`] and whose dependencies
     /// are all [`StepState::Passed`].
     ///
@@ -234,7 +352,7 @@ impl PipelineRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::StepConfig;
+    use crate::config::ensemble::{StepApprovalConfig, StepApprovalMode, StepConfig};
     use crate::pipeline::dag::build_dag;
 
     fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
@@ -248,6 +366,7 @@ mod tests {
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
+            approval: None,
         }
     }
 
@@ -267,6 +386,31 @@ mod tests {
             agent: agent.to_string(),
             depends: deps,
             tracker_state: Some(tracker_state.to_string()),
+            approval: None,
+        }
+    }
+
+    fn make_step_with_approval(
+        name: &str,
+        agent: &str,
+        depends: &[&str],
+        mode: StepApprovalMode,
+        state: Option<&str>,
+    ) -> StepConfig {
+        let deps = if depends.is_empty() {
+            None
+        } else {
+            Some(depends.iter().map(|s| s.to_string()).collect())
+        };
+        StepConfig {
+            name: name.to_string(),
+            agent: agent.to_string(),
+            depends: deps,
+            tracker_state: None,
+            approval: Some(StepApprovalConfig {
+                mode,
+                state: state.map(|value| value.to_string()),
+            }),
         }
     }
 
@@ -306,7 +450,7 @@ mod tests {
         );
 
         // build completes with approve → should dispatch test next.
-        let action = run.step_completed("build", Verdict::Approve);
+        let action = run.step_completed("build", Verdict::Approve, false);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "test"),
             "expected Dispatch([test]), got {action:?}"
@@ -315,7 +459,7 @@ mod tests {
         run.mark_running("test", "session-2".to_string());
 
         // test completes with approve → all done.
-        let action = run.step_completed("test", Verdict::Approve);
+        let action = run.step_completed("test", Verdict::Approve, false);
         assert_eq!(action, PipelineAction::Succeeded);
     }
 
@@ -341,7 +485,7 @@ mod tests {
         );
 
         run.mark_running("build", "session-build".to_string());
-        let action = run.step_completed("build", Verdict::Approve);
+        let action = run.step_completed("build", Verdict::Approve, false);
 
         // After build passes, both review steps should be dispatched together.
         match action {
@@ -357,9 +501,9 @@ mod tests {
         // Both reviews pass → Succeeded.
         run.mark_running("review-a", "session-ra".to_string());
         run.mark_running("review-b", "session-rb".to_string());
-        let _ = run.step_completed("review-a", Verdict::Approve);
+        let _ = run.step_completed("review-a", Verdict::Approve, false);
         // After review-a passes, review-b is still running → Waiting.
-        let _action = run.step_completed("review-a", Verdict::Approve);
+        let _action = run.step_completed("review-a", Verdict::Approve, false);
         // review-a was already set to Passed; a second approve on it should
         // still produce Waiting (review-b still pending/running).
         // Restart properly: create a fresh run and walk through fully.
@@ -370,12 +514,12 @@ mod tests {
         ];
         let mut run2 = make_run(&steps2);
         run2.mark_running("build", "s-b".to_string());
-        run2.step_completed("build", Verdict::Approve);
+        run2.step_completed("build", Verdict::Approve, false);
         run2.mark_running("review-a", "s-ra".to_string());
         run2.mark_running("review-b", "s-rb".to_string());
 
         // review-a passes first; review-b is still Running → Waiting.
-        let action = run2.step_completed("review-a", Verdict::Approve);
+        let action = run2.step_completed("review-a", Verdict::Approve, false);
         assert_eq!(
             action,
             PipelineAction::Waiting,
@@ -383,8 +527,184 @@ mod tests {
         );
 
         // Now review-b also passes → Succeeded.
-        let action = run2.step_completed("review-b", Verdict::Approve);
+        let action = run2.step_completed("review-b", Verdict::Approve, false);
         assert_eq!(action, PipelineAction::Succeeded);
+    }
+
+    #[test]
+    fn approved_step_with_always_gate_waits_for_approval() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step_with_approval(
+                "implement",
+                "implementer",
+                &["build"],
+                StepApprovalMode::Always,
+                Some("Ready for approval"),
+            ),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        let action = run.step_completed("build", Verdict::Approve, false);
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "implement"),
+            "expected implement to dispatch after build, got {action:?}"
+        );
+
+        run.mark_running("implement", "session-implement".to_string());
+        let action = run.step_completed("implement", Verdict::Approve, false);
+        assert!(
+            matches!(
+                &action,
+                PipelineAction::AwaitingApproval {
+                    step,
+                    approval_state
+                } if step == "implement" && approval_state.as_deref() == Some("Ready for approval")
+            ),
+            "expected AwaitingApproval for implement, got {action:?}"
+        );
+        assert_eq!(
+            run.step_states["implement"],
+            StepState::AwaitingApproval {
+                interaction_request_id: None
+            }
+        );
+    }
+
+    #[test]
+    fn approve_gate_dispatches_downstream_steps() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step_with_approval(
+                "implement",
+                "implementer",
+                &["build"],
+                StepApprovalMode::Always,
+                Some("Approve implementation"),
+            ),
+            make_step("review", "reviewer", &["implement"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        assert!(matches!(
+            run.step_completed("build", Verdict::Approve, false),
+            PipelineAction::Dispatch(_)
+        ));
+
+        run.mark_running("implement", "session-implement".to_string());
+        let action = run.step_completed("implement", Verdict::Approve, false);
+        assert!(matches!(action, PipelineAction::AwaitingApproval { .. }));
+
+        let action = run.bind_approval_interaction("implement", "approval-123".to_string());
+        assert_eq!(action, PipelineAction::Waiting);
+        assert_eq!(
+            run.step_states["implement"],
+            StepState::AwaitingApproval {
+                interaction_request_id: Some("approval-123".to_string())
+            }
+        );
+
+        let action = run.approve_gate("implement");
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
+            "expected downstream review dispatch after approval, got {action:?}"
+        );
+        assert_eq!(run.step_states["implement"], StepState::Passed);
+    }
+
+    #[test]
+    fn conditional_gate_only_triggers_when_worker_requested_it() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step_with_approval(
+                "implement",
+                "implementer",
+                &["build"],
+                StepApprovalMode::WhenRequestedByAgent,
+                Some("Wait for request"),
+            ),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        assert!(matches!(
+            run.step_completed("build", Verdict::Approve, false),
+            PipelineAction::Dispatch(_)
+        ));
+
+        run.mark_running("implement", "session-implement".to_string());
+        let action = run.step_completed("implement", Verdict::Approve, false);
+        assert!(
+            matches!(&action, PipelineAction::Succeeded),
+            "expected approve without request to complete the pipeline, got {action:?}"
+        );
+        assert_eq!(run.step_states["implement"], StepState::Passed);
+
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step_with_approval(
+                "implement",
+                "implementer",
+                &["build"],
+                StepApprovalMode::WhenRequestedByAgent,
+                Some("Wait for request"),
+            ),
+        ];
+        let mut run = make_run(&steps);
+        run.mark_running("build", "session-build".to_string());
+        let _ = run.step_completed("build", Verdict::Approve, false);
+        run.mark_running("implement", "session-implement".to_string());
+        let action = run.step_completed("implement", Verdict::Approve, true);
+        assert!(
+            matches!(
+                &action,
+                PipelineAction::AwaitingApproval {
+                    step,
+                    approval_state
+                } if step == "implement" && approval_state.as_deref() == Some("Wait for request")
+            ),
+            "expected approval-requested step to gate, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn approve_gate_marks_completed_step_passed_without_rerunning_it() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step_with_approval(
+                "implement",
+                "implementer",
+                &["build"],
+                StepApprovalMode::Always,
+                Some("Ready to gate"),
+            ),
+            make_step("review", "reviewer", &["implement"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        let _ = run.step_completed("build", Verdict::Approve, false);
+        run.mark_running("implement", "session-implement".to_string());
+        let action = run.step_completed("implement", Verdict::Approve, false);
+        assert!(matches!(action, PipelineAction::AwaitingApproval { .. }));
+
+        let action = run.bind_approval_interaction("implement", "approval-456".to_string());
+        assert_eq!(action, PipelineAction::Waiting);
+        assert_eq!(
+            run.step_states["implement"],
+            StepState::AwaitingApproval {
+                interaction_request_id: Some("approval-456".to_string())
+            }
+        );
+
+        let action = run.approve_gate("implement");
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
+            "expected review dispatch after gate approval, got {action:?}"
+        );
+        assert_eq!(run.step_states["implement"], StepState::Passed);
     }
 
     // -------------------------------------------------------------------------
@@ -400,7 +720,7 @@ mod tests {
         let mut run = make_run(&steps);
 
         run.mark_running("build", "s-b".to_string());
-        run.step_completed("build", Verdict::Approve);
+        run.step_completed("build", Verdict::Approve, false);
         run.mark_running("review", "s-r".to_string());
 
         let action = run.step_completed(
@@ -408,6 +728,7 @@ mod tests {
             Verdict::Reject {
                 summary: "code quality is too low".to_string(),
             },
+            false,
         );
 
         assert!(
@@ -479,7 +800,7 @@ mod tests {
 
         // After build passes, review is dispatched with its tracker_state.
         run.mark_running("build", "s-b".to_string());
-        let action = run.step_completed("build", Verdict::Approve);
+        let action = run.step_completed("build", Verdict::Approve, false);
         match &action {
             PipelineAction::Dispatch(reqs) => {
                 assert_eq!(reqs.len(), 1);
@@ -503,6 +824,10 @@ mod tests {
         .is_terminal());
         assert!(!StepState::BlockedOnHuman {
             interaction_request_id: "interaction-1".to_string()
+        }
+        .is_terminal());
+        assert!(!StepState::AwaitingApproval {
+            interaction_request_id: None
         }
         .is_terminal());
         assert!(StepState::Passed.is_terminal());
@@ -531,6 +856,50 @@ mod tests {
                 interaction_request_id: "interaction-123".to_string()
             }
         );
+    }
+
+    #[test]
+    fn reject_gate_rejects_and_halts_from_approval_state() {
+        let steps = vec![make_step_with_approval(
+            "review",
+            "reviewer",
+            &[],
+            StepApprovalMode::Always,
+            Some("Review gate"),
+        )];
+        let mut run = make_run(&steps);
+
+        let action = run.step_completed("review", Verdict::Approve, false);
+        assert!(matches!(action, PipelineAction::AwaitingApproval { .. }));
+
+        let action = run.bind_approval_interaction("review", "approval-789".to_string());
+        assert_eq!(action, PipelineAction::Waiting);
+
+        let action = run.reject_gate("review", "needs more work".to_string());
+        assert_eq!(
+            action,
+            PipelineAction::Failed {
+                step: "review".to_string(),
+                reason: "needs more work".to_string()
+            }
+        );
+        assert_eq!(
+            run.step_states["review"],
+            StepState::Rejected {
+                summary: "needs more work".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn bind_approval_interaction_ignores_non_approval_states() {
+        let steps = vec![make_step("build", "builder", &[])];
+        let mut run = make_run(&steps);
+
+        let action = run.bind_approval_interaction("build", "approval-ignored".to_string());
+
+        assert_eq!(action, PipelineAction::Waiting);
+        assert_eq!(run.step_states["build"], StepState::Pending);
     }
 
     #[test]
@@ -588,7 +957,7 @@ mod tests {
         let mut run = make_run(&steps);
 
         run.mark_running("build", "session-build".to_string());
-        let action = run.step_completed("build", Verdict::Approve);
+        let action = run.step_completed("build", Verdict::Approve, false);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
             "expected Dispatch([review]), got {action:?}"

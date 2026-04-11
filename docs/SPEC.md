@@ -229,6 +229,12 @@ Pipeline step definition:
   implicitly depends on the step directly before it in the list. The first step has no implicit
   dependency. Explicit `depends` overrides the implicit rule.
 - `tracker_state` (string, optional) — tracker state to write on step entry.
+- `approval` (StepApprovalConfig, optional) — post-step approval gate:
+
+  - `mode` (string) — `always` or `when_requested_by_agent`. The latter waits for the agent to
+    request approval via `.ensemble/approval-request.json`.
+  - `state` (string, optional) — tracker state to mirror while waiting for approval. If set, the
+    issue's tracker state is updated to this value during the approval hold.
 
 #### 4.1.5 Workspace
 
@@ -253,9 +259,19 @@ Step states:
 
 - `Pending` — not yet started
 - `Running` — agent dispatched, session active
-- `Passed` — agent exited successfully with approve verdict (or no verdict)
-- `Rejected` — agent exited successfully with reject verdict
+- `AwaitingApproval` — step completed but blocked on an approval gate. The orchestrator
+  holds the pipeline here until a `approve_gate` or `reject_gate` signal is received.
+- `Passed` — agent exited successfully with approve verdict (or no verdict), or approved at an
+  approval gate
+- `Rejected` — agent exited successfully with reject verdict, or rejected at an approval gate
 - `Failed` — agent crashed, timed out, or errored
+
+**Post-step approval checkpoints:** When a step has `approval` configured, the orchestrator
+enters `AwaitingApproval` after the step completes. The orchestrator updates the issue tracker
+state to `approval.state` (if set) and waits. On `approve_gate`: the step transitions to `Passed`
+and downstream steps are dispatched. On `reject_gate`: the step transitions to `Rejected` and the
+pipeline falls back to `on_failure`. The `Rejected` transition does not write a separate rejection
+state — it is treated as a failure in the `on_failure` sense.
 
 #### 4.1.7 Verdict
 

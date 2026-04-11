@@ -6,7 +6,8 @@ use ensemble_core::agent::cancellation::new_cancellation_registry;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
 use ensemble_core::interaction::model::{
-    InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+    InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
+    InteractionStatus,
 };
 use ensemble_core::interaction::store::InteractionStore;
 use ensemble_core::observability::events::EventBus;
@@ -140,11 +141,16 @@ fn test_interaction(id: &str, issue_id: &str, issue_identifier: &str) -> Interac
         status: InteractionStatus::Open,
         blocking: true,
         awaiting_resume: true,
+        resume_strategy: InteractionResumeStrategy::RerunStep,
         title: "Need clarification".to_string(),
         body: "Pick a deployment target".to_string(),
         options: vec!["staging".to_string(), "production".to_string()],
         artifacts: vec!["docs/spec.md".to_string()],
         response: None,
+        waiting_started_at: None,
+        agent_input_tokens: 0,
+        agent_output_tokens: 0,
+        agent_total_tokens: 0,
         requested_at: Utc::now(),
         resolved_at: None,
     }
@@ -909,6 +915,10 @@ async fn resume_blocked_issue_requeues_issue() {
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
     }
@@ -952,6 +962,10 @@ async fn issue_input_resolves_interaction_and_queues_resume() {
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
     }
@@ -1023,6 +1037,10 @@ async fn issue_detail_includes_pending_input_summary() {
             prompt: "Need input".to_string(),
             agent_name: "reviewer".to_string(),
             retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
     }
@@ -1063,6 +1081,10 @@ async fn issue_input_supports_rejection_outcome_for_approval_gate() {
             prompt: "Approve deployment?".to_string(),
             agent_name: "reviewer".to_string(),
             retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
     }
@@ -1119,6 +1141,10 @@ async fn issue_input_rejects_invalid_outcome() {
             prompt: "Approve deployment?".to_string(),
             agent_name: "reviewer".to_string(),
             retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
     }

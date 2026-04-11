@@ -324,7 +324,8 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None
+                runtime_verdict: None,
+                ..
             }
         ));
         let mut saw_output = false;
@@ -386,7 +387,8 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None
+                runtime_verdict: None,
+                ..
             }
         ));
     }

@@ -20,6 +20,14 @@ pub struct WaitingOnHumanEntry {
     pub prompt: String,
     pub agent_name: String,
     pub retry_attempt: Option<u32>,
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub agent_input_tokens: u64,
+    #[serde(default)]
+    pub agent_output_tokens: u64,
+    #[serde(default)]
+    pub agent_total_tokens: u64,
     pub requested_at: DateTime<Utc>,
 }
 
@@ -535,6 +543,10 @@ mod tests {
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: None,
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
 
@@ -565,6 +577,10 @@ mod tests {
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: None,
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
         });
         state.queue_resume("1");

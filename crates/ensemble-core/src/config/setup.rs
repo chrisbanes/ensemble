@@ -799,6 +799,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
             // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
             depends: Some(step.depends.clone()),
             tracker_state: step.tracker_state.clone(),
+            approval: None,
         })
         .collect();
 

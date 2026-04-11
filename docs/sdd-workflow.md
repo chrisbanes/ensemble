@@ -150,6 +150,18 @@ Use tracker states for planned approval/review gates:
 - Approval transitions move the issue forward
 - Rejection returns the issue to an earlier state
 
+Step-level approval gates (not just tracker states) are now the orchestration boundary. Ensemble pipelines can include steps with an `approval` block that causes the orchestrator to pause and wait for explicit `approve_gate` or `reject_gate` signals before continuing downstream steps.
+
+### Recommended Superpowers Pipeline
+
+The recommended operating model is a single Ensemble pipeline:
+
+- `plan` — brainstorm, design, and planning. May request a manual approval gate before implementation.
+- `implement` — build the planned solution.
+- `review` — verify the implementation.
+
+This three-step DAG allows the plan step to request human approval before implementation begins, ensuring designs are reviewed before code is written.
+
 ### Retry And Review Handling
 
 Use the same execution issue for retries, review cycles, and ambiguity handling:
