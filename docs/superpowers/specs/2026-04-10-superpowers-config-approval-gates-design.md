@@ -22,7 +22,7 @@ The key product change is a new generic per-step approval gate in Ensemble. Trac
 
 ## Problem
 
-The current local config at `/Users/chris/Library/Application Support/ensemble/config.yaml` is a simple two-step pipeline:
+The current local config at `$HOME/Library/Application Support/ensemble/config.yaml` is a simple two-step pipeline:
 
 - `implement`
 - `review`
@@ -87,7 +87,7 @@ Conceptual target:
 ```yaml
 tracker:
   kind: todo_file
-  path: /Users/chris/ensemble/TODO.md
+  path: $HOME/ensemble/TODO.md
   active_states:
     - Todo
     - Ready
@@ -96,7 +96,7 @@ tracker:
     - Failed
 
 repos:
-  - path: /Users/chris/dev/ensemble
+  - path: $HOME/dev/ensemble
     branch: main
 
 agents:

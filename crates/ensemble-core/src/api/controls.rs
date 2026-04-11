@@ -1006,14 +1006,13 @@ mod tests {
         serde_json::from_slice(&body).unwrap()
     }
 
-    async fn build_app_state_with_waiting_approval_gate() -> AppState {
+    async fn build_app_state_with_waiting_approval_gate() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.yaml");
         tokio::fs::write(&config_path, "tracker:\n  kind: todo_file\n")
             .await
             .unwrap();
         let config_dir = temp_dir.path().to_path_buf();
-        std::mem::forget(temp_dir);
 
         let mut state = OrchestratorState::new(30000, 10);
         state.add_claimed("NODE_123");
@@ -1069,17 +1068,16 @@ mod tests {
             .await
             .unwrap();
 
-        app_state
+        (app_state, temp_dir)
     }
 
-    async fn build_app_state_with_waiting_manual_decision() -> AppState {
+    async fn build_app_state_with_waiting_manual_decision() -> (AppState, tempfile::TempDir) {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.yaml");
         tokio::fs::write(&config_path, "tracker:\n  kind: todo_file\n")
             .await
             .unwrap();
         let config_dir = temp_dir.path().to_path_buf();
-        std::mem::forget(temp_dir);
 
         let mut state = OrchestratorState::new(30000, 10);
         state.add_claimed("NODE_123");
@@ -1135,7 +1133,7 @@ mod tests {
             .await
             .unwrap();
 
-        app_state
+        (app_state, temp_dir)
     }
 
     fn build_app_state_with_running_pid(agent_pid: Option<&str>) -> AppState {
@@ -1407,7 +1405,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_issue_input_accepts_approval_outcome_for_post_step_gate() {
-        let state = build_app_state_with_waiting_approval_gate().await;
+        let (state, _temp_dir) = build_app_state_with_waiting_approval_gate().await;
 
         let response = post_issue_input(
             State(state.clone()),
@@ -1446,7 +1444,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_issue_input_rejects_missing_outcome_for_approval_gate() {
-        let state = build_app_state_with_waiting_approval_gate().await;
+        let (state, _temp_dir) = build_app_state_with_waiting_approval_gate().await;
 
         let response = post_issue_input(
             State(state.clone()),
@@ -1474,7 +1472,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_issue_input_rejects_missing_outcome_for_manual_decision() {
-        let state = build_app_state_with_waiting_manual_decision().await;
+        let (state, _temp_dir) = build_app_state_with_waiting_manual_decision().await;
 
         let response = post_issue_input(
             State(state.clone()),

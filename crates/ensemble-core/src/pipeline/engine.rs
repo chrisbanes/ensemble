@@ -71,6 +71,18 @@ pub enum PipelineAction {
     Waiting,
 }
 
+/// Result of checking whether a step is eligible for post-step approval gating.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ApprovalGateCheck {
+    /// Step is eligible — approval gate should apply.
+    EligibleGating,
+    /// Step has no approval config and none was requested.
+    NotRequested,
+    /// Worker emitted an approval request but the step has no approval
+    /// configuration. This is a mismatch that should fail the step.
+    UnconfiguredButRequested,
+}
+
 /// Per-issue pipeline execution state machine.
 ///
 /// Tracks step states, drives step dispatch when dependencies are met, and
@@ -132,8 +144,8 @@ impl PipelineRun {
         approval_requested: bool,
     ) -> PipelineAction {
         match verdict {
-            Verdict::Approve => {
-                if self.should_gate_approval(step_name, approval_requested) {
+            Verdict::Approve => match self.gate_check(step_name, approval_requested) {
+                ApprovalGateCheck::EligibleGating => {
                     let approval_state = self.approval_state_for(step_name);
                     self.step_states.insert(
                         step_name.to_string(),
@@ -145,7 +157,24 @@ impl PipelineRun {
                         step: step_name.to_string(),
                         approval_state,
                     }
-                } else {
+                }
+                ApprovalGateCheck::UnconfiguredButRequested => {
+                    self.step_states.insert(
+                            step_name.to_string(),
+                            StepState::Failed {
+                                error: format!(
+                                    "worker requested approval for step '{step_name}' but it has no approval configuration"
+                                ),
+                            },
+                        );
+                    PipelineAction::Failed {
+                            step: step_name.to_string(),
+                            reason: format!(
+                                "step '{step_name}' has no approval configuration but the worker requested one"
+                            ),
+                        }
+                }
+                ApprovalGateCheck::NotRequested => {
                     self.step_states
                         .insert(step_name.to_string(), StepState::Passed);
                     if self.all_passed() {
@@ -154,7 +183,7 @@ impl PipelineRun {
                         self.find_dispatchable()
                     }
                 }
-            }
+            },
             Verdict::Reject { summary } => {
                 self.step_states.insert(
                     step_name.to_string(),
@@ -284,23 +313,33 @@ impl PipelineRun {
             .all(|s| self.step_states.get(&s.name) == Some(&StepState::Passed))
     }
 
-    fn should_gate_approval(&self, step_name: &str, approval_requested: bool) -> bool {
-        matches!(
-            self.dag
-                .steps
-                .iter()
-                .find(|step| step.name == step_name)
-                .and_then(|step| step.approval.as_ref().map(|approval| approval.mode)),
-            Some(crate::config::ensemble::StepApprovalMode::Always)
-        ) || (approval_requested
-            && matches!(
-                self.dag
-                    .steps
-                    .iter()
-                    .find(|step| step.name == step_name)
-                    .and_then(|step| step.approval.as_ref().map(|approval| approval.mode)),
-                Some(crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent)
-            ))
+    fn gate_check(&self, step_name: &str, approval_requested: bool) -> ApprovalGateCheck {
+        let step_approval_mode = self
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == step_name)
+            .and_then(|step| step.approval.as_ref().map(|approval| approval.mode));
+
+        match step_approval_mode {
+            Some(crate::config::ensemble::StepApprovalMode::Always) => {
+                ApprovalGateCheck::EligibleGating
+            }
+            Some(crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent) => {
+                if approval_requested {
+                    ApprovalGateCheck::EligibleGating
+                } else {
+                    ApprovalGateCheck::NotRequested
+                }
+            }
+            None => {
+                if approval_requested {
+                    ApprovalGateCheck::UnconfiguredButRequested
+                } else {
+                    ApprovalGateCheck::NotRequested
+                }
+            }
+        }
     }
 
     fn approval_state_for(&self, step_name: &str) -> Option<String> {
@@ -974,5 +1013,27 @@ mod tests {
             }
         );
         assert_eq!(run.find_dispatchable(), PipelineAction::Waiting);
+    }
+
+    #[test]
+    fn step_completed_fails_when_worker_requests_approval_but_step_has_no_approval_config() {
+        let steps = vec![make_step("build", "builder", &[])];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        let action = run.step_completed("build", Verdict::Approve, true);
+
+        assert!(
+            matches!(
+                &action,
+                PipelineAction::Failed { step, reason }
+                    if step == "build" && reason.contains("no approval configuration")
+            ),
+            "expected Failed for unconfigured approval request, got {action:?}"
+        );
+        assert!(matches!(
+            &run.step_states["build"],
+            StepState::Failed { error } if error.contains("no approval configuration")
+        ));
     }
 }
