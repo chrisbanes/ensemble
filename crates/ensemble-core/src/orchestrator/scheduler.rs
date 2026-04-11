@@ -50,7 +50,7 @@ pub fn is_dispatch_eligible(
     }
 
     // Must not already be completed (tracker may re-surface stale issues)
-    if state.completed.contains(&issue.id) {
+    if state.completed.contains_key(&issue.id) {
         return Some("already completed".to_string());
     }
 
@@ -120,7 +120,7 @@ pub fn is_resume_dispatch_eligible(
     if state.is_running(&issue.id) {
         return Some("already running".to_string());
     }
-    if state.completed.contains(&issue.id) {
+    if state.completed.contains_key(&issue.id) {
         return Some("already completed".to_string());
     }
     if available_global_slots(state) == 0 {
@@ -351,7 +351,11 @@ mod tests {
     #[test]
     fn test_ineligible_already_completed() {
         let mut state = OrchestratorState::new(30000, 10);
-        state.completed.insert("1".to_string());
+        state.add_completed(
+            "1".to_string(),
+            "repo#1".to_string(),
+            "completed_succeeded".to_string(),
+        );
 
         let issue = test_issue("1", "Todo");
 

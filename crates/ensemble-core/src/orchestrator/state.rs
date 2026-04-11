@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interaction::model::InteractionKind;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::EnsembleConfig;
@@ -29,6 +29,15 @@ pub struct WaitingOnHumanEntry {
     #[serde(default)]
     pub agent_total_tokens: u64,
     pub requested_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedEntry {
+    pub issue_id: String,
+    pub identifier: String,
+    pub status: String,
+    pub completed_at: DateTime<Utc>,
+    pub outcome_summary: Option<String>,
 }
 
 /// Rate limit snapshot from agent events.
@@ -84,8 +93,10 @@ pub struct OrchestratorState {
     pub waiting_on_human: HashMap<String, WaitingOnHumanEntry>,
     /// Explicit resume requests queued by the API/UI: issue IDs.
     pub resume_requested: HashSet<String>,
-    /// Completed issue IDs (bookkeeping only).
-    pub completed: HashSet<String>,
+    /// Completed issues: issue_id -> CompletedEntry.
+    pub completed: HashMap<String, CompletedEntry>,
+    /// Seconds to keep completed entries before expiry.
+    pub completed_expiry_secs: u64,
     /// Aggregate token counts and runtime seconds.
     pub agent_totals: AgentTotals,
     /// Latest rate limit snapshot from agent events.
@@ -127,7 +138,8 @@ impl OrchestratorState {
             retry_attempts: HashMap::new(),
             waiting_on_human: HashMap::new(),
             resume_requested: HashSet::new(),
-            completed: HashSet::new(),
+            completed: HashMap::new(),
+            completed_expiry_secs: 259200,
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
@@ -429,6 +441,26 @@ impl OrchestratorState {
 
     pub fn get_pipeline_config(&self, issue_id: &str) -> Option<&std::sync::Arc<EnsembleConfig>> {
         self.pipeline_configs.get(issue_id)
+    }
+
+    pub fn add_completed(&mut self, issue_id: String, identifier: String, status: String) {
+        self.completed.insert(
+            issue_id.clone(),
+            CompletedEntry {
+                issue_id,
+                identifier,
+                status,
+                completed_at: Utc::now(),
+                outcome_summary: None,
+            },
+        );
+    }
+
+    pub fn cleanup_expired_completed(&mut self) {
+        let now = Utc::now();
+        let expiry = Duration::seconds(self.completed_expiry_secs as i64);
+        self.completed
+            .retain(|_, entry| now.signed_duration_since(entry.completed_at) < expiry);
     }
 }
 
@@ -733,5 +765,68 @@ mod tests {
         state.release_claim("1");
         assert!(state.issue_run_ids.get("1").is_none());
         assert!(state.timeline_sequences.get(&second_run_id).is_none());
+    }
+
+    #[test]
+    fn test_add_completed() {
+        let mut state = OrchestratorState::new(30000, 10);
+
+        state.add_completed(
+            "issue-1".to_string(),
+            "repo#1".to_string(),
+            "completed_succeeded".to_string(),
+        );
+
+        assert!(state.completed.contains_key("issue-1"));
+        let entry = state.completed.get("issue-1").unwrap();
+        assert_eq!(entry.issue_id, "issue-1");
+        assert_eq!(entry.identifier, "repo#1");
+        assert_eq!(entry.status, "completed_succeeded");
+        assert!(entry.outcome_summary.is_none());
+    }
+
+    #[test]
+    fn test_cleanup_expired_completed() {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.completed_expiry_secs = 1;
+
+        state.add_completed(
+            "issue-1".to_string(),
+            "repo#1".to_string(),
+            "completed_succeeded".to_string(),
+        );
+
+        assert!(state.completed.contains_key("issue-1"));
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        state.cleanup_expired_completed();
+
+        assert!(state.completed.is_empty());
+    }
+
+    #[test]
+    fn test_cleanup_expired_completed_keeps_valid() {
+        let mut state = OrchestratorState::new(30000, 10);
+        state.completed_expiry_secs = 10;
+
+        state.add_completed(
+            "issue-1".to_string(),
+            "repo#1".to_string(),
+            "completed_succeeded".to_string(),
+        );
+        state.add_completed(
+            "issue-2".to_string(),
+            "repo#2".to_string(),
+            "completed_failed".to_string(),
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        state.cleanup_expired_completed();
+
+        assert_eq!(state.completed.len(), 2);
+        assert!(state.completed.contains_key("issue-1"));
+        assert!(state.completed.contains_key("issue-2"));
     }
 }

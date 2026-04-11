@@ -1262,7 +1262,7 @@ mod tests {
         let finalize = lock.get_finalize_state("NODE_888").unwrap();
         assert_eq!(finalize.status, FinalizeStatus::InProgress);
         assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
-        assert!(!lock.completed.contains("NODE_888"));
+        assert!(!lock.completed.contains_key("NODE_888"));
     }
 
     #[tokio::test]

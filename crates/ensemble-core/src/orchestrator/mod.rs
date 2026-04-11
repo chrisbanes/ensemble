@@ -1035,9 +1035,12 @@ impl Orchestrator {
                                     )
                                 });
 
-                            if let Some(entry) = state.remove_running(issue_id) {
+                            let completed_identifier = if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
-                            }
+                                Some(entry.identifier)
+                            } else {
+                                None
+                            };
 
                             if finalize_state.status == FinalizeStatus::Succeeded
                                 || finalize_state.status == FinalizeStatus::NotRequired
@@ -1053,7 +1056,9 @@ impl Orchestrator {
                                 }
                                 state.release_claim(issue_id);
                                 state.remove_pipeline_run(issue_id);
-                                state.completed.insert(issue_id.to_string());
+                                if let Some(identifier) = completed_identifier {
+                                    state.add_completed(issue_id.to_string(), identifier, "completed_succeeded".to_string());
+                                }
                                 state.clear_finalize_state(issue_id);
 
                                 drop(state);
@@ -1932,7 +1937,11 @@ impl Orchestrator {
                 );
 
                 if should_complete {
-                    state.completed.insert(issue_id.to_string());
+                    let identifier = state
+                        .get_finalize_state(issue_id)
+                        .map(|f| f.issue_identifier.clone())
+                        .unwrap_or_else(|| issue_id.to_string());
+                    state.add_completed(issue_id.to_string(), identifier, "completed_succeeded".to_string());
                     state.release_claim(issue_id);
                     state.remove_pipeline_run(issue_id);
                     state.clear_finalize_state(issue_id);
@@ -2648,7 +2657,7 @@ impl Orchestrator {
                             ) {
                                 state.release_claim(&issue.id);
                                 state.remove_pipeline_run(&issue.id);
-                                state.completed.insert(issue.id.clone());
+                                state.add_completed(issue.id.clone(), issue.identifier.clone(), "completed_succeeded".to_string());
                                 state.clear_finalize_state(&issue.id);
 
                                 (
@@ -2715,7 +2724,7 @@ impl Orchestrator {
 
                             state.release_claim(&issue.id);
                             state.remove_pipeline_run(&issue.id);
-                            state.completed.insert(issue.id.clone());
+                            state.add_completed(issue.id.clone(), issue.identifier.clone(), "completed_failed".to_string());
                             state.clear_finalize_state(&issue.id);
 
                             history_record
@@ -3575,7 +3584,7 @@ agent:
         let state = orchestrator.state.read().await;
         // With a single-step pipeline, success should complete the pipeline
         assert!(
-            state.completed.contains("1") || state.retry_attempts.contains_key("1"),
+            state.completed.contains_key("1") || state.retry_attempts.contains_key("1"),
             "should be completed or retrying"
         );
     }
@@ -3640,7 +3649,7 @@ agent:
             .await;
 
         let state = orchestrator.state.read().await;
-        assert!(state.completed.contains("1"));
+        assert!(state.completed.contains_key("1"));
         assert!(!state.retry_attempts.contains_key("1"));
     }
 
@@ -4195,7 +4204,7 @@ agent:
         let state = orchestrator.state.read().await;
         if !state.is_running("1") {
             assert!(
-                state.retry_attempts.contains_key("1") || state.completed.contains("1"),
+                state.retry_attempts.contains_key("1") || state.completed.contains_key("1"),
                 "should have retry or be completed"
             );
         }
@@ -4865,7 +4874,7 @@ agent:
             .expect("rejected approval gate should still resolve locally");
 
         let state = orchestrator.state.read().await;
-        assert!(state.completed.contains("1"));
+        assert!(state.completed.contains_key("1"));
         assert!(!state.is_claimed("1"));
         assert!(state.get_pipeline_run("1").is_none());
     }
