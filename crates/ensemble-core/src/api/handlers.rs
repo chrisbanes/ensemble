@@ -1,14 +1,19 @@
 use crate::api::router::AppState;
+use crate::history::model::HistoryRecord;
 use crate::observability::snapshot::{
-    build_issue_snapshot, build_state_snapshot, extract_step_detail_state, IssueDetailSnapshot,
-    RuntimeSnapshot, StepDetailSnapshot,
+    build_issue_snapshot, build_state_snapshot, extract_step_detail_state, AttemptInfo,
+    FinalizeSnapshot, IssueDetailSnapshot, IssueSummary, RepoFinalizeSnapshot, RetryRow,
+    RunningDetail, RuntimeSnapshot, StepDetailSnapshot, WorkflowStepInfo, WorkspaceInfo,
 };
+use crate::tracker::model::sanitize_workspace_key;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use serde::Serialize;
+use std::io::ErrorKind;
+use std::path::Path as FsPath;
 
 /// Standard JSON error envelope matching SPEC.md Section 13.7.2 error format.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -81,9 +86,31 @@ pub async fn get_issue_detail(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
 ) -> impl IntoResponse {
-    let lock = state.orchestrator_state.read().await;
-    let detail = build_issue_snapshot(&lock, &identifier, &state.workspace_root);
-    drop(lock);
+    let live_detail = {
+        let lock = state.orchestrator_state.read().await;
+        build_issue_snapshot(&lock, &identifier, &state.workspace_root)
+    };
+
+    if let Some(detail) = live_detail {
+        return (StatusCode::OK, Json(detail)).into_response();
+    }
+
+    let detail = match build_issue_snapshot_from_history(
+        &state.history_path,
+        &state.workspace_root,
+        &identifier,
+    )
+    .await
+    {
+        Ok(detail) => detail,
+        Err(error) => {
+            let error = ApiError::new(
+                "history_read_error",
+                &format!("failed to read history: {}", error),
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+        }
+    };
 
     match detail {
         Some(detail) => (StatusCode::OK, Json(detail)).into_response(),
@@ -98,6 +125,96 @@ pub async fn get_issue_detail(
             (StatusCode::NOT_FOUND, Json(error)).into_response()
         }
     }
+}
+
+async fn build_issue_snapshot_from_history(
+    history_path: &FsPath,
+    workspace_root: &str,
+    identifier: &str,
+) -> Result<Option<IssueDetailSnapshot>, std::io::Error> {
+    let contents = match tokio::fs::read_to_string(history_path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+
+    let record = contents.lines().rev().find_map(|line| {
+        serde_json::from_str::<HistoryRecord>(line)
+            .ok()
+            .filter(|entry| entry.issue_identifier == identifier)
+    });
+    let Some(record) = record else {
+        return Ok(None);
+    };
+
+    let status = match record.outcome.as_str() {
+        "succeeded" => "completed_succeeded".to_string(),
+        "failed" => "completed_failed".to_string(),
+        "stopped" => "completed_stopped".to_string(),
+        other => format!("completed_{other}"),
+    };
+
+    let workspace_path = if record.workspace_path.is_empty() {
+        let key = sanitize_workspace_key(identifier);
+        let Some(key) = key else {
+            return Ok(None);
+        };
+        format!("{}/{}", workspace_root, key)
+    } else {
+        record.workspace_path.clone()
+    };
+
+    let workflow_steps: Vec<WorkflowStepInfo> = if record.steps_traversed.is_empty() {
+        Vec::new()
+    } else {
+        let last_idx = record.steps_traversed.len().saturating_sub(1);
+        record
+            .steps_traversed
+            .iter()
+            .enumerate()
+            .map(|(idx, name)| WorkflowStepInfo {
+                name: name.clone(),
+                agent: "unknown".to_string(),
+                dependencies: vec![],
+                state: if record.outcome == "failed" && idx == last_idx {
+                    "failed".to_string()
+                } else {
+                    "passed".to_string()
+                },
+                can_navigate: false,
+            })
+            .collect()
+    };
+
+    Ok(Some(IssueDetailSnapshot {
+        issue_identifier: record.issue_identifier.clone(),
+        issue_id: record.issue_id.clone(),
+        status,
+        workspace: WorkspaceInfo {
+            path: workspace_path,
+        },
+        attempts: AttemptInfo {
+            restart_count: record.attempts.saturating_sub(1),
+            current_retry_attempt: None,
+        },
+        running: Option::<RunningDetail>::None,
+        retry: Option::<RetryRow>::None,
+        pending_input: None,
+        current_interaction: None,
+        last_error: record.last_error.clone(),
+        finalize: FinalizeSnapshot {
+            status: "not_required".to_string(),
+            repos: Vec::<RepoFinalizeSnapshot>::new(),
+        },
+        workflow_steps,
+        issue: IssueSummary {
+            title: record.issue_identifier.clone(),
+            description: None,
+            labels: vec![],
+            priority: None,
+            url: None,
+        },
+    }))
 }
 
 /// GET /api/v1/{identifier}/step/{step_name}
@@ -233,10 +350,13 @@ mod tests {
     use super::*;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::ConcurrencyConfig;
+    use crate::history::model::{HistoryRecord, TokenTotals};
+    use crate::history::writer::HistoryWriter;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
     use std::sync::Arc;
+    use tempfile::NamedTempFile;
 
     fn test_issue() -> Issue {
         Issue {
@@ -424,6 +544,95 @@ mod tests {
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_falls_back_to_history_for_terminal_issue() {
+        let mut app_state = build_empty_state();
+        let tmp = NamedTempFile::new().unwrap();
+        let history_path = tmp.path().to_path_buf();
+        std::fs::remove_file(&history_path).ok();
+        app_state.history_path = history_path.clone();
+
+        let writer = HistoryWriter::new(history_path);
+        writer
+            .append(&HistoryRecord {
+                issue_identifier: "todo-0".to_string(),
+                issue_id: "todo-0".to_string(),
+                outcome: "failed".to_string(),
+                steps_traversed: vec!["build".to_string()],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                },
+                duration_seconds: 42,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: Some("agent crashed".to_string()),
+                verdict: Some("failed".to_string()),
+                workspace_path: "/tmp/workspaces/todo-0".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let response = get_issue_detail(State(app_state), Path("todo-0".to_string()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_history_read_error_returns_500() {
+        let mut app_state = build_empty_state();
+        let temp_dir = tempfile::tempdir().unwrap();
+        app_state.history_path = temp_dir.path().to_path_buf();
+
+        let response = get_issue_detail(State(app_state), Path("todo-0".to_string()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_history_fallback_rejects_unsafe_workspace_key() {
+        let mut app_state = build_empty_state();
+        let tmp = NamedTempFile::new().unwrap();
+        let history_path = tmp.path().to_path_buf();
+        std::fs::remove_file(&history_path).ok();
+        app_state.history_path = history_path.clone();
+
+        let writer = HistoryWriter::new(history_path);
+        writer
+            .append(&HistoryRecord {
+                issue_identifier: ".".to_string(),
+                issue_id: "dot".to_string(),
+                outcome: "failed".to_string(),
+                steps_traversed: vec!["build".to_string()],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                },
+                duration_seconds: 42,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: Some("agent crashed".to_string()),
+                verdict: Some("failed".to_string()),
+                workspace_path: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let response = get_issue_detail(State(app_state), Path(".".to_string()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
