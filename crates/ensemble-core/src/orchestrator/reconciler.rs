@@ -251,6 +251,7 @@ pub async fn startup_terminal_cleanup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::ConcurrencyConfig;
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
 
@@ -270,7 +271,7 @@ mod tests {
 
     #[test]
     fn test_stall_detection_disabled() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let result = reconcile_stalled_runs(&state, 0);
         assert_eq!(result.stalled_count, 0);
 
@@ -280,14 +281,14 @@ mod tests {
 
     #[test]
     fn test_stall_detection_no_running() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let result = reconcile_stalled_runs(&state, 300_000);
         assert_eq!(result.stalled_count, 0);
     }
 
     #[test]
     fn test_stall_detection_not_stalled() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
         // started_at is now, so it won't be stalled with a large timeout
@@ -297,7 +298,7 @@ mod tests {
 
     #[test]
     fn test_stall_detection_stalled() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -313,7 +314,7 @@ mod tests {
 
     #[test]
     fn test_stall_uses_last_agent_timestamp() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -406,7 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_tracker_no_running() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let tracker = MockTrackerForReconcile {
             issues: vec![],
             should_fail: false,
@@ -424,7 +425,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_tracker_active_update() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "In Progress");
         state.add_running(&issue, None);
 
@@ -444,7 +445,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_tracker_terminal_cleanup() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "In Progress");
         state.add_running(&issue, None);
 
@@ -464,7 +465,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_tracker_non_active_stop() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "In Progress");
         state.add_running(&issue, None);
 
@@ -484,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_reconcile_tracker_refresh_failed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "In Progress");
         state.add_running(&issue, None);
 

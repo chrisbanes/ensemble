@@ -23,7 +23,7 @@ pub mod test_helpers {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
     pub identifier: String,
@@ -39,7 +39,7 @@ pub struct Issue {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockerRef {
     pub id: Option<String>,
     pub identifier: Option<String>,

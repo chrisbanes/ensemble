@@ -1,6 +1,7 @@
 use crate::api::router::AppState;
 use crate::observability::snapshot::{
-    build_issue_snapshot, build_state_snapshot, IssueDetailSnapshot, RuntimeSnapshot,
+    build_issue_snapshot, build_state_snapshot, extract_step_detail_state, IssueDetailSnapshot,
+    RuntimeSnapshot, StepDetailSnapshot,
 };
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -99,6 +100,87 @@ pub async fn get_issue_detail(
     }
 }
 
+/// GET /api/v1/{identifier}/step/{step_name}
+///
+/// Returns step detail including recent events filtered to that step.
+#[utoipa::path(
+    get,
+    path = "/api/v1/{identifier}/step/{step_name}",
+    operation_id = "getStepDetail",
+    params(
+        ("identifier" = String, Path, description = "Issue identifier"),
+        ("step_name" = String, Path, description = "Step name")
+    ),
+    responses(
+        (status = 200, description = "Step detail", body = StepDetailSnapshot),
+        (status = 404, description = "Issue or step not found", body = ApiError)
+    ),
+    tag = "issues"
+)]
+pub async fn get_step_detail(
+    State(state): State<AppState>,
+    Path((identifier, step_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    // Extract data from state without doing I/O
+    let detail_state = {
+        let lock = state.orchestrator_state.read().await;
+        extract_step_detail_state(&lock, &identifier, &step_name)
+    };
+
+    let Some(detail_state) = detail_state else {
+        let error = ApiError::new(
+            "step_not_found",
+            &format!("no issue '{}' or step '{}' found", identifier, step_name),
+        );
+        return (StatusCode::NOT_FOUND, Json(error)).into_response();
+    };
+
+    // Do I/O outside the state lock using tokio::fs
+    let recent_events = if let Some(ref run_id) = detail_state.run_id {
+        let timeline_path = std::path::PathBuf::from(&state.workspace_root)
+            .join(".ensemble")
+            .join("runs")
+            .join(run_id)
+            .join("events.jsonl");
+        tokio::fs::read_to_string(&timeline_path)
+            .await
+            .ok()
+            .map(|contents| {
+                contents
+                    .lines()
+                    .rev()
+                    .filter_map(|line| {
+                        serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line)
+                            .ok()
+                    })
+                    .filter(|event| event.issue_identifier == identifier)
+                    .filter(|event| event.step_name.as_deref() == Some(&step_name))
+                    .take(50)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let detail = StepDetailSnapshot {
+        issue_identifier: identifier,
+        issue_id: detail_state.issue_id,
+        step_name,
+        status: detail_state.status,
+        agent: detail_state.agent,
+        dependencies: detail_state.dependencies,
+        can_navigate: detail_state.can_navigate,
+        verdict: detail_state.verdict,
+        recent_events,
+    };
+
+    (StatusCode::OK, Json(detail)).into_response()
+}
+
 /// Response body for POST /api/v1/refresh.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RefreshResponse {
@@ -150,6 +232,7 @@ pub async fn method_not_allowed() -> (StatusCode, Json<ApiError>) {
 mod tests {
     use super::*;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
+    use crate::config::ensemble::ConcurrencyConfig;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
@@ -206,7 +289,7 @@ mod tests {
     }
 
     fn build_populated_state() -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state
             .running
             .insert("NODE_123".to_string(), test_running_entry());
@@ -341,5 +424,31 @@ mod tests {
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_step_detail_not_found_no_issue() {
+        let app_state = build_empty_state();
+        let response = get_step_detail(
+            State(app_state),
+            Path(("nonexistent#999".to_string(), "build".to_string())),
+        )
+        .await;
+
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_step_detail_not_found_no_step() {
+        let app_state = build_populated_state();
+        let response = get_step_detail(
+            State(app_state),
+            Path(("my-repo#42".to_string(), "nonexistent-step".to_string())),
+        )
+        .await;
+
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -3,6 +3,7 @@ use crate::api::router::{AppState, ConfigRuntime};
 use crate::config::draft::{
     missing_config_state, ConfigDocumentState, ConfigStateKind, DraftValidationReport,
 };
+use crate::config::ensemble::ConcurrencyConfig;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use std::path::PathBuf;
@@ -24,7 +25,10 @@ pub(crate) fn parsed_document_state() -> ConfigDocumentState {
 
 pub(crate) fn app_state_with_document_state(document_state: ConfigDocumentState) -> AppState {
     AppState {
-        orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
+        orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(
+            30000,
+            &ConcurrencyConfig::default(),
+        ))),
         orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: "/tmp/workspaces".to_string(),
@@ -43,7 +47,10 @@ pub(crate) fn app_state_with_missing_config(
     workspace_root: &str,
 ) -> AppState {
     AppState {
-        orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(30000, 10))),
+        orchestrator_state: Arc::new(RwLock::new(OrchestratorState::new(
+            30000,
+            &ConcurrencyConfig::default(),
+        ))),
         orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: workspace_root.to_string(),

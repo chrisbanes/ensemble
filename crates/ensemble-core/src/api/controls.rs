@@ -894,7 +894,7 @@ mod tests {
     use crate::agent::cancellation::register_issue_cancellation;
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
-    use crate::config::ensemble::StepConfig;
+    use crate::config::ensemble::{ConcurrencyConfig, StepConfig};
     use crate::interaction::{InteractionRequest, InteractionResumeStrategy};
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
@@ -910,7 +910,7 @@ mod tests {
 
     #[test]
     fn find_issue_presence_reports_running_retrying_and_missing() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue(), None);
         state.add_retry(RetryEntry {
             issue_id: "NODE_456".to_string(),
@@ -973,7 +973,7 @@ mod tests {
     }
 
     fn build_app_state_with_running() -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue(), None);
         let mut app_state = app_state_with_document_state(parsed_document_state());
         app_state.orchestrator_state = Arc::new(RwLock::new(state));
@@ -1014,7 +1014,7 @@ mod tests {
             .unwrap();
         let config_dir = temp_dir.path().to_path_buf();
 
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_claimed("NODE_123");
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: "NODE_123".to_string(),
@@ -1030,6 +1030,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: chrono::Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let mut app_state = app_state_with_document_state(parsed_document_state());
@@ -1079,7 +1081,7 @@ mod tests {
             .unwrap();
         let config_dir = temp_dir.path().to_path_buf();
 
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_claimed("NODE_123");
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: "NODE_123".to_string(),
@@ -1095,6 +1097,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: chrono::Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let mut app_state = app_state_with_document_state(parsed_document_state());
@@ -1137,7 +1141,7 @@ mod tests {
     }
 
     fn build_app_state_with_running_pid(agent_pid: Option<&str>) -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue(), None);
         state.update_session_info("NODE_123", "session-123", agent_pid);
 
@@ -1152,7 +1156,7 @@ mod tests {
     }
 
     fn build_app_state_with_retry() -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_retry(RetryEntry {
             issue_id: "NODE_456".to_string(),
             identifier: "my-repo#99".to_string(),
@@ -1167,7 +1171,7 @@ mod tests {
     }
 
     fn build_app_state_with_finalize_pending() -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.set_finalize_state(
             "NODE_888",
             IssueFinalizeState {
@@ -1189,7 +1193,7 @@ mod tests {
     }
 
     fn build_app_state_with_finalize_failed() -> AppState {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.set_finalize_state(
             "NODE_999",
             IssueFinalizeState {
@@ -1262,7 +1266,7 @@ mod tests {
         let finalize = lock.get_finalize_state("NODE_888").unwrap();
         assert_eq!(finalize.status, FinalizeStatus::InProgress);
         assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
-        assert!(!lock.completed.contains("NODE_888"));
+        assert!(!lock.completed.contains_key("NODE_888"));
     }
 
     #[tokio::test]

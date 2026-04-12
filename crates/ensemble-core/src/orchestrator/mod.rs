@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 
@@ -124,7 +125,16 @@ impl Orchestrator {
         config_dir: &Path,
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
-        let state = Arc::new(RwLock::new(OrchestratorState::new(30_000, 10)));
+        let (concurrency, poll_interval_ms) = {
+            let config_guard = futures::executor::block_on(config.read());
+            let concurrency = config_guard.concurrency.clone();
+            let poll_interval_ms = config_guard.polling.interval_ms;
+            (concurrency, poll_interval_ms)
+        };
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            poll_interval_ms,
+            &concurrency,
+        )));
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
         Self::new_with_state(
             OrchestratorRuntimeParts {
@@ -187,22 +197,28 @@ impl Orchestrator {
 
         // Initialize state from config
         {
-            let config = self.config.read().await;
+            let (poll_interval_ms, max_concurrent_agents, config_clone) = {
+                let config = self.config.read().await;
+                (
+                    config.polling.interval_ms,
+                    config.concurrency.max_concurrent_agents,
+                    config.clone(),
+                )
+            };
             let mut state = self.state.write().await;
-            state.poll_interval_ms = config.polling.interval_ms;
-            state.max_concurrent_agents = config.concurrency.max_concurrent_agents;
-            state.init_state_lists(&config);
+            state.poll_interval_ms = poll_interval_ms;
+            state.max_concurrent_agents = max_concurrent_agents;
+            state.init_state_lists(&config_clone);
         }
 
         // Startup terminal workspace cleanup
         {
-            let config = self.config.read().await;
-            startup_terminal_cleanup(
-                self.tracker.as_ref(),
-                &config.tracker.terminal_states,
-                &self.workspace_mgr,
-            )
-            .await;
+            let terminal_states = {
+                let config = self.config.read().await;
+                config.tracker.terminal_states.clone()
+            };
+            startup_terminal_cleanup(self.tracker.as_ref(), &terminal_states, &self.workspace_mgr)
+                .await;
         }
 
         info!("orchestrator started, entering main loop");
@@ -275,6 +291,12 @@ impl Orchestrator {
     async fn handle_tick(&self) {
         let tick_started_at = std::time::Instant::now();
         info!(event = ORCH_TICK_STARTED, "orchestrator tick started");
+
+        // Cleanup expired completed entries
+        {
+            let mut state = self.state.write().await;
+            state.cleanup_expired_completed();
+        }
 
         // Initialize state lists lazily (for tests that don't call run())
         {
@@ -1035,13 +1057,21 @@ impl Orchestrator {
                                     )
                                 });
 
-                            if let Some(entry) = state.remove_running(issue_id) {
-                                state.add_runtime_seconds(&entry);
-                            }
+                            // Get running entry data before removing
+                            let running_entry = state.get_running(issue_id).cloned();
 
                             if finalize_state.status == FinalizeStatus::Succeeded
                                 || finalize_state.status == FinalizeStatus::NotRequired
                             {
+                                // Add to completed BEFORE removing from running
+                                if let Some(ref entry) = running_entry {
+                                    state.add_completed(
+                                        issue_id.to_string(),
+                                        entry.identifier.clone(),
+                                        "completed_succeeded".to_string(),
+                                    );
+                                }
+
                                 if self.tracker.supports_writes() {
                                     if let Err(e) = self
                                         .tracker
@@ -1053,7 +1083,11 @@ impl Orchestrator {
                                 }
                                 state.release_claim(issue_id);
                                 state.remove_pipeline_run(issue_id);
-                                state.completed.insert(issue_id.to_string());
+
+                                // Now remove from running and add runtime seconds
+                                if let Some(entry) = state.remove_running(issue_id) {
+                                    state.add_runtime_seconds(&entry);
+                                }
                                 state.clear_finalize_state(issue_id);
 
                                 drop(state);
@@ -1089,8 +1123,10 @@ impl Orchestrator {
                             let completed_at = Utc::now();
                             let mut final_failure = false;
                             let mut history_record = None;
+                            let mut completed_identifier = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
+                                completed_identifier = Some(entry.identifier.clone());
                                 let retry_scheduled = schedule_failure_retry(
                                     &mut state,
                                     issue_id,
@@ -1124,6 +1160,15 @@ impl Orchestrator {
                                 }
                             }
                             state.remove_pipeline_run(issue_id);
+                            if final_failure {
+                                if let Some(identifier) = completed_identifier {
+                                    state.add_completed(
+                                        issue_id.to_string(),
+                                        identifier,
+                                        "completed_failed".to_string(),
+                                    );
+                                }
+                            }
 
                             drop(state);
                             if final_failure {
@@ -1240,8 +1285,10 @@ impl Orchestrator {
                 let completed_at = Utc::now();
                 let mut final_failure = false;
                 let mut history_record = None;
+                let mut completed_identifier = None;
 
                 if let Some(entry) = state.remove_running(issue_id) {
+                    completed_identifier = Some(entry.identifier.clone());
                     state.add_runtime_seconds(&entry);
                     let retry_scheduled = schedule_failure_retry(
                         &mut state,
@@ -1276,6 +1323,15 @@ impl Orchestrator {
                     }
                 }
                 state.remove_pipeline_run(issue_id);
+                if final_failure {
+                    if let Some(identifier) = completed_identifier {
+                        state.add_completed(
+                            issue_id.to_string(),
+                            identifier,
+                            "completed_failed".to_string(),
+                        );
+                    }
+                }
 
                 drop(state);
                 if final_failure {
@@ -1377,10 +1433,14 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .is_some_and(Self::pipeline_has_running_steps);
 
-        let retry_attempt = state
-            .running
-            .get(issue_id)
-            .and_then(|entry| entry.retry_attempt);
+        let (retry_attempt, waiting_issue, waiting_run_id) = {
+            let entry = state.running.get(issue_id);
+            (
+                entry.and_then(|e| e.retry_attempt),
+                entry.map(|e| e.issue.clone()),
+                entry.and_then(|e| e.run_id.clone()),
+            )
+        };
         if !has_running_steps {
             if let Some(entry) = state.remove_running(issue_id) {
                 state.add_runtime_seconds(&entry);
@@ -1400,6 +1460,8 @@ impl Orchestrator {
             agent_output_tokens: waiting_output_tokens,
             agent_total_tokens: waiting_total_tokens,
             requested_at: interaction.requested_at,
+            run_id: waiting_run_id,
+            issue: waiting_issue,
         });
         drop(state);
 
@@ -1544,10 +1606,14 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .is_some_and(Self::pipeline_has_running_steps);
 
-        let retry_attempt = state
-            .running
-            .get(issue_id)
-            .and_then(|entry| entry.retry_attempt);
+        let (retry_attempt, waiting_issue, waiting_run_id) = {
+            let entry = state.running.get(issue_id);
+            (
+                entry.and_then(|e| e.retry_attempt),
+                entry.map(|e| e.issue.clone()),
+                entry.and_then(|e| e.run_id.clone()),
+            )
+        };
         if !has_running_steps {
             if let Some(entry) = state.remove_running(issue_id) {
                 state.add_runtime_seconds(&entry);
@@ -1568,6 +1634,8 @@ impl Orchestrator {
             agent_output_tokens: waiting_output_tokens,
             agent_total_tokens: waiting_total_tokens,
             requested_at: interaction.requested_at,
+            run_id: waiting_run_id,
+            issue: waiting_issue,
         });
         drop(state);
 
@@ -1605,6 +1673,14 @@ impl Orchestrator {
                 continue;
             }
 
+            // Try to get the issue from the tracker
+            let issue = self
+                .tracker
+                .fetch_issue_states_by_ids(std::slice::from_ref(&interaction.issue_id))
+                .await
+                .ok()
+                .and_then(|issues| issues.into_iter().next());
+
             state.add_waiting_on_human(WaitingOnHumanEntry {
                 issue_id: interaction.issue_id.clone(),
                 identifier: interaction.issue_identifier.clone(),
@@ -1619,6 +1695,8 @@ impl Orchestrator {
                 agent_output_tokens: interaction.agent_output_tokens,
                 agent_total_tokens: interaction.agent_total_tokens,
                 requested_at: interaction.requested_at,
+                run_id: None,
+                issue,
             });
         }
     }
@@ -1932,7 +2010,15 @@ impl Orchestrator {
                 );
 
                 if should_complete {
-                    state.completed.insert(issue_id.to_string());
+                    let identifier = state
+                        .get_finalize_state(issue_id)
+                        .map(|f| f.issue_identifier.clone())
+                        .unwrap_or_else(|| issue_id.to_string());
+                    state.add_completed(
+                        issue_id.to_string(),
+                        identifier,
+                        "completed_succeeded".to_string(),
+                    );
                     state.release_claim(issue_id);
                     state.remove_pipeline_run(issue_id);
                     state.clear_finalize_state(issue_id);
@@ -2256,24 +2342,27 @@ impl Orchestrator {
         }
 
         let mut state = self.state.write().await;
+        let run_id_for_waiting = state.issue_run_ids.get(&issue.id).cloned();
         state.insert_pipeline_run(&issue.id, pipeline_run, config_snapshot);
-        if !state.is_waiting_on_human(&issue.id) {
-            state.add_waiting_on_human(WaitingOnHumanEntry {
-                issue_id: issue.id.clone(),
-                identifier: issue.identifier.clone(),
-                interaction_request_id: interaction.id.clone(),
-                step_name: interaction.step_name.clone(),
-                kind: interaction.kind.clone(),
-                prompt: interaction.body.clone(),
-                agent_name: interaction.agent_name.clone(),
-                retry_attempt: Some(interaction.pipeline_cycle.max(1)),
-                started_at: interaction.waiting_started_at,
-                agent_input_tokens: interaction.agent_input_tokens,
-                agent_output_tokens: interaction.agent_output_tokens,
-                agent_total_tokens: interaction.agent_total_tokens,
-                requested_at: interaction.requested_at,
-            });
-        }
+        // Always update/add the waiting entry with the issue data to ensure it's available
+        // for completion tracking
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            interaction_request_id: interaction.id.clone(),
+            step_name: interaction.step_name.clone(),
+            kind: interaction.kind.clone(),
+            prompt: interaction.body.clone(),
+            agent_name: interaction.agent_name.clone(),
+            retry_attempt: Some(interaction.pipeline_cycle.max(1)),
+            started_at: interaction.waiting_started_at,
+            agent_input_tokens: interaction.agent_input_tokens,
+            agent_output_tokens: interaction.agent_output_tokens,
+            agent_total_tokens: interaction.agent_total_tokens,
+            requested_at: interaction.requested_at,
+            run_id: run_id_for_waiting,
+            issue: Some(issue.clone()),
+        });
 
         Ok(())
     }
@@ -2646,9 +2735,14 @@ impl Orchestrator {
                                 finalize_state.status,
                                 FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
                             ) {
+                                // Add to completed BEFORE releasing claim (which removes waiting_on_human)
+                                state.add_completed(
+                                    issue.id.clone(),
+                                    issue.identifier.clone(),
+                                    "completed_succeeded".to_string(),
+                                );
                                 state.release_claim(&issue.id);
                                 state.remove_pipeline_run(&issue.id);
-                                state.completed.insert(issue.id.clone());
                                 state.clear_finalize_state(&issue.id);
 
                                 (
@@ -2713,9 +2807,14 @@ impl Orchestrator {
                                     })
                                 });
 
+                            // Add to completed BEFORE releasing claim (which removes waiting_on_human)
+                            state.add_completed(
+                                issue.id.clone(),
+                                issue.identifier.clone(),
+                                "completed_failed".to_string(),
+                            );
                             state.release_claim(&issue.id);
                             state.remove_pipeline_run(&issue.id);
-                            state.completed.insert(issue.id.clone());
                             state.clear_finalize_state(&issue.id);
 
                             history_record
@@ -3034,7 +3133,7 @@ mod tests {
     use crate::agent::events::{
         AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
     };
-    use crate::config::ensemble::parse_config;
+    use crate::config::ensemble::{parse_config, ConcurrencyConfig};
     use crate::error::AgentError;
     use crate::interaction::{
         InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
@@ -3575,7 +3674,7 @@ agent:
         let state = orchestrator.state.read().await;
         // With a single-step pipeline, success should complete the pipeline
         assert!(
-            state.completed.contains("1") || state.retry_attempts.contains_key("1"),
+            state.completed.contains_key("1") || state.retry_attempts.contains_key("1"),
             "should be completed or retrying"
         );
     }
@@ -3640,7 +3739,7 @@ agent:
             .await;
 
         let state = orchestrator.state.read().await;
-        assert!(state.completed.contains("1"));
+        assert!(state.completed.contains_key("1"));
         assert!(!state.retry_attempts.contains_key("1"));
     }
 
@@ -4195,7 +4294,7 @@ agent:
         let state = orchestrator.state.read().await;
         if !state.is_running("1") {
             assert!(
-                state.retry_attempts.contains_key("1") || state.completed.contains("1"),
+                state.retry_attempts.contains_key("1") || state.completed.contains_key("1"),
                 "should have retry or be completed"
             );
         }
@@ -4217,7 +4316,10 @@ agent:
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(RwLock::new(OrchestratorState::new(60_000, 10)));
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            60_000,
+            &ConcurrencyConfig::default(),
+        )));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(
@@ -4286,7 +4388,10 @@ agent:
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(RwLock::new(OrchestratorState::new(100, 10)));
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            100,
+            &ConcurrencyConfig::default(),
+        )));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(
@@ -4865,7 +4970,7 @@ agent:
             .expect("rejected approval gate should still resolve locally");
 
         let state = orchestrator.state.read().await;
-        assert!(state.completed.contains("1"));
+        assert!(state.completed.contains_key("1"));
         assert!(!state.is_claimed("1"));
         assert!(state.get_pipeline_run("1").is_none());
     }
@@ -5234,6 +5339,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
             state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
         }
@@ -5301,6 +5408,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
             "interaction-1".to_string()
         };
@@ -5408,6 +5517,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
             state.queue_resume("1");
             "interaction-1".to_string()
@@ -5590,6 +5701,8 @@ agent:
                 agent_output_tokens: 45,
                 agent_total_tokens: 168,
                 requested_at,
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -5864,6 +5977,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -5970,6 +6085,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6078,6 +6195,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6184,6 +6303,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6300,6 +6421,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6520,6 +6643,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6687,6 +6812,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6788,6 +6915,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6847,6 +6976,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 

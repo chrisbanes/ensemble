@@ -50,7 +50,7 @@ pub fn is_dispatch_eligible(
     }
 
     // Must not already be completed (tracker may re-surface stale issues)
-    if state.completed.contains(&issue.id) {
+    if state.completed.contains_key(&issue.id) {
         return Some("already completed".to_string());
     }
 
@@ -120,7 +120,7 @@ pub fn is_resume_dispatch_eligible(
     if state.is_running(&issue.id) {
         return Some("already running".to_string());
     }
-    if state.completed.contains(&issue.id) {
+    if state.completed.contains_key(&issue.id) {
         return Some("already completed".to_string());
     }
     if available_global_slots(state) == 0 {
@@ -193,6 +193,7 @@ pub fn has_available_slots(state: &OrchestratorState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::ConcurrencyConfig;
     use crate::tracker::model::BlockerRef;
     use chrono::{TimeZone, Utc};
 
@@ -210,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_eligible_issue() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         let result = is_dispatch_eligible(
@@ -225,7 +226,7 @@ mod tests {
 
     #[test]
     fn resumed_waiting_issue_is_dispatch_eligible_even_while_claimed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
             issue_id: issue.id.clone(),
@@ -241,6 +242,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let normal = is_dispatch_eligible(
@@ -267,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_missing_id() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let mut issue = test_issue("", "Todo");
         issue.id = "".to_string();
 
@@ -284,7 +287,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_wrong_state() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Backlog");
 
         let result = is_dispatch_eligible(
@@ -300,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_terminal_state() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Done");
 
         let result = is_dispatch_eligible(
@@ -315,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_already_running() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -332,7 +335,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_already_claimed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_claimed("1");
 
         let issue = test_issue("1", "Todo");
@@ -350,10 +353,18 @@ mod tests {
 
     #[test]
     fn test_ineligible_already_completed() {
-        let mut state = OrchestratorState::new(30000, 10);
-        state.completed.insert("1".to_string());
-
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
+        // Add to running first so complete_issue can find the issue data
+        state.add_running(&issue, None);
+        state.add_completed(
+            "1".to_string(),
+            "repo#1".to_string(),
+            "completed_succeeded".to_string(),
+        );
+        // Remove from running and claimed so the "already completed" check is reached
+        state.running.remove("1");
+        state.claimed.remove("1");
 
         let result = is_dispatch_eligible(
             &issue,
@@ -368,8 +379,12 @@ mod tests {
 
     #[test]
     fn test_ineligible_no_global_slots() {
-        let mut state = OrchestratorState::new(30000, 1);
-        state.add_running(&test_issue("existing", "Todo"), None);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        // Fill up all 4 default slots
+        state.add_running(&test_issue("1", "Todo"), None);
+        state.add_running(&test_issue("2", "Todo"), None);
+        state.add_running(&test_issue("3", "Todo"), None);
+        state.add_running(&test_issue("4", "Todo"), None);
 
         let issue = test_issue("new", "Todo");
 
@@ -386,7 +401,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_no_state_slots() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue("existing", "Todo"), None);
 
         let mut by_state = HashMap::new();
@@ -407,7 +422,7 @@ mod tests {
 
     #[test]
     fn test_ineligible_todo_with_non_terminal_blocker() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let mut issue = test_issue("1", "Todo");
         issue.blocked_by = vec![BlockerRef {
             id: Some("blocker-1".to_string()),
@@ -428,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_eligible_todo_with_terminal_blocker() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let mut issue = test_issue("1", "Todo");
         issue.blocked_by = vec![BlockerRef {
             id: Some("blocker-1".to_string()),
@@ -545,34 +560,35 @@ mod tests {
 
     #[test]
     fn test_available_global_slots() {
-        let mut state = OrchestratorState::new(30000, 3);
-        assert_eq!(available_global_slots(&state), 3);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        assert_eq!(available_global_slots(&state), 4);
 
         state.add_running(&test_issue("1", "Todo"), None);
-        assert_eq!(available_global_slots(&state), 2);
+        assert_eq!(available_global_slots(&state), 3);
 
         state.add_running(&test_issue("2", "Todo"), None);
         state.add_running(&test_issue("3", "Todo"), None);
+        state.add_running(&test_issue("4", "Todo"), None);
         assert_eq!(available_global_slots(&state), 0);
     }
 
     #[test]
     fn test_available_state_slots_with_cap() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue("1", "Todo"), None);
 
         let mut by_state = HashMap::new();
         by_state.insert("todo".to_string(), 2);
 
         assert_eq!(available_state_slots(&state, &by_state, "Todo"), 1);
-        assert_eq!(available_state_slots(&state, &by_state, "In Progress"), 9); // no cap, falls back to global (10 - 1 running)
+        assert_eq!(available_state_slots(&state, &by_state, "In Progress"), 3); // no cap, falls back to global (4 - 1 running)
     }
 
     #[test]
     fn test_available_state_slots_no_cap() {
-        let state = OrchestratorState::new(30000, 5);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let by_state = HashMap::new();
-        assert_eq!(available_state_slots(&state, &by_state, "Todo"), 5);
+        assert_eq!(available_state_slots(&state, &by_state, "Todo"), 4);
     }
 }

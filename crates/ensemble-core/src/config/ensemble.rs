@@ -320,6 +320,8 @@ pub struct ConcurrencyConfig {
     pub max_concurrent_agents: u32,
     #[serde(default = "default_max_step_parallelism")]
     pub max_step_parallelism: u32,
+    #[serde(default = "default_completed_expiry_secs")]
+    pub completed_expiry_secs: u64,
 }
 
 fn default_max_concurrent_agents() -> u32 {
@@ -328,6 +330,10 @@ fn default_max_concurrent_agents() -> u32 {
 
 fn default_max_step_parallelism() -> u32 {
     2
+}
+
+fn default_completed_expiry_secs() -> u64 {
+    259200
 }
 
 pub fn default_workspace_root() -> String {
@@ -342,6 +348,7 @@ impl Default for ConcurrencyConfig {
         Self {
             max_concurrent_agents: default_max_concurrent_agents(),
             max_step_parallelism: default_max_step_parallelism(),
+            completed_expiry_secs: default_completed_expiry_secs(),
         }
     }
 }

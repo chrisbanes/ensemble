@@ -2,15 +2,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::interaction::model::InteractionKind;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ensemble::EnsembleConfig;
+use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
 /// Issue currently blocked waiting for a human response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingOnHumanEntry {
     pub issue_id: String,
     pub identifier: String,
@@ -29,6 +29,31 @@ pub struct WaitingOnHumanEntry {
     #[serde(default)]
     pub agent_total_tokens: u64,
     pub requested_at: DateTime<Utc>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub issue: Option<Issue>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedEntry {
+    pub issue_id: String,
+    pub identifier: String,
+    pub run_id: Option<String>,
+    pub issue: Issue,
+    pub status: String,
+    pub workflow_steps: Vec<CompletedWorkflowStep>,
+    pub completed_at: DateTime<Utc>,
+    pub outcome_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedWorkflowStep {
+    pub name: String,
+    pub agent: String,
+    pub dependencies: Vec<String>,
+    pub state: String,
+    pub can_navigate: bool,
 }
 
 /// Rate limit snapshot from agent events.
@@ -84,8 +109,10 @@ pub struct OrchestratorState {
     pub waiting_on_human: HashMap<String, WaitingOnHumanEntry>,
     /// Explicit resume requests queued by the API/UI: issue IDs.
     pub resume_requested: HashSet<String>,
-    /// Completed issue IDs (bookkeeping only).
-    pub completed: HashSet<String>,
+    /// Completed issues: issue_id -> CompletedEntry.
+    pub completed: HashMap<String, CompletedEntry>,
+    /// Seconds to keep completed entries before expiry.
+    pub completed_expiry_secs: u64,
     /// Aggregate token counts and runtime seconds.
     pub agent_totals: AgentTotals,
     /// Latest rate limit snapshot from agent events.
@@ -118,16 +145,17 @@ fn new_issue_run_id() -> String {
 
 impl OrchestratorState {
     /// Create a new OrchestratorState with the given config values.
-    pub fn new(poll_interval_ms: u64, max_concurrent_agents: u32) -> Self {
+    pub fn new(poll_interval_ms: u64, config: &ConcurrencyConfig) -> Self {
         Self {
             poll_interval_ms,
-            max_concurrent_agents,
+            max_concurrent_agents: config.max_concurrent_agents,
             running: HashMap::new(),
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
             waiting_on_human: HashMap::new(),
             resume_requested: HashSet::new(),
-            completed: HashSet::new(),
+            completed: HashMap::new(),
+            completed_expiry_secs: config.completed_expiry_secs,
             agent_totals: AgentTotals::default(),
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
@@ -193,6 +221,11 @@ impl OrchestratorState {
     /// Remove a running entry and return it. Returns None if not found.
     pub fn remove_running(&mut self, issue_id: &str) -> Option<RunningEntry> {
         self.running.remove(issue_id)
+    }
+
+    /// Get a reference to a running entry without removing it.
+    pub fn get_running(&self, issue_id: &str) -> Option<&RunningEntry> {
+        self.running.get(issue_id)
     }
 
     pub fn next_timeline_sequence(&mut self, run_id: &str) -> u64 {
@@ -430,11 +463,149 @@ impl OrchestratorState {
     pub fn get_pipeline_config(&self, issue_id: &str) -> Option<&std::sync::Arc<EnsembleConfig>> {
         self.pipeline_configs.get(issue_id)
     }
+
+    pub fn complete_issue(
+        &mut self,
+        issue_id: &str,
+        status: Option<String>,
+        outcome_summary: Option<String>,
+    ) {
+        let running = self.running.get(issue_id).cloned();
+        let waiting = self.waiting_on_human.get(issue_id).cloned();
+        let finalize = self.finalize.get(issue_id).cloned();
+        let run = self.pipeline_runs.get(issue_id).cloned();
+        let config = self.pipeline_configs.get(issue_id).cloned();
+
+        eprintln!(
+            "DEBUG complete_issue: issue_id={}, running={:?}, waiting={:?}, waiting.issue={:?}",
+            issue_id,
+            running.is_some(),
+            waiting.is_some(),
+            waiting
+                .as_ref()
+                .and_then(|w| w.issue.as_ref().map(|i| &i.id))
+        );
+
+        let Some(issue) = running
+            .as_ref()
+            .map(|entry| entry.issue.clone())
+            .or_else(|| waiting.as_ref().and_then(|entry| entry.issue.clone()))
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .map(|entry| entry.issue.clone())
+            })
+        else {
+            return;
+        };
+
+        let identifier = running
+            .as_ref()
+            .map(|entry| entry.identifier.clone())
+            .or_else(|| waiting.as_ref().map(|entry| entry.identifier.clone()))
+            .or_else(|| {
+                finalize
+                    .as_ref()
+                    .map(|entry| entry.issue_identifier.clone())
+            })
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .map(|entry| entry.identifier.clone())
+            })
+            .unwrap_or_else(|| issue.identifier.clone());
+        let run_id = running
+            .as_ref()
+            .and_then(|entry| entry.run_id.clone())
+            .or_else(|| waiting.as_ref().and_then(|entry| entry.run_id.clone()))
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .and_then(|entry| entry.run_id.clone())
+            });
+        let completed_status = status.unwrap_or_else(|| {
+            self.completed
+                .get(issue_id)
+                .map(|entry| entry.status.clone())
+                .unwrap_or_else(|| "completed_succeeded".to_string())
+        });
+        let workflow_steps = config
+            .as_ref()
+            .map(|config| completed_workflow_steps(config, run.as_ref()))
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .map(|entry| entry.workflow_steps.clone())
+            })
+            .unwrap_or_default();
+
+        self.completed.insert(
+            issue_id.to_string(),
+            CompletedEntry {
+                issue_id: issue_id.to_string(),
+                identifier,
+                run_id,
+                issue,
+                status: completed_status,
+                workflow_steps,
+                completed_at: Utc::now(),
+                outcome_summary,
+            },
+        );
+    }
+
+    pub fn cleanup_expired_completed(&mut self) {
+        let now = Utc::now();
+        let expiry = Duration::seconds(self.completed_expiry_secs as i64);
+        self.completed
+            .retain(|_, entry| now.signed_duration_since(entry.completed_at) < expiry);
+    }
+
+    /// Add a completed entry with the given status.
+    /// This is a convenience wrapper around `complete_issue` for simpler use cases.
+    pub fn add_completed(&mut self, issue_id: String, _identifier: String, status: String) {
+        self.complete_issue(&issue_id, Some(status), None);
+    }
+}
+
+fn completed_workflow_steps(
+    config: &EnsembleConfig,
+    run: Option<&PipelineRun>,
+) -> Vec<CompletedWorkflowStep> {
+    config
+        .steps
+        .iter()
+        .map(|step| CompletedWorkflowStep {
+            name: step.name.clone(),
+            agent: step.agent.clone(),
+            dependencies: step.depends.clone().unwrap_or_default(),
+            state: completed_step_state(step, run),
+            can_navigate: run
+                .map(|pipeline_run| pipeline_run.step_states.contains_key(&step.name))
+                .unwrap_or(false),
+        })
+        .collect()
+}
+
+fn completed_step_state(step: &StepConfig, run: Option<&PipelineRun>) -> String {
+    run.and_then(|pipeline_run| pipeline_run.step_states.get(&step.name))
+        .map(|state| match state {
+            crate::pipeline::engine::StepState::Pending => "pending",
+            crate::pipeline::engine::StepState::Running { .. } => "running",
+            crate::pipeline::engine::StepState::Passed => "passed",
+            crate::pipeline::engine::StepState::Failed { .. } => "failed",
+            crate::pipeline::engine::StepState::BlockedOnHuman { .. } => "waiting",
+            crate::pipeline::engine::StepState::AwaitingApproval { .. } => "waiting",
+            crate::pipeline::engine::StepState::Rejected { .. } => "rejected",
+        })
+        .unwrap_or("pending")
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::ConcurrencyConfig;
 
     fn test_issue(id: &str, state: &str) -> Issue {
         crate::tracker::model::test_helpers::test_issue(id, state)
@@ -442,9 +613,9 @@ mod tests {
 
     #[test]
     fn test_new_state() {
-        let state = OrchestratorState::new(30000, 10);
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         assert_eq!(state.poll_interval_ms, 30000);
-        assert_eq!(state.max_concurrent_agents, 10);
+        assert_eq!(state.max_concurrent_agents, 4);
         assert!(state.running.is_empty());
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
@@ -457,7 +628,7 @@ mod tests {
 
     #[test]
     fn test_add_running() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, None);
@@ -469,7 +640,7 @@ mod tests {
 
     #[test]
     fn test_remove_running() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, None);
@@ -483,7 +654,7 @@ mod tests {
 
     #[test]
     fn test_release_claim() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, None);
@@ -495,7 +666,7 @@ mod tests {
 
     #[test]
     fn test_add_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let retry = RetryEntry {
             issue_id: "1".to_string(),
@@ -513,7 +684,7 @@ mod tests {
 
     #[test]
     fn test_remove_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let retry = RetryEntry {
             issue_id: "1".to_string(),
@@ -532,7 +703,7 @@ mod tests {
 
     #[test]
     fn test_add_waiting_on_human_keeps_claimed() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: "1".to_string(),
@@ -548,6 +719,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         assert!(state.is_claimed("1"));
@@ -556,7 +729,7 @@ mod tests {
 
     #[test]
     fn test_queue_and_clear_resume_request() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         state.queue_resume("1");
         assert!(state.is_resume_requested("1"));
@@ -567,7 +740,7 @@ mod tests {
 
     #[test]
     fn test_release_claim_clears_waiting_on_human() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: "1".to_string(),
             identifier: "repo#1".to_string(),
@@ -582,6 +755,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
         state.queue_resume("1");
 
@@ -594,7 +769,7 @@ mod tests {
 
     #[test]
     fn test_update_session_info() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -607,7 +782,7 @@ mod tests {
 
     #[test]
     fn test_update_agent_event() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -622,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_increment_turn_count() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -635,7 +810,7 @@ mod tests {
 
     #[test]
     fn test_update_token_usage_with_deltas() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
         state.add_running(&issue, None);
 
@@ -659,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_running_count_in_state() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue("1", "Todo"), None);
         state.add_running(&test_issue("2", "Todo"), None);
         state.add_running(&test_issue("3", "In Progress"), None);
@@ -671,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_running_issue_ids() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.add_running(&test_issue("a", "Todo"), None);
         state.add_running(&test_issue("b", "Todo"), None);
 
@@ -682,7 +857,7 @@ mod tests {
 
     #[test]
     fn test_add_running_clears_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let retry = RetryEntry {
             issue_id: "1".to_string(),
@@ -701,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_run_id_and_sequence_are_stable_across_retries_until_release() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = test_issue("1", "Todo");
 
         state.add_running(&issue, Some(1));
@@ -733,5 +908,57 @@ mod tests {
         state.release_claim("1");
         assert!(state.issue_run_ids.get("1").is_none());
         assert!(state.timeline_sequences.get(&second_run_id).is_none());
+    }
+
+    #[test]
+    fn test_add_completed() {
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        let issue = test_issue("issue-1", "Todo");
+        state.add_running(&issue, None);
+        state.complete_issue("issue-1", Some("completed_succeeded".to_string()), None);
+
+        assert!(state.completed.contains_key("issue-1"));
+        let entry = state.completed.get("issue-1").unwrap();
+        assert_eq!(entry.issue_id, "issue-1");
+        assert_eq!(entry.identifier, "repo#issue-1");
+        assert_eq!(entry.status, "completed_succeeded");
+        assert_eq!(entry.issue.title, issue.title);
+        assert!(entry.outcome_summary.is_none());
+    }
+
+    #[test]
+    fn test_cleanup_expired_completed() {
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        state.completed_expiry_secs = 1;
+
+        state.add_running(&test_issue("issue-1", "Todo"), None);
+        state.complete_issue("issue-1", Some("completed_succeeded".to_string()), None);
+
+        assert!(state.completed.contains_key("issue-1"));
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        state.cleanup_expired_completed();
+
+        assert!(state.completed.is_empty());
+    }
+
+    #[test]
+    fn test_cleanup_expired_completed_keeps_valid() {
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        state.completed_expiry_secs = 10;
+
+        state.add_running(&test_issue("issue-1", "Todo"), None);
+        state.add_running(&test_issue("issue-2", "Todo"), None);
+        state.complete_issue("issue-1", Some("completed_succeeded".to_string()), None);
+        state.complete_issue("issue-2", Some("completed_failed".to_string()), None);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        state.cleanup_expired_completed();
+
+        assert_eq!(state.completed.len(), 2);
+        assert!(state.completed.contains_key("issue-1"));
+        assert!(state.completed.contains_key("issue-2"));
     }
 }

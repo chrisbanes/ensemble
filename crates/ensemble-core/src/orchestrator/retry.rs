@@ -153,6 +153,7 @@ pub fn next_retry_time(state: &OrchestratorState) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::ConcurrencyConfig;
 
     #[test]
     fn retry_reason_is_non_empty() {
@@ -204,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_schedule_continuation_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let due = schedule_continuation_retry(&mut state, "issue-1", "repo#1");
 
@@ -219,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_schedule_failure_retry() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let due = schedule_failure_retry(
             &mut state,
@@ -241,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_schedule_failure_retry_respects_max_cycles() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         // attempt 3, max_cycles 3 → should NOT schedule
         let due = schedule_failure_retry(
@@ -300,7 +301,7 @@ mod tests {
 
     #[test]
     fn test_get_due_retries() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         // One due retry (in the past)
         state.add_retry(RetryEntry {
@@ -327,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_next_retry_time() {
-        let mut state = OrchestratorState::new(30000, 10);
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         assert_eq!(next_retry_time(&state), None);
 
         state.add_retry(RetryEntry {
