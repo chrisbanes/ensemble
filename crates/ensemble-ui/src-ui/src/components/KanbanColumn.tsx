@@ -3,7 +3,18 @@ import { Badge } from "@/components/ui/badge";
 import IssueCard from "./IssueCard";
 import type { RunningSessionRow, RetryRow, WaitingInteractionRow } from "@/generated/models";
 
-type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow;
+// Base interface for all issue items
+interface BaseIssueItem {
+  issue_id: string;
+  issue_identifier: string;
+}
+
+interface CompletedIssueItem extends BaseIssueItem {
+  status: string;
+  completed_at: string;
+}
+
+type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedIssueItem;
 
 interface KanbanColumnProps {
   title: string;

@@ -4,7 +4,18 @@ import { Badge } from "@/components/ui/badge";
 import { formatTokens } from "@/lib/formatters";
 import type { RunningSessionRow, RetryRow, WaitingInteractionRow } from "@/generated/models";
 
-type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow;
+// Base interface for all issue items
+interface BaseIssueItem {
+  issue_id: string;
+  issue_identifier: string;
+}
+
+interface CompletedIssueItem extends BaseIssueItem {
+  status: string;
+  completed_at: string;
+}
+
+type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedIssueItem;
 
 interface IssueCardProps {
   issue: IssueItem;
@@ -22,27 +33,42 @@ const statusColors: Record<string, string> = {
   completed_stopped: "border-l-gray-400",
 };
 
+function isCompletedIssue(issue: IssueItem): issue is CompletedIssueItem {
+  return 'completed_at' in issue;
+}
+
+function isRunningIssue(issue: IssueItem): issue is RunningSessionRow {
+  return 'turn_count' in issue && !('completed_at' in issue);
+}
+
 export default function IssueCard({ issue, status }: IssueCardProps) {
   const colorClass = statusColors[status] ?? "border-l-gray-400";
-  const isRunning = 'turn_count' in issue;
-  
+  const completed = isCompletedIssue(issue);
+  const running = isRunningIssue(issue);
+
   return (
     <Card className={`border-l-4 ${colorClass} hover:shadow-md transition-shadow`}>
       <CardContent className="p-3 space-y-2">
-        <Link 
+        <Link
           to={`/issue/${encodeURIComponent(issue.issue_identifier)}`}
           className="text-sm font-medium text-primary hover:underline block truncate"
         >
           {issue.issue_identifier}
         </Link>
-        
-        {isRunning && issue.step_name && (
+
+        {running && issue.step_name && (
           <Badge variant="outline" className="text-xs">
             {issue.step_name}
           </Badge>
         )}
-        
-        {isRunning && (
+
+        {completed && (
+          <Badge variant="outline" className="text-xs">
+            {issue.status}
+          </Badge>
+        )}
+
+        {running && (
           <div className="flex items-center justify-between text-xs text-muted-foreground">
             <span>{formatTokens(issue.tokens.total_tokens)} tokens</span>
             <span>{issue.turn_count} turns</span>

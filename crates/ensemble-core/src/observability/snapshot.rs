@@ -13,6 +13,7 @@ pub struct RuntimeSnapshot {
     pub running: Vec<RunningSessionRow>,
     pub retrying: Vec<RetryRow>,
     pub waiting_on_human: Vec<WaitingInteractionRow>,
+    pub completed: Vec<CompletedRow>,
     pub agent_totals: AgentTotalsSnapshot,
     pub rate_limits: Option<RateLimitSnapshot>,
     pub poll_interval_ms: u64,
@@ -25,6 +26,16 @@ pub struct SnapshotCounts {
     pub running: usize,
     pub retrying: usize,
     pub waiting_on_human: usize,
+    pub completed: usize,
+}
+
+/// A single row in the completed issues list.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CompletedRow {
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub status: String,
+    pub completed_at: DateTime<Utc>,
 }
 
 /// A compact row for an issue currently waiting on human input.
@@ -105,12 +116,6 @@ pub struct AgentTotalsSnapshot {
 }
 
 /// Per-issue detail snapshot for GET /api/v1/{identifier}.
-///
-/// NOTE: Plan 5 (Dashboard) expects additional fields `logs` and `recent_events`
-/// in the API response. When implementing the dashboard integration, extend this
-/// struct with `logs` and `recent_events` fields.
-/// These are omitted here because Plan 4 does not yet have the event/log collection
-/// infrastructure, but the JSON shape should be forward-compatible.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct IssueDetailSnapshot {
     pub issue_identifier: String,
@@ -160,6 +165,20 @@ pub struct IssueSummary {
     pub labels: Vec<String>,
     pub priority: Option<i32>,
     pub url: Option<String>,
+}
+
+/// Step detail snapshot for GET /api/v1/{identifier}/step/{step_name}.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct StepDetailSnapshot {
+    pub issue_identifier: String,
+    pub issue_id: String,
+    pub step_name: String,
+    pub status: String,
+    pub agent: String,
+    pub dependencies: Vec<String>,
+    pub can_navigate: bool,
+    pub verdict: Option<String>,
+    pub recent_events: Vec<crate::timeline::model::TimelineEventRecord>,
 }
 
 fn finalize_status_str(status: &FinalizeStatus) -> &'static str {
@@ -226,6 +245,18 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
         .map(waiting_entry_to_row)
         .collect();
 
+    let mut completed_rows: Vec<CompletedRow> = state
+        .completed
+        .values()
+        .map(|entry| CompletedRow {
+            issue_id: entry.issue_id.clone(),
+            issue_identifier: entry.identifier.clone(),
+            status: entry.status.clone(),
+            completed_at: entry.completed_at,
+        })
+        .collect();
+    completed_rows.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
+
     // Compute live seconds_running: cumulative from ended sessions + active elapsed
     let active_elapsed: f64 = state
         .running
@@ -244,10 +275,12 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
             running: running_rows.len(),
             retrying: retry_rows.len(),
             waiting_on_human: waiting_rows.len(),
+            completed: completed_rows.len(),
         },
         running: running_rows,
         retrying: retry_rows,
         waiting_on_human: waiting_rows,
+        completed: completed_rows,
         agent_totals: AgentTotalsSnapshot {
             input_tokens: state.agent_totals.input_tokens,
             output_tokens: state.agent_totals.output_tokens,
@@ -258,6 +291,127 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
         poll_interval_ms: state.poll_interval_ms,
         last_tick_at: state.last_tick_at,
     }
+}
+
+/// Build a StepDetailSnapshot for a specific step within an issue.
+///
+/// Returns None if the identifier or step_name is not found.
+pub fn build_step_detail_snapshot(
+    state: &OrchestratorState,
+    identifier: &str,
+    step_name: &str,
+    workspace_root: &str,
+    max_events: usize,
+) -> Option<StepDetailSnapshot> {
+    let issue_entry = state.running.values().find(|e| e.identifier == identifier);
+
+    let issue_id = if let Some(entry) = issue_entry {
+        entry.issue_id.clone()
+    } else if let Some(entry) = state
+        .retry_attempts
+        .values()
+        .find(|e| e.identifier == identifier)
+    {
+        entry.issue_id.clone()
+    } else if let Some(entry) = state
+        .waiting_on_human
+        .values()
+        .find(|e| e.identifier == identifier)
+    {
+        entry.issue_id.clone()
+    } else if let Some((issue_id, _)) = state
+        .finalize
+        .iter()
+        .find(|(_, finalize)| finalize.issue_identifier == identifier)
+    {
+        issue_id.clone()
+    } else if let Some(entry) = state
+        .completed
+        .values()
+        .find(|e| e.identifier == identifier)
+    {
+        entry.issue_id.clone()
+    } else {
+        return None;
+    };
+
+    let pipeline_config = state.pipeline_configs.get(&issue_id)?;
+    let step_config = pipeline_config.steps.iter().find(|s| s.name == step_name)?;
+    let pipeline_run = state.pipeline_runs.get(&issue_id);
+    let step_state = pipeline_run.and_then(|run| run.step_states.get(step_name));
+
+    let status_str = step_state
+        .map(|s| match s {
+            StepState::Pending => "pending",
+            StepState::Running { .. } => "running",
+            StepState::Passed => "passed",
+            StepState::Failed { .. } => "failed",
+            StepState::BlockedOnHuman { .. } => "waiting",
+            StepState::AwaitingApproval { .. } => "waiting",
+            StepState::Rejected { .. } => "rejected",
+        })
+        .unwrap_or("pending");
+
+    let verdict = step_state.and_then(|s| match s {
+        StepState::Passed => Some("success".to_string()),
+        StepState::Failed { error, .. } => Some(error.clone()),
+        StepState::Rejected { summary } => Some(summary.clone()),
+        _ => None,
+    });
+
+    // Get run_id from issue_run_ids, running entry, or completed entry
+    let run_id = state
+        .issue_run_ids
+        .get(&issue_id)
+        .cloned()
+        .or_else(|| state.running.get(&issue_id).and_then(|e| e.run_id.clone()))
+        .or_else(|| {
+            state
+                .completed
+                .get(&issue_id)
+                .and_then(|e| e.run_id.clone())
+        });
+
+    let recent_events: Vec<crate::timeline::model::TimelineEventRecord> = if let Some(ref run_id) =
+        run_id
+    {
+        let timeline_path = std::path::PathBuf::from(workspace_root)
+            .join(".ensemble")
+            .join("runs")
+            .join(run_id)
+            .join("events.jsonl");
+        std::fs::read_to_string(&timeline_path)
+            .ok()
+            .map(|contents| {
+                contents
+                    .lines()
+                    .filter_map(|line| {
+                        serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line)
+                            .ok()
+                    })
+                    .filter(|event| event.issue_identifier == identifier)
+                    .filter(|event| event.step_name.as_deref() == Some(step_name))
+                    .take(max_events)
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    Some(StepDetailSnapshot {
+        issue_identifier: identifier.to_string(),
+        issue_id,
+        step_name: step_name.to_string(),
+        status: status_str.to_string(),
+        agent: step_config.agent.clone(),
+        dependencies: step_config.depends.clone().unwrap_or_default(),
+        can_navigate: pipeline_run
+            .map(|r| r.step_states.contains_key(step_name))
+            .unwrap_or(false),
+        verdict,
+        recent_events,
+    })
 }
 
 /// Build an IssueDetailSnapshot for a specific issue by identifier.
@@ -399,6 +553,7 @@ pub fn build_issue_snapshot(
     let pipeline_run = state.pipeline_runs.get(&issue_id);
     let config = state.pipeline_configs.get(&issue_id);
 
+    // Try to get workflow_steps from running config first, then from completed entry
     let workflow_steps = if let Some(config) = config {
         config
             .steps
@@ -427,10 +582,23 @@ pub fn build_issue_snapshot(
                 }
             })
             .collect()
+    } else if let Some(completed) = completed_entry {
+        completed
+            .workflow_steps
+            .iter()
+            .map(|step| WorkflowStepInfo {
+                name: step.name.clone(),
+                agent: step.agent.clone(),
+                dependencies: step.dependencies.clone(),
+                state: step.state.clone(),
+                can_navigate: step.can_navigate,
+            })
+            .collect()
     } else {
         vec![]
     };
 
+    // Try to get issue info from running entry first, then from completed entry
     let issue_summary = running_entry
         .map(|e| IssueSummary {
             title: e.issue.title.clone(),
@@ -438,6 +606,15 @@ pub fn build_issue_snapshot(
             labels: e.issue.labels.clone(),
             priority: e.issue.priority,
             url: e.issue.url.clone(),
+        })
+        .or_else(|| {
+            completed_entry.map(|e| IssueSummary {
+                title: e.issue.title.clone(),
+                description: e.issue.description.clone(),
+                labels: e.issue.labels.clone(),
+                priority: e.issue.priority,
+                url: e.issue.url.clone(),
+            })
         })
         .unwrap_or_else(|| IssueSummary {
             title: identifier.to_string(),
@@ -561,8 +738,10 @@ mod tests {
     use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig, TrackerConfig};
     use crate::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
     use crate::pipeline::engine::{PipelineRun, StepState};
+    use crate::timeline::model::TimelineEventRecord;
     use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
+    use tempfile::TempDir;
     fn test_issue() -> Issue {
         Issue {
             id: "NODE_123".to_string(),
@@ -643,8 +822,74 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
         state
+    }
+
+    fn test_config_with_steps() -> std::sync::Arc<EnsembleConfig> {
+        std::sync::Arc::new(EnsembleConfig {
+            tracker: TrackerConfig {
+                kind: "todo_file".to_string(),
+                active_states: vec!["In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                path: Some("test.toml".into()),
+                endpoint: None,
+                gh_hostname: None,
+                api_key: None,
+                repository: None,
+                project_number: None,
+                labels_filter: vec![],
+                notion: None,
+            },
+            repos: vec![],
+            agents: HashMap::new(),
+            steps: vec![
+                StepConfig {
+                    name: "build".to_string(),
+                    agent: "builder".to_string(),
+                    depends: None,
+                    tracker_state: None,
+                    approval: None,
+                },
+                StepConfig {
+                    name: "review".to_string(),
+                    agent: "reviewer".to_string(),
+                    depends: Some(vec!["build".to_string()]),
+                    tracker_state: None,
+                    approval: None,
+                },
+            ],
+            on_success: "finalize".to_string(),
+            on_failure: "retry".to_string(),
+            concurrency: ConcurrencyConfig::default(),
+            max_cycles: 5,
+            polling: Default::default(),
+            workspace: Default::default(),
+            hooks: Default::default(),
+            agent: Default::default(),
+            human_interaction: Default::default(),
+        })
+    }
+
+    fn attach_pipeline_state(state: &mut OrchestratorState, issue_id: &str) {
+        use crate::pipeline::dag::build_dag;
+
+        let config = test_config_with_steps();
+        let dag = build_dag(&config.steps).expect("valid dag");
+        let mut pipeline_run = PipelineRun::new(issue_id.to_string(), 1, dag);
+        pipeline_run
+            .step_states
+            .insert("build".to_string(), StepState::Passed);
+        pipeline_run.step_states.insert(
+            "review".to_string(),
+            StepState::Running {
+                session_id: "session-abc".to_string(),
+            },
+        );
+
+        state.insert_pipeline_run(issue_id, pipeline_run, config);
     }
 
     #[test]
@@ -884,6 +1129,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces").unwrap();
@@ -925,73 +1172,8 @@ mod tests {
 
     #[test]
     fn test_issue_snapshot_with_workflow_steps() {
-        use crate::pipeline::dag::build_dag;
-        use std::sync::Arc;
-
         let mut state = build_test_state();
-
-        let steps = vec![
-            StepConfig {
-                name: "build".to_string(),
-                agent: "builder".to_string(),
-                depends: None,
-                tracker_state: None,
-                approval: None,
-            },
-            StepConfig {
-                name: "review".to_string(),
-                agent: "reviewer".to_string(),
-                depends: Some(vec!["build".to_string()]),
-                tracker_state: None,
-                approval: None,
-            },
-        ];
-        let config = Arc::new(EnsembleConfig {
-            tracker: TrackerConfig {
-                kind: "todo_file".to_string(),
-                active_states: vec!["In Progress".to_string()],
-                terminal_states: vec!["Done".to_string()],
-                path: Some("test.toml".into()),
-                endpoint: None,
-                gh_hostname: None,
-                api_key: None,
-                repository: None,
-                project_number: None,
-                labels_filter: vec![],
-                notion: None,
-            },
-            repos: vec![],
-            agents: HashMap::new(),
-            steps,
-            on_success: "finalize".to_string(),
-            on_failure: "retry".to_string(),
-            concurrency: ConcurrencyConfig::default(),
-            max_cycles: 5,
-            polling: Default::default(),
-            workspace: Default::default(),
-            hooks: Default::default(),
-            agent: Default::default(),
-            human_interaction: Default::default(),
-        });
-
-        let dag = build_dag(&config.steps).expect("valid dag");
-        let mut pipeline_run = PipelineRun::new("NODE_123".to_string(), 1, dag);
-        pipeline_run
-            .step_states
-            .insert("build".to_string(), StepState::Passed);
-        pipeline_run.step_states.insert(
-            "review".to_string(),
-            StepState::Running {
-                session_id: "session-abc".to_string(),
-            },
-        );
-
-        state
-            .pipeline_configs
-            .insert("NODE_123".to_string(), config);
-        state
-            .pipeline_runs
-            .insert("NODE_123".to_string(), pipeline_run);
+        attach_pipeline_state(&mut state, "NODE_123");
 
         let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
         let json = serde_json::to_value(&detail).unwrap();
@@ -1013,6 +1195,80 @@ mod tests {
             .unwrap();
         assert_eq!(review_step.get("state").unwrap(), "running");
         assert_eq!(review_step.get("agent").unwrap(), "reviewer");
+    }
+
+    #[test]
+    fn completed_issue_snapshot_retains_issue_and_workflow_details() {
+        let mut state = build_test_state();
+        attach_pipeline_state(&mut state, "NODE_123");
+        state.complete_issue("NODE_123", Some("completed_succeeded".to_string()), None);
+        // Simulate what the orchestrator does: remove from running after completing
+        state.running.remove("NODE_123");
+
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
+
+        assert_eq!(detail.status, "completed_succeeded");
+        assert_eq!(detail.issue.title, "Fix the bug");
+        assert_eq!(detail.issue.labels, vec!["bug".to_string()]);
+        assert_eq!(detail.workflow_steps.len(), 2);
+        assert_eq!(detail.workflow_steps[0].name, "build");
+        assert_eq!(detail.workflow_steps[0].state, "passed");
+        assert_eq!(detail.workflow_steps[1].name, "review");
+        assert_eq!(detail.workflow_steps[1].state, "running");
+    }
+
+    #[test]
+    fn runtime_snapshot_includes_completed_entries() {
+        let mut state = build_test_state();
+        attach_pipeline_state(&mut state, "NODE_123");
+        state.complete_issue("NODE_123", Some("completed_succeeded".to_string()), None);
+
+        let snapshot = build_state_snapshot(&state);
+
+        assert_eq!(snapshot.completed.len(), 1);
+        assert_eq!(snapshot.completed[0].issue_identifier, "my-repo#42");
+        assert_eq!(snapshot.completed[0].status, "completed_succeeded");
+    }
+
+    #[test]
+    fn step_detail_reads_recent_events_from_run_id_storage() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut state = build_test_state();
+        attach_pipeline_state(&mut state, "NODE_123");
+
+        let run_id = state
+            .running
+            .get("NODE_123")
+            .and_then(|entry| entry.run_id.clone())
+            .expect("run id should exist");
+        let timeline_dir = temp_dir.path().join(".ensemble").join("runs").join(&run_id);
+        std::fs::create_dir_all(&timeline_dir).unwrap();
+        let record = TimelineEventRecord {
+            run_id: run_id.clone(),
+            issue_identifier: "my-repo#42".to_string(),
+            sequence: 1,
+            timestamp: Utc::now(),
+            event_type: "step_started".to_string(),
+            step_name: Some("review".to_string()),
+            attempt: 1,
+            detail: "started review".to_string(),
+            verdict: None,
+            tool_name: None,
+        };
+        let line = serde_json::to_string(&record).unwrap();
+        std::fs::write(timeline_dir.join("events.jsonl"), format!("{line}\n")).unwrap();
+
+        let detail = build_step_detail_snapshot(
+            &state,
+            "my-repo#42",
+            "review",
+            temp_dir.path().to_str().unwrap(),
+            50,
+        )
+        .unwrap();
+
+        assert_eq!(detail.recent_events.len(), 1);
+        assert_eq!(detail.recent_events[0].detail, "started review");
     }
 
     #[test]

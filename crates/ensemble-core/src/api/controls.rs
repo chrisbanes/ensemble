@@ -1030,6 +1030,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: chrono::Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let mut app_state = app_state_with_document_state(parsed_document_state());
@@ -1095,6 +1097,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: chrono::Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let mut app_state = app_state_with_document_state(parsed_document_state());

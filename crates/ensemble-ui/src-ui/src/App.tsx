@@ -5,6 +5,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 
 const Dashboard = lazy(() => import("./pages/Dashboard"));
 const IssueDetail = lazy(() => import("./pages/IssueDetail"));
+const StepDetail = lazy(() => import("./pages/StepDetail"));
 const History = lazy(() => import("./pages/History"));
 const ConfigPage = lazy(() => import("./pages/ConfigPage"));
 
@@ -20,6 +21,7 @@ export default function App() {
           <Route element={<Layout />}>
             <Route path="/" element={<Dashboard />} />
             <Route path="/issue/:identifier" element={<IssueDetail />} />
+            <Route path="/issue/:identifier/step/:stepName" element={<StepDetail />} />
             <Route path="/history" element={<History />} />
             <Route path="/config" element={<ConfigPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />

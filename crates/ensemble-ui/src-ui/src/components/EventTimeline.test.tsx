@@ -87,4 +87,39 @@ describe("aggregateOutputEvents", () => {
     expect(result[0]!.attempt).toBe(2);
     expect(result[0]!.runId).toBe("run-123");
   });
+
+  it("does not aggregate output events across step boundaries", () => {
+    const events: WsEventData[] = [
+      makeEvent({ type: "output", detail: "A", stepName: "build", attempt: 1, runId: "run-1" }),
+      makeEvent({ type: "output", detail: "B", stepName: "review", attempt: 1, runId: "run-1" }),
+    ];
+
+    const result = aggregateOutputEvents(events);
+
+    expect(result).toHaveLength(2);
+    expect(result[0]!.detail).toBe("A");
+    expect(result[1]!.detail).toBe("B");
+  });
+
+  it("does not aggregate output events across attempt boundaries", () => {
+    const events: WsEventData[] = [
+      makeEvent({ type: "output", detail: "A", stepName: "build", attempt: 1, runId: "run-1" }),
+      makeEvent({ type: "output", detail: "B", stepName: "build", attempt: 2, runId: "run-1" }),
+    ];
+
+    const result = aggregateOutputEvents(events);
+
+    expect(result).toHaveLength(2);
+  });
+
+  it("does not aggregate output events across run boundaries", () => {
+    const events: WsEventData[] = [
+      makeEvent({ type: "output", detail: "A", stepName: "build", attempt: 1, runId: "run-1" }),
+      makeEvent({ type: "output", detail: "B", stepName: "build", attempt: 1, runId: "run-2" }),
+    ];
+
+    const result = aggregateOutputEvents(events);
+
+    expect(result).toHaveLength(2);
+  });
 });

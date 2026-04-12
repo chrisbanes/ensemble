@@ -26,12 +26,24 @@ interface AggregatedEvent extends WsEventData {
   aggregatedCount?: number;
 }
 
+function getEventContext(event: WsEventData): string {
+  return `${event.runId ?? ''}:${event.stepName ?? ''}:${event.attempt ?? 1}`;
+}
+
 export function aggregateOutputEvents(events: WsEventData[]): AggregatedEvent[] {
   const result: AggregatedEvent[] = [];
   let outputBuffer: WsEventData[] = [];
+  let currentContext: string = '';
 
   for (const event of events) {
     if (event.type === 'output') {
+      const context = getEventContext(event);
+      // Start new buffer if context changes (different run/step/attempt)
+      if (outputBuffer.length > 0 && context !== currentContext) {
+        result.push(flushOutputBuffer(outputBuffer));
+        outputBuffer = [];
+      }
+      currentContext = context;
       outputBuffer.push(event);
     } else {
       if (outputBuffer.length > 0) {

@@ -11,7 +11,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 
@@ -124,9 +125,16 @@ impl Orchestrator {
         config_dir: &Path,
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
-        let concurrency = config.blocking_read().concurrency.clone();
-        let poll_interval_ms = config.blocking_read().polling.interval_ms;
-        let state = Arc::new(RwLock::new(OrchestratorState::new(poll_interval_ms, &concurrency)));
+        let (concurrency, poll_interval_ms) = {
+            let config_guard = futures::executor::block_on(config.read());
+            let concurrency = config_guard.concurrency.clone();
+            let poll_interval_ms = config_guard.polling.interval_ms;
+            (concurrency, poll_interval_ms)
+        };
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            poll_interval_ms,
+            &concurrency,
+        )));
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
         Self::new_with_state(
             OrchestratorRuntimeParts {
@@ -189,22 +197,28 @@ impl Orchestrator {
 
         // Initialize state from config
         {
-            let config = self.config.read().await;
+            let (poll_interval_ms, max_concurrent_agents, config_clone) = {
+                let config = self.config.read().await;
+                (
+                    config.polling.interval_ms,
+                    config.concurrency.max_concurrent_agents,
+                    config.clone(),
+                )
+            };
             let mut state = self.state.write().await;
-            state.poll_interval_ms = config.polling.interval_ms;
-            state.max_concurrent_agents = config.concurrency.max_concurrent_agents;
-            state.init_state_lists(&config);
+            state.poll_interval_ms = poll_interval_ms;
+            state.max_concurrent_agents = max_concurrent_agents;
+            state.init_state_lists(&config_clone);
         }
 
         // Startup terminal workspace cleanup
         {
-            let config = self.config.read().await;
-            startup_terminal_cleanup(
-                self.tracker.as_ref(),
-                &config.tracker.terminal_states,
-                &self.workspace_mgr,
-            )
-            .await;
+            let terminal_states = {
+                let config = self.config.read().await;
+                config.tracker.terminal_states.clone()
+            };
+            startup_terminal_cleanup(self.tracker.as_ref(), &terminal_states, &self.workspace_mgr)
+                .await;
         }
 
         info!("orchestrator started, entering main loop");
@@ -1043,17 +1057,21 @@ impl Orchestrator {
                                     )
                                 });
 
-                            let completed_identifier =
-                                if let Some(entry) = state.remove_running(issue_id) {
-                                    state.add_runtime_seconds(&entry);
-                                    Some(entry.identifier)
-                                } else {
-                                    None
-                                };
+                            // Get running entry data before removing
+                            let running_entry = state.get_running(issue_id).cloned();
 
                             if finalize_state.status == FinalizeStatus::Succeeded
                                 || finalize_state.status == FinalizeStatus::NotRequired
                             {
+                                // Add to completed BEFORE removing from running
+                                if let Some(ref entry) = running_entry {
+                                    state.add_completed(
+                                        issue_id.to_string(),
+                                        entry.identifier.clone(),
+                                        "completed_succeeded".to_string(),
+                                    );
+                                }
+
                                 if self.tracker.supports_writes() {
                                     if let Err(e) = self
                                         .tracker
@@ -1065,12 +1083,10 @@ impl Orchestrator {
                                 }
                                 state.release_claim(issue_id);
                                 state.remove_pipeline_run(issue_id);
-                                if let Some(identifier) = completed_identifier {
-                                    state.add_completed(
-                                        issue_id.to_string(),
-                                        identifier,
-                                        "completed_succeeded".to_string(),
-                                    );
+
+                                // Now remove from running and add runtime seconds
+                                if let Some(entry) = state.remove_running(issue_id) {
+                                    state.add_runtime_seconds(&entry);
                                 }
                                 state.clear_finalize_state(issue_id);
 
@@ -1440,6 +1456,8 @@ impl Orchestrator {
             agent_output_tokens: waiting_output_tokens,
             agent_total_tokens: waiting_total_tokens,
             requested_at: interaction.requested_at,
+            run_id: None,
+            issue: None,
         });
         drop(state);
 
@@ -1608,6 +1626,8 @@ impl Orchestrator {
             agent_output_tokens: waiting_output_tokens,
             agent_total_tokens: waiting_total_tokens,
             requested_at: interaction.requested_at,
+            run_id: None,
+            issue: None,
         });
         drop(state);
 
@@ -1659,6 +1679,8 @@ impl Orchestrator {
                 agent_output_tokens: interaction.agent_output_tokens,
                 agent_total_tokens: interaction.agent_total_tokens,
                 requested_at: interaction.requested_at,
+                run_id: None,
+                issue: None,
             });
         }
     }
@@ -2320,6 +2342,8 @@ impl Orchestrator {
                 agent_output_tokens: interaction.agent_output_tokens,
                 agent_total_tokens: interaction.agent_total_tokens,
                 requested_at: interaction.requested_at,
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -4273,7 +4297,10 @@ agent:
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(RwLock::new(OrchestratorState::new(60_000, &ConcurrencyConfig::default())));
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            60_000,
+            &ConcurrencyConfig::default(),
+        )));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(
@@ -4342,7 +4369,10 @@ agent:
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let refresh_requested = Arc::new(tokio::sync::Notify::new());
-        let state = Arc::new(RwLock::new(OrchestratorState::new(100, &ConcurrencyConfig::default())));
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            100,
+            &ConcurrencyConfig::default(),
+        )));
         let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let mut orchestrator = Orchestrator::new_with_state(
@@ -5290,6 +5320,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
             state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
         }
@@ -5357,6 +5389,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
             "interaction-1".to_string()
         };
@@ -5464,6 +5498,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
             state.queue_resume("1");
             "interaction-1".to_string()
@@ -5646,6 +5682,8 @@ agent:
                 agent_output_tokens: 45,
                 agent_total_tokens: 168,
                 requested_at,
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -5920,6 +5958,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6026,6 +6066,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6134,6 +6176,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6240,6 +6284,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6356,6 +6402,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6576,6 +6624,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6743,6 +6793,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6844,6 +6896,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 
@@ -6903,6 +6957,8 @@ agent:
                 agent_output_tokens: 0,
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
             });
         }
 

@@ -242,6 +242,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         let normal = is_dispatch_eligible(
@@ -352,13 +354,17 @@ mod tests {
     #[test]
     fn test_ineligible_already_completed() {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        let issue = test_issue("1", "Todo");
+        // Add to running first so complete_issue can find the issue data
+        state.add_running(&issue, None);
         state.add_completed(
             "1".to_string(),
             "repo#1".to_string(),
             "completed_succeeded".to_string(),
         );
-
-        let issue = test_issue("1", "Todo");
+        // Remove from running and claimed so the "already completed" check is reached
+        state.running.remove("1");
+        state.claimed.remove("1");
 
         let result = is_dispatch_eligible(
             &issue,
@@ -374,7 +380,11 @@ mod tests {
     #[test]
     fn test_ineligible_no_global_slots() {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
-        state.add_running(&test_issue("existing", "Todo"), None);
+        // Fill up all 4 default slots
+        state.add_running(&test_issue("1", "Todo"), None);
+        state.add_running(&test_issue("2", "Todo"), None);
+        state.add_running(&test_issue("3", "Todo"), None);
+        state.add_running(&test_issue("4", "Todo"), None);
 
         let issue = test_issue("new", "Todo");
 
@@ -551,13 +561,14 @@ mod tests {
     #[test]
     fn test_available_global_slots() {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
-        assert_eq!(available_global_slots(&state), 3);
+        assert_eq!(available_global_slots(&state), 4);
 
         state.add_running(&test_issue("1", "Todo"), None);
-        assert_eq!(available_global_slots(&state), 2);
+        assert_eq!(available_global_slots(&state), 3);
 
         state.add_running(&test_issue("2", "Todo"), None);
         state.add_running(&test_issue("3", "Todo"), None);
+        state.add_running(&test_issue("4", "Todo"), None);
         assert_eq!(available_global_slots(&state), 0);
     }
 
@@ -570,7 +581,7 @@ mod tests {
         by_state.insert("todo".to_string(), 2);
 
         assert_eq!(available_state_slots(&state, &by_state, "Todo"), 1);
-        assert_eq!(available_state_slots(&state, &by_state, "In Progress"), 9); // no cap, falls back to global (10 - 1 running)
+        assert_eq!(available_state_slots(&state, &by_state, "In Progress"), 3); // no cap, falls back to global (4 - 1 running)
     }
 
     #[test]
@@ -578,6 +589,6 @@ mod tests {
         let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
 
         let by_state = HashMap::new();
-        assert_eq!(available_state_slots(&state, &by_state, "Todo"), 5);
+        assert_eq!(available_state_slots(&state, &by_state, "Todo"), 4);
     }
 }

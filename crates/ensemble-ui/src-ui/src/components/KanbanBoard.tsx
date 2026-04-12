@@ -1,9 +1,20 @@
 import { useMemo } from "react";
 import KanbanColumn from "./KanbanColumn";
 import type { RuntimeSnapshot } from "@/generated/models";
-import type { RunningSessionRow, RetryRow, WaitingInteractionRow } from "@/generated/models";
+import type { RunningSessionRow, RetryRow, WaitingInteractionRow, CompletedRow } from "@/generated/models";
 
-type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow;
+// Base interface for all issue items
+interface BaseIssueItem {
+  issue_id: string;
+  issue_identifier: string;
+}
+
+interface CompletedIssueItem extends BaseIssueItem {
+  status: string;
+  completed_at: string;
+}
+
+type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedIssueItem;
 
 interface KanbanBoardProps {
   data: RuntimeSnapshot;
@@ -17,11 +28,12 @@ interface Column {
 
 export default function KanbanBoard({ data }: KanbanBoardProps) {
   const columns = useMemo((): Column[] => {
+    const completed: CompletedRow[] = data.completed ?? [];
     return [
       { title: "Running", status: "running", issues: data.running },
       { title: "Retrying", status: "retrying", issues: data.retrying },
       { title: "Waiting on Human", status: "waiting_on_human", issues: data.waiting_on_human },
-      { title: "Completed", status: "completed_succeeded", issues: [] },
+      { title: "Completed", status: "completed_succeeded", issues: completed },
     ];
   }, [data]);
 

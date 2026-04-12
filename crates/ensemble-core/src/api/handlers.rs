@@ -1,6 +1,7 @@
 use crate::api::router::AppState;
 use crate::observability::snapshot::{
-    build_issue_snapshot, build_state_snapshot, IssueDetailSnapshot, RuntimeSnapshot,
+    build_issue_snapshot, build_state_snapshot, build_step_detail_snapshot, IssueDetailSnapshot,
+    RuntimeSnapshot, StepDetailSnapshot,
 };
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -93,6 +94,44 @@ pub async fn get_issue_detail(
                     "no running, waiting, or retrying issue with identifier '{}'",
                     identifier
                 ),
+            );
+            (StatusCode::NOT_FOUND, Json(error)).into_response()
+        }
+    }
+}
+
+/// GET /api/v1/{identifier}/step/{step_name}
+///
+/// Returns step detail including recent events filtered to that step.
+#[utoipa::path(
+    get,
+    path = "/api/v1/{identifier}/step/{step_name}",
+    operation_id = "getStepDetail",
+    params(
+        ("identifier" = String, Path, description = "Issue identifier"),
+        ("step_name" = String, Path, description = "Step name")
+    ),
+    responses(
+        (status = 200, description = "Step detail", body = StepDetailSnapshot),
+        (status = 404, description = "Issue or step not found", body = ApiError)
+    ),
+    tag = "issues"
+)]
+pub async fn get_step_detail(
+    State(state): State<AppState>,
+    Path((identifier, step_name)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let lock = state.orchestrator_state.read().await;
+    let detail =
+        build_step_detail_snapshot(&lock, &identifier, &step_name, &state.workspace_root, 50);
+    drop(lock);
+
+    match detail {
+        Some(detail) => (StatusCode::OK, Json(detail)).into_response(),
+        None => {
+            let error = ApiError::new(
+                "step_not_found",
+                &format!("no issue '{}' or step '{}' found", identifier, step_name),
             );
             (StatusCode::NOT_FOUND, Json(error)).into_response()
         }
@@ -342,5 +381,31 @@ mod tests {
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_step_detail_not_found_no_issue() {
+        let app_state = build_empty_state();
+        let response = get_step_detail(
+            State(app_state),
+            Path(("nonexistent#999".to_string(), "build".to_string())),
+        )
+        .await;
+
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_step_detail_not_found_no_step() {
+        let app_state = build_populated_state();
+        let response = get_step_detail(
+            State(app_state),
+            Path(("my-repo#42".to_string(), "nonexistent-step".to_string())),
+        )
+        .await;
+
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 }

@@ -5,12 +5,12 @@ use crate::interaction::model::InteractionKind;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig};
+use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
 /// Issue currently blocked waiting for a human response.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaitingOnHumanEntry {
     pub issue_id: String,
     pub identifier: String,
@@ -29,15 +29,31 @@ pub struct WaitingOnHumanEntry {
     #[serde(default)]
     pub agent_total_tokens: u64,
     pub requested_at: DateTime<Utc>,
+    #[serde(default)]
+    pub run_id: Option<String>,
+    #[serde(default)]
+    pub issue: Option<Issue>,
 }
 
 #[derive(Debug, Clone)]
 pub struct CompletedEntry {
     pub issue_id: String,
     pub identifier: String,
+    pub run_id: Option<String>,
+    pub issue: Issue,
     pub status: String,
+    pub workflow_steps: Vec<CompletedWorkflowStep>,
     pub completed_at: DateTime<Utc>,
     pub outcome_summary: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletedWorkflowStep {
+    pub name: String,
+    pub agent: String,
+    pub dependencies: Vec<String>,
+    pub state: String,
+    pub can_navigate: bool,
 }
 
 /// Rate limit snapshot from agent events.
@@ -205,6 +221,11 @@ impl OrchestratorState {
     /// Remove a running entry and return it. Returns None if not found.
     pub fn remove_running(&mut self, issue_id: &str) -> Option<RunningEntry> {
         self.running.remove(issue_id)
+    }
+
+    /// Get a reference to a running entry without removing it.
+    pub fn get_running(&self, issue_id: &str) -> Option<&RunningEntry> {
+        self.running.get(issue_id)
     }
 
     pub fn next_timeline_sequence(&mut self, run_id: &str) -> u64 {
@@ -443,15 +464,82 @@ impl OrchestratorState {
         self.pipeline_configs.get(issue_id)
     }
 
-    pub fn add_completed(&mut self, issue_id: String, identifier: String, status: String) {
+    pub fn complete_issue(
+        &mut self,
+        issue_id: &str,
+        status: Option<String>,
+        outcome_summary: Option<String>,
+    ) {
+        let running = self.running.get(issue_id).cloned();
+        let waiting = self.waiting_on_human.get(issue_id).cloned();
+        let finalize = self.finalize.get(issue_id).cloned();
+        let run = self.pipeline_runs.get(issue_id).cloned();
+        let config = self.pipeline_configs.get(issue_id).cloned();
+
+        let Some(issue) = running
+            .as_ref()
+            .map(|entry| entry.issue.clone())
+            .or_else(|| waiting.as_ref().and_then(|entry| entry.issue.clone()))
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .map(|entry| entry.issue.clone())
+            })
+        else {
+            return;
+        };
+
+        let identifier = running
+            .as_ref()
+            .map(|entry| entry.identifier.clone())
+            .or_else(|| waiting.as_ref().map(|entry| entry.identifier.clone()))
+            .or_else(|| {
+                finalize
+                    .as_ref()
+                    .map(|entry| entry.issue_identifier.clone())
+            })
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .map(|entry| entry.identifier.clone())
+            })
+            .unwrap_or_else(|| issue.identifier.clone());
+        let run_id = running
+            .as_ref()
+            .and_then(|entry| entry.run_id.clone())
+            .or_else(|| waiting.as_ref().and_then(|entry| entry.run_id.clone()))
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .and_then(|entry| entry.run_id.clone())
+            });
+        let completed_status = status.unwrap_or_else(|| {
+            self.completed
+                .get(issue_id)
+                .map(|entry| entry.status.clone())
+                .unwrap_or_else(|| "completed_succeeded".to_string())
+        });
+        let workflow_steps = config
+            .as_ref()
+            .map(|config| completed_workflow_steps(config, run.as_ref()))
+            .or_else(|| {
+                self.completed
+                    .get(issue_id)
+                    .map(|entry| entry.workflow_steps.clone())
+            })
+            .unwrap_or_default();
+
         self.completed.insert(
-            issue_id.clone(),
+            issue_id.to_string(),
             CompletedEntry {
-                issue_id,
+                issue_id: issue_id.to_string(),
                 identifier,
-                status,
+                run_id,
+                issue,
+                status: completed_status,
+                workflow_steps,
                 completed_at: Utc::now(),
-                outcome_summary: None,
+                outcome_summary,
             },
         );
     }
@@ -462,6 +550,46 @@ impl OrchestratorState {
         self.completed
             .retain(|_, entry| now.signed_duration_since(entry.completed_at) < expiry);
     }
+
+    /// Add a completed entry with the given status.
+    /// This is a convenience wrapper around `complete_issue` for simpler use cases.
+    pub fn add_completed(&mut self, issue_id: String, _identifier: String, status: String) {
+        self.complete_issue(&issue_id, Some(status), None);
+    }
+}
+
+fn completed_workflow_steps(
+    config: &EnsembleConfig,
+    run: Option<&PipelineRun>,
+) -> Vec<CompletedWorkflowStep> {
+    config
+        .steps
+        .iter()
+        .map(|step| CompletedWorkflowStep {
+            name: step.name.clone(),
+            agent: step.agent.clone(),
+            dependencies: step.depends.clone().unwrap_or_default(),
+            state: completed_step_state(step, run),
+            can_navigate: run
+                .map(|pipeline_run| pipeline_run.step_states.contains_key(&step.name))
+                .unwrap_or(false),
+        })
+        .collect()
+}
+
+fn completed_step_state(step: &StepConfig, run: Option<&PipelineRun>) -> String {
+    run.and_then(|pipeline_run| pipeline_run.step_states.get(&step.name))
+        .map(|state| match state {
+            crate::pipeline::engine::StepState::Pending => "pending",
+            crate::pipeline::engine::StepState::Running { .. } => "running",
+            crate::pipeline::engine::StepState::Passed => "passed",
+            crate::pipeline::engine::StepState::Failed { .. } => "failed",
+            crate::pipeline::engine::StepState::BlockedOnHuman { .. } => "waiting",
+            crate::pipeline::engine::StepState::AwaitingApproval { .. } => "waiting",
+            crate::pipeline::engine::StepState::Rejected { .. } => "rejected",
+        })
+        .unwrap_or("pending")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -477,7 +605,7 @@ mod tests {
     fn test_new_state() {
         let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         assert_eq!(state.poll_interval_ms, 30000);
-        assert_eq!(state.max_concurrent_agents, 10);
+        assert_eq!(state.max_concurrent_agents, 4);
         assert!(state.running.is_empty());
         assert!(state.claimed.is_empty());
         assert!(state.retry_attempts.is_empty());
@@ -581,6 +709,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
 
         assert!(state.is_claimed("1"));
@@ -615,6 +745,8 @@ mod tests {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
         state.queue_resume("1");
 
@@ -771,18 +903,16 @@ mod tests {
     #[test]
     fn test_add_completed() {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
-
-        state.add_completed(
-            "issue-1".to_string(),
-            "repo#1".to_string(),
-            "completed_succeeded".to_string(),
-        );
+        let issue = test_issue("issue-1", "Todo");
+        state.add_running(&issue, None);
+        state.complete_issue("issue-1", Some("completed_succeeded".to_string()), None);
 
         assert!(state.completed.contains_key("issue-1"));
         let entry = state.completed.get("issue-1").unwrap();
         assert_eq!(entry.issue_id, "issue-1");
-        assert_eq!(entry.identifier, "repo#1");
+        assert_eq!(entry.identifier, "repo#issue-1");
         assert_eq!(entry.status, "completed_succeeded");
+        assert_eq!(entry.issue.title, issue.title);
         assert!(entry.outcome_summary.is_none());
     }
 
@@ -791,11 +921,8 @@ mod tests {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.completed_expiry_secs = 1;
 
-        state.add_completed(
-            "issue-1".to_string(),
-            "repo#1".to_string(),
-            "completed_succeeded".to_string(),
-        );
+        state.add_running(&test_issue("issue-1", "Todo"), None);
+        state.complete_issue("issue-1", Some("completed_succeeded".to_string()), None);
 
         assert!(state.completed.contains_key("issue-1"));
 
@@ -811,16 +938,10 @@ mod tests {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         state.completed_expiry_secs = 10;
 
-        state.add_completed(
-            "issue-1".to_string(),
-            "repo#1".to_string(),
-            "completed_succeeded".to_string(),
-        );
-        state.add_completed(
-            "issue-2".to_string(),
-            "repo#2".to_string(),
-            "completed_failed".to_string(),
-        );
+        state.add_running(&test_issue("issue-1", "Todo"), None);
+        state.add_running(&test_issue("issue-2", "Todo"), None);
+        state.complete_issue("issue-1", Some("completed_succeeded".to_string()), None);
+        state.complete_issue("issue-2", Some("completed_failed".to_string()), None);
 
         std::thread::sleep(std::time::Duration::from_millis(100));
 

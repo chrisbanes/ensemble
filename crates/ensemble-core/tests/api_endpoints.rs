@@ -921,6 +921,8 @@ async fn resume_blocked_issue_requeues_issue() {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
     }
 
@@ -968,6 +970,8 @@ async fn issue_input_resolves_interaction_and_queues_resume() {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
     }
 
@@ -1043,6 +1047,8 @@ async fn issue_detail_includes_pending_input_summary() {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
     }
 
@@ -1087,6 +1093,8 @@ async fn issue_input_supports_rejection_outcome_for_approval_gate() {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
     }
 
@@ -1147,6 +1155,8 @@ async fn issue_input_rejects_invalid_outcome() {
             agent_output_tokens: 0,
             agent_total_tokens: 0,
             requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
         });
     }
 

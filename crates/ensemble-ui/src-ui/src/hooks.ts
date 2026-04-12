@@ -134,6 +134,31 @@ export function useTimelineQuery(identifier: string, runId?: string, limit = 200
   });
 }
 
+export interface StepDetailSnapshot {
+  issue_identifier: string;
+  issue_id: string;
+  step_name: string;
+  status: string;
+  agent: string;
+  dependencies: string[];
+  can_navigate: boolean;
+  verdict: string | null;
+  recent_events: TimelineEventRecord[];
+}
+
+export function useStepDetailQuery(identifier: string, stepName: string) {
+  return useQuery({
+    queryKey: ["stepDetail", identifier, stepName],
+    enabled: identifier.length > 0 && stepName.length > 0,
+    queryFn: async (): Promise<StepDetailSnapshot> => {
+      const response = await customFetch<{ data: StepDetailSnapshot }>(
+        `/api/v1/${encodeURIComponent(identifier)}/step/${encodeURIComponent(stepName)}`,
+      );
+      return response.data;
+    },
+  });
+}
+
 export function useInteractionsQuery() {
   return useListOpenInteractions<InteractionRequest[]>({
     query: {
