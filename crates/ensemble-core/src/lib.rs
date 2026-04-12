@@ -3,6 +3,7 @@ pub mod api;
 pub mod config;
 pub mod error;
 pub mod history;
+pub mod history_store;
 pub mod interaction;
 pub mod observability;
 pub mod orchestrator;

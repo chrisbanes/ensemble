@@ -39,3 +39,4 @@ dotenvy = "0.15"
 shellexpand = "3"
 mime_guess = "2"
 opener = "0.7"
+rusqlite = { version = "0.33", features = ["bundled"] }
