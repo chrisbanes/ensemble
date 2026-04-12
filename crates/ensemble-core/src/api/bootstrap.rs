@@ -89,6 +89,9 @@ pub fn build_app_state(
     let has_runnable_config = document_state.active_config.is_some();
     let workspace_root = workspace_root_from_document(&document_state);
     let history_path = PathBuf::from(&workspace_root).join("ensemble_history.jsonl");
+    let history_db_path = PathBuf::from(&workspace_root)
+        .join(".ensemble")
+        .join("history.db");
 
     let app_state = AppState {
         orchestrator_state: orchestrator_state_from_document(&document_state),
@@ -96,6 +99,7 @@ pub fn build_app_state(
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root,
         history_path,
+        history_db_path,
         event_bus,
         config_runtime: ConfigRuntime {
             config_path,

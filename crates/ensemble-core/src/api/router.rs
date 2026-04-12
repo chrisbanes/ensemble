@@ -40,6 +40,8 @@ pub struct AppState {
     pub workspace_root: String,
     /// Path to the history JSONL file.
     pub history_path: PathBuf,
+    /// Path to the global history sqlite database.
+    pub history_db_path: PathBuf,
     /// Event bus for pipeline event broadcasting.
     pub event_bus: EventBus,
     /// Runtime configuration store with document state.

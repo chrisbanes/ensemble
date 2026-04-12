@@ -1,5 +1,6 @@
 use crate::api::router::AppState;
-use crate::history::reader::{read_history, HistoryQuery, HistoryResponse};
+use crate::history::reader::{HistoryQuery, HistoryResponse};
+use crate::history_store::store::HistoryStore;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -23,7 +24,21 @@ pub async fn get_history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    match read_history(&state.history_path, &query).await {
+    let store = match HistoryStore::new(state.history_db_path.clone()).await {
+        Ok(store) => store,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                crate::api::handlers::api_error(
+                    "history_store_error",
+                    format!("failed to open history store: {}", e),
+                ),
+            )
+                .into_response();
+        }
+    };
+
+    match store.read_history(&query).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -41,13 +56,13 @@ mod tests {
     use super::*;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::history::model::{HistoryRecord, TokenTotals};
-    use crate::history::writer::HistoryWriter;
     use chrono::Utc;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
-    fn build_app_state(history_path: PathBuf) -> AppState {
+    fn build_app_state(base: &Path) -> AppState {
         let mut app_state = app_state_with_document_state(parsed_document_state());
-        app_state.history_path = history_path;
+        app_state.history_path = base.join("ensemble_history.jsonl");
+        app_state.history_db_path = base.join(".ensemble").join("history.db");
         app_state
     }
 
@@ -74,7 +89,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_history_empty() {
-        let state = build_app_state(PathBuf::from("/tmp/nonexistent_test_history.jsonl"));
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(temp.path());
         let response = get_history(State(state), Query(HistoryQuery::default())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -82,17 +98,23 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_history_with_records() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::fs::remove_file(&path).ok();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(tmp.path());
+        let store = HistoryStore::new(state.history_db_path.clone()).await.unwrap();
+        store
+            .append_history_record("run-1", &sample_record("MT-1"))
+            .await
+            .unwrap();
+        store
+            .append_history_record("run-2", &sample_record("MT-2"))
+            .await
+            .unwrap();
 
-        let writer = HistoryWriter::new(path.clone());
-        writer.append(&sample_record("MT-1")).await.unwrap();
-        writer.append(&sample_record("MT-2")).await.unwrap();
-
-        let state = build_app_state(path);
         let response = get_history(State(state), Query(HistoryQuery::default())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
     }
+
+    #[allow(dead_code)]
+    fn _unused(_path: PathBuf) {}
 }

@@ -15,6 +15,7 @@ pub fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
             issue_id TEXT NOT NULL,
             issue_identifier TEXT NOT NULL,
             outcome TEXT NOT NULL,
+            steps_traversed TEXT NOT NULL,
             attempts INTEGER NOT NULL,
             duration_seconds INTEGER NOT NULL,
             started_at TEXT NOT NULL,
