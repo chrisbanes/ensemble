@@ -79,7 +79,7 @@ export default function StepDetail() {
       <section>
         <h2 className="text-lg font-semibold mb-3">Recent Events</h2>
         <Card className="p-4 max-h-[600px] overflow-y-auto">
-          <EventTimeline events={events} live={false} onViewConversation={() => {}} />
+          <EventTimeline events={events} live={false} />
         </Card>
       </section>
     </div>

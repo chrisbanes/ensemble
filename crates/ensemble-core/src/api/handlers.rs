@@ -1,6 +1,6 @@
 use crate::api::router::AppState;
 use crate::observability::snapshot::{
-    build_issue_snapshot, build_state_snapshot, build_step_detail_snapshot, IssueDetailSnapshot,
+    build_issue_snapshot, build_state_snapshot, extract_step_detail_state, IssueDetailSnapshot,
     RuntimeSnapshot, StepDetailSnapshot,
 };
 use axum::extract::{Path, State};
@@ -121,21 +121,64 @@ pub async fn get_step_detail(
     State(state): State<AppState>,
     Path((identifier, step_name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let lock = state.orchestrator_state.read().await;
-    let detail =
-        build_step_detail_snapshot(&lock, &identifier, &step_name, &state.workspace_root, 50);
-    drop(lock);
+    // Extract data from state without doing I/O
+    let detail_state = {
+        let lock = state.orchestrator_state.read().await;
+        extract_step_detail_state(&lock, &identifier, &step_name)
+    };
 
-    match detail {
-        Some(detail) => (StatusCode::OK, Json(detail)).into_response(),
-        None => {
-            let error = ApiError::new(
-                "step_not_found",
-                &format!("no issue '{}' or step '{}' found", identifier, step_name),
-            );
-            (StatusCode::NOT_FOUND, Json(error)).into_response()
-        }
-    }
+    let Some(detail_state) = detail_state else {
+        let error = ApiError::new(
+            "step_not_found",
+            &format!("no issue '{}' or step '{}' found", identifier, step_name),
+        );
+        return (StatusCode::NOT_FOUND, Json(error)).into_response();
+    };
+
+    // Do I/O outside the state lock using tokio::fs
+    let recent_events = if let Some(ref run_id) = detail_state.run_id {
+        let timeline_path = std::path::PathBuf::from(&state.workspace_root)
+            .join(".ensemble")
+            .join("runs")
+            .join(run_id)
+            .join("events.jsonl");
+        tokio::fs::read_to_string(&timeline_path)
+            .await
+            .ok()
+            .map(|contents| {
+                contents
+                    .lines()
+                    .rev()
+                    .filter_map(|line| {
+                        serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line)
+                            .ok()
+                    })
+                    .filter(|event| event.issue_identifier == identifier)
+                    .filter(|event| event.step_name.as_deref() == Some(&step_name))
+                    .take(50)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let detail = StepDetailSnapshot {
+        issue_identifier: identifier,
+        issue_id: detail_state.issue_id,
+        step_name,
+        status: detail_state.status,
+        agent: detail_state.agent,
+        dependencies: detail_state.dependencies,
+        can_navigate: detail_state.can_navigate,
+        verdict: detail_state.verdict,
+        recent_events,
+    };
+
+    (StatusCode::OK, Json(detail)).into_response()
 }
 
 /// Response body for POST /api/v1/refresh.

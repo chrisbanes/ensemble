@@ -476,6 +476,16 @@ impl OrchestratorState {
         let run = self.pipeline_runs.get(issue_id).cloned();
         let config = self.pipeline_configs.get(issue_id).cloned();
 
+        eprintln!(
+            "DEBUG complete_issue: issue_id={}, running={:?}, waiting={:?}, waiting.issue={:?}",
+            issue_id,
+            running.is_some(),
+            waiting.is_some(),
+            waiting
+                .as_ref()
+                .and_then(|w| w.issue.as_ref().map(|i| &i.id))
+        );
+
         let Some(issue) = running
             .as_ref()
             .map(|entry| entry.issue.clone())

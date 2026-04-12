@@ -1433,10 +1433,14 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .is_some_and(Self::pipeline_has_running_steps);
 
-        let retry_attempt = state
-            .running
-            .get(issue_id)
-            .and_then(|entry| entry.retry_attempt);
+        let (retry_attempt, waiting_issue, waiting_run_id) = {
+            let entry = state.running.get(issue_id);
+            (
+                entry.and_then(|e| e.retry_attempt),
+                entry.map(|e| e.issue.clone()),
+                entry.and_then(|e| e.run_id.clone()),
+            )
+        };
         if !has_running_steps {
             if let Some(entry) = state.remove_running(issue_id) {
                 state.add_runtime_seconds(&entry);
@@ -1456,8 +1460,8 @@ impl Orchestrator {
             agent_output_tokens: waiting_output_tokens,
             agent_total_tokens: waiting_total_tokens,
             requested_at: interaction.requested_at,
-            run_id: None,
-            issue: None,
+            run_id: waiting_run_id,
+            issue: waiting_issue,
         });
         drop(state);
 
@@ -1602,10 +1606,14 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .is_some_and(Self::pipeline_has_running_steps);
 
-        let retry_attempt = state
-            .running
-            .get(issue_id)
-            .and_then(|entry| entry.retry_attempt);
+        let (retry_attempt, waiting_issue, waiting_run_id) = {
+            let entry = state.running.get(issue_id);
+            (
+                entry.and_then(|e| e.retry_attempt),
+                entry.map(|e| e.issue.clone()),
+                entry.and_then(|e| e.run_id.clone()),
+            )
+        };
         if !has_running_steps {
             if let Some(entry) = state.remove_running(issue_id) {
                 state.add_runtime_seconds(&entry);
@@ -1626,8 +1634,8 @@ impl Orchestrator {
             agent_output_tokens: waiting_output_tokens,
             agent_total_tokens: waiting_total_tokens,
             requested_at: interaction.requested_at,
-            run_id: None,
-            issue: None,
+            run_id: waiting_run_id,
+            issue: waiting_issue,
         });
         drop(state);
 
@@ -1665,6 +1673,14 @@ impl Orchestrator {
                 continue;
             }
 
+            // Try to get the issue from the tracker
+            let issue = self
+                .tracker
+                .fetch_issue_states_by_ids(std::slice::from_ref(&interaction.issue_id))
+                .await
+                .ok()
+                .and_then(|issues| issues.into_iter().next());
+
             state.add_waiting_on_human(WaitingOnHumanEntry {
                 issue_id: interaction.issue_id.clone(),
                 identifier: interaction.issue_identifier.clone(),
@@ -1680,7 +1696,7 @@ impl Orchestrator {
                 agent_total_tokens: interaction.agent_total_tokens,
                 requested_at: interaction.requested_at,
                 run_id: None,
-                issue: None,
+                issue,
             });
         }
     }
@@ -2326,26 +2342,27 @@ impl Orchestrator {
         }
 
         let mut state = self.state.write().await;
+        let run_id_for_waiting = state.issue_run_ids.get(&issue.id).cloned();
         state.insert_pipeline_run(&issue.id, pipeline_run, config_snapshot);
-        if !state.is_waiting_on_human(&issue.id) {
-            state.add_waiting_on_human(WaitingOnHumanEntry {
-                issue_id: issue.id.clone(),
-                identifier: issue.identifier.clone(),
-                interaction_request_id: interaction.id.clone(),
-                step_name: interaction.step_name.clone(),
-                kind: interaction.kind.clone(),
-                prompt: interaction.body.clone(),
-                agent_name: interaction.agent_name.clone(),
-                retry_attempt: Some(interaction.pipeline_cycle.max(1)),
-                started_at: interaction.waiting_started_at,
-                agent_input_tokens: interaction.agent_input_tokens,
-                agent_output_tokens: interaction.agent_output_tokens,
-                agent_total_tokens: interaction.agent_total_tokens,
-                requested_at: interaction.requested_at,
-                run_id: None,
-                issue: None,
-            });
-        }
+        // Always update/add the waiting entry with the issue data to ensure it's available
+        // for completion tracking
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            interaction_request_id: interaction.id.clone(),
+            step_name: interaction.step_name.clone(),
+            kind: interaction.kind.clone(),
+            prompt: interaction.body.clone(),
+            agent_name: interaction.agent_name.clone(),
+            retry_attempt: Some(interaction.pipeline_cycle.max(1)),
+            started_at: interaction.waiting_started_at,
+            agent_input_tokens: interaction.agent_input_tokens,
+            agent_output_tokens: interaction.agent_output_tokens,
+            agent_total_tokens: interaction.agent_total_tokens,
+            requested_at: interaction.requested_at,
+            run_id: run_id_for_waiting,
+            issue: Some(issue.clone()),
+        });
 
         Ok(())
     }
@@ -2718,13 +2735,14 @@ impl Orchestrator {
                                 finalize_state.status,
                                 FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
                             ) {
-                                state.release_claim(&issue.id);
-                                state.remove_pipeline_run(&issue.id);
+                                // Add to completed BEFORE releasing claim (which removes waiting_on_human)
                                 state.add_completed(
                                     issue.id.clone(),
                                     issue.identifier.clone(),
                                     "completed_succeeded".to_string(),
                                 );
+                                state.release_claim(&issue.id);
+                                state.remove_pipeline_run(&issue.id);
                                 state.clear_finalize_state(&issue.id);
 
                                 (
@@ -2789,13 +2807,14 @@ impl Orchestrator {
                                     })
                                 });
 
-                            state.release_claim(&issue.id);
-                            state.remove_pipeline_run(&issue.id);
+                            // Add to completed BEFORE releasing claim (which removes waiting_on_human)
                             state.add_completed(
                                 issue.id.clone(),
                                 issue.identifier.clone(),
                                 "completed_failed".to_string(),
                             );
+                            state.release_claim(&issue.id);
+                            state.remove_pipeline_run(&issue.id);
                             state.clear_finalize_state(&issue.id);
 
                             history_record

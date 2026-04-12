@@ -293,16 +293,25 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
     }
 }
 
-/// Build a StepDetailSnapshot for a specific step within an issue.
-///
+/// Data extracted from state needed to build a step detail snapshot.
+/// This allows releasing the state lock before doing I/O.
+pub struct StepDetailState {
+    pub issue_id: String,
+    pub status: String,
+    pub verdict: Option<String>,
+    pub agent: String,
+    pub dependencies: Vec<String>,
+    pub can_navigate: bool,
+    pub run_id: Option<String>,
+}
+
+/// Extract step detail data from state without doing I/O.
 /// Returns None if the identifier or step_name is not found.
-pub fn build_step_detail_snapshot(
+pub fn extract_step_detail_state(
     state: &OrchestratorState,
     identifier: &str,
     step_name: &str,
-    workspace_root: &str,
-    max_events: usize,
-) -> Option<StepDetailSnapshot> {
+) -> Option<StepDetailState> {
     let issue_entry = state.running.values().find(|e| e.identifier == identifier);
 
     let issue_id = if let Some(entry) = issue_entry {
@@ -335,46 +344,101 @@ pub fn build_step_detail_snapshot(
         return None;
     };
 
-    let pipeline_config = state.pipeline_configs.get(&issue_id)?;
-    let step_config = pipeline_config.steps.iter().find(|s| s.name == step_name)?;
-    let pipeline_run = state.pipeline_runs.get(&issue_id);
-    let step_state = pipeline_run.and_then(|run| run.step_states.get(step_name));
+    // Try to get step info from pipeline config/run first
+    let from_pipeline = state.pipeline_configs.get(&issue_id).and_then(|config| {
+        config
+            .steps
+            .iter()
+            .find(|s| s.name == step_name)
+            .map(|step_config| {
+                let pipeline_run = state.pipeline_runs.get(&issue_id);
+                let step_state = pipeline_run.and_then(|run| run.step_states.get(step_name));
 
-    let status_str = step_state
-        .map(|s| match s {
-            StepState::Pending => "pending",
-            StepState::Running { .. } => "running",
-            StepState::Passed => "passed",
-            StepState::Failed { .. } => "failed",
-            StepState::BlockedOnHuman { .. } => "waiting",
-            StepState::AwaitingApproval { .. } => "waiting",
-            StepState::Rejected { .. } => "rejected",
-        })
-        .unwrap_or("pending");
+                let status = step_state
+                    .map(|s| match s {
+                        StepState::Pending => "pending",
+                        StepState::Running { .. } => "running",
+                        StepState::Passed => "passed",
+                        StepState::Failed { .. } => "failed",
+                        StepState::BlockedOnHuman { .. } => "waiting",
+                        StepState::AwaitingApproval { .. } => "waiting",
+                        StepState::Rejected { .. } => "rejected",
+                    })
+                    .unwrap_or("pending")
+                    .to_string();
 
-    let verdict = step_state.and_then(|s| match s {
-        StepState::Passed => Some("success".to_string()),
-        StepState::Failed { error, .. } => Some(error.clone()),
-        StepState::Rejected { summary } => Some(summary.clone()),
-        _ => None,
+                let verdict = step_state.and_then(|s| match s {
+                    StepState::Passed => Some("success".to_string()),
+                    StepState::Failed { error, .. } => Some(error.clone()),
+                    StepState::Rejected { summary } => Some(summary.clone()),
+                    _ => None,
+                });
+
+                StepDetailState {
+                    issue_id: issue_id.clone(),
+                    status,
+                    verdict,
+                    agent: step_config.agent.clone(),
+                    dependencies: step_config.depends.clone().unwrap_or_default(),
+                    can_navigate: pipeline_run
+                        .map(|r| r.step_states.contains_key(step_name))
+                        .unwrap_or(false),
+                    run_id: state
+                        .issue_run_ids
+                        .get(&issue_id)
+                        .cloned()
+                        .or_else(|| state.running.get(&issue_id).and_then(|e| e.run_id.clone()))
+                        .or_else(|| {
+                            state
+                                .completed
+                                .get(&issue_id)
+                                .and_then(|e| e.run_id.clone())
+                        }),
+                }
+            })
     });
 
-    // Get run_id from issue_run_ids, running entry, or completed entry
-    let run_id = state
-        .issue_run_ids
-        .get(&issue_id)
-        .cloned()
-        .or_else(|| state.running.get(&issue_id).and_then(|e| e.run_id.clone()))
-        .or_else(|| {
-            state
-                .completed
-                .get(&issue_id)
-                .and_then(|e| e.run_id.clone())
-        });
+    // Fall back to completed entry workflow_steps for completed issues
+    from_pipeline.or_else(|| {
+        state.completed.get(&issue_id).and_then(|completed| {
+            completed
+                .workflow_steps
+                .iter()
+                .find(|s| s.name == step_name)
+                .map(|step| StepDetailState {
+                    issue_id: issue_id.clone(),
+                    status: step.state.clone(),
+                    verdict: if step.state == "failed" || step.state == "rejected" {
+                        Some("error".to_string())
+                    } else if step.state == "passed" {
+                        Some("success".to_string())
+                    } else {
+                        None
+                    },
+                    agent: step.agent.clone(),
+                    dependencies: step.dependencies.clone(),
+                    can_navigate: step.can_navigate,
+                    run_id: completed.run_id.clone(),
+                })
+        })
+    })
+}
 
-    let recent_events: Vec<crate::timeline::model::TimelineEventRecord> = if let Some(ref run_id) =
-        run_id
-    {
+/// Build a StepDetailSnapshot for a specific step within an issue.
+///
+/// Returns None if the identifier or step_name is not found.
+/// NOTE: This function does synchronous I/O. Consider using extract_step_detail_state
+/// to get data without I/O, then do I/O separately.
+pub fn build_step_detail_snapshot(
+    state: &OrchestratorState,
+    identifier: &str,
+    step_name: &str,
+    workspace_root: &str,
+    max_events: usize,
+) -> Option<StepDetailSnapshot> {
+    let detail_state = extract_step_detail_state(state, identifier, step_name)?;
+
+    let recent_events = if let Some(ref run_id) = detail_state.run_id {
         let timeline_path = std::path::PathBuf::from(workspace_root)
             .join(".ensemble")
             .join("runs")
@@ -385,6 +449,7 @@ pub fn build_step_detail_snapshot(
             .map(|contents| {
                 contents
                     .lines()
+                    .rev() // Start from the end to get most recent events
                     .filter_map(|line| {
                         serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line)
                             .ok()
@@ -392,6 +457,9 @@ pub fn build_step_detail_snapshot(
                     .filter(|event| event.issue_identifier == identifier)
                     .filter(|event| event.step_name.as_deref() == Some(step_name))
                     .take(max_events)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev() // Restore chronological order
                     .collect()
             })
             .unwrap_or_default()
@@ -401,15 +469,13 @@ pub fn build_step_detail_snapshot(
 
     Some(StepDetailSnapshot {
         issue_identifier: identifier.to_string(),
-        issue_id,
+        issue_id: detail_state.issue_id,
         step_name: step_name.to_string(),
-        status: status_str.to_string(),
-        agent: step_config.agent.clone(),
-        dependencies: step_config.depends.clone().unwrap_or_default(),
-        can_navigate: pipeline_run
-            .map(|r| r.step_states.contains_key(step_name))
-            .unwrap_or(false),
-        verdict,
+        status: detail_state.status,
+        agent: detail_state.agent,
+        dependencies: detail_state.dependencies,
+        can_navigate: detail_state.can_navigate,
+        verdict: detail_state.verdict,
         recent_events,
     })
 }

@@ -16,6 +16,10 @@ interface CompletedIssueItem extends BaseIssueItem {
 
 type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedIssueItem;
 
+function isCompletedIssue(issue: IssueItem): issue is CompletedIssueItem {
+  return 'completed_at' in issue;
+}
+
 interface KanbanColumnProps {
   title: string;
   status: string;
@@ -36,7 +40,7 @@ export default function KanbanColumn({ title, status, issues }: KanbanColumnProp
           <IssueCard 
             key={issue.issue_id} 
             issue={issue} 
-            status={status}
+            status={isCompletedIssue(issue) ? issue.status : status}
           />
         ))}
         {issues.length === 0 && (
