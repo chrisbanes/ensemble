@@ -12,6 +12,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use serde::Serialize;
+use std::io::ErrorKind;
 use std::path::Path as FsPath;
 
 /// Standard JSON error envelope matching SPEC.md Section 13.7.2 error format.
@@ -85,16 +86,30 @@ pub async fn get_issue_detail(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
 ) -> impl IntoResponse {
-    let detail = {
+    let live_detail = {
         let lock = state.orchestrator_state.read().await;
         build_issue_snapshot(&lock, &identifier, &state.workspace_root)
     };
 
-    let detail = if detail.is_some() {
-        detail
-    } else {
-        build_issue_snapshot_from_history(&state.history_path, &state.workspace_root, &identifier)
-            .await
+    if let Some(detail) = live_detail {
+        return (StatusCode::OK, Json(detail)).into_response();
+    }
+
+    let detail = match build_issue_snapshot_from_history(
+        &state.history_path,
+        &state.workspace_root,
+        &identifier,
+    )
+    .await
+    {
+        Ok(detail) => detail,
+        Err(error) => {
+            let error = ApiError::new(
+                "history_read_error",
+                &format!("failed to read history: {}", error),
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+        }
     };
 
     match detail {
@@ -116,14 +131,21 @@ async fn build_issue_snapshot_from_history(
     history_path: &FsPath,
     workspace_root: &str,
     identifier: &str,
-) -> Option<IssueDetailSnapshot> {
-    let contents = tokio::fs::read_to_string(history_path).await.ok()?;
+) -> Result<Option<IssueDetailSnapshot>, std::io::Error> {
+    let contents = match tokio::fs::read_to_string(history_path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
 
     let record = contents.lines().rev().find_map(|line| {
         serde_json::from_str::<HistoryRecord>(line)
             .ok()
             .filter(|entry| entry.issue_identifier == identifier)
-    })?;
+    });
+    let Some(record) = record else {
+        return Ok(None);
+    };
 
     let status = match record.outcome.as_str() {
         "succeeded" => "completed_succeeded".to_string(),
@@ -133,9 +155,11 @@ async fn build_issue_snapshot_from_history(
     };
 
     let workspace_path = if record.workspace_path.is_empty() {
-        sanitize_workspace_key(identifier)
-            .map(|key| format!("{workspace_root}/{key}"))
-            .unwrap_or_default()
+        let key = sanitize_workspace_key(identifier);
+        let Some(key) = key else {
+            return Ok(None);
+        };
+        format!("{}/{}", workspace_root, key)
     } else {
         record.workspace_path.clone()
     };
@@ -162,7 +186,7 @@ async fn build_issue_snapshot_from_history(
             .collect()
     };
 
-    Some(IssueDetailSnapshot {
+    Ok(Some(IssueDetailSnapshot {
         issue_identifier: record.issue_identifier.clone(),
         issue_id: record.issue_id.clone(),
         status,
@@ -190,7 +214,7 @@ async fn build_issue_snapshot_from_history(
             priority: None,
             url: None,
         },
-    })
+    }))
 }
 
 /// GET /api/v1/{identifier}/step/{step_name}
@@ -558,6 +582,57 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_history_read_error_returns_500() {
+        let mut app_state = build_empty_state();
+        let temp_dir = tempfile::tempdir().unwrap();
+        app_state.history_path = temp_dir.path().to_path_buf();
+
+        let response = get_issue_detail(State(app_state), Path("todo-0".to_string()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_history_fallback_rejects_unsafe_workspace_key() {
+        let mut app_state = build_empty_state();
+        let tmp = NamedTempFile::new().unwrap();
+        let history_path = tmp.path().to_path_buf();
+        std::fs::remove_file(&history_path).ok();
+        app_state.history_path = history_path.clone();
+
+        let writer = HistoryWriter::new(history_path);
+        writer
+            .append(&HistoryRecord {
+                issue_identifier: ".".to_string(),
+                issue_id: "dot".to_string(),
+                outcome: "failed".to_string(),
+                steps_traversed: vec!["build".to_string()],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                },
+                duration_seconds: 42,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: Some("agent crashed".to_string()),
+                verdict: Some("failed".to_string()),
+                workspace_path: String::new(),
+            })
+            .await
+            .unwrap();
+
+        let response = get_issue_detail(State(app_state), Path(".".to_string()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
