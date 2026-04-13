@@ -6,9 +6,8 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 
 ## 1. Problem Statement
 
-Ensemble is a long-running automation service that continuously reads work from an issue tracker
-(GitHub Projects in this specification version), creates an isolated workspace for each issue, and
-runs a coding agent session for that issue inside the workspace.
+Ensemble runs agent workflows for tickets and provides a control room for supervising interactive
+execution. External trackers may provide tickets, but Ensemble owns live execution state.
 
 The service solves four operational problems:
 
