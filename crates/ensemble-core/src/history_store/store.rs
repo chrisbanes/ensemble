@@ -1,7 +1,8 @@
 use std::io;
 use std::path::PathBuf;
 
-use rusqlite::{params, Connection};
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, TransactionBehavior};
 
 use crate::history::model::HistoryRecord;
 use crate::history::reader::{HistoryQuery, HistoryResponse};
@@ -14,21 +15,20 @@ pub struct HistoryStore {
 }
 
 impl HistoryStore {
-    pub async fn new(db_path: PathBuf) -> Result<Self, io::Error> {
-        let path = db_path.clone();
-        tokio::task::spawn_blocking(move || -> Result<(), io::Error> {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let conn = Connection::open(&path).map_err(io::Error::other)?;
-            crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
-            crate::history_store::schema::bootstrap_schema(&conn).map_err(io::Error::other)?;
-            Ok(())
-        })
-        .await
-        .map_err(io::Error::other)??;
-
+    pub fn new_blocking(db_path: PathBuf) -> Result<Self, io::Error> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(&db_path).map_err(io::Error::other)?;
+        crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
+        crate::history_store::schema::bootstrap_schema(&conn).map_err(io::Error::other)?;
         Ok(Self { db_path })
+    }
+
+    pub async fn new(db_path: PathBuf) -> Result<Self, io::Error> {
+        tokio::task::spawn_blocking(move || Self::new_blocking(db_path))
+            .await
+            .map_err(io::Error::other)?
     }
 
     pub fn db_path(&self) -> &PathBuf {
@@ -46,7 +46,9 @@ impl HistoryStore {
         tokio::task::spawn_blocking(move || -> Result<(), io::Error> {
             let mut conn = Connection::open(path).map_err(io::Error::other)?;
             crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
-            let tx = conn.transaction().map_err(io::Error::other)?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(io::Error::other)?;
             tx.execute(
                 r#"
                 INSERT INTO runs (
@@ -105,7 +107,9 @@ impl HistoryStore {
         tokio::task::spawn_blocking(move || -> Result<(), io::Error> {
             let mut conn = Connection::open(path).map_err(io::Error::other)?;
             crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
-            let tx = conn.transaction().map_err(io::Error::other)?;
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(io::Error::other)?;
             tx.execute(
                 r#"
                 INSERT OR IGNORE INTO run_events (
@@ -144,32 +148,57 @@ impl HistoryStore {
             let conn = Connection::open(path).map_err(io::Error::other)?;
             crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
 
-            let mut sql = String::from(
-                "SELECT issue_id, issue_identifier, outcome, steps_traversed, attempts, duration_seconds, started_at, completed_at, last_error, verdict, workspace_path, input_tokens, output_tokens, total_tokens FROM runs",
-            );
-            if outcome.is_some() {
-                sql.push_str(" WHERE outcome = ?1");
+            let mut where_clauses: Vec<&str> = Vec::new();
+            let mut base_params: Vec<Value> = Vec::new();
+            if let Some(ref out) = outcome {
+                where_clauses.push("outcome = ?");
+                base_params.push(Value::from(out.clone()));
             }
-            sql.push_str(" ORDER BY completed_at DESC");
+            if let Some(ref step_name) = step {
+                where_clauses.push("EXISTS (SELECT 1 FROM json_each(runs.steps_traversed) WHERE json_each.value = ?)");
+                base_params.push(Value::from(step_name.clone()));
+            }
 
-            let mut stmt = conn.prepare(&sql).map_err(io::Error::other)?;
-            let rows = if let Some(outcome) = outcome {
-                stmt.query_map([outcome], crate::history_store::model::row_to_history_record)
+            let where_sql = if where_clauses.is_empty() {
+                String::new()
             } else {
-                stmt.query_map([], crate::history_store::model::row_to_history_record)
-            }
-            .map_err(io::Error::other)?;
+                format!(" WHERE {}", where_clauses.join(" AND "))
+            };
 
-            let mut records: Vec<HistoryRecord> = rows
+            let count_sql = format!("SELECT COUNT(*) FROM runs{where_sql}");
+            let total: usize = conn
+                .query_row(
+                    &count_sql,
+                    params_from_iter(base_params.clone()),
+                    |row| row.get(0),
+                )
+                .map_err(io::Error::other)?;
+
+            let limit_i64 = i64::try_from(limit).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "limit does not fit in i64")
+            })?;
+            let cursor_i64 = i64::try_from(cursor).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "cursor does not fit in i64")
+            })?;
+
+            let page_sql = format!(
+                "SELECT issue_id, issue_identifier, outcome, steps_traversed, attempts, duration_seconds, started_at, completed_at, last_error, verdict, workspace_path, input_tokens, output_tokens, total_tokens FROM runs{where_sql} ORDER BY completed_at DESC LIMIT ? OFFSET ?"
+            );
+            let mut page_params = base_params;
+            page_params.push(Value::from(limit_i64));
+            page_params.push(Value::from(cursor_i64));
+
+            let mut stmt = conn.prepare(&page_sql).map_err(io::Error::other)?;
+            let rows = stmt
+                .query_map(
+                    params_from_iter(page_params),
+                    crate::history_store::model::row_to_history_record,
+                )
+                .map_err(io::Error::other)?;
+
+            let page: Vec<HistoryRecord> = rows
                 .map(|r| r.map_err(io::Error::other))
                 .collect::<Result<_, _>>()?;
-
-            if let Some(step) = step {
-                records.retain(|r| r.steps_traversed.contains(&step));
-            }
-
-            let total = records.len();
-            let page = records.into_iter().skip(cursor).take(limit).collect::<Vec<_>>();
             let next_cursor = if cursor + page.len() < total {
                 Some(cursor + page.len())
             } else {
@@ -199,28 +228,48 @@ impl HistoryStore {
         tokio::task::spawn_blocking(move || -> Result<TimelineResponse, io::Error> {
             let conn = Connection::open(path).map_err(io::Error::other)?;
             crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
-            let mut sql = String::from(
-                "SELECT run_id, issue_identifier, sequence, timestamp, event_type, step_name, attempt, detail, verdict, tool_name FROM run_events WHERE run_id = ?1",
+            let mut where_clauses = vec!["run_id = ?".to_string()];
+            let mut base_params = vec![Value::from(run_id)];
+            if let Some(identifier) = issue_identifier {
+                where_clauses.push("issue_identifier = ?".to_string());
+                base_params.push(Value::from(identifier));
+            }
+            let where_sql = format!(" WHERE {}", where_clauses.join(" AND "));
+
+            let count_sql = format!("SELECT COUNT(*) FROM run_events{where_sql}");
+            let total: usize = conn
+                .query_row(
+                    &count_sql,
+                    params_from_iter(base_params.clone()),
+                    |row| row.get(0),
+                )
+                .map_err(io::Error::other)?;
+
+            let limit_i64 = i64::try_from(limit).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "limit does not fit in i64")
+            })?;
+            let cursor_i64 = i64::try_from(cursor).map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "cursor does not fit in i64")
+            })?;
+
+            let query_sql = format!(
+                "SELECT run_id, issue_identifier, sequence, timestamp, event_type, step_name, attempt, detail, verdict, tool_name FROM run_events{where_sql} ORDER BY sequence ASC LIMIT ? OFFSET ?"
             );
-            if issue_identifier.is_some() {
-                sql.push_str(" AND issue_identifier = ?2");
-            }
-            sql.push_str(" ORDER BY sequence ASC");
+            let mut query_params = base_params;
+            query_params.push(Value::from(limit_i64));
+            query_params.push(Value::from(cursor_i64));
 
-            let mut stmt = conn.prepare(&sql).map_err(io::Error::other)?;
-            let rows = if let Some(identifier) = issue_identifier {
-                stmt.query_map(params![run_id, identifier], crate::history_store::model::row_to_timeline_record)
-            } else {
-                stmt.query_map([run_id], crate::history_store::model::row_to_timeline_record)
-            }
-            .map_err(io::Error::other)?;
+            let mut stmt = conn.prepare(&query_sql).map_err(io::Error::other)?;
+            let rows = stmt
+                .query_map(
+                    params_from_iter(query_params),
+                    crate::history_store::model::row_to_timeline_record,
+                )
+                .map_err(io::Error::other)?;
 
-            let events: Vec<TimelineEventRecord> = rows
+            let page: Vec<TimelineEventRecord> = rows
                 .map(|r| r.map_err(io::Error::other))
                 .collect::<Result<_, _>>()?;
-
-            let total = events.len();
-            let page = events.into_iter().skip(cursor).take(limit).collect::<Vec<_>>();
             let next_cursor = if cursor + page.len() < total {
                 Some(cursor + page.len())
             } else {

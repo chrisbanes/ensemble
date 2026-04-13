@@ -6,6 +6,7 @@ use ensemble_core::agent::cancellation::new_cancellation_registry;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
 use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
 use ensemble_core::config::ensemble::ConcurrencyConfig;
+use ensemble_core::history_store::store::HistoryStore;
 use ensemble_core::interaction::model::{
     InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
     InteractionStatus,
@@ -38,6 +39,7 @@ fn build_app_state(
     orchestrator_state: OrchestratorState,
     document_state: ConfigDocumentState,
 ) -> AppState {
+    let history_db_path = temp_dir.path().join(".ensemble").join("history.db");
     AppState {
         orchestrator_state: Arc::new(RwLock::new(orchestrator_state)),
         orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
@@ -48,7 +50,8 @@ fn build_app_state(
             .display()
             .to_string(),
         history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
-        history_db_path: temp_dir.path().join(".ensemble").join("history.db"),
+        history_db_path: history_db_path.clone(),
+        history_store: HistoryStore::new_blocking(history_db_path).ok(),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),

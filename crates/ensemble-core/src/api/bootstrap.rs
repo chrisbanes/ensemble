@@ -4,6 +4,7 @@ use crate::api::router::{AppState, ConfigRuntime};
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{default_workspace_root, ConcurrencyConfig, PollingConfig};
 use crate::error::{ConfigError, EnsembleError};
+use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use crate::orchestrator::{Orchestrator, OrchestratorRuntimeParts};
@@ -15,6 +16,7 @@ use std::sync::Arc;
 use std::sync::MutexGuard;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
+use tracing::warn;
 
 pub struct PreparedApp {
     pub app_state: AppState,
@@ -92,6 +94,17 @@ pub fn build_app_state(
     let history_db_path = PathBuf::from(&workspace_root)
         .join(".ensemble")
         .join("history.db");
+    let history_store = match HistoryStore::new_blocking(history_db_path.clone()) {
+        Ok(store) => Some(store),
+        Err(error) => {
+            warn!(
+                path = %history_db_path.display(),
+                error = %error,
+                "failed to initialize sqlite history store; api will fall back to JSONL history"
+            );
+            None
+        }
+    };
 
     let app_state = AppState {
         orchestrator_state: orchestrator_state_from_document(&document_state),
@@ -100,6 +113,7 @@ pub fn build_app_state(
         workspace_root,
         history_path,
         history_db_path,
+        history_store,
         event_bus,
         config_runtime: ConfigRuntime {
             config_path,

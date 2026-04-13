@@ -1,6 +1,5 @@
 use crate::api::router::AppState;
-use crate::history::reader::{HistoryQuery, HistoryResponse};
-use crate::history_store::store::HistoryStore;
+use crate::history::reader::{read_history, HistoryQuery, HistoryResponse};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -24,21 +23,13 @@ pub async fn get_history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    let store = match HistoryStore::new(state.history_db_path.clone()).await {
-        Ok(store) => store,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                crate::api::handlers::api_error(
-                    "history_store_error",
-                    format!("failed to open history store: {}", e),
-                ),
-            )
-                .into_response();
-        }
+    let read_result = if let Some(store) = state.history_store.as_ref() {
+        store.read_history(&query).await
+    } else {
+        read_history(&state.history_path, &query).await
     };
 
-    match store.read_history(&query).await {
+    match read_result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -56,13 +47,17 @@ mod tests {
     use super::*;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::history::model::{HistoryRecord, TokenTotals};
+    use crate::history::writer::HistoryWriter;
+    use crate::history_store::store::HistoryStore;
     use chrono::Utc;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     fn build_app_state(base: &Path) -> AppState {
         let mut app_state = app_state_with_document_state(parsed_document_state());
         app_state.history_path = base.join("ensemble_history.jsonl");
         app_state.history_db_path = base.join(".ensemble").join("history.db");
+        app_state.history_store =
+            HistoryStore::new_blocking(app_state.history_db_path.clone()).ok();
         app_state
     }
 
@@ -117,6 +112,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    #[allow(dead_code)]
-    fn _unused(_path: PathBuf) {}
+    #[tokio::test]
+    async fn test_get_history_falls_back_to_jsonl_when_sqlite_unavailable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut state = build_app_state(temp.path());
+        state.history_store = None;
+        let writer = HistoryWriter::new(state.history_path.clone());
+        writer.append(&sample_record("MT-JSONL")).await.unwrap();
+
+        let response = get_history(State(state), Query(HistoryQuery::default())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
