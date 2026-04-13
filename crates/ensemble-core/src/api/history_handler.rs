@@ -100,7 +100,9 @@ mod tests {
     async fn test_get_history_with_records() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = build_app_state(tmp.path());
-        let store = HistoryStore::new(state.history_db_path.clone()).await.unwrap();
+        let store = HistoryStore::new(state.history_db_path.clone())
+            .await
+            .unwrap();
         store
             .append_history_record("run-1", &sample_record("MT-1"))
             .await

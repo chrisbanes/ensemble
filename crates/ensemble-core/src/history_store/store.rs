@@ -96,7 +96,10 @@ impl HistoryStore {
         .map_err(io::Error::other)?
     }
 
-    pub async fn append_timeline_event(&self, record: &TimelineEventRecord) -> Result<(), io::Error> {
+    pub async fn append_timeline_event(
+        &self,
+        record: &TimelineEventRecord,
+    ) -> Result<(), io::Error> {
         let path = self.db_path.clone();
         let record = record.clone();
         tokio::task::spawn_blocking(move || -> Result<(), io::Error> {
@@ -280,7 +283,9 @@ mod tests {
     #[tokio::test]
     async fn append_history_record_is_queryable() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = HistoryStore::new(dir.path().join("history.db")).await.unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
 
         store
             .append_history_record("run-1", &sample_history("repo#1"))
@@ -295,7 +300,9 @@ mod tests {
     #[tokio::test]
     async fn append_timeline_event_is_queryable_in_sequence_order() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = HistoryStore::new(dir.path().join("history.db")).await.unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
 
         store
             .append_timeline_event(&sample_event("run-1", "repo#1", 2))
@@ -326,7 +333,9 @@ mod tests {
     #[tokio::test]
     async fn append_timeline_event_is_idempotent_for_duplicate_sequence() {
         let dir = tempfile::TempDir::new().unwrap();
-        let store = HistoryStore::new(dir.path().join("history.db")).await.unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
         let event = sample_event("run-1", "repo#1", 1);
 
         store.append_timeline_event(&event).await.unwrap();

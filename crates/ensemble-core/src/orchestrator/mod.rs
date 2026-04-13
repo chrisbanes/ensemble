@@ -28,6 +28,7 @@ use crate::config::ensemble::EnsembleConfig;
 use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
+use crate::history_store::store::HistoryStore;
 use crate::interaction::{
     InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
     InteractionStore,
@@ -93,6 +94,7 @@ pub struct Orchestrator {
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
+    history_store: Option<HistoryStore>,
     event_bus: EventBus,
     timeline_writer: TimelineWriter,
     worker_tx: mpsc::Sender<WorkerEvent>,
@@ -171,6 +173,17 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            history_store: futures::executor::block_on(HistoryStore::new(
+                parts.workspace_root.join(".ensemble").join("history.db"),
+            ))
+            .map_err(|error| {
+                warn!(
+                    error = %error,
+                    "failed to initialize sqlite history store; continuing with file persistence only"
+                );
+                error
+            })
+            .ok(),
             event_bus: parts.event_bus,
             timeline_writer: TimelineWriter::new(parts.workspace_root),
             worker_tx,
@@ -2285,6 +2298,16 @@ impl Orchestrator {
     }
 
     async fn append_history_record(&self, record: HistoryRecord) {
+        if let Some(store) = &self.history_store {
+            if let Err(error) = store.append_history_record(&record.issue_id, &record).await {
+                warn!(
+                    issue_id = %record.issue_id,
+                    error = %error,
+                    "failed to append history record to sqlite"
+                );
+            }
+        }
+
         let history_path = self.workspace_mgr.root().join("ensemble_history.jsonl");
         let _guard = self.history_write_lock.lock().await;
         let writer = HistoryWriter::new(history_path);
@@ -3015,6 +3038,17 @@ impl Orchestrator {
         self.event_bus.publish(event);
 
         if let Some((run_id, record)) = timeline_entry {
+            if let Some(store) = &self.history_store {
+                if let Err(error) = store.append_timeline_event(&record).await {
+                    warn!(
+                        event = "timeline_persist_failed",
+                        run_id = %run_id,
+                        error = %error,
+                        "failed to persist timeline event to sqlite"
+                    );
+                }
+            }
+
             if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
                 warn!(
                     event = "timeline_persist_failed",

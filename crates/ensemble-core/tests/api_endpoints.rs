@@ -48,6 +48,7 @@ fn build_app_state(
             .display()
             .to_string(),
         history_path: temp_dir.path().join("ensemble_test_history.jsonl"),
+        history_db_path: temp_dir.path().join(".ensemble").join("history.db"),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),

@@ -125,7 +125,9 @@ mod tests {
     async fn get_timeline_returns_paginated_events_for_run_id() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
-        let store = HistoryStore::new(state.history_db_path.clone()).await.unwrap();
+        let store = HistoryStore::new(state.history_db_path.clone())
+            .await
+            .unwrap();
         store
             .append_timeline_event(&sample_event("run-abc", 1))
             .await
@@ -171,7 +173,9 @@ mod tests {
     async fn get_timeline_scopes_results_to_path_identifier() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
-        let store = HistoryStore::new(state.history_db_path.clone()).await.unwrap();
+        let store = HistoryStore::new(state.history_db_path.clone())
+            .await
+            .unwrap();
         let mut wrong_issue = sample_event("run-abc", 1);
         wrong_issue.issue_identifier = "repo#other".to_string();
         store.append_timeline_event(&wrong_issue).await.unwrap();

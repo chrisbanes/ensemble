@@ -6,7 +6,9 @@ use rusqlite::Row;
 fn parse_utc(ts: &str) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts)
         .map(|dt| dt.with_timezone(&Utc))
-        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e)))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })
 }
 
 pub(crate) fn row_to_history_record(row: &Row<'_>) -> rusqlite::Result<HistoryRecord> {
