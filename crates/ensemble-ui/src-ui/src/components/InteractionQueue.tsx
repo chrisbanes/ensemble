@@ -1,6 +1,5 @@
 import { Link } from "react-router-dom";
-import type { InteractionRequest } from "@/generated/models";
-import { Badge } from "@/components/ui/badge";
+import type { WaitingInteractionRow } from "@/generated/models";
 import {
   Table,
   TableBody,
@@ -11,7 +10,7 @@ import {
 } from "@/components/ui/table";
 
 interface InteractionQueueProps {
-  interactions: InteractionRequest[];
+  interactions: WaitingInteractionRow[];
 }
 
 function formatAge(requestedAt: string): string {
@@ -43,16 +42,13 @@ export default function InteractionQueue({ interactions }: InteractionQueueProps
       <TableHeader>
         <TableRow>
           <TableHead>Issue</TableHead>
-          <TableHead>Kind</TableHead>
-          <TableHead>Title</TableHead>
-          <TableHead>Mode</TableHead>
           <TableHead>Step</TableHead>
           <TableHead>Age</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
         {interactions.map((interaction) => (
-          <TableRow key={interaction.id}>
+          <TableRow key={interaction.interaction_request_id}>
             <TableCell>
               <Link
                 to={`/issue/${encodeURIComponent(interaction.issue_identifier)}`}
@@ -61,16 +57,11 @@ export default function InteractionQueue({ interactions }: InteractionQueueProps
                 {interaction.issue_identifier}
               </Link>
             </TableCell>
-            <TableCell className="text-muted-foreground capitalize">
-              {interaction.kind}
+            <TableCell className="text-muted-foreground">
+              <div>
+                <p className="font-medium">{interaction.step_name}</p>
+              </div>
             </TableCell>
-            <TableCell className="font-medium">{interaction.title}</TableCell>
-            <TableCell>
-              <Badge variant={interaction.blocking ? "secondary" : "outline"}>
-                {interaction.blocking ? "Blocking" : "Info"}
-              </Badge>
-            </TableCell>
-            <TableCell className="text-muted-foreground">{interaction.step_name}</TableCell>
             <TableCell className="text-muted-foreground">
               {formatAge(interaction.requested_at)}
             </TableCell>

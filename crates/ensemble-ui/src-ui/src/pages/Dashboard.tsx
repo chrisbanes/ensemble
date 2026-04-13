@@ -1,6 +1,7 @@
 import { useStateQuery, useRefreshMutation } from "@/hooks";
 import { Button } from "@/components/ui/button";
 import KanbanBoard from "@/components/KanbanBoard";
+import InteractionQueue from "@/components/InteractionQueue";
 
 export default function Dashboard() {
   const { data, isLoading, isError, error } = useStateQuery();
@@ -22,10 +23,12 @@ export default function Dashboard() {
 
   if (!data) return null;
 
+  const waitingInteractions = data.waiting_on_human ?? [];
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Dashboard</h1>
+        <h1 className="text-2xl font-bold">Control Room</h1>
         <Button
           onClick={() => refreshMutation.mutate()}
           disabled={refreshMutation.isPending}
@@ -33,6 +36,13 @@ export default function Dashboard() {
           {refreshMutation.isPending ? "Refreshing..." : "Refresh"}
         </Button>
       </div>
+
+      {waitingInteractions.length > 0 && (
+        <section>
+          <h2 className="text-lg font-semibold mb-3">Needs attention</h2>
+          <InteractionQueue interactions={waitingInteractions} />
+        </section>
+      )}
 
       <KanbanBoard data={data} />
     </div>
