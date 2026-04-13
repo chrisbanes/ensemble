@@ -47,7 +47,7 @@ export default function IssueDetail() {
   const { identifier = "" } = useParams<{ identifier: string }>();
   const { data, isLoading, isError, error } = useIssueDetailQuery(identifier);
   const interactionId =
-    data?.pending_input?.context.interaction_request_id ??
+    data?.pending_input?.ask_id ??
     data?.current_interaction?.interaction_request_id ??
     "";
   const { data: interaction } = useInteractionDetailQuery(interactionId);

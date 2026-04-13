@@ -38,6 +38,7 @@ import type {
   ConfigStateResponse,
   GuidedConfigForm,
   InteractionRequest,
+  InteractionDetail,
 } from "./generated/models";
 import { customFetch } from "./fetch-client";
 
@@ -169,10 +170,10 @@ export function useInteractionsQuery() {
 }
 
 export function useInteractionDetailQuery(id: string) {
-  return useGetInteractionById<InteractionRequest>(id, {
+  return useGetInteractionById<InteractionDetail>(id, {
     query: {
       enabled: id.length > 0,
-      select: (resp) => resp.data as InteractionRequest,
+      select: (resp) => resp.data as InteractionDetail,
     },
   });
 }

@@ -1,33 +1,16 @@
 import { useState, type ChangeEvent } from "react";
-import type { InteractionRequest } from "@/generated/models";
+import type { InteractionDetail } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 
 interface InteractionPanelProps {
-  interaction: InteractionRequest;
+  interaction: InteractionDetail;
   issueIdentifier: string;
   onSubmitInput: (response: string) => void;
   onCancel: () => void;
   isSubmitting?: boolean;
   isCancelling?: boolean;
-}
-
-function renderResponseSummary(interaction: InteractionRequest) {
-  if (!interaction.response) return null;
-
-  switch (interaction.response.kind) {
-    case "question":
-      return interaction.response.text;
-    case "approval":
-      return interaction.response.approved
-        ? "Approved"
-        : interaction.response.reason || "Rejected";
-    case "handoff":
-      return interaction.response.completed
-        ? interaction.response.notes || "Completed"
-        : interaction.response.notes || "Pending";
-  }
 }
 
 export default function InteractionPanel({
@@ -41,59 +24,49 @@ export default function InteractionPanel({
   const [textResponse, setTextResponse] = useState("");
 
   const isResolved = interaction.status === "resolved";
-  const responseSummary = renderResponseSummary(interaction);
 
   return (
     <div className="space-y-4">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold">{interaction.title}</h3>
-            <Badge variant={interaction.blocking ? "secondary" : "outline"}>
-              {interaction.blocking ? "Blocking" : "Info"}
-            </Badge>
-          </div>
+          <h2 className="text-lg font-semibold">{interaction.question}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{issueIdentifier}</p>
         </div>
-        <Badge variant="outline">{interaction.kind}</Badge>
+        <Badge variant="outline">{interaction.status}</Badge>
       </div>
 
-      <div className="rounded-lg border bg-muted/20 p-4 space-y-2">
-        <p className="text-sm leading-6">{interaction.body}</p>
-        <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
-          <span>Step: {interaction.step_name}</span>
-          <span>Status: {interaction.status}</span>
-        </div>
-      </div>
+      {interaction.why_blocked && (
+        <p className="text-sm text-muted-foreground bg-muted/20 rounded-lg border p-3">
+          {interaction.why_blocked}
+        </p>
+      )}
 
-      {interaction.options.length > 0 && (
-        <div className="flex flex-wrap gap-2">
-          {interaction.options.map((option) => (
-            <Badge key={option} variant="outline">
-              {option}
-            </Badge>
-          ))}
+      {interaction.suggested_answer && (
+        <div className="rounded-lg border border-blue-200 bg-blue-50/60 p-4 text-sm text-blue-900 dark:border-blue-900 dark:bg-blue-950/20 dark:text-blue-100">
+          <span className="font-medium">Suggested:</span> {interaction.suggested_answer}
         </div>
       )}
 
-      {responseSummary && (
-        <div className="rounded-lg border border-green-200 bg-green-50/60 p-4 text-sm text-green-900 dark:border-green-900 dark:bg-green-950/20 dark:text-green-100">
-          Latest response: {responseSummary}
+      {interaction.extra_context && (
+        <div className="rounded-lg border bg-muted/20 p-4 text-sm">
+          <span className="font-medium text-muted-foreground">Context:</span> {interaction.extra_context}
         </div>
       )}
+
+      <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
+        <span>Step: {interaction.step_name}</span>
+        <span>Status: {interaction.status}</span>
+      </div>
 
       {!isResolved && (
         <div className="space-y-3">
-          <label htmlFor="interaction-response" className="text-sm font-medium">
-            Response
-          </label>
           <Textarea
             id="interaction-response"
             value={textResponse}
             onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
               setTextResponse(event.target.value)
             }
-            placeholder="Add the operator response"
+            placeholder="Answer the agent's question"
           />
           <div className="flex flex-wrap gap-2">
             <Button
