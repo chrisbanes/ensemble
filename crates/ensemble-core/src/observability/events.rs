@@ -66,6 +66,28 @@ pub enum PipelineEvent {
         step_name: String,
         detail: String,
     },
+    QuestionAsked {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        agent_name: String,
+        ask_id: String,
+        detail: String,
+    },
+    HumanReplySubmitted {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        ask_id: String,
+        detail: String,
+    },
+    StepResumedFromHumanReply {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        ask_id: String,
+        detail: String,
+    },
     Error {
         issue_identifier: String,
         timestamp: DateTime<Utc>,
@@ -120,6 +142,15 @@ impl PipelineEvent {
             | Self::InputResumed {
                 issue_identifier, ..
             }
+            | Self::QuestionAsked {
+                issue_identifier, ..
+            }
+            | Self::HumanReplySubmitted {
+                issue_identifier, ..
+            }
+            | Self::StepResumedFromHumanReply {
+                issue_identifier, ..
+            }
             | Self::Error {
                 issue_identifier, ..
             }
@@ -143,6 +174,9 @@ impl PipelineEvent {
             | Self::InputRequested { timestamp, .. }
             | Self::InputSubmitted { timestamp, .. }
             | Self::InputResumed { timestamp, .. }
+            | Self::QuestionAsked { timestamp, .. }
+            | Self::HumanReplySubmitted { timestamp, .. }
+            | Self::StepResumedFromHumanReply { timestamp, .. }
             | Self::Error { timestamp, .. }
             | Self::RetryScheduled { timestamp, .. }
             | Self::Complete { timestamp, .. } => *timestamp,
@@ -308,6 +342,61 @@ impl PipelineEvent {
                 step_name: Some(step_name.clone()),
                 attempt,
                 detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::QuestionAsked {
+                issue_identifier,
+                timestamp,
+                step_name,
+                agent_name: _,
+                ask_id,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "question_asked".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: format!("{} (ask_id: {})", detail, ask_id),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::HumanReplySubmitted {
+                issue_identifier,
+                timestamp,
+                step_name,
+                ask_id,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "human_reply_submitted".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: format!("{} (ask_id: {})", detail, ask_id),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::StepResumedFromHumanReply {
+                issue_identifier,
+                timestamp,
+                step_name,
+                ask_id,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "step_resumed_from_human_reply".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: format!("{} (ask_id: {})", detail, ask_id),
                 verdict: None,
                 tool_name: None,
             },

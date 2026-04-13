@@ -791,7 +791,9 @@ async fn get_interaction_by_id() {
     let json: serde_json::Value = response.json().await.unwrap();
     assert_eq!(json["id"], "interaction-detail");
     assert_eq!(json["issue_identifier"], "my-repo#77");
-    assert_eq!(json["kind"], "brainstorm_prompt");
+    assert_eq!(json["question"], "Need clarification");
+    assert_eq!(json["why_blocked"], "Pick a deployment target");
+    assert_eq!(json["status"], "open");
 }
 
 #[tokio::test]
@@ -1066,11 +1068,14 @@ async fn issue_detail_includes_pending_input_summary() {
 
     assert_eq!(response.status(), 200);
     let json: serde_json::Value = response.json().await.unwrap();
-    assert_eq!(json["pending_input"]["kind"], "brainstorm_prompt");
+    assert_eq!(json["pending_input"]["ask_id"], "interaction-pending");
+    assert_eq!(json["pending_input"]["question"], "Need clarification");
     assert_eq!(
-        json["pending_input"]["context"]["interaction_request_id"],
-        "interaction-pending"
+        json["pending_input"]["why_blocked"],
+        "Pick a deployment target"
     );
+    assert_eq!(json["pending_input"]["step_name"], "review");
+    assert_eq!(json["pending_input"]["agent_name"], "reviewer");
 }
 
 #[tokio::test]

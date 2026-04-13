@@ -1,5 +1,6 @@
 use crate::api::router::AppState;
 use crate::history::model::HistoryRecord;
+use crate::interaction::store::InteractionStore;
 use crate::observability::snapshot::{
     build_issue_snapshot, build_state_snapshot, extract_step_detail_state, AttemptInfo,
     FinalizeSnapshot, IssueDetailSnapshot, IssueSummary, RepoFinalizeSnapshot, RetryRow,
@@ -86,9 +87,23 @@ pub async fn get_issue_detail(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
 ) -> impl IntoResponse {
+    let config_dir = state
+        .config_runtime
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let interaction_store = InteractionStore::new(config_dir);
+
     let live_detail = {
         let lock = state.orchestrator_state.read().await;
-        build_issue_snapshot(&lock, &identifier, &state.workspace_root)
+        build_issue_snapshot(
+            &lock,
+            &identifier,
+            &state.workspace_root,
+            Some(&interaction_store),
+        )
+        .await
     };
 
     if let Some(detail) = live_detail {

@@ -142,6 +142,7 @@ impl InteractionStore {
         Ok(interaction)
     }
 
+    /// Marks an interaction as no longer awaiting resume (human has responded).
     pub async fn mark_resumed(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
         let mut interaction = self
             .get(id)
@@ -153,6 +154,8 @@ impl InteractionStore {
         Ok(interaction)
     }
 
+    /// Creates a new agent ask interaction, failing if an unresolved ask already exists
+    /// for the same issue and step combination.
     pub async fn create_ask(&self, ask: AgentAsk) -> Result<AgentAsk, InteractionError> {
         let _guard = self.create_mutex.lock().await;
 
@@ -171,49 +174,39 @@ impl InteractionStore {
         Ok(ask)
     }
 
+    /// Replies to an open interaction with a text response, resolving it.
+    /// Only valid for `BrainstormPrompt` interactions where a `Question` response is expected.
     pub async fn reply(&self, id: &str, response: String) -> Result<AgentAsk, InteractionError> {
         let mut interaction = self
             .get(id)
             .await?
             .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
 
-        match interaction.status {
-            InteractionStatus::Resolved => {
-                return Err(InteractionError::AlreadyResolved { id: id.to_string() });
-            }
-            InteractionStatus::Cancelled => {
-                return Err(InteractionError::AlreadyCancelled { id: id.to_string() });
-            }
-            InteractionStatus::Open => {}
-        }
+        validate_status_open(&interaction)?;
 
-        interaction.status = InteractionStatus::Resolved;
-        interaction.awaiting_resume = false;
-        interaction.response = Some(InteractionResponse::Question {
+        let question_response = InteractionResponse::Question {
             response_schema_version: 1,
             text: response,
             selected_option: None,
-        });
+        };
+        validate_response_kind(&interaction.kind, &question_response)?;
+
+        interaction.status = InteractionStatus::Resolved;
+        interaction.awaiting_resume = false;
+        interaction.response = Some(question_response);
         interaction.resolved_at = Some(Utc::now());
         self.write_interaction(&interaction).await?;
         Ok(interaction.into())
     }
 
+    /// Cancels an open interaction, marking it as resolved without a response.
     pub async fn cancel_ask(&self, id: &str) -> Result<AgentAsk, InteractionError> {
         let mut interaction = self
             .get(id)
             .await?
             .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
 
-        match interaction.status {
-            InteractionStatus::Resolved => {
-                return Err(InteractionError::AlreadyResolved { id: id.to_string() });
-            }
-            InteractionStatus::Cancelled => {
-                return Err(InteractionError::AlreadyCancelled { id: id.to_string() });
-            }
-            InteractionStatus::Open => {}
-        }
+        validate_status_open(&interaction)?;
 
         interaction.status = InteractionStatus::Cancelled;
         interaction.awaiting_resume = false;
@@ -222,6 +215,8 @@ impl InteractionStore {
         Ok(interaction.into())
     }
 
+    /// Clears the waiting state of an interaction, either cancelling open interactions
+    /// or marking resolved/cancelled interactions as no longer awaiting resume.
     pub async fn clear_waiting_state(
         &self,
         id: &str,
@@ -280,11 +275,23 @@ impl InteractionStore {
         issue_id: &str,
         step_name: &str,
     ) -> Result<Option<AgentAsk>, InteractionError> {
-        let existing = self.list_open().await?;
-        Ok(existing
-            .into_iter()
-            .find(|candidate| candidate.issue_id == issue_id && candidate.step_name == step_name)
-            .map(Into::into))
+        let existing = self.find_open_interaction_for(issue_id, step_name).await?;
+        Ok(existing.map(Into::into))
+    }
+
+    async fn find_open_interaction_for(
+        &self,
+        issue_id: &str,
+        step_name: &str,
+    ) -> Result<Option<InteractionRequest>, InteractionError> {
+        let mut interactions = self.list_all().await?;
+        interactions.retain(|interaction| {
+            interaction.status == InteractionStatus::Open
+                && interaction.issue_id == issue_id
+                && interaction.step_name == step_name
+        });
+        interactions.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
+        Ok(interactions.into_iter().next())
     }
 
     async fn write_interaction(
@@ -344,6 +351,18 @@ impl InteractionStore {
                 Err(error.into())
             }
         }
+    }
+}
+
+fn validate_status_open(interaction: &InteractionRequest) -> Result<(), InteractionError> {
+    match interaction.status {
+        InteractionStatus::Open => Ok(()),
+        InteractionStatus::Resolved => Err(InteractionError::AlreadyResolved {
+            id: interaction.id.clone(),
+        }),
+        InteractionStatus::Cancelled => Err(InteractionError::AlreadyCancelled {
+            id: interaction.id.clone(),
+        }),
     }
 }
 
