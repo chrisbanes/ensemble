@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::model::TimelineEventRecord;
 
-#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[derive(Debug, Clone, Deserialize, utoipa::IntoParams)]
 pub struct TimelineQuery {
     pub run_id: String,
     pub cursor: Option<usize>,

@@ -23,7 +23,13 @@ pub async fn get_history(
     State(state): State<AppState>,
     Query(query): Query<HistoryQuery>,
 ) -> impl IntoResponse {
-    match read_history(&state.history_path, &query).await {
+    let read_result = if let Some(store) = state.history_store.as_ref() {
+        store.read_history(&query).await
+    } else {
+        read_history(&state.history_path, &query).await
+    };
+
+    match read_result {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -42,12 +48,16 @@ mod tests {
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::history::model::{HistoryRecord, TokenTotals};
     use crate::history::writer::HistoryWriter;
+    use crate::history_store::store::HistoryStore;
     use chrono::Utc;
-    use std::path::PathBuf;
+    use std::path::Path;
 
-    fn build_app_state(history_path: PathBuf) -> AppState {
+    fn build_app_state(base: &Path) -> AppState {
         let mut app_state = app_state_with_document_state(parsed_document_state());
-        app_state.history_path = history_path;
+        app_state.history_path = base.join("ensemble_history.jsonl");
+        app_state.history_db_path = base.join(".ensemble").join("history.db");
+        app_state.history_store =
+            HistoryStore::new_blocking(app_state.history_db_path.clone()).ok();
         app_state
     }
 
@@ -74,7 +84,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_history_empty() {
-        let state = build_app_state(PathBuf::from("/tmp/nonexistent_test_history.jsonl"));
+        let temp = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(temp.path());
         let response = get_history(State(state), Query(HistoryQuery::default())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -82,15 +93,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_history_with_records() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        std::fs::remove_file(&path).ok();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state = build_app_state(tmp.path());
+        let store = HistoryStore::new(state.history_db_path.clone())
+            .await
+            .unwrap();
+        store
+            .append_history_record("run-1", &sample_record("MT-1"))
+            .await
+            .unwrap();
+        store
+            .append_history_record("run-2", &sample_record("MT-2"))
+            .await
+            .unwrap();
 
-        let writer = HistoryWriter::new(path.clone());
-        writer.append(&sample_record("MT-1")).await.unwrap();
-        writer.append(&sample_record("MT-2")).await.unwrap();
+        let response = get_history(State(state), Query(HistoryQuery::default())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
-        let state = build_app_state(path);
+    #[tokio::test]
+    async fn test_get_history_falls_back_to_jsonl_when_sqlite_unavailable() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let mut state = build_app_state(temp.path());
+        state.history_store = None;
+        let writer = HistoryWriter::new(state.history_path.clone());
+        writer.append(&sample_record("MT-JSONL")).await.unwrap();
+
         let response = get_history(State(state), Query(HistoryQuery::default())).await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);

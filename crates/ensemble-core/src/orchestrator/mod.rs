@@ -28,6 +28,7 @@ use crate::config::ensemble::EnsembleConfig;
 use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
+use crate::history_store::store::HistoryStore;
 use crate::interaction::{
     InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
     InteractionStore,
@@ -93,6 +94,7 @@ pub struct Orchestrator {
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
+    history_store: Option<HistoryStore>,
     event_bus: EventBus,
     timeline_writer: TimelineWriter,
     worker_tx: mpsc::Sender<WorkerEvent>,
@@ -171,6 +173,17 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            history_store: futures::executor::block_on(HistoryStore::new(
+                parts.workspace_root.join(".ensemble").join("history.db"),
+            ))
+            .map_err(|error| {
+                warn!(
+                    error = %error,
+                    "failed to initialize sqlite history store; continuing with file persistence only"
+                );
+                error
+            })
+            .ok(),
             event_bus: parts.event_bus,
             timeline_writer: TimelineWriter::new(parts.workspace_root),
             worker_tx,
@@ -385,6 +398,9 @@ impl Orchestrator {
                     if let Some(entry) = running_entry.as_ref() {
                         state.add_runtime_seconds(entry);
                     }
+                    let run_id = running_entry
+                        .as_ref()
+                        .and_then(|entry| entry.run_id.clone());
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
                             self.build_history_record(
@@ -406,9 +422,9 @@ impl Orchestrator {
                         waiting_entry.map(|entry| entry.interaction_request_id);
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (identifier, interaction_request_id, history_record)
+                    (identifier, interaction_request_id, run_id, history_record)
                 };
-                let (identifier, interaction_request_id, history_record) = history_record;
+                let (identifier, interaction_request_id, run_id, history_record) = history_record;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
@@ -421,7 +437,7 @@ impl Orchestrator {
                 }
 
                 if let Some(record) = history_record {
-                    self.append_history_record(record).await;
+                    self.append_history_record(run_id.as_deref(), record).await;
                 }
             }
 
@@ -433,6 +449,9 @@ impl Orchestrator {
                     if let Some(entry) = running_entry.as_ref() {
                         state.add_runtime_seconds(entry);
                     }
+                    let run_id = running_entry
+                        .as_ref()
+                        .and_then(|entry| entry.run_id.clone());
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
                             self.build_history_record(
@@ -451,14 +470,14 @@ impl Orchestrator {
                         .map(|entry| entry.interaction_request_id.clone());
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (interaction_request_id, history_record)
+                    (interaction_request_id, run_id, history_record)
                 };
-                let (interaction_request_id, history_record) = result;
+                let (interaction_request_id, run_id, history_record) = result;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
                 if let Some(record) = history_record {
-                    self.append_history_record(record).await;
+                    self.append_history_record(run_id.as_deref(), record).await;
                 }
             }
         }
@@ -1092,7 +1111,13 @@ impl Orchestrator {
 
                                 drop(state);
                                 if let Some(record) = history_record {
-                                    self.append_history_record(record).await;
+                                    self.append_history_record(
+                                        running_entry
+                                            .as_ref()
+                                            .and_then(|entry| entry.run_id.as_deref()),
+                                        record,
+                                    )
+                                    .await;
                                 }
                             } else {
                                 if self.tracker.supports_writes()
@@ -1123,10 +1148,12 @@ impl Orchestrator {
                             let completed_at = Utc::now();
                             let mut final_failure = false;
                             let mut history_record = None;
+                            let mut history_run_id = None;
                             let mut completed_identifier = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                                 completed_identifier = Some(entry.identifier.clone());
+                                history_run_id = entry.run_id.clone();
                                 let retry_scheduled = schedule_failure_retry(
                                     &mut state,
                                     issue_id,
@@ -1173,7 +1200,8 @@ impl Orchestrator {
                             drop(state);
                             if final_failure {
                                 if let Some(record) = history_record {
-                                    self.append_history_record(record).await;
+                                    self.append_history_record(history_run_id.as_deref(), record)
+                                        .await;
                                 }
                             }
                         }
@@ -1285,10 +1313,12 @@ impl Orchestrator {
                 let completed_at = Utc::now();
                 let mut final_failure = false;
                 let mut history_record = None;
+                let mut history_run_id = None;
                 let mut completed_identifier = None;
 
                 if let Some(entry) = state.remove_running(issue_id) {
                     completed_identifier = Some(entry.identifier.clone());
+                    history_run_id = entry.run_id.clone();
                     state.add_runtime_seconds(&entry);
                     let retry_scheduled = schedule_failure_retry(
                         &mut state,
@@ -1336,7 +1366,8 @@ impl Orchestrator {
                 drop(state);
                 if final_failure {
                     if let Some(record) = history_record {
-                        self.append_history_record(record).await;
+                        self.append_history_record(history_run_id.as_deref(), record)
+                            .await;
                     }
                 }
             }
@@ -2284,7 +2315,25 @@ impl Orchestrator {
         None
     }
 
-    async fn append_history_record(&self, record: HistoryRecord) {
+    async fn append_history_record(&self, run_id: Option<&str>, record: HistoryRecord) {
+        if let Some(run_id) = run_id {
+            if let Some(store) = &self.history_store {
+                if let Err(error) = store.append_history_record(run_id, &record).await {
+                    warn!(
+                        run_id = %run_id,
+                        issue_id = %record.issue_id,
+                        error = %error,
+                        "failed to append history record to sqlite"
+                    );
+                }
+            }
+        } else if self.history_store.is_some() {
+            warn!(
+                issue_id = %record.issue_id,
+                "missing run_id; skipping sqlite history write"
+            );
+        }
+
         let history_path = self.workspace_mgr.root().join("ensemble_history.jsonl");
         let _guard = self.history_write_lock.lock().await;
         let writer = HistoryWriter::new(history_path);
@@ -2715,8 +2764,12 @@ impl Orchestrator {
                             .run_finalize_phase(&issue.identifier, &current_config)
                             .await;
                         let completed_at = Utc::now();
-                        let (tracker_state, history_record, tracker_error_message) = {
+                        let (tracker_state, history_run_id, history_record, tracker_error_message) = {
                             let mut state = self.state.write().await;
+                            let history_run_id = state
+                                .waiting_on_human
+                                .get(&issue.id)
+                                .and_then(|entry| entry.run_id.clone());
                             let history_record =
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
@@ -2749,6 +2802,7 @@ impl Orchestrator {
                                     self.tracker
                                         .supports_writes()
                                         .then(|| current_config.on_success.clone()),
+                                    history_run_id,
                                     history_record,
                                     "failed to set tracker success state after approval resume",
                                 )
@@ -2765,6 +2819,7 @@ impl Orchestrator {
 
                                 (
                                     tracker_state,
+                                    None,
                                     None,
                                     "failed to set tracker failure state after approval finalize failure",
                                 )
@@ -2786,13 +2841,18 @@ impl Orchestrator {
                         }
 
                         if let Some(record) = history_record {
-                            self.append_history_record(record).await;
+                            self.append_history_record(history_run_id.as_deref(), record)
+                                .await;
                         }
                     }
                     PipelineAction::Failed { reason, .. } => {
                         let completed_at = Utc::now();
-                        let history_record = {
+                        let (history_run_id, history_record) = {
                             let mut state = self.state.write().await;
+                            let history_run_id = state
+                                .waiting_on_human
+                                .get(&issue.id)
+                                .and_then(|entry| entry.run_id.clone());
                             let history_record =
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
@@ -2817,7 +2877,7 @@ impl Orchestrator {
                             state.remove_pipeline_run(&issue.id);
                             state.clear_finalize_state(&issue.id);
 
-                            history_record
+                            (history_run_id, history_record)
                         };
 
                         if self.tracker.supports_writes() {
@@ -2835,7 +2895,8 @@ impl Orchestrator {
                         }
 
                         if let Some(record) = history_record {
-                            self.append_history_record(record).await;
+                            self.append_history_record(history_run_id.as_deref(), record)
+                                .await;
                         }
                     }
                     PipelineAction::Waiting
@@ -3015,6 +3076,17 @@ impl Orchestrator {
         self.event_bus.publish(event);
 
         if let Some((run_id, record)) = timeline_entry {
+            if let Some(store) = &self.history_store {
+                if let Err(error) = store.append_timeline_event(&record).await {
+                    warn!(
+                        event = "timeline_persist_failed",
+                        run_id = %run_id,
+                        error = %error,
+                        "failed to persist timeline event to sqlite"
+                    );
+                }
+            }
+
             if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
                 warn!(
                     event = "timeline_persist_failed",

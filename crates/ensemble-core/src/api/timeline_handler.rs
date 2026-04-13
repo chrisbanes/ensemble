@@ -1,23 +1,15 @@
 use crate::api::router::AppState;
 use crate::timeline::reader::{read_timeline, TimelineQuery, TimelineResponse};
+use crate::timeline::writer::TimelineWriter;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use std::path::PathBuf;
 
 fn is_safe_run_id(run_id: &str) -> bool {
     !run_id.is_empty()
         && run_id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-fn timeline_path(workspace_root: &str, run_id: &str) -> PathBuf {
-    PathBuf::from(workspace_root)
-        .join(".ensemble")
-        .join("runs")
-        .join(run_id)
-        .join("events.jsonl")
 }
 
 /// GET /api/v1/{identifier}/timeline
@@ -53,8 +45,15 @@ pub async fn get_timeline(
             .into_response();
     }
 
-    let path = timeline_path(&state.workspace_root, &query.run_id);
-    match read_timeline(&path, &query, Some(&identifier)).await {
+    let read_result = if let Some(store) = state.history_store.as_ref() {
+        store.read_timeline(&query, Some(&identifier)).await
+    } else {
+        let path = TimelineWriter::new(std::path::PathBuf::from(&state.workspace_root))
+            .events_path(&query.run_id);
+        read_timeline(&path, &query, Some(&identifier)).await
+    };
+
+    match read_result {
         Ok(response) => (StatusCode::OK, axum::Json(response)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -71,6 +70,7 @@ pub async fn get_timeline(
 mod tests {
     use super::*;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
+    use crate::history_store::store::HistoryStore;
     use crate::timeline::model::TimelineEventRecord;
     use crate::timeline::writer::TimelineWriter;
     use chrono::Utc;
@@ -78,6 +78,11 @@ mod tests {
     fn build_app_state(workspace_root: String) -> AppState {
         let mut app_state = app_state_with_document_state(parsed_document_state());
         app_state.workspace_root = workspace_root;
+        app_state.history_db_path = std::path::PathBuf::from(&app_state.workspace_root)
+            .join(".ensemble")
+            .join("history.db");
+        app_state.history_store =
+            HistoryStore::new_blocking(app_state.history_db_path.clone()).ok();
         app_state
     }
 
@@ -118,13 +123,15 @@ mod tests {
     async fn get_timeline_returns_paginated_events_for_run_id() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
-        let writer = TimelineWriter::new(temp_dir.path().to_path_buf());
-        writer
-            .append("run-abc", &sample_event("run-abc", 1))
+        let store = HistoryStore::new(state.history_db_path.clone())
             .await
             .unwrap();
-        writer
-            .append("run-abc", &sample_event("run-abc", 2))
+        store
+            .append_timeline_event(&sample_event("run-abc", 1))
+            .await
+            .unwrap();
+        store
+            .append_timeline_event(&sample_event("run-abc", 2))
             .await
             .unwrap();
 
@@ -164,16 +171,43 @@ mod tests {
     async fn get_timeline_scopes_results_to_path_identifier() {
         let temp_dir = tempfile::TempDir::new().unwrap();
         let state = build_app_state(temp_dir.path().to_string_lossy().to_string());
-        let writer = TimelineWriter::new(temp_dir.path().to_path_buf());
+        let store = HistoryStore::new(state.history_db_path.clone())
+            .await
+            .unwrap();
         let mut wrong_issue = sample_event("run-abc", 1);
         wrong_issue.issue_identifier = "repo#other".to_string();
-        writer.append("run-abc", &wrong_issue).await.unwrap();
+        store.append_timeline_event(&wrong_issue).await.unwrap();
 
         let response = get_timeline(
             State(state),
             Path("repo#1".to_string()),
             Query(TimelineQuery {
                 run_id: "run-abc".to_string(),
+                cursor: Some(0),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_falls_back_to_jsonl_when_sqlite_unavailable() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut state = build_app_state(temp_dir.path().to_string_lossy().to_string());
+        state.history_store = None;
+        let writer = TimelineWriter::new(std::path::PathBuf::from(&state.workspace_root));
+        writer
+            .append("run-fallback", &sample_event("run-fallback", 1))
+            .await
+            .unwrap();
+
+        let response = get_timeline(
+            State(state),
+            Path("repo#1".to_string()),
+            Query(TimelineQuery {
+                run_id: "run-fallback".to_string(),
                 cursor: Some(0),
                 limit: Some(10),
             }),

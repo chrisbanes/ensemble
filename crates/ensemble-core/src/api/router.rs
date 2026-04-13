@@ -5,6 +5,7 @@ use crate::api::{
     history_handler, timeline_handler, ws,
 };
 use crate::config::draft::ConfigDocumentState;
+use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use axum::http::StatusCode;
@@ -40,6 +41,10 @@ pub struct AppState {
     pub workspace_root: String,
     /// Path to the history JSONL file.
     pub history_path: PathBuf,
+    /// Path to the global history sqlite database.
+    pub history_db_path: PathBuf,
+    /// Shared history store initialized at app bootstrap. Falls back to JSONL readers when absent.
+    pub history_store: Option<HistoryStore>,
     /// Event bus for pipeline event broadcasting.
     pub event_bus: EventBus,
     /// Runtime configuration store with document state.

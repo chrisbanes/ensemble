@@ -4,6 +4,7 @@ use crate::config::draft::{
     missing_config_state, ConfigDocumentState, ConfigStateKind, DraftValidationReport,
 };
 use crate::config::ensemble::ConcurrencyConfig;
+use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use std::path::PathBuf;
@@ -33,6 +34,8 @@ pub(crate) fn app_state_with_document_state(document_state: ConfigDocumentState)
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: "/tmp/workspaces".to_string(),
         history_path: PathBuf::from("/tmp/history.jsonl"),
+        history_db_path: PathBuf::from("/tmp/.ensemble/history.db"),
+        history_store: HistoryStore::new_blocking(PathBuf::from("/tmp/.ensemble/history.db")).ok(),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),
@@ -55,6 +58,8 @@ pub(crate) fn app_state_with_missing_config(
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: workspace_root.to_string(),
         history_path: PathBuf::from("/tmp/history.jsonl"),
+        history_db_path: PathBuf::from("/tmp/.ensemble/history.db"),
+        history_store: HistoryStore::new_blocking(PathBuf::from("/tmp/.ensemble/history.db")).ok(),
         event_bus: EventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: config_path.clone(),

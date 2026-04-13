@@ -30,6 +30,7 @@ dotenvy = { workspace = true }
 shellexpand = { workspace = true }
 shlex = "1"
 mime_guess = { workspace = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

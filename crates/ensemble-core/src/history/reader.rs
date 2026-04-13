@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use super::model::HistoryRecord;
 
 /// Query parameters for filtering and paginating history records.
-#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[derive(Debug, Default, Clone, Deserialize, utoipa::IntoParams)]
 pub struct HistoryQuery {
     /// Filter to records with this outcome (e.g. "succeeded", "failed").
     pub outcome: Option<String>,
