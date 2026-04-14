@@ -1381,18 +1381,18 @@ impl Orchestrator {
         request: &InteractionRequestDraft,
         issue_snapshot: Option<&Issue>,
     ) -> Result<(), EnsembleError> {
-        let issue = issue_snapshot.ok_or_else(|| AgentError::PromptError {
-            reason: format!("missing running issue snapshot for blocked issue {issue_id}"),
-        })?;
+        let missing_blocked_issue_value = |value: &str| AgentError::PromptError {
+            reason: format!("missing {value} for blocked issue {issue_id}"),
+        };
+
+        let issue =
+            issue_snapshot.ok_or_else(|| missing_blocked_issue_value("running issue snapshot"))?;
 
         let interaction_context = {
             let state = self.state.read().await;
-            let config =
-                state
-                    .get_pipeline_config(issue_id)
-                    .ok_or_else(|| AgentError::PromptError {
-                        reason: format!("missing pipeline config for blocked issue {issue_id}"),
-                    })?;
+            let config = state
+                .get_pipeline_config(issue_id)
+                .ok_or_else(|| missing_blocked_issue_value("pipeline config"))?;
             let step = config
                 .steps
                 .iter()
@@ -1402,9 +1402,7 @@ impl Orchestrator {
                 })?;
             let run = state
                 .get_pipeline_run(issue_id)
-                .ok_or_else(|| AgentError::PromptError {
-                    reason: format!("missing pipeline run for blocked issue {issue_id}"),
-                })?;
+                .ok_or_else(|| missing_blocked_issue_value("pipeline run"))?;
             let completed_steps = config
                 .steps
                 .iter()

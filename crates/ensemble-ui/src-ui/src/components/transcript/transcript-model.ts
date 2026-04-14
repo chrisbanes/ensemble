@@ -90,6 +90,13 @@ type SortableEntry = {
 };
 
 const HIGH_SORT_NUMBER = Number.MAX_SAFE_INTEGER;
+const TRANSCRIPT_SORT_PRIORITY = {
+  stepEvent: 0,
+  humanOrQuestion: 1,
+  agentOrTool: 2,
+  error: 3,
+  verdict: 4,
+} as const;
 
 function toMs(timestamp: string | null | undefined): number {
   if (!timestamp) return HIGH_SORT_NUMBER;
@@ -98,7 +105,9 @@ function toMs(timestamp: string | null | undefined): number {
 }
 
 function eventPriority(eventType: string): number {
-  if (eventType === "step_started" || eventType === "step_completed") return 0;
+  if (eventType === "step_started" || eventType === "step_completed") {
+    return TRANSCRIPT_SORT_PRIORITY.stepEvent;
+  }
   if (
     eventType === "human_reply_submitted" ||
     eventType === "question_asked" ||
@@ -108,12 +117,14 @@ function eventPriority(eventType: string): number {
     eventType === "step_resumed_from_human_reply" ||
     eventType === "retry_scheduled"
   ) {
-    return 1;
+    return TRANSCRIPT_SORT_PRIORITY.humanOrQuestion;
   }
-  if (eventType === "verdict") return 4;
-  if (eventType === "tool_call" || eventType === "output") return 2;
-  if (eventType === "error") return 3;
-  return 1;
+  if (eventType === "verdict") return TRANSCRIPT_SORT_PRIORITY.verdict;
+  if (eventType === "tool_call" || eventType === "output") {
+    return TRANSCRIPT_SORT_PRIORITY.agentOrTool;
+  }
+  if (eventType === "error") return TRANSCRIPT_SORT_PRIORITY.error;
+  return TRANSCRIPT_SORT_PRIORITY.humanOrQuestion;
 }
 
 function interactionSequence(index: number): number {
@@ -173,7 +184,7 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
       },
       sortTimestamp: toMs(timestamp),
       sortSequence: interactionSequence(index),
-      sortPriority: 1,
+      sortPriority: TRANSCRIPT_SORT_PRIORITY.humanOrQuestion,
     });
   }
 
@@ -208,7 +219,10 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
       entry,
       sortTimestamp: toMs(maybeTimestamp),
       sortSequence: message.index,
-      sortPriority: entry.kind === "human_message" ? 1 : 2,
+      sortPriority:
+        entry.kind === "human_message"
+          ? TRANSCRIPT_SORT_PRIORITY.humanOrQuestion
+          : TRANSCRIPT_SORT_PRIORITY.agentOrTool,
     });
   }
 
