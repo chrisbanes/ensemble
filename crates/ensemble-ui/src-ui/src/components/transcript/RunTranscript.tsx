@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { TranscriptEntryRenderer } from "./TranscriptEntryRenderer";
 import type { GroupedTranscriptEntry } from "./transcript-model";
 
@@ -12,6 +12,23 @@ interface RunTranscriptProps {
 
 export function RunTranscript({ entries, activeEntryId, onJumpToEntry }: RunTranscriptProps) {
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_ENTRY_COUNT);
+
+  useEffect(() => {
+    if (!activeEntryId) {
+      return;
+    }
+
+    const activeIndex = entries.findIndex((entry) => entry.id === activeEntryId);
+    if (activeIndex < 0) {
+      return;
+    }
+
+    const requiredVisibleCount = entries.length - activeIndex;
+    setVisibleCount((current) =>
+      Math.max(current, requiredVisibleCount, INITIAL_VISIBLE_ENTRY_COUNT),
+    );
+  }, [activeEntryId, entries]);
+
   const visibleEntryCount = Math.min(entries.length, visibleCount);
   const hiddenCount = entries.length - visibleEntryCount;
   const visibleEntries = useMemo(

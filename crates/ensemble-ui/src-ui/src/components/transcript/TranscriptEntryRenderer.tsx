@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { AgentMessageEntry } from "./entries/AgentMessageEntry";
 import { AgentQuestionEntry } from "./entries/AgentQuestionEntry";
 import { ErrorEntry } from "./entries/ErrorEntry";
@@ -14,7 +15,7 @@ interface TranscriptEntryRendererProps {
   onJumpToEntry: (entryId: string) => void;
 }
 
-export function TranscriptEntryRenderer({
+function TranscriptEntryRendererImpl({
   entry,
   isActive,
   onJumpToEntry,
@@ -40,3 +41,5 @@ export function TranscriptEntryRenderer({
       return <ErrorEntry entry={entry} isActive={isActive} />;
   }
 }
+
+export const TranscriptEntryRenderer = memo(TranscriptEntryRendererImpl);

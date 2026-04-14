@@ -3,6 +3,7 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { Route, Routes } from "react-router-dom";
 import { renderWithProviders } from "@/test/render";
+import { connectWs } from "@/ws";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
 import type { GroupedTranscriptEntry } from "@/components/transcript/transcript-model";
 import IssueDetail from "./IssueDetail";
@@ -82,7 +83,7 @@ const hooksMock = vi.hoisted(() => {
 });
 
 vi.mock("@/hooks", () => hooksMock);
-vi.mock("@/ws", () => ({ connectWs: () => () => {} }));
+vi.mock("@/ws", () => ({ connectWs: vi.fn(() => () => {}) }));
 vi.mock("@/notifications", () => ({
   addNotification: vi.fn(),
   requestPermissionIfNeeded: vi.fn(),
@@ -231,5 +232,51 @@ describe("IssueDetail", () => {
     expect(screen.getByText("I am ready")).toBeInTheDocument();
     expect(screen.getByLabelText("Reply")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Workflow" })).toBeInTheDocument();
+  });
+
+  it("reveals hidden transcript history when a raw event jumps to an older conversation entry", async () => {
+    const user = userEvent.setup();
+    const connectWsMock = vi.mocked(connectWs);
+
+    hooksMock.useConversationQuery.mockImplementation(() => ({
+      data: {
+        messages: Array.from({ length: 55 }, (_, index) => ({
+          index: index + 1,
+          role: "user",
+          content: `history message ${index + 1}`,
+          tool_calls: null,
+        })),
+      },
+      isLoading: false,
+      isError: false,
+    }));
+    connectWsMock.mockImplementation(({ onMessage }) => {
+      onMessage({
+        type: "event",
+        data: {
+          event_type: "turn_completed",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "Conversation turn completed",
+          conversation_index: 5,
+          run_id: "run-1",
+          sequence: 1,
+        },
+      });
+
+      return () => {};
+    });
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { route: "/issue/todo-1" },
+    );
+
+    expect(screen.queryByText("history message 5")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Raw events" }));
+    await user.click(screen.getByRole("button", { name: "View in conversation" }));
+
+    expect(screen.getByText("history message 5")).toBeInTheDocument();
   });
 });
