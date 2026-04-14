@@ -8,10 +8,20 @@ interface RunTranscriptProps {
   entries: GroupedTranscriptEntry[];
   activeEntryId: string | null;
   onJumpToEntry: (entryId: string) => void;
+  transcriptSessionKey: string;
 }
 
-export function RunTranscript({ entries, activeEntryId, onJumpToEntry }: RunTranscriptProps) {
+export function RunTranscript({
+  entries,
+  activeEntryId,
+  onJumpToEntry,
+  transcriptSessionKey,
+}: RunTranscriptProps) {
   const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE_ENTRY_COUNT);
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_VISIBLE_ENTRY_COUNT);
+  }, [transcriptSessionKey]);
 
   useEffect(() => {
     if (!activeEntryId) {
@@ -27,7 +37,7 @@ export function RunTranscript({ entries, activeEntryId, onJumpToEntry }: RunTran
     setVisibleCount((current) =>
       Math.max(current, requiredVisibleCount, INITIAL_VISIBLE_ENTRY_COUNT),
     );
-  }, [activeEntryId, entries]);
+  }, [activeEntryId, entries, transcriptSessionKey]);
 
   const visibleEntryCount = Math.min(entries.length, visibleCount);
   const hiddenCount = entries.length - visibleEntryCount;
