@@ -1,7 +1,92 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { Route, Routes } from "react-router-dom";
+import { renderWithProviders } from "@/test/render";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
 import type { GroupedTranscriptEntry } from "@/components/transcript/transcript-model";
+import IssueDetail from "./IssueDetail";
+
+const hooksMock = vi.hoisted(() => {
+  const stopMutate = vi.fn();
+  const retryMutate = vi.fn();
+  const inputMutate = vi.fn();
+  const cancelMutate = vi.fn();
+
+  return {
+    stopMutate,
+    retryMutate,
+    inputMutate,
+    cancelMutate,
+    useIssueDetailQuery: vi.fn(() => ({
+      data: {
+        issue_identifier: "todo-1",
+        status: "running",
+        running: {
+          step_name: "deploy",
+          turn_count: 2,
+          tokens: { total_tokens: 100 },
+          run_id: "run-1",
+        },
+        attempts: { restart_count: 0 },
+        retry: null,
+        last_error: null,
+        issue: { title: "Deploy feature", labels: [] },
+        workspace: { path: "/tmp/workspace" },
+        workflow_steps: [
+          {
+            name: "deploy",
+            agent: "builder",
+            dependencies: [],
+            state: "running",
+            can_navigate: true,
+          },
+        ],
+        pending_input: { ask_id: "ask-1" },
+        current_interaction: { interaction_request_id: "ask-1" },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    })),
+    useInteractionDetailQuery: vi.fn(() => ({
+      data: {
+        agent_name: "builder",
+        id: "ask-1",
+        issue_id: "issue-1",
+        issue_identifier: "todo-1",
+        status: "pending",
+        question: "Which environment?",
+        why_blocked: "Need target",
+        suggested_answer: "staging",
+        extra_context: null,
+        step_name: "deploy",
+        requested_at: "2026-04-14T10:00:00Z",
+      },
+    })),
+    useTimelineQuery: vi.fn(() => ({ data: { events: [] }, isError: false })),
+    useConversationQuery: vi.fn(() => ({
+      data: {
+        messages: [
+          { index: 1, role: "assistant", content: "I am ready", tool_calls: null },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    })),
+    useStopMutation: vi.fn(() => ({ mutate: stopMutate, isPending: false })),
+    useRetryMutation: vi.fn(() => ({ mutate: retryMutate, isPending: false })),
+    useIssueInputMutation: vi.fn(() => ({ mutate: inputMutate, isPending: false })),
+    useCancelInteractionMutation: vi.fn(() => ({ mutate: cancelMutate, isPending: false })),
+  };
+});
+
+vi.mock("@/hooks", () => hooksMock);
+vi.mock("@/ws", () => ({ connectWs: () => () => {} }));
+vi.mock("@/notifications", () => ({
+  addNotification: vi.fn(),
+  requestPermissionIfNeeded: vi.fn(),
+}));
 
 describe("RunTranscript", () => {
   it("renders an empty state when there are no entries", () => {
@@ -23,7 +108,10 @@ describe("RunTranscript", () => {
         id: "interaction:ask-1",
         timestamp: "2026-04-14T10:00:00Z",
         interaction: {
+          agent_name: "builder",
           id: "ask-1",
+          issue_id: "issue-1",
+          issue_identifier: "todo-1",
           status: "pending",
           question: "Which environment should I deploy to?",
           why_blocked: "Needs a deployment target",
@@ -31,7 +119,6 @@ describe("RunTranscript", () => {
           extra_context: null,
           step_name: "deploy",
           requested_at: "2026-04-14T10:00:00Z",
-          resolved_at: null,
         },
       },
       {
@@ -88,5 +175,61 @@ describe("RunTranscript", () => {
     expect(screen.getByText("Use staging for this run.")).toBeInTheDocument();
     expect(screen.getByText("Deployment failed before the approval step.")).toBeInTheDocument();
     expect(screen.getByText("2 low-level activities")).toBeInTheDocument();
+  });
+
+  it("highlights the active transcript entry and expands grouped activity on demand", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <RunTranscript
+        entries={[
+          {
+            id: "group-1",
+            kind: "tool_activity_group",
+            timestamp: "2026-04-14T10:00:00Z",
+            count: 2,
+            defaultExpanded: false,
+            entries: [
+              {
+                id: "event-1",
+                kind: "tool_activity",
+                timestamp: "2026-04-14T10:00:00Z",
+                event: {
+                  type: "tool_call",
+                  timestamp: "2026-04-14T10:00:00Z",
+                  detail: "rg src",
+                  stepName: "build",
+                  runId: "run-1",
+                  sequence: 1,
+                },
+              },
+            ],
+          },
+        ]}
+        activeEntryId="group-1"
+        onJumpToEntry={() => {}}
+      />, 
+    );
+
+    expect(screen.getByText("2 low-level activities").closest('[data-active="true"]')).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "Show details" }));
+    expect(screen.getByText("rg src")).toBeInTheDocument();
+  });
+
+});
+
+describe("IssueDetail", () => {
+  it("renders the merged transcript shell and composer", () => {
+    renderWithProviders(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { route: "/issue/todo-1" },
+    );
+
+    expect(screen.getAllByText("Which environment?")).toHaveLength(2);
+    expect(screen.getByText("I am ready")).toBeInTheDocument();
+    expect(screen.getByLabelText("Reply")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Workflow" })).toBeInTheDocument();
   });
 });

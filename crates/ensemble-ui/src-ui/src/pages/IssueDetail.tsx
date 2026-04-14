@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import {
-  useIssueDetailQuery,
-  useStopMutation,
-  useRetryMutation,
-  useInteractionDetailQuery,
-  useIssueInputMutation,
   useCancelInteractionMutation,
+  useConversationQuery,
+  useInteractionDetailQuery,
+  useIssueDetailQuery,
+  useIssueInputMutation,
+  useRetryMutation,
+  useStopMutation,
   useTimelineQuery,
 } from "@/hooks";
 import { connectWs } from "@/ws";
@@ -20,10 +21,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import EventTimeline from "@/components/EventTimeline";
-import ConversationViewer from "@/components/ConversationViewer";
-import InteractionPanel from "@/components/InteractionPanel";
-import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
 import IssueInfoSection from "@/components/IssueInfoSection";
+import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
+import { IssueComposer } from "@/components/issue-detail/IssueComposer";
+import { IssueContextPanel } from "@/components/issue-detail/IssueContextPanel";
+import { RunTranscript } from "@/components/transcript/RunTranscript";
+import { buildTranscriptEntries, groupTranscriptEntries } from "@/components/transcript/transcript-model";
 
 function triggerNotification(event: WsPipelineEvent, identifier: string) {
   const detail = event.detail ?? event.event_type;
@@ -51,6 +54,7 @@ export default function IssueDetail() {
     data?.current_interaction?.interaction_request_id ??
     "";
   const { data: interaction } = useInteractionDetailQuery(interactionId);
+  const conversationQuery = useConversationQuery(identifier);
   const stopMutation = useStopMutation();
   const retryMutation = useRetryMutation();
   const inputMutation = useIssueInputMutation(identifier, interactionId);
@@ -59,11 +63,12 @@ export default function IssueDetail() {
   const [liveEvents, setLiveEvents] = useState<WsEventData[]>([]);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
   const [showStopConfirm, setShowStopConfirm] = useState(false);
-  const [highlightIndex, setHighlightIndex] = useState<number | undefined>();
+  const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
   const [lastKnownRunId, setLastKnownRunId] = useState("");
 
   const isLiveRun = data?.running != null;
   const currentRunId = (data?.running as { run_id?: string } | undefined)?.run_id;
+
   useEffect(() => {
     if (currentRunId) {
       setLastKnownRunId((previousRunId) =>
@@ -83,6 +88,7 @@ export default function IssueDetail() {
     const merged = [...persistedEvents, ...liveEvents];
     const seen = new Set<string>();
     const deduped: WsEventData[] = [];
+
     for (const event of merged) {
       const key =
         event.runId && event.sequence != null
@@ -95,18 +101,22 @@ export default function IssueDetail() {
               event.attempt ?? "",
               event.conversationIndex ?? "",
             ].join(":");
+
       if (seen.has(key)) continue;
       seen.add(key);
       deduped.push(event);
     }
+
     return deduped.sort((a, b) => {
       if (a.runId && b.runId && a.runId === b.runId && a.sequence != null && b.sequence != null) {
         return a.sequence - b.sequence;
       }
+
       const tsDelta = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
       if (tsDelta !== 0) {
         return tsDelta;
       }
+
       return (a.sequence ?? 0) - (b.sequence ?? 0);
     });
   }, [liveEvents, persistedEvents]);
@@ -139,50 +149,146 @@ export default function IssueDetail() {
     });
   }, [identifier, isLiveRun]);
 
+  const transcriptEntries = useMemo(
+    () =>
+      groupTranscriptEntries(
+        buildTranscriptEntries({
+          conversation: conversationQuery.data?.messages ?? [],
+          interactions: interaction ? [interaction] : [],
+          events,
+        }),
+      ),
+    [conversationQuery.data?.messages, interaction, events],
+  );
+
+  const pendingQuestion = interaction
+    ? {
+        interactionId: interaction.id,
+        question: interaction.question,
+        whyBlocked: interaction.why_blocked,
+        suggestedAnswer: interaction.suggested_answer ?? null,
+        stepName: interaction.step_name,
+      }
+    : null;
+
   if (isLoading) {
-    return <div className="text-center py-12 text-muted-foreground">Loading...</div>;
+    return <div className="py-12 text-center text-muted-foreground">Loading...</div>;
   }
 
   if (isError) {
     return (
-      <div className="text-center py-12">
-        <p className="text-destructive">Failed to load issue: {error instanceof Error ? error.message : "Unknown error"}</p>
+      <div className="py-12 text-center">
+        <p className="text-destructive">
+          Failed to load issue: {error instanceof Error ? error.message : "Unknown error"}
+        </p>
       </div>
     );
   }
 
   if (!data) return null;
 
+  const logsPanel = (
+    <div className="space-y-3 text-sm">
+      <div className="rounded-lg border bg-muted/20 p-3">
+        <div className="font-medium">Run status</div>
+        <div className="mt-1 text-muted-foreground">
+          {isLiveRun ? `Live websocket: ${wsStatus}` : "No active run"}
+        </div>
+      </div>
+      {data.last_error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50/60 p-3 text-red-900 dark:border-red-900 dark:bg-red-950/20 dark:text-red-100">
+          <div className="font-medium">Last error</div>
+          <p className="mt-1 whitespace-pre-wrap text-sm">{data.last_error}</p>
+        </div>
+      ) : (
+        <div className="rounded-lg border bg-muted/20 p-3 text-muted-foreground">
+          No errors recorded for this issue.
+        </div>
+      )}
+      <div className="rounded-lg border bg-muted/20 p-3 text-muted-foreground">
+        Transcript entries: {transcriptEntries.length}
+      </div>
+    </div>
+  );
+
+  const artifactsPanel = (
+    <div className="space-y-3 text-sm">
+      <div className="rounded-lg border bg-muted/20 p-3">
+        <div className="font-medium">Workspace</div>
+        <code className="mt-2 block rounded bg-background px-2 py-1 text-xs">{data.workspace.path}</code>
+      </div>
+      {data.issue ? <IssueInfoSection issue={data.issue} /> : null}
+    </div>
+  );
+
+  const rawEventsPanel = timelineQuery.isError ? (
+    <div className="space-y-3">
+      <p className="text-sm text-amber-700">
+        Couldn&apos;t load saved timeline history; showing live events only.
+      </p>
+      <EventTimeline
+        events={events}
+        live={isLiveRun}
+        onViewConversation={(index) => setActiveEntryId(`message:${index}`)}
+      />
+    </div>
+  ) : (
+    <EventTimeline
+      events={events}
+      live={isLiveRun}
+      onViewConversation={(index) => setActiveEntryId(`message:${index}`)}
+    />
+  );
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-3">
           <Link to="/" className="text-muted-foreground hover:text-foreground">
             <ArrowLeft className="h-5 w-5" />
           </Link>
-          <h1 className="text-2xl font-bold">{data.issue_identifier}</h1>
-          <StatusBadge status={data.status} />
-          {isLiveRun && (
-            <span className={`text-xs ${wsStatus === "connected" ? "text-green-500" : wsStatus === "connecting" ? "text-yellow-500" : "text-muted-foreground"}`}>
-              WS: {wsStatus}
-            </span>
-          )}
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-3">
+              <h1 className="text-2xl font-bold">{data.issue_identifier}</h1>
+              <StatusBadge status={data.status} />
+              {isLiveRun ? (
+                <span
+                  className={`text-xs ${
+                    wsStatus === "connected"
+                      ? "text-green-500"
+                      : wsStatus === "connecting"
+                        ? "text-yellow-500"
+                        : "text-muted-foreground"
+                  }`}
+                >
+                  WS: {wsStatus}
+                </span>
+              ) : null}
+            </div>
+            {data.issue?.title ? (
+              <p className="truncate text-sm text-muted-foreground">{data.issue.title}</p>
+            ) : null}
+          </div>
         </div>
         <div className="flex gap-2">
-          {isLiveRun && (
+          {isLiveRun ? (
             <Button variant="destructive" size="sm" onClick={() => setShowStopConfirm(true)}>
               Stop Agent
             </Button>
-          )}
-          {data.retry && (
-            <Button size="sm" onClick={() => retryMutation.mutate({ identifier })} disabled={retryMutation.isPending}>
+          ) : null}
+          {data.retry ? (
+            <Button
+              size="sm"
+              onClick={() => retryMutation.mutate({ identifier })}
+              disabled={retryMutation.isPending}
+            >
               Retry Now
             </Button>
-          )}
+          ) : null}
         </div>
       </div>
 
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4">
             <dt className="text-sm font-medium text-muted-foreground">Turns</dt>
@@ -192,13 +298,15 @@ export default function IssueDetail() {
         <Card>
           <CardContent className="p-4">
             <dt className="text-sm font-medium text-muted-foreground">Step</dt>
-            <dd className="mt-1 text-lg font-semibold">{data.running?.step_name ?? "\u2014"}</dd>
+            <dd className="mt-1 text-lg font-semibold">{data.running?.step_name ?? "—"}</dd>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
             <dt className="text-sm font-medium text-muted-foreground">Tokens</dt>
-            <dd className="mt-1 text-2xl font-semibold">{data.running ? formatTokens(data.running.tokens.total_tokens) : "\u2014"}</dd>
+            <dd className="mt-1 text-2xl font-semibold">
+              {data.running ? formatTokens(data.running.tokens.total_tokens) : "—"}
+            </dd>
           </CardContent>
         </Card>
         <Card>
@@ -209,74 +317,57 @@ export default function IssueDetail() {
         </Card>
       </div>
 
-      {data.workflow_steps && data.workflow_steps.length > 0 && (
-        <div className="mb-4">
-          <WorkflowStepsSidebar
-            steps={data.workflow_steps}
-            issueIdentifier={identifier}
-            currentStep={data.running?.step_name ?? undefined}
-          />
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        <div className="space-y-4">
-          {data.issue && (
-            <IssueInfoSection issue={data.issue} />
-          )}
-        </div>
-
-        <div className="lg:col-span-3 space-y-6">
-          {data.last_error && (
-            <div className="bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg p-4">
-              <h3 className="text-sm font-medium text-red-800 dark:text-red-200">Last Error</h3>
-              <p className="mt-1 text-sm text-red-700 dark:text-red-300">{data.last_error}</p>
-            </div>
-          )}
-
-          {interaction && (
-            <section>
-              <h2 className="text-lg font-semibold mb-3">Interaction</h2>
-              <Card className="p-4">
-                <InteractionPanel
-                  interaction={interaction}
-                  issueIdentifier={identifier}
-                  onSubmitInput={(response) => inputMutation.mutate(response)}
-                  onCancel={() => cancelMutation.mutate({ id: interaction.id })}
-                  isSubmitting={inputMutation.isPending}
-                  isCancelling={cancelMutation.isPending}
-                />
-              </Card>
-            </section>
-          )}
-
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <section>
-              <h2 className="text-lg font-semibold mb-3">Event Timeline</h2>
-              {timelineQuery.isError && (
-                <p className="mb-2 text-sm text-amber-700">
-                  Couldn&apos;t load saved timeline history; showing live events only.
-                </p>
-              )}
-              <Card className="p-4 max-h-[600px] overflow-y-auto">
-                <EventTimeline events={events} live={isLiveRun} onViewConversation={(idx) => setHighlightIndex(idx)} />
-              </Card>
-            </section>
-
-            <section>
-              <h2 className="text-lg font-semibold mb-3">Conversation</h2>
-              <Card className="p-4 max-h-[600px] overflow-y-auto">
-                <ConversationViewer identifier={identifier} scrollToIndex={highlightIndex} />
-              </Card>
-            </section>
+      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
+        <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
+          <div className="min-h-0 flex-1 overflow-auto p-4">
+            <RunTranscript
+              entries={transcriptEntries}
+              activeEntryId={activeEntryId}
+              onJumpToEntry={setActiveEntryId}
+            />
           </div>
-
-          <Card className="p-4">
-            <span className="text-sm text-muted-foreground">
-              Workspace: <code className="bg-muted px-1 rounded">{data.workspace.path}</code>
-            </span>
-          </Card>
+          <div className="border-t bg-background">
+            <IssueComposer
+              pendingQuestion={pendingQuestion}
+              onSubmitReply={(value) => inputMutation.mutate(value)}
+              onSubmitFollowUp={(value) => inputMutation.mutate(value)}
+              isSubmitting={inputMutation.isPending}
+            />
+            {interaction && interaction.status !== "resolved" ? (
+              <div className="px-4 pb-4">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => cancelMutation.mutate({ id: interaction.id })}
+                  disabled={cancelMutation.isPending}
+                >
+                  Cancel Request
+                </Button>
+              </div>
+            ) : null}
+          </div>
         </div>
+
+        <IssueContextPanel
+          workflow={
+            <div className="space-y-4">
+              {data.workflow_steps && data.workflow_steps.length > 0 ? (
+                <WorkflowStepsSidebar
+                  steps={data.workflow_steps}
+                  issueIdentifier={identifier}
+                  currentStep={data.running?.step_name ?? undefined}
+                />
+              ) : (
+                <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+                  No workflow steps available.
+                </div>
+              )}
+            </div>
+          }
+          logs={logsPanel}
+          artifacts={artifactsPanel}
+          rawEvents={rawEventsPanel}
+        />
       </div>
 
       <ConfirmDialog

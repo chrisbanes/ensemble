@@ -18,7 +18,10 @@ describe("buildTranscriptEntries", () => {
       ],
       interactions: [
         {
+          agent_name: "builder",
           id: "ask-1",
+          issue_id: "issue-1",
+          issue_identifier: "todo-1",
           status: "pending",
           question: "What API key should I use?",
           why_blocked: "Deployment requires credentials",
@@ -26,7 +29,6 @@ describe("buildTranscriptEntries", () => {
           extra_context: null,
           step_name: "deploy",
           requested_at: "2026-04-14T10:00:02Z",
-          resolved_at: null,
         },
       ],
       events: [
@@ -42,7 +44,6 @@ describe("buildTranscriptEntries", () => {
           type: "verdict",
           timestamp: "2026-04-14T10:00:04Z",
           detail: "approved",
-          verdict: "pass",
           stepName: "deploy",
           runId: "run-1",
           sequence: 4,
@@ -137,7 +138,10 @@ describe("buildTranscriptEntries", () => {
       conversation: [],
       interactions: [
         {
+          agent_name: "builder",
           id: "ask-2",
+          issue_id: "issue-1",
+          issue_identifier: "todo-1",
           status: "pending",
           question: "Second question",
           why_blocked: "Need approval",
@@ -145,10 +149,12 @@ describe("buildTranscriptEntries", () => {
           extra_context: null,
           step_name: "deploy",
           requested_at: "2026-04-14T10:00:03Z",
-          resolved_at: null,
         },
         {
+          agent_name: "builder",
           id: "ask-1",
+          issue_id: "issue-1",
+          issue_identifier: "todo-1",
           status: "pending",
           question: "First question",
           why_blocked: "Need credentials",
@@ -156,7 +162,6 @@ describe("buildTranscriptEntries", () => {
           extra_context: null,
           step_name: "deploy",
           requested_at: "2026-04-14T10:00:01Z",
-          resolved_at: null,
         },
       ],
       events: [],

@@ -77,6 +77,11 @@ export interface ToolActivityGroupEntry extends TranscriptEntryBase {
 
 export type GroupedTranscriptEntry = TranscriptEntry | ToolActivityGroupEntry;
 
+interface TimestampedConversationMessage extends ConversationMessage {
+  timestamp?: string;
+  created_at?: string;
+}
+
 type SortableEntry = {
   entry: TranscriptEntry;
   sortTimestamp: number;
@@ -132,33 +137,22 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
   const sortable: SortableEntry[] = [];
 
   for (const event of source.events) {
-    const kind: TranscriptEntry["kind"] =
-      event.type === "verdict"
-        ? "verdict"
-        : event.type === "error"
-          ? "error"
-          : event.type === "human_reply_submitted"
-            ? "human_reply"
-            : event.type === "tool_call" || event.type === "output"
-              ? "tool_activity"
-              : event.type === "step_started" || event.type === "step_completed"
-                ? "step_event"
-                : "workflow_event";
+    const entryId = `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`;
+    let entry: TranscriptEntry;
 
-    const entry: TranscriptEntry =
-      kind === "verdict" || kind === "error" || kind === "workflow_event" || kind === "step_event" || kind === "tool_activity"
-        ? {
-            kind,
-            id: `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`,
-            event,
-            timestamp: event.timestamp,
-          }
-        : {
-            kind,
-            id: `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`,
-            reply: event.detail,
-            timestamp: event.timestamp,
-          };
+    if (event.type === "verdict") {
+      entry = { kind: "verdict", id: entryId, event, timestamp: event.timestamp };
+    } else if (event.type === "error") {
+      entry = { kind: "error", id: entryId, message: event.detail, timestamp: event.timestamp };
+    } else if (event.type === "human_reply_submitted") {
+      entry = { kind: "human_reply", id: entryId, reply: event.detail, timestamp: event.timestamp };
+    } else if (event.type === "tool_call" || event.type === "output") {
+      entry = { kind: "tool_activity", id: entryId, event, timestamp: event.timestamp };
+    } else if (event.type === "step_started" || event.type === "step_completed") {
+      entry = { kind: "step_event", id: entryId, event, timestamp: event.timestamp };
+    } else {
+      entry = { kind: "workflow_event", id: entryId, event, timestamp: event.timestamp };
+    }
 
     sortable.push({
       entry,
@@ -186,26 +180,35 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
   const fallbackConversationTimestamp = earliestInteractionTimestamp(source.interactions);
 
   for (const message of source.conversation) {
+    const messageWithTimestamp = message as TimestampedConversationMessage;
     const explicitTimestamp =
-      typeof (message as { timestamp?: unknown }).timestamp === "string"
-        ? ((message as { timestamp: string }).timestamp)
-        : typeof (message as { created_at?: unknown }).created_at === "string"
-          ? ((message as { created_at: string }).created_at)
+      typeof messageWithTimestamp.timestamp === "string"
+        ? messageWithTimestamp.timestamp
+        : typeof messageWithTimestamp.created_at === "string"
+          ? messageWithTimestamp.created_at
           : null;
 
     const maybeTimestamp = explicitTimestamp ?? fallbackConversationTimestamp;
-    const kind = message.role === "user" ? "human_message" : "agent_message";
+    const entry: TranscriptEntry =
+      message.role === "user"
+        ? {
+            kind: "human_message",
+            id: `message:${message.index}`,
+            message: message.content,
+            timestamp: maybeTimestamp ?? undefined,
+          }
+        : {
+            kind: "agent_message",
+            id: `message:${message.index}`,
+            message,
+            timestamp: maybeTimestamp ?? undefined,
+          };
 
     sortable.push({
-      entry: {
-        kind,
-        id: `message:${message.index}`,
-        ...(kind === "agent_message" ? { message } : { message: message.content }),
-        timestamp: maybeTimestamp ?? undefined,
-      },
+      entry,
       sortTimestamp: toMs(maybeTimestamp),
       sortSequence: message.index,
-      sortPriority: kind === "human_message" ? 1 : 2,
+      sortPriority: entry.kind === "human_message" ? 1 : 2,
     });
   }
 

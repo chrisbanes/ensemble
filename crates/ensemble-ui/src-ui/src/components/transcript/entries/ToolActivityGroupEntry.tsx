@@ -9,10 +9,13 @@ interface ToolActivityGroupEntryProps {
 }
 
 export function ToolActivityGroupEntry({ entry, isActive }: ToolActivityGroupEntryProps) {
-  const [expanded, setExpanded] = useState(entry.defaultExpanded);
+  const [expanded, setExpanded] = useState<boolean>(entry.defaultExpanded);
 
   return (
-    <Card className={cn("border-dashed border-slate-300 bg-slate-100/40 p-4", isActive && "ring-2 ring-primary")}>
+    <Card
+      className={cn("border-dashed border-slate-300 bg-slate-100/40 p-4", isActive && "ring-2 ring-primary")}
+      data-active={isActive ? "true" : "false"}
+    >
       <div className="text-xs font-medium uppercase text-slate-700">Tool activity</div>
       <p className="mt-1 text-sm">{entry.count} low-level activities</p>
       <button
