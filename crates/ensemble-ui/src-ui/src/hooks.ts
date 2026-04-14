@@ -13,6 +13,7 @@ import {
   usePostRetry,
 } from "./generated/api/controls/controls";
 import {
+  getGetInteractionByIdQueryKey,
   getListOpenInteractionsQueryKey,
   useGetInteractionById,
   useListOpenInteractions,
@@ -38,6 +39,7 @@ import type {
   ConfigStateResponse,
   GuidedConfigForm,
   InteractionRequest,
+  InteractionDetail,
 } from "./generated/models";
 import { customFetch } from "./fetch-client";
 
@@ -169,10 +171,10 @@ export function useInteractionsQuery() {
 }
 
 export function useInteractionDetailQuery(id: string) {
-  return useGetInteractionById<InteractionRequest>(id, {
+  return useGetInteractionById<InteractionDetail>(id, {
     query: {
       enabled: id.length > 0,
-      select: (resp) => resp.data as InteractionRequest,
+      select: (resp) => resp.data as InteractionDetail,
     },
   });
 }
@@ -320,7 +322,7 @@ export function useResumeIssueMutation(identifier?: string) {
   });
 }
 
-export function useIssueInputMutation(identifier?: string) {
+export function useIssueInputMutation(identifier?: string, interactionId?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (response: string) => {
@@ -341,6 +343,11 @@ export function useIssueInputMutation(identifier?: string) {
       if (identifier) {
         queryClient.invalidateQueries({
           queryKey: getGetIssueDetailQueryKey(identifier),
+        });
+      }
+      if (interactionId) {
+        queryClient.invalidateQueries({
+          queryKey: getGetInteractionByIdQueryKey(interactionId),
         });
       }
     },

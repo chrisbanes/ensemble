@@ -42,7 +42,11 @@ pub enum TrackerError {
 }
 
 /// Trait for issue tracker adapters.
-/// The orchestrator uses this to fetch issues without knowing the tracker backend.
+///
+/// Trackers are integration adapters: they fetch ticket metadata from external sources and
+/// write state transitions back to those sources. They do not own or control runtime state.
+/// Ensemble's orchestrator owns the authoritative runtime execution state and decides when to
+/// poll, dispatch, retry, or stop work based on its own state machine.
 #[async_trait]
 pub trait IssueTracker: Send + Sync {
     /// Fetch candidate issues in active states for dispatch.
@@ -59,7 +63,8 @@ pub trait IssueTracker: Send + Sync {
     /// The pipeline engine checks this at startup to fail fast if the flow requires
     /// tracker state transitions but the backend cannot perform them.
     /// Note: `add_comment` may still return `WritesNotSupported` even when this
-    /// returns true (e.g., the todo_file tracker supports state writes but not comments).
+    /// returns true, because some trackers support state writes but not comments
+    /// (e.g., the todo_file tracker supports state writes but not comments).
     fn supports_writes(&self) -> bool {
         false
     }
@@ -92,9 +97,14 @@ pub fn resolve_github_token_for_endpoint(
 
 /// Create an `IssueTracker` implementation based on the tracker config.
 ///
+/// The returned tracker is an integration adapter for a specific backend (GitHub Projects,
+/// Notion, todo file). It provides ticket sourcing and state-sink capabilities but does not
+/// own runtime authority. Ensemble's orchestrator controls dispatch, retry, and lifecycle.
+///
 /// Matches on `kind` to return the right backend:
 /// - `"todo_file"` -> `TodoFileTracker`
 /// - `"github"` -> `GithubTracker`
+/// - `"notion"` -> `NotionTracker`
 ///
 /// Returns an error if the tracker kind is unsupported, or
 /// if required configuration is absent (e.g., missing API key for GitHub).

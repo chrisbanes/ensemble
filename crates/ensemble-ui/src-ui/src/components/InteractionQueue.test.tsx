@@ -1,48 +1,33 @@
 import { describe, expect, it } from "vitest";
 import { screen } from "@testing-library/react";
-import type { InteractionRequest } from "@/generated/models";
+import type { WaitingInteractionRow } from "@/generated/models";
 import { renderWithProviders } from "@/test/render";
 import InteractionQueue from "./InteractionQueue";
 
-function interaction(overrides: Partial<InteractionRequest> = {}): InteractionRequest {
+function waitingInteraction(
+  overrides: Partial<WaitingInteractionRow> = {},
+): WaitingInteractionRow {
   return {
-    id: "interaction-1",
-    schema_version: 1,
+    interaction_request_id: "interaction-1",
     issue_id: "NODE_123",
     issue_identifier: "my-repo#42",
-    pipeline_cycle: 1,
-    completed_steps: ["build"],
-    step_name: "review",
-    agent_name: "reviewer",
-    step_depends: ["build"],
-    step_tracker_state: null,
-    kind: "brainstorm_prompt",
-    status: "open",
-    blocking: true,
-    awaiting_resume: true,
-    title: "Need clarification",
-    body: "Choose a deployment target",
-    options: ["staging", "production"],
-    artifacts: [],
-    response: null,
+    question: "Need clarification",
     requested_at: "2026-04-04T10:00:00Z",
-    resolved_at: null,
+    step_name: "review",
     ...overrides,
   };
 }
 
 describe("InteractionQueue", () => {
-  it("renders open interaction rows with kind, title, step, and age", () => {
+  it("renders waiting interaction rows with issue, step, and age", () => {
     renderWithProviders(
-      <InteractionQueue interactions={[interaction()]} />,
+      <InteractionQueue interactions={[waitingInteraction()]} />,
       { route: "/" },
     );
 
     expect(screen.getByText("my-repo#42")).toBeInTheDocument();
-    expect(screen.getByText("brainstorm_prompt")).toBeInTheDocument();
     expect(screen.getByText("Need clarification")).toBeInTheDocument();
     expect(screen.getByText("review")).toBeInTheDocument();
-    expect(screen.getByText("Blocking")).toBeInTheDocument();
     expect(screen.getByText(/ago$/)).toBeInTheDocument();
   });
 

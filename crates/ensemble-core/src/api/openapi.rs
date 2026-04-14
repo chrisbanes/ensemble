@@ -51,7 +51,6 @@ use utoipa::OpenApi;
         crate::observability::snapshot::FinalizeSnapshot,
         crate::observability::snapshot::RepoFinalizeSnapshot,
         crate::observability::snapshot::PendingInputSummary,
-        crate::observability::snapshot::PendingInputContext,
         // Orchestrator types
         crate::orchestrator::state::RateLimitSnapshot,
         crate::orchestrator::state::FinalizeStatus,
@@ -70,6 +69,7 @@ use utoipa::OpenApi;
         crate::api::controls::IssueInputRequest,
         crate::api::controls::IssueInputResponse,
         // Interaction types
+        crate::api::interactions::InteractionDetail,
         crate::api::interactions::InteractionResponseBody,
         crate::interaction::model::InteractionKind,
         crate::interaction::model::InteractionStatus,

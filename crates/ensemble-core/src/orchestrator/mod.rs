@@ -1457,9 +1457,13 @@ impl Orchestrator {
 
         let mut state = self.state.write().await;
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
+        let follow_up_sequence = run_id
+            .as_ref()
+            .map(|current_run_id| state.next_timeline_sequence(current_run_id));
         if let Some(run) = state.get_pipeline_run_mut(issue_id) {
             run.step_blocked_on_human(step_name, interaction.id.clone());
         }
+        state.park_step_waiting_for_human(issue_id, step_name, interaction.id.clone());
         let has_running_steps = state
             .get_pipeline_run(issue_id)
             .is_some_and(Self::pipeline_has_running_steps);
@@ -1480,10 +1484,10 @@ impl Orchestrator {
         state.add_waiting_on_human(WaitingOnHumanEntry {
             issue_id: issue.id.clone(),
             identifier: issue.identifier.clone(),
-            interaction_request_id: interaction.id,
+            interaction_request_id: interaction.id.clone(),
             step_name: step_name.to_string(),
             kind: interaction.kind.clone(),
-            prompt: interaction.body.clone(),
+            prompt: interaction.title.clone(),
             agent_name: interaction.agent_name.clone(),
             retry_attempt,
             started_at: waiting_started_at,
@@ -1497,8 +1501,23 @@ impl Orchestrator {
         drop(state);
 
         self.publish_pipeline_event(
-            run_id,
+            run_id.clone(),
             sequence,
+            attempt,
+            PipelineEvent::QuestionAsked {
+                issue_identifier: issue.identifier.clone(),
+                timestamp: Utc::now(),
+                step_name: step_name.to_string(),
+                agent_name: interaction.agent_name.clone(),
+                ask_id: interaction.id.clone(),
+                detail: interaction.title.clone(),
+            },
+        )
+        .await;
+
+        self.publish_pipeline_event(
+            run_id,
+            follow_up_sequence,
             attempt,
             PipelineEvent::InputRequested {
                 issue_identifier: issue.identifier.clone(),
@@ -1657,7 +1676,7 @@ impl Orchestrator {
             interaction_request_id: interaction.id.clone(),
             step_name: step_name.to_string(),
             kind: interaction.kind.clone(),
-            prompt: interaction.body.clone(),
+            prompt: interaction.title.clone(),
             agent_name: interaction.agent_name.clone(),
             retry_attempt,
             started_at: waiting_started_at,
@@ -1718,7 +1737,7 @@ impl Orchestrator {
                 interaction_request_id: interaction.id.clone(),
                 step_name: interaction.step_name.clone(),
                 kind: interaction.kind.clone(),
-                prompt: interaction.body.clone(),
+                prompt: interaction.title.clone(),
                 agent_name: interaction.agent_name.clone(),
                 retry_attempt: Some(interaction.pipeline_cycle.max(1)),
                 started_at: interaction.waiting_started_at,
@@ -2401,7 +2420,7 @@ impl Orchestrator {
             interaction_request_id: interaction.id.clone(),
             step_name: interaction.step_name.clone(),
             kind: interaction.kind.clone(),
-            prompt: interaction.body.clone(),
+            prompt: interaction.title.clone(),
             agent_name: interaction.agent_name.clone(),
             retry_attempt: Some(interaction.pipeline_cycle.max(1)),
             started_at: interaction.waiting_started_at,
@@ -2911,10 +2930,13 @@ impl Orchestrator {
         let mut state = self.state.write().await;
         state.remove_waiting_on_human(&issue.id);
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, &issue.id);
+        let follow_up_sequence = run_id
+            .as_ref()
+            .map(|current_run_id| state.next_timeline_sequence(current_run_id));
         drop(state);
 
         self.publish_pipeline_event(
-            run_id,
+            run_id.clone(),
             sequence,
             attempt,
             PipelineEvent::InputResumed {
@@ -2922,6 +2944,20 @@ impl Orchestrator {
                 timestamp: Utc::now(),
                 step_name: current_step.name.clone(),
                 detail: format!("resumed from interaction {}", interaction.id),
+            },
+        )
+        .await;
+
+        self.publish_pipeline_event(
+            run_id,
+            follow_up_sequence,
+            attempt,
+            PipelineEvent::StepResumedFromHumanReply {
+                issue_identifier: issue.identifier.clone(),
+                timestamp: Utc::now(),
+                step_name: current_step.name.clone(),
+                ask_id: interaction.id.clone(),
+                detail: "step resumed after human reply".to_string(),
             },
         )
         .await;
@@ -7257,5 +7293,363 @@ agent:
         assert_eq!(record.attempt, 3);
         assert_eq!(record.event_type, "output");
         assert_eq!(record.step_name.as_deref(), Some("build"));
+    }
+
+    #[tokio::test]
+    async fn step_moves_to_waiting_for_human_when_agent_asks_a_question() {
+        use crate::orchestrator::state::StepRunState;
+
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let _interaction_id = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            "interaction-1".to_string()
+        };
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::BlockedOnHuman {
+                    request: InteractionRequestDraft {
+                        schema_version: 1,
+                        kind: InteractionKind::BrainstormPrompt,
+                        blocking: true,
+                        title: "Need input".to_string(),
+                        body: "Choose environment".to_string(),
+                        options: vec!["staging".to_string()],
+                        artifacts: vec![],
+                    },
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let step_state = state.get_step_state("1", "build");
+        assert!(
+            matches!(step_state, Some(StepRunState::WaitingForHuman { .. })),
+            "step should be in WaitingForHuman state, got {:?}",
+            step_state
+        );
+    }
+
+    #[tokio::test]
+    async fn downstream_steps_do_not_start_while_waiting_for_human() {
+        use crate::orchestrator::state::StepRunState;
+
+        let config = Arc::new(RwLock::new(make_parallel_resume_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::BlockedOnHuman {
+                    request: InteractionRequestDraft {
+                        schema_version: 1,
+                        kind: InteractionKind::BrainstormPrompt,
+                        blocking: true,
+                        title: "Need input".to_string(),
+                        body: "Choose environment".to_string(),
+                        options: vec!["staging".to_string()],
+                        artifacts: vec![],
+                    },
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let step_state = state.get_step_state("1", "build");
+        assert!(
+            matches!(step_state, Some(StepRunState::WaitingForHuman { .. })),
+            "build step should be waiting for human, got {:?}",
+            step_state
+        );
+        let review_state = state.get_step_state("1", "review");
+        assert!(
+            review_state.is_none(),
+            "review step should not have an OrchestratorState entry (not yet started), got {:?}",
+            review_state
+        );
+        let docs_state = state.get_step_state("1", "docs");
+        assert!(
+            docs_state.is_none(),
+            "docs step should not have an OrchestratorState entry (not yet started), got {:?}",
+            docs_state
+        );
+    }
+
+    #[tokio::test]
+    async fn step_resumes_on_next_tick_after_human_reply_is_persisted() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: issues.clone(),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let interaction_id = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.step_blocked_on_human("build", "interaction-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            state.add_claimed("1");
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
+            });
+            state.queue_resume("1");
+            "interaction-1".to_string()
+        };
+
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: interaction_id.clone(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::BrainstormPrompt,
+                status: InteractionStatus::Resolved,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: Some(InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: Some("staging".to_string()),
+                }),
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(
+            state.is_running("1"),
+            "issue should be running after reply is persisted and tick fires"
+        );
+        assert!(
+            !state.is_waiting_on_human("1"),
+            "issue should no longer be waiting on human after resume"
+        );
+        let run = state.get_pipeline_run("1").expect("pipeline should exist");
+        assert!(
+            matches!(
+                run.step_states.get("build"),
+                Some(crate::pipeline::engine::StepState::Running { .. })
+            ),
+            "build step should be running after resume"
+        );
+    }
+
+    #[tokio::test]
+    async fn question_asked_timeline_event_is_emitted_when_step_blocks_on_human() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::BlockedOnHuman {
+                    request: InteractionRequestDraft {
+                        schema_version: 1,
+                        kind: InteractionKind::BrainstormPrompt,
+                        blocking: true,
+                        title: "Need input".to_string(),
+                        body: "Choose environment".to_string(),
+                        options: vec!["staging".to_string()],
+                        artifacts: vec![],
+                    },
+                },
+            )
+            .await;
+
+        let run_id = {
+            let state = orchestrator.state.read().await;
+            state
+                .running
+                .get("1")
+                .and_then(|e| e.run_id.clone())
+                .or_else(|| {
+                    state
+                        .waiting_on_human
+                        .get("1")
+                        .and_then(|e| e.run_id.clone())
+                })
+        };
+
+        if let Some(run_id) = run_id {
+            let events_path = orchestrator.timeline_writer.events_path(&run_id);
+            if events_path.exists() {
+                let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
+                let mut question_asked_sequence: Option<u64> = None;
+                let mut input_requested_sequence: Option<u64> = None;
+
+                for line in contents.lines() {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let event_type = value
+                        .get("event_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let sequence = value.get("sequence").and_then(|v| v.as_u64());
+
+                    match event_type {
+                        "question_asked" => question_asked_sequence = sequence,
+                        "input_requested" => input_requested_sequence = sequence,
+                        _ => {}
+                    }
+                }
+
+                assert!(
+                    question_asked_sequence.is_some() && input_requested_sequence.is_some(),
+                    "timeline should contain both question_asked and input_requested events"
+                );
+                assert_ne!(
+                    question_asked_sequence, input_requested_sequence,
+                    "question_asked and input_requested must not reuse the same sequence number"
+                );
+            }
+        }
     }
 }

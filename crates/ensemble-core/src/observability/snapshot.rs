@@ -1,3 +1,4 @@
+use crate::interaction::store::InteractionStore;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
 use crate::pipeline::engine::{PipelineRun, StepState};
 use crate::tracker::model::{RetryEntry, RunningEntry};
@@ -44,6 +45,7 @@ pub struct WaitingInteractionRow {
     pub issue_id: String,
     pub issue_identifier: String,
     pub interaction_request_id: String,
+    pub question: String,
     pub step_name: String,
     pub requested_at: DateTime<Utc>,
 }
@@ -56,20 +58,16 @@ pub struct CurrentInteractionSummary {
     pub requested_at: DateTime<Utc>,
 }
 
-/// Preferred issue-detail pending input summary for UI resume flow.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingInputSummary {
-    pub kind: String,
-    pub prompt: String,
-    pub requested_at: DateTime<Utc>,
-    pub context: PendingInputContext,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct PendingInputContext {
-    pub interaction_request_id: String,
+    pub ask_id: String,
+    pub question: String,
+    pub why_blocked: String,
+    pub suggested_answer: Option<String>,
+    pub extra_context: Option<String>,
     pub step_name: String,
     pub agent_name: String,
+    pub requested_at: DateTime<Utc>,
 }
 
 /// A single row in the running sessions list.
@@ -483,10 +481,12 @@ pub fn build_step_detail_snapshot(
 /// Build an IssueDetailSnapshot for a specific issue by identifier.
 ///
 /// Returns None if the identifier is not found in running or retry maps.
-pub fn build_issue_snapshot(
+/// If interaction_store is provided, pending_input will be populated with full interaction details.
+pub async fn build_issue_snapshot(
     state: &OrchestratorState,
     identifier: &str,
     workspace_root: &str,
+    interaction_store: Option<&InteractionStore>,
 ) -> Option<IssueDetailSnapshot> {
     // Check running entries first
     let running_entry = state.running.values().find(|e| e.identifier == identifier);
@@ -590,7 +590,18 @@ pub fn build_issue_snapshot(
     });
 
     let retry_detail = retry_entry.map(retry_entry_to_row);
-    let pending_input = waiting_entry.map(pending_input_summary);
+
+    let pending_input = if let (Some(entry), Some(store)) = (waiting_entry, interaction_store) {
+        let interaction = store
+            .get(&entry.interaction_request_id)
+            .await
+            .ok()
+            .flatten();
+        interaction.map(|i| pending_input_summary(entry, &i))
+    } else {
+        None
+    };
+    // Note: store errors are intentionally ignored for best-effort snapshot generation
     let current_interaction = waiting_entry.map(current_interaction_summary);
 
     let last_error = retry_entry.and_then(|e| e.error.clone());
@@ -712,6 +723,31 @@ pub fn build_issue_snapshot(
     })
 }
 
+/// Best-effort enrichment for pending-input details using the interaction store.
+/// Intended to run outside orchestrator-state lock scopes.
+pub async fn enrich_issue_snapshot_pending_input(
+    detail: &mut IssueDetailSnapshot,
+    interaction_store: &InteractionStore,
+) {
+    if detail.pending_input.is_some() {
+        return;
+    }
+
+    let Some(current) = detail.current_interaction.as_ref() else {
+        return;
+    };
+
+    let interaction = interaction_store
+        .get(&current.interaction_request_id)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(interaction) = interaction {
+        detail.pending_input = Some(pending_input_from_current(current, &interaction));
+    }
+}
+
 /// Convert a RunningEntry to a RunningSessionRow for the snapshot.
 fn running_entry_to_row(
     entry: &RunningEntry,
@@ -763,6 +799,7 @@ fn waiting_entry_to_row(
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         interaction_request_id: entry.interaction_request_id.clone(),
+        question: entry.prompt.clone(),
         step_name: entry.step_name.clone(),
         requested_at: entry.requested_at,
     }
@@ -780,21 +817,43 @@ fn current_interaction_summary(
 
 fn pending_input_summary(
     entry: &crate::orchestrator::state::WaitingOnHumanEntry,
+    interaction: &crate::interaction::model::InteractionRequest,
 ) -> PendingInputSummary {
+    let suggested_answer = match interaction.options.len() {
+        0 => None,
+        1 => interaction.options.first().cloned(),
+        _ => Some(interaction.options.join(", ")),
+    };
     PendingInputSummary {
-        kind: match &entry.kind {
-            crate::interaction::InteractionKind::BrainstormPrompt => "brainstorm_prompt",
-            crate::interaction::InteractionKind::ApprovalGate => "approval_gate",
-            crate::interaction::InteractionKind::ManualDecision => "manual_decision",
-        }
-        .to_string(),
-        prompt: entry.prompt.clone(),
+        ask_id: entry.interaction_request_id.clone(),
+        question: interaction.title.clone(),
+        why_blocked: interaction.body.clone(),
+        suggested_answer,
+        extra_context: interaction.step_tracker_state.clone(),
+        step_name: entry.step_name.clone(),
+        agent_name: entry.agent_name.clone(),
         requested_at: entry.requested_at,
-        context: PendingInputContext {
-            interaction_request_id: entry.interaction_request_id.clone(),
-            step_name: entry.step_name.clone(),
-            agent_name: entry.agent_name.clone(),
-        },
+    }
+}
+
+fn pending_input_from_current(
+    current: &CurrentInteractionSummary,
+    interaction: &crate::interaction::model::InteractionRequest,
+) -> PendingInputSummary {
+    let suggested_answer = match interaction.options.len() {
+        0 => None,
+        1 => interaction.options.first().cloned(),
+        _ => Some(interaction.options.join(", ")),
+    };
+    PendingInputSummary {
+        ask_id: current.interaction_request_id.clone(),
+        question: interaction.title.clone(),
+        why_blocked: interaction.body.clone(),
+        suggested_answer,
+        extra_context: interaction.step_tracker_state.clone(),
+        step_name: current.step_name.clone(),
+        agent_name: interaction.agent_name.clone(),
+        requested_at: current.requested_at,
     }
 }
 
@@ -980,6 +1039,7 @@ mod tests {
         assert_eq!(row.issue_id, "NODE_789");
         assert_eq!(row.issue_identifier, "my-repo#77");
         assert_eq!(row.interaction_request_id, "interaction-1");
+        assert_eq!(row.question, "Need input");
         assert_eq!(row.step_name, "review");
     }
 
@@ -1105,10 +1165,10 @@ mod tests {
         assert!(snapshot.last_tick_at.is_none());
     }
 
-    #[test]
-    fn test_build_issue_snapshot_found_running() {
+    #[tokio::test]
+    async fn test_build_issue_snapshot_found_running() {
         let state = build_test_state();
-        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces");
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None).await;
 
         assert!(detail.is_some());
         let detail = detail.unwrap();
@@ -1124,10 +1184,10 @@ mod tests {
         assert_eq!(running.session_id, Some("session-abc".to_string()));
     }
 
-    #[test]
-    fn test_build_issue_snapshot_found_retrying() {
+    #[tokio::test]
+    async fn test_build_issue_snapshot_found_retrying() {
         let state = build_test_state();
-        let detail = build_issue_snapshot(&state, "my-repo#99", "/tmp/workspaces");
+        let detail = build_issue_snapshot(&state, "my-repo#99", "/tmp/workspaces", None).await;
 
         assert!(detail.is_some());
         let detail = detail.unwrap();
@@ -1142,17 +1202,19 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_build_issue_snapshot_not_found() {
+    #[tokio::test]
+    async fn test_build_issue_snapshot_not_found() {
         let state = build_test_state();
-        let detail = build_issue_snapshot(&state, "nonexistent#999", "/tmp/workspaces");
+        let detail = build_issue_snapshot(&state, "nonexistent#999", "/tmp/workspaces", None).await;
         assert!(detail.is_none());
     }
 
-    #[test]
-    fn issue_detail_snapshot_includes_current_interaction_summary() {
+    #[tokio::test]
+    async fn issue_detail_snapshot_includes_current_interaction_summary() {
         let state = build_test_state();
-        let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces").unwrap();
+        let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces", None)
+            .await
+            .unwrap();
 
         assert_eq!(detail.status, "waiting_on_human");
         let interaction = detail.current_interaction.unwrap();
@@ -1160,8 +1222,8 @@ mod tests {
         assert_eq!(interaction.step_name, "review");
     }
 
-    #[test]
-    fn issue_detail_snapshot_preserves_retry_attempt_for_waiting_issue() {
+    #[tokio::test]
+    async fn issue_detail_snapshot_preserves_retry_attempt_for_waiting_issue() {
         let mut state = build_test_state();
         state.add_running(
             &Issue {
@@ -1199,16 +1261,20 @@ mod tests {
             issue: None,
         });
 
-        let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces").unwrap();
+        let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces", None)
+            .await
+            .unwrap();
 
         assert_eq!(detail.attempts.current_retry_attempt, Some(3));
         assert_eq!(detail.attempts.restart_count, 3);
     }
 
-    #[test]
-    fn test_issue_snapshot_json_shape() {
+    #[tokio::test]
+    async fn test_issue_snapshot_json_shape() {
         let state = build_test_state();
-        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None)
+            .await
+            .unwrap();
         let json = serde_json::to_value(&detail).unwrap();
 
         assert!(json.get("issue_identifier").is_some());
@@ -1236,12 +1302,14 @@ mod tests {
         assert!(issue.get("labels").is_some());
     }
 
-    #[test]
-    fn test_issue_snapshot_with_workflow_steps() {
+    #[tokio::test]
+    async fn test_issue_snapshot_with_workflow_steps() {
         let mut state = build_test_state();
         attach_pipeline_state(&mut state, "NODE_123");
 
-        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None)
+            .await
+            .unwrap();
         let json = serde_json::to_value(&detail).unwrap();
 
         let workflow_steps = json.get("workflow_steps").unwrap().as_array().unwrap();
@@ -1263,15 +1331,17 @@ mod tests {
         assert_eq!(review_step.get("agent").unwrap(), "reviewer");
     }
 
-    #[test]
-    fn completed_issue_snapshot_retains_issue_and_workflow_details() {
+    #[tokio::test]
+    async fn completed_issue_snapshot_retains_issue_and_workflow_details() {
         let mut state = build_test_state();
         attach_pipeline_state(&mut state, "NODE_123");
         state.complete_issue("NODE_123", Some("completed_succeeded".to_string()), None);
         // Simulate what the orchestrator does: remove from running after completing
         state.running.remove("NODE_123");
 
-        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces").unwrap();
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None)
+            .await
+            .unwrap();
 
         assert_eq!(detail.status, "completed_succeeded");
         assert_eq!(detail.issue.title, "Fix the bug");

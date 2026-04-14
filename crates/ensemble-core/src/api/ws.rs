@@ -1,6 +1,7 @@
 use crate::api::router::AppState;
+use crate::interaction::store::InteractionStore;
 use crate::observability::events::PipelineEvent;
-use crate::observability::snapshot::build_issue_snapshot;
+use crate::observability::snapshot::{build_issue_snapshot, enrich_issue_snapshot_pending_input};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -25,11 +26,23 @@ pub async fn ws_events(
 async fn handle_ws(socket: WebSocket, state: AppState, identifier: String) {
     let (mut sender, mut receiver) = socket.split();
 
+    let config_dir = state
+        .config_runtime
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let interaction_store = InteractionStore::new(config_dir);
+
     // 1. Send initial snapshot on connect
     {
-        let lock = state.orchestrator_state.read().await;
-        let snapshot = build_issue_snapshot(&lock, &identifier, &state.workspace_root);
-        drop(lock);
+        let mut snapshot = {
+            let lock = state.orchestrator_state.read().await;
+            build_issue_snapshot(&lock, &identifier, &state.workspace_root, None).await
+        };
+        if let Some(detail) = snapshot.as_mut() {
+            enrich_issue_snapshot_pending_input(detail, &interaction_store).await;
+        }
 
         let initial_msg = serde_json::json!({
             "type": "snapshot",

@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 /// Top-level configuration parsed from `ensemble.yaml`.
+///
+/// `config.yaml` is a policy layer: it defines agents, pipeline steps, concurrency limits,
+/// and tracker integration settings. It is not a runtime collaboration log — runtime state
+/// (running issues, retry timers, session metadata) lives in Ensemble's orchestrator, not in
+/// the config file.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct EnsembleConfig {
     pub tracker: TrackerConfig,
@@ -108,6 +113,11 @@ fn default_max_cycles() -> u32 {
 }
 
 /// Tracker configuration: which issue tracker to use and how to connect to it.
+///
+/// The tracker is an optional integration adapter. When configured, it provides candidate
+/// tickets as work sources and receives state transitions as sinks. Without a tracker,
+/// Ensemble can still run with a static or manually-populated work queue (future extension).
+/// Runtime authority always stays with the Ensemble orchestrator, not the tracker.
 #[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct TrackerConfig {
     pub kind: String,

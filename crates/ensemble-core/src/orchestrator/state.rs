@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use tracing::trace;
+
 use crate::interaction::model::InteractionKind;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -8,6 +10,19 @@ use serde::{Deserialize, Serialize};
 use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
+
+/// Runtime state of an individual step within a pipeline run.
+/// Tracks the step's progress through its lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepRunState {
+    Pending,
+    Running,
+    WaitingOnDependency,
+    WaitingForHuman { ask_id: String },
+    Paused,
+    Completed,
+    Failed,
+}
 
 /// Issue currently blocked waiting for a human response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +148,8 @@ pub struct OrchestratorState {
     pub timeline_sequences: HashMap<String, u64>,
     /// Stable run IDs per issue across retries within the same orchestration cycle.
     pub issue_run_ids: HashMap<String, String>,
+    /// Per-step runtime states: issue_id -> (step_name -> StepRunState).
+    pub step_states: HashMap<String, HashMap<String, StepRunState>>,
 }
 
 static ORCH_RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -166,6 +183,7 @@ impl OrchestratorState {
             terminal_states_lower: Vec::new(),
             timeline_sequences: HashMap::new(),
             issue_run_ids: HashMap::new(),
+            step_states: HashMap::new(),
         }
     }
 
@@ -308,6 +326,7 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        self.step_states.remove(issue_id);
         if let Some(run_id) = self.issue_run_ids.remove(issue_id) {
             self.timeline_sequences.remove(&run_id);
         }
@@ -476,14 +495,11 @@ impl OrchestratorState {
         let run = self.pipeline_runs.get(issue_id).cloned();
         let config = self.pipeline_configs.get(issue_id).cloned();
 
-        eprintln!(
-            "DEBUG complete_issue: issue_id={}, running={:?}, waiting={:?}, waiting.issue={:?}",
+        trace!(
+            "complete_issue: issue_id={}, running={}, waiting={}",
             issue_id,
             running.is_some(),
-            waiting.is_some(),
-            waiting
-                .as_ref()
-                .and_then(|w| w.issue.as_ref().map(|i| &i.id))
+            waiting.is_some()
         );
 
         let Some(issue) = running
@@ -565,6 +581,46 @@ impl OrchestratorState {
     /// This is a convenience wrapper around `complete_issue` for simpler use cases.
     pub fn add_completed(&mut self, issue_id: String, _identifier: String, status: String) {
         self.complete_issue(&issue_id, Some(status), None);
+    }
+
+    /// Park a step, marking it as waiting for human input.
+    pub fn park_step_waiting_for_human(&mut self, issue_id: &str, step_name: &str, ask_id: String) {
+        let step_states = self.step_states.entry(issue_id.to_string()).or_default();
+        step_states.insert(
+            step_name.to_string(),
+            StepRunState::WaitingForHuman { ask_id },
+        );
+    }
+
+    /// Get the runtime state of a specific step for an issue.
+    pub fn get_step_state(&self, issue_id: &str, step_name: &str) -> Option<StepRunState> {
+        self.step_states
+            .get(issue_id)
+            .and_then(|steps| steps.get(step_name).cloned())
+    }
+
+    /// Set the runtime state of a specific step for an issue.
+    pub fn set_step_state(&mut self, issue_id: &str, step_name: &str, state: StepRunState) {
+        let step_states = self.step_states.entry(issue_id.to_string()).or_default();
+        step_states.insert(step_name.to_string(), state);
+    }
+
+    /// Clear all step states for an issue.
+    pub fn clear_step_states_for_issue(&mut self, issue_id: &str) {
+        self.step_states.remove(issue_id);
+    }
+
+    /// Get the ask_id if a step is waiting for human input.
+    pub fn get_step_waiting_ask_id(&self, issue_id: &str) -> Option<String> {
+        self.step_states.get(issue_id).and_then(|steps| {
+            steps.values().find_map(|s| {
+                if let StepRunState::WaitingForHuman { ask_id } = s {
+                    Some(ask_id.clone())
+                } else {
+                    None
+                }
+            })
+        })
     }
 }
 

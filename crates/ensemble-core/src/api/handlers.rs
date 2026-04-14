@@ -1,9 +1,11 @@
 use crate::api::router::AppState;
 use crate::history::model::HistoryRecord;
+use crate::interaction::store::InteractionStore;
 use crate::observability::snapshot::{
-    build_issue_snapshot, build_state_snapshot, extract_step_detail_state, AttemptInfo,
-    FinalizeSnapshot, IssueDetailSnapshot, IssueSummary, RepoFinalizeSnapshot, RetryRow,
-    RunningDetail, RuntimeSnapshot, StepDetailSnapshot, WorkflowStepInfo, WorkspaceInfo,
+    build_issue_snapshot, build_state_snapshot, enrich_issue_snapshot_pending_input,
+    extract_step_detail_state, AttemptInfo, FinalizeSnapshot, IssueDetailSnapshot, IssueSummary,
+    RepoFinalizeSnapshot, RetryRow, RunningDetail, RuntimeSnapshot, StepDetailSnapshot,
+    WorkflowStepInfo, WorkspaceInfo,
 };
 use crate::tracker::model::sanitize_workspace_key;
 use axum::extract::{Path, State};
@@ -86,10 +88,22 @@ pub async fn get_issue_detail(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
 ) -> impl IntoResponse {
-    let live_detail = {
+    let config_dir = state
+        .config_runtime
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let interaction_store = InteractionStore::new(config_dir);
+
+    let mut live_detail = {
         let lock = state.orchestrator_state.read().await;
-        build_issue_snapshot(&lock, &identifier, &state.workspace_root)
+        build_issue_snapshot(&lock, &identifier, &state.workspace_root, None).await
     };
+
+    if let Some(detail) = live_detail.as_mut() {
+        enrich_issue_snapshot_pending_input(detail, &interaction_store).await;
+    }
 
     if let Some(detail) = live_detail {
         return (StatusCode::OK, Json(detail)).into_response();

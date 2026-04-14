@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 use crate::config::location::interactions_state_dir;
 use crate::interaction::error::InteractionError;
 use crate::interaction::model::{
-    InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+    AgentAsk, InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -142,6 +142,7 @@ impl InteractionStore {
         Ok(interaction)
     }
 
+    /// Marks an interaction as no longer awaiting resume (human has responded).
     pub async fn mark_resumed(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
         let mut interaction = self
             .get(id)
@@ -153,6 +154,69 @@ impl InteractionStore {
         Ok(interaction)
     }
 
+    /// Creates a new agent ask interaction, failing if an unresolved ask already exists
+    /// for the same issue and step combination.
+    pub async fn create_ask(&self, ask: AgentAsk) -> Result<AgentAsk, InteractionError> {
+        let _guard = self.create_mutex.lock().await;
+
+        if self
+            .current_unresolved_ask_for_ticket_step(&ask.issue_id, &ask.step_name)
+            .await?
+            .is_some()
+        {
+            return Err(InteractionError::OpenBlockingInteractionExists {
+                issue_id: ask.issue_id.clone(),
+            });
+        }
+
+        let interaction: InteractionRequest = ask.clone().into();
+        self.write_new_interaction(&interaction).await?;
+        Ok(ask)
+    }
+
+    /// Replies to an open interaction with a text response, resolving it.
+    /// Only valid for `BrainstormPrompt` interactions where a `Question` response is expected.
+    pub async fn reply(&self, id: &str, response: String) -> Result<AgentAsk, InteractionError> {
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+
+        validate_status_open(&interaction)?;
+
+        let question_response = InteractionResponse::Question {
+            response_schema_version: 1,
+            text: response,
+            selected_option: None,
+        };
+        validate_response_kind(&interaction.kind, &question_response)?;
+
+        interaction.status = InteractionStatus::Resolved;
+        interaction.awaiting_resume = true;
+        interaction.response = Some(question_response);
+        interaction.resolved_at = Some(Utc::now());
+        self.write_interaction(&interaction).await?;
+        Ok(interaction.into())
+    }
+
+    /// Cancels an open interaction, marking it as resolved without a response.
+    pub async fn cancel_ask(&self, id: &str) -> Result<AgentAsk, InteractionError> {
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+
+        validate_status_open(&interaction)?;
+
+        interaction.status = InteractionStatus::Cancelled;
+        interaction.awaiting_resume = false;
+        interaction.resolved_at = Some(Utc::now());
+        self.write_interaction(&interaction).await?;
+        Ok(interaction.into())
+    }
+
+    /// Clears the waiting state of an interaction, either cancelling open interactions
+    /// or marking resolved/cancelled interactions as no longer awaiting resume.
     pub async fn clear_waiting_state(
         &self,
         id: &str,
@@ -204,6 +268,30 @@ impl InteractionStore {
         Ok(existing
             .into_iter()
             .find(|candidate| candidate.blocking && candidate.issue_id == issue_id))
+    }
+
+    async fn current_unresolved_ask_for_ticket_step(
+        &self,
+        issue_id: &str,
+        step_name: &str,
+    ) -> Result<Option<AgentAsk>, InteractionError> {
+        let existing = self.find_open_interaction_for(issue_id, step_name).await?;
+        Ok(existing.map(Into::into))
+    }
+
+    async fn find_open_interaction_for(
+        &self,
+        issue_id: &str,
+        step_name: &str,
+    ) -> Result<Option<InteractionRequest>, InteractionError> {
+        let mut interactions = self.list_all().await?;
+        interactions.retain(|interaction| {
+            interaction.status == InteractionStatus::Open
+                && interaction.issue_id == issue_id
+                && interaction.step_name == step_name
+        });
+        interactions.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
+        Ok(interactions.into_iter().next())
     }
 
     async fn write_interaction(
@@ -263,6 +351,18 @@ impl InteractionStore {
                 Err(error.into())
             }
         }
+    }
+}
+
+fn validate_status_open(interaction: &InteractionRequest) -> Result<(), InteractionError> {
+    match interaction.status {
+        InteractionStatus::Open => Ok(()),
+        InteractionStatus::Resolved => Err(InteractionError::AlreadyResolved {
+            id: interaction.id.clone(),
+        }),
+        InteractionStatus::Cancelled => Err(InteractionError::AlreadyCancelled {
+            id: interaction.id.clone(),
+        }),
     }
 }
 
@@ -672,5 +772,114 @@ mod tests {
         let loaded = store.get("int_tmp").await.unwrap().unwrap();
         assert_eq!(loaded.id, "int_tmp");
         assert!(tokio::fs::try_exists(&stale_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn create_question_ask_defaults_to_open_waiting_for_human() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+
+        let ask = crate::interaction::model::AgentAsk {
+            id: "ask_1".to_string(),
+            issue_id: "issue-1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            step_name: "review".to_string(),
+            agent_name: "reviewer".to_string(),
+            question: "Which environment should I deploy to?".to_string(),
+            why_blocked: "Need human input to proceed".to_string(),
+            suggested_answer: None,
+            extra_context: None,
+            status: crate::interaction::model::InteractionStatus::Open,
+            awaiting_resume: true,
+            requested_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        let created = store.create_ask(ask.clone()).await.unwrap();
+        assert_eq!(
+            created.status,
+            crate::interaction::model::InteractionStatus::Open
+        );
+        assert!(created.awaiting_resume);
+        assert!(created.resolved_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolving_an_ask_marks_it_resolved_and_awaiting_resume() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+
+        let ask = crate::interaction::model::AgentAsk {
+            id: "ask_resolve".to_string(),
+            issue_id: "issue-2".to_string(),
+            issue_identifier: "PROJ-2".to_string(),
+            step_name: "review".to_string(),
+            agent_name: "reviewer".to_string(),
+            question: "Is this ready to merge?".to_string(),
+            why_blocked: "Need approval".to_string(),
+            suggested_answer: None,
+            extra_context: None,
+            status: crate::interaction::model::InteractionStatus::Open,
+            awaiting_resume: true,
+            requested_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        store.create_ask(ask).await.unwrap();
+
+        let resolved = store
+            .reply("ask_resolve", "Yes, looks good".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resolved.status,
+            crate::interaction::model::InteractionStatus::Resolved
+        );
+        assert!(resolved.awaiting_resume);
+        assert!(resolved.resolved_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn only_one_unresolved_ask_can_exist_for_a_ticket_step_pair() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+
+        let first_ask = crate::interaction::model::AgentAsk {
+            id: "ask_first".to_string(),
+            issue_id: "issue-1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            step_name: "review".to_string(),
+            agent_name: "reviewer".to_string(),
+            question: "First question".to_string(),
+            why_blocked: "Blocked".to_string(),
+            suggested_answer: None,
+            extra_context: None,
+            status: crate::interaction::model::InteractionStatus::Open,
+            awaiting_resume: true,
+            requested_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        store.create_ask(first_ask).await.unwrap();
+
+        let second_ask = crate::interaction::model::AgentAsk {
+            id: "ask_second".to_string(),
+            issue_id: "issue-1".to_string(),
+            issue_identifier: "PROJ-1".to_string(),
+            step_name: "review".to_string(),
+            agent_name: "reviewer".to_string(),
+            question: "Second question".to_string(),
+            why_blocked: "Blocked again".to_string(),
+            suggested_answer: None,
+            extra_context: None,
+            status: crate::interaction::model::InteractionStatus::Open,
+            awaiting_resume: true,
+            requested_at: chrono::Utc::now(),
+            resolved_at: None,
+        };
+
+        let err = store.create_ask(second_ask).await.unwrap_err();
+        assert!(err.to_string().contains("open blocking interaction"));
     }
 }

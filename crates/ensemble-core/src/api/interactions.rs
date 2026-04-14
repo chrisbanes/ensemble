@@ -8,7 +8,41 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use serde::Deserialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InteractionDetail {
+    pub id: String,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub step_name: String,
+    pub agent_name: String,
+    pub question: String,
+    pub why_blocked: String,
+    pub suggested_answer: Option<String>,
+    pub extra_context: Option<String>,
+    pub status: String,
+    pub requested_at: DateTime<Utc>,
+}
+
+impl From<&InteractionRequest> for InteractionDetail {
+    fn from(req: &InteractionRequest) -> Self {
+        InteractionDetail {
+            id: req.id.clone(),
+            issue_id: req.issue_id.clone(),
+            issue_identifier: req.issue_identifier.clone(),
+            step_name: req.step_name.clone(),
+            agent_name: req.agent_name.clone(),
+            question: req.title.clone(),
+            why_blocked: req.body.clone(),
+            suggested_answer: req.options.first().cloned(),
+            extra_context: req.step_tracker_state.clone(),
+            status: req.status.as_str().to_string(),
+            requested_at: req.requested_at,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -90,7 +124,16 @@ fn interaction_error_response(error: InteractionError) -> (StatusCode, Json<serd
 
     (
         status,
-        Json(serde_json::to_value(ApiError::new(code, &error.to_string())).unwrap()),
+        Json(
+            serde_json::to_value(ApiError::new(code, &error.to_string())).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "error": {
+                        "code": code,
+                        "message": "failed to serialize error"
+                    }
+                })
+            }),
+        ),
     )
 }
 
@@ -120,7 +163,7 @@ pub async fn list_open_interactions(State(state): State<AppState>) -> impl IntoR
     operation_id = "getInteractionById",
     params(("id" = String, Path, description = "Interaction identifier")),
     responses(
-        (status = 200, description = "Interaction detail", body = InteractionRequest),
+        (status = 200, description = "Interaction detail", body = InteractionDetail),
         (status = 404, description = "Interaction not found", body = ApiError)
     ),
     tag = "interactions"
@@ -132,7 +175,7 @@ pub async fn get_interaction_by_id(
     match interaction_store(&state).get(&id).await {
         Ok(Some(interaction)) => (
             StatusCode::OK,
-            Json(serde_json::to_value(interaction).unwrap()),
+            Json(serde_json::to_value(InteractionDetail::from(&interaction)).unwrap()),
         )
             .into_response(),
         Ok(None) => (
