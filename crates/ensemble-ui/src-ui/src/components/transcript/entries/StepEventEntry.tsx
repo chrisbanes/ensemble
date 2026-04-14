@@ -3,7 +3,7 @@ import { cn } from "@/lib/utils";
 import type { TranscriptEntry } from "../transcript-model";
 
 interface StepEventEntryProps {
-  entry: Extract<TranscriptEntry, { kind: "step_event" | "tool_activity" }>;
+  entry: Extract<TranscriptEntry, { kind: "step_event" | "workflow_event" | "tool_activity" }>;
   isActive: boolean;
 }
 
@@ -12,7 +12,12 @@ function formatTime(timestamp: string): string {
 }
 
 export function StepEventEntry({ entry, isActive }: StepEventEntryProps) {
-  const label = entry.kind === "tool_activity" ? "Tool activity" : "Step event";
+  const label =
+    entry.kind === "tool_activity"
+      ? "Tool activity"
+      : entry.kind === "workflow_event"
+        ? "Workflow event"
+        : "Step event";
 
   return (
     <Card className={cn("border-slate-300/60 bg-slate-50/40 p-4", isActive && "ring-2 ring-primary")}>

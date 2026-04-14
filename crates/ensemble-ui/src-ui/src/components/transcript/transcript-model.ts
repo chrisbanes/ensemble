@@ -17,6 +17,11 @@ export interface StepEventEntry extends TranscriptEntryBase {
   event: WsEventData;
 }
 
+export interface WorkflowEventEntry extends TranscriptEntryBase {
+  kind: "workflow_event";
+  event: WsEventData;
+}
+
 export interface VerdictEntry extends TranscriptEntryBase {
   kind: "verdict";
   event: WsEventData;
@@ -32,6 +37,21 @@ export interface AgentMessageEntry extends TranscriptEntryBase {
   message: ConversationMessage;
 }
 
+export interface HumanMessageEntry extends TranscriptEntryBase {
+  kind: "human_message";
+  message: string;
+}
+
+export interface HumanReplyEntry extends TranscriptEntryBase {
+  kind: "human_reply";
+  reply: string;
+}
+
+export interface ErrorEntry extends TranscriptEntryBase {
+  kind: "error";
+  message: string;
+}
+
 export interface ToolActivityEntry extends TranscriptEntryBase {
   kind: "tool_activity";
   event: WsEventData;
@@ -39,9 +59,13 @@ export interface ToolActivityEntry extends TranscriptEntryBase {
 
 export type TranscriptEntry =
   | StepEventEntry
+  | WorkflowEventEntry
   | VerdictEntry
   | AgentQuestionEntry
   | AgentMessageEntry
+  | HumanMessageEntry
+  | HumanReplyEntry
+  | ErrorEntry
   | ToolActivityEntry;
 
 export interface ToolActivityGroupEntry extends TranscriptEntryBase {
@@ -70,8 +94,20 @@ function toMs(timestamp: string | null | undefined): number {
 
 function eventPriority(eventType: string): number {
   if (eventType === "step_started" || eventType === "step_completed") return 0;
+  if (
+    eventType === "human_reply_submitted" ||
+    eventType === "question_asked" ||
+    eventType === "input_requested" ||
+    eventType === "input_submitted" ||
+    eventType === "input_resumed" ||
+    eventType === "step_resumed_from_human_reply" ||
+    eventType === "retry_scheduled"
+  ) {
+    return 1;
+  }
   if (eventType === "verdict") return 4;
   if (eventType === "tool_call" || eventType === "output") return 2;
+  if (eventType === "error") return 3;
   return 1;
 }
 
@@ -99,31 +135,30 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
     const kind: TranscriptEntry["kind"] =
       event.type === "verdict"
         ? "verdict"
-        : event.type === "tool_call" || event.type === "output"
-          ? "tool_activity"
-          : "step_event";
+        : event.type === "error"
+          ? "error"
+          : event.type === "human_reply_submitted"
+            ? "human_reply"
+            : event.type === "tool_call" || event.type === "output"
+              ? "tool_activity"
+              : event.type === "step_started" || event.type === "step_completed"
+                ? "step_event"
+                : "workflow_event";
 
     const entry: TranscriptEntry =
-      kind === "verdict"
+      kind === "verdict" || kind === "error" || kind === "workflow_event" || kind === "step_event" || kind === "tool_activity"
         ? {
             kind,
             id: `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`,
             event,
             timestamp: event.timestamp,
           }
-        : kind === "tool_activity"
-          ? {
-              kind,
-              id: `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`,
-              event,
-              timestamp: event.timestamp,
-            }
-          : {
-              kind,
-              id: `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`,
-              event,
-              timestamp: event.timestamp,
-            };
+        : {
+            kind,
+            id: `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`,
+            reply: event.detail,
+            timestamp: event.timestamp,
+          };
 
     sortable.push({
       entry,
@@ -159,17 +194,18 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
           : null;
 
     const maybeTimestamp = explicitTimestamp ?? fallbackConversationTimestamp;
+    const kind = message.role === "user" ? "human_message" : "agent_message";
 
     sortable.push({
       entry: {
-        kind: "agent_message",
+        kind,
         id: `message:${message.index}`,
-        message,
+        ...(kind === "agent_message" ? { message } : { message: message.content }),
         timestamp: maybeTimestamp ?? undefined,
       },
       sortTimestamp: toMs(maybeTimestamp),
       sortSequence: message.index,
-      sortPriority: 2,
+      sortPriority: kind === "human_message" ? 1 : 2,
     });
   }
 

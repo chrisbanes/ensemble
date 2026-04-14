@@ -60,6 +60,78 @@ describe("buildTranscriptEntries", () => {
     ]);
   });
 
+  it("classifies user conversation messages as human messages", () => {
+    const source: TranscriptSource = {
+      conversation: [
+        {
+          index: 1,
+          role: "user",
+          content: "Can you wait before deploying?",
+          tool_calls: null,
+        },
+      ],
+      interactions: [],
+      events: [],
+    };
+
+    const entries = buildTranscriptEntries(source);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      kind: "human_message",
+      message: "Can you wait before deploying?",
+    });
+  });
+
+  it("classifies workflow and error events distinctly", () => {
+    const source: TranscriptSource = {
+      conversation: [],
+      interactions: [],
+      events: [
+        {
+          type: "step_started",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "Started deploy",
+          stepName: "deploy",
+          runId: "run-1",
+          sequence: 1,
+        },
+        {
+          type: "question_asked",
+          timestamp: "2026-04-14T10:00:01Z",
+          detail: "Need confirmation",
+          stepName: "deploy",
+          runId: "run-1",
+          sequence: 2,
+        },
+        {
+          type: "human_reply_submitted",
+          timestamp: "2026-04-14T10:00:02Z",
+          detail: "Use staging",
+          stepName: "deploy",
+          runId: "run-1",
+          sequence: 3,
+        },
+        {
+          type: "error",
+          timestamp: "2026-04-14T10:00:03Z",
+          detail: "Agent crashed",
+          runId: "run-1",
+          sequence: 4,
+        },
+      ],
+    };
+
+    const entries = buildTranscriptEntries(source);
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "step_event",
+      "workflow_event",
+      "human_reply",
+      "error",
+    ]);
+  });
+
   it("handles multiple interaction items in timestamp order", () => {
     const source: TranscriptSource = {
       conversation: [],
