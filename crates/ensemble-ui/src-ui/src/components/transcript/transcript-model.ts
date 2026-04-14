@@ -3,7 +3,7 @@ import type { WsEventData } from "@/ws-types";
 
 export interface TranscriptSource {
   conversation: ConversationMessage[];
-  interaction: InteractionDetail | null;
+  interactions: InteractionDetail[];
   events: WsEventData[];
 }
 
@@ -75,19 +75,21 @@ function eventPriority(eventType: string): number {
   return 1;
 }
 
-function entryPriority(entry: TranscriptEntry): number {
-  switch (entry.kind) {
-    case "step_event":
-      return 0;
-    case "agent_question":
-      return 1;
-    case "agent_message":
-      return 2;
-    case "tool_activity":
-      return 3;
-    case "verdict":
-      return 4;
+function interactionSequence(index: number): number {
+  return index;
+}
+
+function earliestInteractionTimestamp(interactions: InteractionDetail[]): string | null {
+  let earliest: string | null = null;
+
+  for (const interaction of interactions) {
+    if (!interaction.requested_at) continue;
+    if (earliest === null || toMs(interaction.requested_at) < toMs(earliest)) {
+      earliest = interaction.requested_at;
+    }
   }
+
+  return earliest;
 }
 
 export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntry[] {
@@ -131,8 +133,7 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
     });
   }
 
-  if (source.interaction) {
-    const interaction = source.interaction;
+  for (const [index, interaction] of source.interactions.entries()) {
     const timestamp = interaction.requested_at;
     sortable.push({
       entry: {
@@ -142,12 +143,12 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
         timestamp: timestamp ?? undefined,
       },
       sortTimestamp: toMs(timestamp),
-      sortSequence: HIGH_SORT_NUMBER - 2,
+      sortSequence: interactionSequence(index),
       sortPriority: 1,
     });
   }
 
-  const fallbackConversationTimestamp = source.interaction?.requested_at ?? null;
+  const fallbackConversationTimestamp = earliestInteractionTimestamp(source.interactions);
 
   for (const message of source.conversation) {
     const explicitTimestamp =
@@ -167,7 +168,7 @@ export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntr
         timestamp: maybeTimestamp ?? undefined,
       },
       sortTimestamp: toMs(maybeTimestamp),
-      sortSequence: explicitTimestamp ? message.index : HIGH_SORT_NUMBER - 1,
+      sortSequence: message.index,
       sortPriority: 2,
     });
   }

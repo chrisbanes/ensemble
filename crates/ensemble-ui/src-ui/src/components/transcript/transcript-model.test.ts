@@ -16,17 +16,19 @@ describe("buildTranscriptEntries", () => {
           tool_calls: null,
         },
       ],
-      interaction: {
-        id: "ask-1",
-        status: "pending",
-        question: "What API key should I use?",
-        why_blocked: "Deployment requires credentials",
-        suggested_answer: "Use staging key",
-        extra_context: null,
-        step_name: "deploy",
-        requested_at: "2026-04-14T10:00:02Z",
-        resolved_at: null,
-      },
+      interactions: [
+        {
+          id: "ask-1",
+          status: "pending",
+          question: "What API key should I use?",
+          why_blocked: "Deployment requires credentials",
+          suggested_answer: "Use staging key",
+          extra_context: null,
+          step_name: "deploy",
+          requested_at: "2026-04-14T10:00:02Z",
+          resolved_at: null,
+        },
+      ],
       events: [
         {
           type: "step_started",
@@ -58,10 +60,80 @@ describe("buildTranscriptEntries", () => {
     ]);
   });
 
+  it("handles multiple interaction items in timestamp order", () => {
+    const source: TranscriptSource = {
+      conversation: [],
+      interactions: [
+        {
+          id: "ask-2",
+          status: "pending",
+          question: "Second question",
+          why_blocked: "Need approval",
+          suggested_answer: null,
+          extra_context: null,
+          step_name: "deploy",
+          requested_at: "2026-04-14T10:00:03Z",
+          resolved_at: null,
+        },
+        {
+          id: "ask-1",
+          status: "pending",
+          question: "First question",
+          why_blocked: "Need credentials",
+          suggested_answer: null,
+          extra_context: null,
+          step_name: "deploy",
+          requested_at: "2026-04-14T10:00:01Z",
+          resolved_at: null,
+        },
+      ],
+      events: [],
+    };
+
+    const entries = buildTranscriptEntries(source);
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "agent_question",
+      "agent_question",
+    ]);
+    expect(entries[0]?.kind === "agent_question" && entries[0].interaction.id).toBe("ask-1");
+    expect(entries[1]?.kind === "agent_question" && entries[1].interaction.id).toBe("ask-2");
+  });
+
+  it("keeps untimestamped conversation messages in numeric index order", () => {
+    const source: TranscriptSource = {
+      conversation: [
+        {
+          index: 10,
+          role: "assistant",
+          content: "Tenth message",
+          tool_calls: null,
+        },
+        {
+          index: 2,
+          role: "assistant",
+          content: "Second message",
+          tool_calls: null,
+        },
+      ],
+      interactions: [],
+      events: [],
+    };
+
+    const entries = buildTranscriptEntries(source);
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "agent_message",
+      "agent_message",
+    ]);
+    expect(entries[0]?.kind === "agent_message" && entries[0].message.index).toBe(2);
+    expect(entries[1]?.kind === "agent_message" && entries[1].message.index).toBe(10);
+  });
+
   it("collapses adjacent low-level activity into one grouped entry", () => {
     const source: TranscriptSource = {
       conversation: [],
-      interaction: null,
+      interactions: [],
       events: [
         {
           type: "tool_call",
