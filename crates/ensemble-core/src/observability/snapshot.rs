@@ -600,6 +600,7 @@ pub async fn build_issue_snapshot(
     } else {
         None
     };
+    // Note: store errors are intentionally ignored for best-effort snapshot generation
     let current_interaction = waiting_entry.map(current_interaction_summary);
 
     let last_error = retry_entry.and_then(|e| e.error.clone());
@@ -791,11 +792,16 @@ fn pending_input_summary(
     entry: &crate::orchestrator::state::WaitingOnHumanEntry,
     interaction: &crate::interaction::model::InteractionRequest,
 ) -> PendingInputSummary {
+    let suggested_answer = match interaction.options.len() {
+        0 => None,
+        1 => interaction.options.first().cloned(),
+        _ => Some(interaction.options.join(", ")),
+    };
     PendingInputSummary {
         ask_id: entry.interaction_request_id.clone(),
         question: interaction.title.clone(),
         why_blocked: interaction.body.clone(),
-        suggested_answer: interaction.options.first().cloned(),
+        suggested_answer,
         extra_context: interaction.step_tracker_state.clone(),
         step_name: entry.step_name.clone(),
         agent_name: entry.agent_name.clone(),

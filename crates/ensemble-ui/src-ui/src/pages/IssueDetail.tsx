@@ -53,7 +53,7 @@ export default function IssueDetail() {
   const { data: interaction } = useInteractionDetailQuery(interactionId);
   const stopMutation = useStopMutation();
   const retryMutation = useRetryMutation();
-  const inputMutation = useIssueInputMutation(identifier);
+  const inputMutation = useIssueInputMutation(identifier, interactionId);
   const cancelMutation = useCancelInteractionMutation(identifier);
 
   const [liveEvents, setLiveEvents] = useState<WsEventData[]>([]);

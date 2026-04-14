@@ -63,7 +63,8 @@ pub trait IssueTracker: Send + Sync {
     /// The pipeline engine checks this at startup to fail fast if the flow requires
     /// tracker state transitions but the backend cannot perform them.
     /// Note: `add_comment` may still return `WritesNotSupported` even when this
-    /// returns true (e.g., the todo_file tracker supports state writes but not comments).
+    /// returns true, because some trackers support state writes but not comments
+    /// (e.g., the todo_file tracker supports state writes but not comments).
     fn supports_writes(&self) -> bool {
         false
     }
@@ -103,6 +104,7 @@ pub fn resolve_github_token_for_endpoint(
 /// Matches on `kind` to return the right backend:
 /// - `"todo_file"` -> `TodoFileTracker`
 /// - `"github"` -> `GithubTracker`
+/// - `"notion"` -> `NotionTracker`
 ///
 /// Returns an error if the tracker kind is unsupported, or
 /// if required configuration is absent (e.g., missing API key for GitHub).

@@ -68,10 +68,11 @@ describe("Dashboard", () => {
     expect(needsAttention).toBeInTheDocument();
   });
 
-  it("shows waiting tickets as question-first queue items", () => {
+  it("shows waiting tickets with issue identifier and blocking step in the queue", () => {
     const waiting: WaitingInteractionRow[] = [
       waitingInteraction({
         issue_identifier: "my-repo#42",
+        step_name: "review",
         interaction_request_id: "interaction-1",
       }),
     ];
@@ -86,8 +87,8 @@ describe("Dashboard", () => {
 
     expect(screen.getByText("Needs attention")).toBeInTheDocument();
     const links = screen.getAllByText("my-repo#42");
-    expect(links.length).toBeGreaterThanOrEqual(1);
+    expect(links).toHaveLength(1);
     expect(links[0]).toHaveAttribute("href", "/issue/my-repo%2342");
-    expect(screen.queryByText("brainstorm_prompt")).not.toBeInTheDocument();
+    expect(screen.getByText("review")).toBeInTheDocument();
   });
 });

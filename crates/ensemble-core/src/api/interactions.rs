@@ -38,7 +38,7 @@ impl From<&InteractionRequest> for InteractionDetail {
             why_blocked: req.body.clone(),
             suggested_answer: req.options.first().cloned(),
             extra_context: req.step_tracker_state.clone(),
-            status: format!("{:?}", req.status).to_lowercase(),
+            status: req.status.as_str().to_string(),
             requested_at: req.requested_at,
         }
     }
@@ -124,7 +124,16 @@ fn interaction_error_response(error: InteractionError) -> (StatusCode, Json<serd
 
     (
         status,
-        Json(serde_json::to_value(ApiError::new(code, &error.to_string())).unwrap()),
+        Json(
+            serde_json::to_value(ApiError::new(code, &error.to_string())).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "error": {
+                        "code": code,
+                        "message": "failed to serialize error"
+                    }
+                })
+            }),
+        ),
     )
 }
 

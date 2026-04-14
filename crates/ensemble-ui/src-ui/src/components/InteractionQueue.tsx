@@ -13,6 +13,10 @@ interface InteractionQueueProps {
   interactions: WaitingInteractionRow[];
 }
 
+// NOTE: The queue displays issue_identifier and step_name from the state snapshot.
+// The full question (from PendingInputSummary) is shown in IssueDetail (Task 5).
+// WaitingInteractionRow intentionally omits question to keep the state snapshot lean.
+
 function formatAge(requestedAt: string): string {
   const ms = Date.now() - new Date(requestedAt).getTime();
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -58,9 +62,7 @@ export default function InteractionQueue({ interactions }: InteractionQueueProps
               </Link>
             </TableCell>
             <TableCell className="text-muted-foreground">
-              <div>
-                <p className="font-medium">{interaction.step_name}</p>
-              </div>
+              <p className="font-medium">{interaction.step_name}</p>
             </TableCell>
             <TableCell className="text-muted-foreground">
               {formatAge(interaction.requested_at)}

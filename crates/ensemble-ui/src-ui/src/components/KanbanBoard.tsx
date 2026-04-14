@@ -3,18 +3,7 @@ import KanbanColumn from "./KanbanColumn";
 import type { RuntimeSnapshot } from "@/generated/models";
 import type { RunningSessionRow, RetryRow, WaitingInteractionRow, CompletedRow } from "@/generated/models";
 
-// Base interface for all issue items
-interface BaseIssueItem {
-  issue_id: string;
-  issue_identifier: string;
-}
-
-interface CompletedIssueItem extends BaseIssueItem {
-  status: string;
-  completed_at: string;
-}
-
-type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedIssueItem;
+type IssueItem = RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedRow;
 
 interface KanbanBoardProps {
   data: RuntimeSnapshot;

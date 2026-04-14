@@ -13,6 +13,7 @@ import {
   usePostRetry,
 } from "./generated/api/controls/controls";
 import {
+  getGetInteractionByIdQueryKey,
   getListOpenInteractionsQueryKey,
   useGetInteractionById,
   useListOpenInteractions,
@@ -321,7 +322,7 @@ export function useResumeIssueMutation(identifier?: string) {
   });
 }
 
-export function useIssueInputMutation(identifier?: string) {
+export function useIssueInputMutation(identifier?: string, interactionId?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (response: string) => {
@@ -342,6 +343,11 @@ export function useIssueInputMutation(identifier?: string) {
       if (identifier) {
         queryClient.invalidateQueries({
           queryKey: getGetIssueDetailQueryKey(identifier),
+        });
+      }
+      if (interactionId) {
+        queryClient.invalidateQueries({
+          queryKey: getGetInteractionByIdQueryKey(interactionId),
         });
       }
     },

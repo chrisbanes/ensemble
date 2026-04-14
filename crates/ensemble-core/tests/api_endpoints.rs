@@ -1193,3 +1193,122 @@ async fn issue_input_rejects_invalid_outcome() {
         .unwrap();
     assert_eq!(interaction.status, InteractionStatus::Open);
 }
+
+#[tokio::test]
+async fn post_issue_input_returns_updated_waiting_ticket_snapshot() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-snapshot", "NODE_900", "my-repo#900"),
+    )
+    .await;
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_900".to_string(),
+            identifier: "my-repo#900".to_string(),
+            interaction_request_id: "interaction-snapshot".to_string(),
+            step_name: "review".to_string(),
+            kind: InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
+            retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
+        });
+    }
+
+    let base_url = start_test_server(app_state.clone()).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%23900/input", base_url))
+        .json(&serde_json::json!({ "response": "Use staging" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["submitted"], true);
+    assert_eq!(json["issue_identifier"], "my-repo#900");
+    assert!(json.get("message").is_some());
+
+    let state = app_state.orchestrator_state.read().await;
+    assert!(state.is_resume_requested("NODE_900"));
+}
+
+#[tokio::test]
+async fn post_issue_input_conflicts_when_ticket_is_not_waiting_for_human() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    let base_url = start_test_server(app_state).await;
+    let client = reqwest::Client::new();
+
+    let response = client
+        .post(format!("{}/api/v1/issues/my-repo%2342/input", base_url))
+        .json(&serde_json::json!({ "response": "Use staging" }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 409);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["error"]["code"], "invalid_input_state");
+}
+
+#[tokio::test]
+async fn issue_detail_exposes_question_first_pending_input_summary() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-pending", "NODE_123", "my-repo#42"),
+    )
+    .await;
+
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "NODE_123".to_string(),
+            identifier: "my-repo#42".to_string(),
+            interaction_request_id: "interaction-pending".to_string(),
+            step_name: "review".to_string(),
+            kind: InteractionKind::BrainstormPrompt,
+            prompt: "Need input".to_string(),
+            agent_name: "reviewer".to_string(),
+            retry_attempt: Some(1),
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
+        });
+    }
+
+    let base_url = start_test_server(app_state).await;
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("{}/api/v1/my-repo%2342", base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    let json: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(json["pending_input"]["ask_id"], "interaction-pending");
+    assert_eq!(json["pending_input"]["question"], "Need clarification");
+    assert_eq!(
+        json["pending_input"]["why_blocked"],
+        "Pick a deployment target"
+    );
+    assert_eq!(json["pending_input"]["step_name"], "review");
+    assert_eq!(json["pending_input"]["agent_name"], "reviewer");
+}

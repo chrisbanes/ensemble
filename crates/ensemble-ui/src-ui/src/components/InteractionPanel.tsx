@@ -55,7 +55,6 @@ export default function InteractionPanel({
 
       <div className="flex flex-wrap gap-4 text-xs text-muted-foreground">
         <span>Step: {interaction.step_name}</span>
-        <span>Status: {interaction.status}</span>
       </div>
 
       {!isResolved && (

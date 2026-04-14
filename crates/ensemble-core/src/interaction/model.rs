@@ -9,6 +9,16 @@ pub enum InteractionStatus {
     Cancelled,
 }
 
+impl InteractionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InteractionStatus::Open => "open",
+            InteractionStatus::Resolved => "resolved",
+            InteractionStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AgentAsk {
     pub id: String,

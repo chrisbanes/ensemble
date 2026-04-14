@@ -24,6 +24,10 @@ export default function Dashboard() {
   if (!data) return null;
 
   const waitingInteractions = data.waiting_on_human ?? [];
+  const kanbanData = {
+    ...data,
+    waiting_on_human: waitingInteractions.length > 0 ? [] : data.waiting_on_human,
+  };
 
   return (
     <div className="space-y-6">
@@ -44,7 +48,7 @@ export default function Dashboard() {
         </section>
       )}
 
-      <KanbanBoard data={data} />
+      <KanbanBoard data={kanbanData} />
     </div>
   );
 }
