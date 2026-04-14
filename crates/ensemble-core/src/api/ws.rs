@@ -1,7 +1,7 @@
 use crate::api::router::AppState;
 use crate::interaction::store::InteractionStore;
 use crate::observability::events::PipelineEvent;
-use crate::observability::snapshot::build_issue_snapshot;
+use crate::observability::snapshot::{build_issue_snapshot, enrich_issue_snapshot_pending_input};
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -36,15 +36,13 @@ async fn handle_ws(socket: WebSocket, state: AppState, identifier: String) {
 
     // 1. Send initial snapshot on connect
     {
-        let lock = state.orchestrator_state.read().await;
-        let snapshot = build_issue_snapshot(
-            &lock,
-            &identifier,
-            &state.workspace_root,
-            Some(&interaction_store),
-        )
-        .await;
-        drop(lock);
+        let mut snapshot = {
+            let lock = state.orchestrator_state.read().await;
+            build_issue_snapshot(&lock, &identifier, &state.workspace_root, None).await
+        };
+        if let Some(detail) = snapshot.as_mut() {
+            enrich_issue_snapshot_pending_input(detail, &interaction_store).await;
+        }
 
         let initial_msg = serde_json::json!({
             "type": "snapshot",

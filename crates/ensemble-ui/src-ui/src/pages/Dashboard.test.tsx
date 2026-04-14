@@ -27,6 +27,7 @@ function waitingInteraction(
     interaction_request_id: "interaction-1",
     issue_id: "NODE_123",
     issue_identifier: "my-repo#42",
+    question: "Need clarification",
     requested_at: "2026-04-14T10:00:00Z",
     step_name: "review",
     ...overrides,

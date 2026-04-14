@@ -45,6 +45,7 @@ pub struct WaitingInteractionRow {
     pub issue_id: String,
     pub issue_identifier: String,
     pub interaction_request_id: String,
+    pub question: String,
     pub step_name: String,
     pub requested_at: DateTime<Utc>,
 }
@@ -722,6 +723,31 @@ pub async fn build_issue_snapshot(
     })
 }
 
+/// Best-effort enrichment for pending-input details using the interaction store.
+/// Intended to run outside orchestrator-state lock scopes.
+pub async fn enrich_issue_snapshot_pending_input(
+    detail: &mut IssueDetailSnapshot,
+    interaction_store: &InteractionStore,
+) {
+    if detail.pending_input.is_some() {
+        return;
+    }
+
+    let Some(current) = detail.current_interaction.as_ref() else {
+        return;
+    };
+
+    let interaction = interaction_store
+        .get(&current.interaction_request_id)
+        .await
+        .ok()
+        .flatten();
+
+    if let Some(interaction) = interaction {
+        detail.pending_input = Some(pending_input_from_current(current, &interaction));
+    }
+}
+
 /// Convert a RunningEntry to a RunningSessionRow for the snapshot.
 fn running_entry_to_row(
     entry: &RunningEntry,
@@ -773,6 +799,7 @@ fn waiting_entry_to_row(
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         interaction_request_id: entry.interaction_request_id.clone(),
+        question: entry.prompt.clone(),
         step_name: entry.step_name.clone(),
         requested_at: entry.requested_at,
     }
@@ -806,6 +833,27 @@ fn pending_input_summary(
         step_name: entry.step_name.clone(),
         agent_name: entry.agent_name.clone(),
         requested_at: entry.requested_at,
+    }
+}
+
+fn pending_input_from_current(
+    current: &CurrentInteractionSummary,
+    interaction: &crate::interaction::model::InteractionRequest,
+) -> PendingInputSummary {
+    let suggested_answer = match interaction.options.len() {
+        0 => None,
+        1 => interaction.options.first().cloned(),
+        _ => Some(interaction.options.join(", ")),
+    };
+    PendingInputSummary {
+        ask_id: current.interaction_request_id.clone(),
+        question: interaction.title.clone(),
+        why_blocked: interaction.body.clone(),
+        suggested_answer,
+        extra_context: interaction.step_tracker_state.clone(),
+        step_name: current.step_name.clone(),
+        agent_name: interaction.agent_name.clone(),
+        requested_at: current.requested_at,
     }
 }
 
@@ -991,6 +1039,7 @@ mod tests {
         assert_eq!(row.issue_id, "NODE_789");
         assert_eq!(row.issue_identifier, "my-repo#77");
         assert_eq!(row.interaction_request_id, "interaction-1");
+        assert_eq!(row.question, "Need input");
         assert_eq!(row.step_name, "review");
     }
 

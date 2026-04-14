@@ -834,6 +834,16 @@ pub async fn post_issue_input(
         let mut lock = state.orchestrator_state.write().await;
         lock.queue_resume(&waiting_entry.issue_id);
     }
+    state.event_bus.publish(PipelineEvent::HumanReplySubmitted {
+        issue_identifier: identifier.clone(),
+        timestamp: chrono::Utc::now(),
+        step_name: waiting_entry.step_name.clone(),
+        ask_id: waiting_entry.interaction_request_id.clone(),
+        detail: format!(
+            "human reply submitted for interaction {}",
+            waiting_entry.interaction_request_id
+        ),
+    });
     state.event_bus.publish(PipelineEvent::InputSubmitted {
         issue_identifier: identifier.clone(),
         timestamp: chrono::Utc::now(),
@@ -1444,6 +1454,41 @@ mod tests {
 
         let lock = state.orchestrator_state.read().await;
         assert!(lock.is_resume_requested("NODE_123"));
+    }
+
+    #[tokio::test]
+    async fn test_issue_input_emits_human_reply_submitted_event() {
+        let (state, _temp_dir) = build_app_state_with_waiting_approval_gate().await;
+        let mut events = state.event_bus.subscribe();
+
+        let response = post_issue_input(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Json(IssueInputRequest {
+                response: "looks good".to_string(),
+                outcome: Some("approve".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let mut saw_human_reply = false;
+        for _ in 0..3 {
+            let event = tokio::time::timeout(std::time::Duration::from_millis(200), events.recv())
+                .await
+                .ok()
+                .and_then(Result::ok);
+            let Some(event) = event else { break };
+            if matches!(event, PipelineEvent::HumanReplySubmitted { .. }) {
+                saw_human_reply = true;
+                break;
+            }
+        }
+        assert!(
+            saw_human_reply,
+            "expected HumanReplySubmitted to be published after issue input"
+        );
     }
 
     #[tokio::test]
