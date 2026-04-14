@@ -32,6 +32,7 @@ describe("InteractionPanel", () => {
     );
 
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Need clarification");
+    expect(screen.getByLabelText("Reply")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("Answer the agent's question")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Submit Input" })).toBeInTheDocument();
   });

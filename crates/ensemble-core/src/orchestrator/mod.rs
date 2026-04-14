@@ -1457,6 +1457,9 @@ impl Orchestrator {
 
         let mut state = self.state.write().await;
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
+        let follow_up_sequence = run_id
+            .as_ref()
+            .map(|current_run_id| state.next_timeline_sequence(current_run_id));
         if let Some(run) = state.get_pipeline_run_mut(issue_id) {
             run.step_blocked_on_human(step_name, interaction.id.clone());
         }
@@ -1514,7 +1517,7 @@ impl Orchestrator {
 
         self.publish_pipeline_event(
             run_id,
-            sequence.map(|s| s + 1),
+            follow_up_sequence,
             attempt,
             PipelineEvent::InputRequested {
                 issue_identifier: issue.identifier.clone(),
@@ -2927,6 +2930,9 @@ impl Orchestrator {
         let mut state = self.state.write().await;
         state.remove_waiting_on_human(&issue.id);
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, &issue.id);
+        let follow_up_sequence = run_id
+            .as_ref()
+            .map(|current_run_id| state.next_timeline_sequence(current_run_id));
         drop(state);
 
         self.publish_pipeline_event(
@@ -2944,7 +2950,7 @@ impl Orchestrator {
 
         self.publish_pipeline_event(
             run_id,
-            sequence.map(|s| s + 1),
+            follow_up_sequence,
             attempt,
             PipelineEvent::StepResumedFromHumanReply {
                 issue_identifier: issue.identifier.clone(),
@@ -7615,12 +7621,33 @@ agent:
             let events_path = orchestrator.timeline_writer.events_path(&run_id);
             if events_path.exists() {
                 let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
-                let has_question_asked = contents.lines().any(|line| {
-                    line.contains("question_asked") || line.contains("input_requested")
-                });
+                let mut question_asked_sequence: Option<u64> = None;
+                let mut input_requested_sequence: Option<u64> = None;
+
+                for line in contents.lines() {
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    let event_type = value
+                        .get("event_type")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+                    let sequence = value.get("sequence").and_then(|v| v.as_u64());
+
+                    match event_type {
+                        "question_asked" => question_asked_sequence = sequence,
+                        "input_requested" => input_requested_sequence = sequence,
+                        _ => {}
+                    }
+                }
+
                 assert!(
-                    has_question_asked,
-                    "timeline should contain question_asked or input_requested event"
+                    question_asked_sequence.is_some() && input_requested_sequence.is_some(),
+                    "timeline should contain both question_asked and input_requested events"
+                );
+                assert_ne!(
+                    question_asked_sequence, input_requested_sequence,
+                    "question_asked and input_requested must not reuse the same sequence number"
                 );
             }
         }

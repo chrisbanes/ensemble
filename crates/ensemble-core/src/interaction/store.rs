@@ -192,7 +192,7 @@ impl InteractionStore {
         validate_response_kind(&interaction.kind, &question_response)?;
 
         interaction.status = InteractionStatus::Resolved;
-        interaction.awaiting_resume = false;
+        interaction.awaiting_resume = true;
         interaction.response = Some(question_response);
         interaction.resolved_at = Some(Utc::now());
         self.write_interaction(&interaction).await?;
@@ -805,7 +805,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolving_an_ask_marks_it_resolved_and_not_awaiting_resume() {
+    async fn resolving_an_ask_marks_it_resolved_and_awaiting_resume() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
 
@@ -836,7 +836,7 @@ mod tests {
             resolved.status,
             crate::interaction::model::InteractionStatus::Resolved
         );
-        assert!(!resolved.awaiting_resume);
+        assert!(resolved.awaiting_resume);
         assert!(resolved.resolved_at.is_some());
     }
 

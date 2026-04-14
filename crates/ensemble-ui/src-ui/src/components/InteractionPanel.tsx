@@ -59,6 +59,9 @@ export default function InteractionPanel({
 
       {!isResolved && (
         <div className="space-y-3">
+          <label htmlFor="interaction-response" className="text-sm font-medium">
+            Reply
+          </label>
           <Textarea
             id="interaction-response"
             value={textResponse}
