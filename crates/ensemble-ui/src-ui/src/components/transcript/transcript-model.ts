@@ -198,18 +198,30 @@ function sameTranscriptEntry(a: TranscriptEntry, b: TranscriptEntry): boolean {
     case "step_event":
     case "workflow_event":
     case "verdict":
-    case "tool_activity":
-      return sameEventData(a.event, b.event);
-    case "agent_question":
-      return sameInteractionDetail(a.interaction, b.interaction);
-    case "agent_message":
-      return sameConversationMessage(a.message, b.message);
-    case "human_message":
-      return a.message === b.message;
-    case "human_reply":
-      return a.reply === b.reply;
-    case "error":
-      return a.message === b.message;
+    case "tool_activity": {
+      const next = b as typeof a;
+      return sameEventData(a.event, next.event);
+    }
+    case "agent_question": {
+      const next = b as typeof a;
+      return sameInteractionDetail(a.interaction, next.interaction);
+    }
+    case "agent_message": {
+      const next = b as typeof a;
+      return sameConversationMessage(a.message, next.message);
+    }
+    case "human_message": {
+      const next = b as typeof a;
+      return a.message === next.message;
+    }
+    case "human_reply": {
+      const next = b as typeof a;
+      return a.reply === next.reply;
+    }
+    case "error": {
+      const next = b as typeof a;
+      return a.message === next.message;
+    }
   }
 }
 
@@ -277,6 +289,9 @@ function reuseGroupedEntries(
     if (!previous) return entry;
     if (entry.kind === "tool_activity_group" && previous.kind === "tool_activity_group") {
       return sameToolActivityGroup(previous, entry) ? previous : entry;
+    }
+    if (entry.kind === "tool_activity_group" || previous.kind === "tool_activity_group") {
+      return entry;
     }
     return sameTranscriptEntry(previous, entry) ? previous : entry;
   });
