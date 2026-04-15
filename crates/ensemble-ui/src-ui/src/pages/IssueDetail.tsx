@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import {
@@ -26,7 +26,10 @@ import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
 import { IssueComposer } from "@/components/issue-detail/IssueComposer";
 import { IssueContextPanel } from "@/components/issue-detail/IssueContextPanel";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
-import { buildTranscriptEntries, groupTranscriptEntries } from "@/components/transcript/transcript-model";
+import {
+  reconcileGroupedTranscriptEntries,
+  type GroupedTranscriptEntry,
+} from "@/components/transcript/transcript-model";
 
 function triggerNotification(event: WsPipelineEvent, identifier: string) {
   const detail = event.detail ?? event.event_type;
@@ -79,6 +82,7 @@ export default function IssueDetail() {
 
   const effectiveRunId = currentRunId ?? lastKnownRunId;
   const transcriptSessionKey = `${identifier}:${effectiveRunId || "no-run"}`;
+  const activeEntrySessionKeyRef = useRef(transcriptSessionKey);
   const timelineQuery = useTimelineQuery(identifier, effectiveRunId);
   const persistedEvents = useMemo(
     () => (timelineQuery.data?.events ?? []).map(timelineRecordToEventData),
@@ -150,17 +154,33 @@ export default function IssueDetail() {
     });
   }, [identifier, isLiveRun]);
 
-  const transcriptEntries = useMemo(
-    () =>
-      groupTranscriptEntries(
-        buildTranscriptEntries({
-          conversation: conversationQuery.data?.messages ?? [],
-          interactions: interaction ? [interaction] : [],
-          events,
-        }),
-      ),
-    [conversationQuery.data?.messages, interaction, events],
-  );
+  const activeTranscriptEntryId =
+    activeEntrySessionKeyRef.current === transcriptSessionKey ? activeEntryId : null;
+
+  const transcriptEntriesRef = useRef<GroupedTranscriptEntry[] | undefined>(undefined);
+  const transcriptEntriesSessionKeyRef = useRef<string | undefined>(undefined);
+  const transcriptEntries = useMemo(() => {
+    const previousEntries =
+      transcriptEntriesSessionKeyRef.current === transcriptSessionKey
+        ? transcriptEntriesRef.current
+        : undefined;
+
+    const nextEntries = reconcileGroupedTranscriptEntries(previousEntries, {
+      conversation: conversationQuery.data?.messages ?? [],
+      interactions: interaction ? [interaction] : [],
+      events,
+    });
+
+    transcriptEntriesRef.current = nextEntries;
+    transcriptEntriesSessionKeyRef.current = transcriptSessionKey;
+
+    return nextEntries;
+  }, [conversationQuery.data?.messages, interaction, events, transcriptSessionKey]);
+
+  useEffect(() => {
+    activeEntrySessionKeyRef.current = transcriptSessionKey;
+    setActiveEntryId(null);
+  }, [transcriptSessionKey]);
 
   const pendingQuestion = interaction
     ? {
@@ -230,14 +250,20 @@ export default function IssueDetail() {
       <EventTimeline
         events={events}
         live={isLiveRun}
-        onViewConversation={(index) => setActiveEntryId(`message:${index}`)}
+        onViewConversation={(index) => {
+        activeEntrySessionKeyRef.current = transcriptSessionKey;
+        setActiveEntryId(`message:${index}`);
+      }}
       />
     </div>
   ) : (
     <EventTimeline
       events={events}
       live={isLiveRun}
-      onViewConversation={(index) => setActiveEntryId(`message:${index}`)}
+      onViewConversation={(index) => {
+        activeEntrySessionKeyRef.current = transcriptSessionKey;
+        setActiveEntryId(`message:${index}`);
+      }}
     />
   );
 
@@ -323,8 +349,11 @@ export default function IssueDetail() {
           <div className="min-h-0 flex-1 overflow-auto p-4">
             <RunTranscript
               entries={transcriptEntries}
-              activeEntryId={activeEntryId}
-              onJumpToEntry={setActiveEntryId}
+              activeEntryId={activeTranscriptEntryId}
+              onJumpToEntry={(entryId) => {
+                activeEntrySessionKeyRef.current = transcriptSessionKey;
+                setActiveEntryId(entryId);
+              }}
               transcriptSessionKey={transcriptSessionKey}
             />
           </div>

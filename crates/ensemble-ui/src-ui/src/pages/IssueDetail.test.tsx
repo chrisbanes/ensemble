@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { renderWithProviders } from "@/test/render";
 import { connectWs } from "@/ws";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
 import type { GroupedTranscriptEntry } from "@/components/transcript/transcript-model";
 import IssueDetail from "./IssueDetail";
+import type { ReactNode } from "react";
 
 const hooksMock = vi.hoisted(() => {
   const stopMutate = vi.fn();
@@ -293,5 +295,111 @@ describe("IssueDetail", () => {
     await user.click(screen.getByRole("button", { name: "View in conversation" }));
 
     expect(screen.getByText("history message 5")).toBeInTheDocument();
+  });
+
+
+  it("resets transcript history after rerendering with a different run session", async () => {
+    const user = userEvent.setup();
+    const connectWsMock = vi.mocked(connectWs);
+    let currentRunId = "run-1";
+    let currentPrefix = "session one";
+
+    hooksMock.useIssueDetailQuery.mockImplementation(() => ({
+      data: {
+        issue_identifier: "todo-1",
+        status: "running",
+        running: {
+          step_name: "deploy",
+          turn_count: 2,
+          tokens: { total_tokens: 100 },
+          run_id: currentRunId,
+        },
+        attempts: { restart_count: 0 },
+        retry: null,
+        last_error: null,
+        issue: { title: "Deploy feature", labels: [] },
+        workspace: { path: "/tmp/workspace" },
+        workflow_steps: [
+          {
+            name: "deploy",
+            agent: "builder",
+            dependencies: [],
+            state: "running",
+            can_navigate: true,
+          },
+        ],
+        pending_input: { ask_id: "ask-1" },
+        current_interaction: { interaction_request_id: "ask-1" },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    }));
+
+    hooksMock.useConversationQuery.mockImplementation(() => ({
+      data: {
+        messages: Array.from({ length: 55 }, (_, index) => ({
+          index: index + 1,
+          role: "user",
+          content: `${currentPrefix} message ${index + 1}`,
+          tool_calls: null,
+        })),
+      },
+      isLoading: false,
+      isError: false,
+    }));
+
+    connectWsMock.mockImplementation(({ onMessage }) => {
+      onMessage({
+        type: "event",
+        data: {
+          event_type: "turn_completed",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "Conversation turn completed",
+          conversation_index: 5,
+          run_id: currentRunId,
+          sequence: 1,
+        },
+      });
+
+      return () => {};
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/issue/todo-1"]}>{children}</MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    const view = render(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { wrapper },
+    );
+
+    expect(screen.queryByText("session one message 5")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Raw events" }));
+    await user.click(screen.getByRole("button", { name: "View in conversation" }));
+
+    expect(screen.getByText("session one message 5")).toBeInTheDocument();
+
+    currentRunId = "run-2";
+    currentPrefix = "session two";
+
+    view.rerender(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+    );
+
+    expect(screen.getByRole("button", { name: "Load older activity" })).toBeInTheDocument();
+    expect(screen.queryByText("session two message 5")).not.toBeInTheDocument();
+    expect(screen.getByText("session two message 55")).toBeInTheDocument();
   });
 });
