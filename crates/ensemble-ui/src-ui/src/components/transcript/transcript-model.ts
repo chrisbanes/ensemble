@@ -144,6 +144,144 @@ function earliestInteractionTimestamp(interactions: InteractionDetail[]): string
   return earliest;
 }
 
+function sameConversationMessage(
+  a: ConversationMessage,
+  b: ConversationMessage,
+): boolean {
+  return (
+    a.content === b.content &&
+    a.index === b.index &&
+    a.role === b.role &&
+    a.tool_calls === b.tool_calls &&
+    a.tool_output === b.tool_output
+  );
+}
+
+function sameInteractionDetail(
+  a: InteractionDetail,
+  b: InteractionDetail,
+): boolean {
+  return (
+    a.agent_name === b.agent_name &&
+    a.extra_context === b.extra_context &&
+    a.id === b.id &&
+    a.issue_id === b.issue_id &&
+    a.issue_identifier === b.issue_identifier &&
+    a.question === b.question &&
+    a.requested_at === b.requested_at &&
+    a.status === b.status &&
+    a.step_name === b.step_name &&
+    a.suggested_answer === b.suggested_answer &&
+    a.why_blocked === b.why_blocked
+  );
+}
+
+function sameEventData(a: WsEventData, b: WsEventData): boolean {
+  return (
+    a.type === b.type &&
+    a.timestamp === b.timestamp &&
+    a.detail === b.detail &&
+    a.runId === b.runId &&
+    a.sequence === b.sequence &&
+    a.stepName === b.stepName &&
+    a.attempt === b.attempt &&
+    a.conversationIndex === b.conversationIndex
+  );
+}
+
+function sameTranscriptEntry(a: TranscriptEntry, b: TranscriptEntry): boolean {
+  if (a.kind !== b.kind || a.id !== b.id || a.timestamp !== b.timestamp) {
+    return false;
+  }
+
+  switch (a.kind) {
+    case "step_event":
+    case "workflow_event":
+    case "verdict":
+    case "tool_activity":
+      return sameEventData(a.event, b.event);
+    case "agent_question":
+      return sameInteractionDetail(a.interaction, b.interaction);
+    case "agent_message":
+      return sameConversationMessage(a.message, b.message);
+    case "human_message":
+      return a.message === b.message;
+    case "human_reply":
+      return a.reply === b.reply;
+    case "error":
+      return a.message === b.message;
+  }
+}
+
+function sameToolActivityGroup(
+  a: ToolActivityGroupEntry,
+  b: ToolActivityGroupEntry,
+): boolean {
+  if (
+    a.kind !== b.kind ||
+    a.id !== b.id ||
+    a.timestamp !== b.timestamp ||
+    a.count !== b.count ||
+    a.defaultExpanded !== b.defaultExpanded ||
+    a.entries.length !== b.entries.length
+  ) {
+    return false;
+  }
+
+  return a.entries.every((entry, index) => entry === b.entries[index]);
+}
+
+function reuseTranscriptEntries(
+  previousEntries: TranscriptEntry[] | undefined,
+  nextEntries: TranscriptEntry[],
+): TranscriptEntry[] {
+  if (!previousEntries) {
+    return nextEntries;
+  }
+
+  const previousById = new Map(previousEntries.map((entry) => [entry.id, entry] as const));
+
+  return nextEntries.map((entry) => {
+    const previous = previousById.get(entry.id);
+    return previous && sameTranscriptEntry(previous, entry) ? previous : entry;
+  });
+}
+
+function flattenGroupedEntries(entries: GroupedTranscriptEntry[] | undefined): TranscriptEntry[] | undefined {
+  if (!entries) return undefined;
+
+  const flattened: TranscriptEntry[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "tool_activity_group") {
+      flattened.push(...entry.entries);
+      continue;
+    }
+    flattened.push(entry);
+  }
+
+  return flattened;
+}
+
+function reuseGroupedEntries(
+  previousEntries: GroupedTranscriptEntry[] | undefined,
+  nextEntries: GroupedTranscriptEntry[],
+): GroupedTranscriptEntry[] {
+  if (!previousEntries) {
+    return nextEntries;
+  }
+
+  const previousById = new Map(previousEntries.map((entry) => [entry.id, entry] as const));
+
+  return nextEntries.map((entry) => {
+    const previous = previousById.get(entry.id);
+    if (!previous) return entry;
+    if (entry.kind === "tool_activity_group" && previous.kind === "tool_activity_group") {
+      return sameToolActivityGroup(previous, entry) ? previous : entry;
+    }
+    return sameTranscriptEntry(previous, entry) ? previous : entry;
+  });
+}
+
 export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntry[] {
   const sortable: SortableEntry[] = [];
 
@@ -272,4 +410,15 @@ export function groupTranscriptEntries(entries: TranscriptEntry[]): GroupedTrans
 
   flush();
   return grouped;
+}
+
+export function reconcileGroupedTranscriptEntries(
+  previousEntries: GroupedTranscriptEntry[] | undefined,
+  source: TranscriptSource,
+): GroupedTranscriptEntry[] {
+  const previousTranscriptEntries = flattenGroupedEntries(previousEntries);
+  const nextTranscriptEntries = reuseTranscriptEntries(previousTranscriptEntries, buildTranscriptEntries(source));
+  const nextGroupedEntries = groupTranscriptEntries(nextTranscriptEntries);
+
+  return reuseGroupedEntries(previousEntries, nextGroupedEntries);
 }

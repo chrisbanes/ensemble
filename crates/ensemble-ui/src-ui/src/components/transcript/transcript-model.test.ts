@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildTranscriptEntries,
   groupTranscriptEntries,
+  reconcileGroupedTranscriptEntries,
   type TranscriptSource,
 } from "./transcript-model";
 
@@ -244,5 +245,123 @@ describe("buildTranscriptEntries", () => {
       defaultExpanded: false,
       count: 3,
     });
+  });
+
+  it("reuses unchanged transcript entries and grouped entries across append-only updates", () => {
+    const first = reconcileGroupedTranscriptEntries(undefined, {
+      conversation: [
+        {
+          index: 1,
+          role: "assistant",
+          content: "I have started.",
+          tool_calls: null,
+        },
+      ],
+      interactions: [],
+      events: [
+        {
+          type: "tool_call",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "rg src",
+          runId: "run-1",
+          sequence: 1,
+        },
+        {
+          type: "output",
+          timestamp: "2026-04-14T10:00:01Z",
+          detail: "match 1",
+          runId: "run-1",
+          sequence: 2,
+        },
+      ],
+    });
+
+    const second = reconcileGroupedTranscriptEntries(first, {
+      conversation: [
+        {
+          index: 1,
+          role: "assistant",
+          content: "I have started.",
+          tool_calls: null,
+        },
+        {
+          index: 2,
+          role: "user",
+          content: "Please keep going.",
+          tool_calls: null,
+        },
+      ],
+      interactions: [],
+      events: [
+        {
+          type: "tool_call",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "rg src",
+          runId: "run-1",
+          sequence: 1,
+        },
+        {
+          type: "output",
+          timestamp: "2026-04-14T10:00:01Z",
+          detail: "match 1",
+          runId: "run-1",
+          sequence: 2,
+        },
+      ],
+    });
+
+    expect(second[0]).toBe(first[0]);
+    expect(second[1]).toBe(first[1]);
+    expect(second[2]).not.toBe(first[1]);
+    expect(second[0]).toMatchObject({
+      kind: "tool_activity_group",
+      count: 2,
+    });
+  });
+
+  it("replaces a grouped entry when its semantic payload changes", () => {
+    const first = reconcileGroupedTranscriptEntries(undefined, {
+      conversation: [],
+      interactions: [],
+      events: [
+        {
+          type: "tool_call",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "rg src",
+          runId: "run-1",
+          sequence: 1,
+        },
+        {
+          type: "output",
+          timestamp: "2026-04-14T10:00:01Z",
+          detail: "match 1",
+          runId: "run-1",
+          sequence: 2,
+        },
+      ],
+    });
+
+    const second = reconcileGroupedTranscriptEntries(first, {
+      conversation: [],
+      interactions: [],
+      events: [
+        {
+          type: "tool_call",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "rg src",
+          runId: "run-1",
+          sequence: 1,
+        },
+        {
+          type: "output",
+          timestamp: "2026-04-14T10:00:01Z",
+          detail: "match 2",
+          runId: "run-1",
+          sequence: 2,
+        },
+      ],
+    });
+
+    expect(second[0]).not.toBe(first[0]);
   });
 });
