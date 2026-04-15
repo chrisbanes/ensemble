@@ -91,7 +91,14 @@ vi.mock("@/notifications", () => ({
 
 describe("RunTranscript", () => {
   it("renders an empty state when there are no entries", () => {
-    render(<RunTranscript entries={[]} activeEntryId={null} onJumpToEntry={() => {}} />);
+    render(
+      <RunTranscript
+        entries={[]}
+        activeEntryId={null}
+        onJumpToEntry={() => {}}
+        transcriptSessionKey="todo-1:run-1"
+      />,
+    );
 
     expect(screen.getByText("No transcript activity yet.")).toBeInTheDocument();
   });
@@ -169,7 +176,14 @@ describe("RunTranscript", () => {
       },
     ];
 
-    render(<RunTranscript entries={entries} activeEntryId={null} onJumpToEntry={() => {}} />);
+    render(
+      <RunTranscript
+        entries={entries}
+        activeEntryId={null}
+        onJumpToEntry={() => {}}
+        transcriptSessionKey="todo-1:run-1"
+      />,
+    );
 
     expect(screen.getByText("Please hold before deploying.")).toBeInTheDocument();
     expect(screen.getByText("Which environment should I deploy to?")).toBeInTheDocument();
@@ -182,8 +196,8 @@ describe("RunTranscript", () => {
     const user = userEvent.setup();
 
     render(
-      <RunTranscript
-        entries={[
+        <RunTranscript
+          entries={[
           {
             id: "group-1",
             kind: "tool_activity_group",
@@ -206,10 +220,11 @@ describe("RunTranscript", () => {
               },
             ],
           },
-        ]}
-        activeEntryId="group-1"
-        onJumpToEntry={() => {}}
-      />, 
+          ]}
+          activeEntryId="group-1"
+          onJumpToEntry={() => {}}
+          transcriptSessionKey="todo-1:run-1"
+        />, 
     );
 
     expect(screen.getByText("2 low-level activities").closest('[data-active="true"]')).not.toBeNull();

@@ -78,6 +78,7 @@ export default function IssueDetail() {
   }, [currentRunId]);
 
   const effectiveRunId = currentRunId ?? lastKnownRunId;
+  const transcriptSessionKey = `${identifier}:${effectiveRunId || "no-run"}`;
   const timelineQuery = useTimelineQuery(identifier, effectiveRunId);
   const persistedEvents = useMemo(
     () => (timelineQuery.data?.events ?? []).map(timelineRecordToEventData),
@@ -324,6 +325,7 @@ export default function IssueDetail() {
               entries={transcriptEntries}
               activeEntryId={activeEntryId}
               onJumpToEntry={setActiveEntryId}
+              transcriptSessionKey={transcriptSessionKey}
             />
           </div>
           <div className="border-t bg-background">
