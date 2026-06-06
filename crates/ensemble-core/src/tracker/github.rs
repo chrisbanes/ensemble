@@ -830,7 +830,10 @@ impl GithubTracker {
             .map(ToOwned::to_owned))
     }
 
-    async fn configured_state_label_ids(&self) -> Result<HashMap<String, String>, TrackerError> {
+    async fn configured_state_label_ids(
+        &self,
+        target_state: &str,
+    ) -> Result<HashMap<String, String>, TrackerError> {
         let mut labels = HashMap::new();
         for state in self.active_states.iter().chain(self.terminal_states.iter()) {
             let key = state.to_lowercase();
@@ -839,6 +842,12 @@ impl GithubTracker {
             }
             if let Some(label_id) = self.repository_label_id(state).await? {
                 labels.insert(key, label_id);
+            }
+        }
+        let target_key = target_state.to_lowercase();
+        if let std::collections::hash_map::Entry::Vacant(entry) = labels.entry(target_key) {
+            if let Some(label_id) = self.repository_label_id(target_state).await? {
+                entry.insert(label_id);
             }
         }
         Ok(labels)
@@ -854,7 +863,7 @@ impl GithubTracker {
                 reason: format!("issue not found for node ID: {id}"),
             })?;
 
-        let state_label_ids = self.configured_state_label_ids().await?;
+        let state_label_ids = self.configured_state_label_ids(state).await?;
         let target_label_id = state_label_ids
             .get(&state.to_lowercase())
             .cloned()
@@ -2132,5 +2141,88 @@ mod tests {
 
         let tracker = create_test_tracker(&server.uri(), None);
         tracker.set_issue_state("I_issue1", "Done").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repo_mode_set_issue_state_resolves_target_label_outside_configured_states() {
+        let server = MockServer::start().await;
+
+        let state_response = graphql_response(json!({
+            "nodes": [
+                {
+                    "id": "I_issue1",
+                    "number": 1,
+                    "title": "Move me",
+                    "state": "OPEN",
+                    "url": "https://github.com/acme/my-repo/issues/1",
+                    "labels": {
+                        "nodes": [
+                            { "name": "In Progress" },
+                            { "name": "bug" }
+                        ]
+                    },
+                    "projectItems": { "nodes": [] }
+                }
+            ]
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&state_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        for (name, id) in [
+            ("Todo", Some("L_todo")),
+            ("In Progress", Some("L_progress")),
+            ("Done", Some("L_done")),
+            ("Closed", None),
+            ("Failed", Some("L_failed")),
+        ] {
+            let label_response = graphql_response(json!({
+                "repository": {
+                    "label": id.map(|id| json!({ "id": id, "name": name }))
+                }
+            }));
+            Mock::given(method("POST"))
+                .and(path("/graphql"))
+                .and(body_string_contains(&format!("\"name\":\"{name}\"")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&label_response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let remove_response = graphql_response(json!({
+            "removeLabelsFromLabelable": {
+                "labelable": { "id": "I_issue1" }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("removeLabelsFromLabelable"))
+            .and(body_string_contains("L_progress"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&remove_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let add_response = graphql_response(json!({
+            "addLabelsToLabelable": {
+                "labelable": { "id": "I_issue1" }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addLabelsToLabelable"))
+            .and(body_string_contains("L_failed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&add_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), None);
+        tracker.set_issue_state("I_issue1", "Failed").await.unwrap();
     }
 }
