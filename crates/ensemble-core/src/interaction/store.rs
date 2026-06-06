@@ -66,7 +66,7 @@ impl InteractionStore {
     pub async fn list_open(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
         let mut interactions = self.list_all().await?;
         interactions.retain(|interaction| interaction.status == InteractionStatus::Open);
-        interactions.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
+        interactions.sort_by_key(|interaction| interaction.requested_at);
         Ok(interactions)
     }
 
@@ -78,14 +78,14 @@ impl InteractionStore {
         interactions.retain(|interaction| {
             interaction.blocking && interaction.awaiting_resume && interaction.issue_id == issue_id
         });
-        interactions.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
+        interactions.sort_by_key(|interaction| interaction.requested_at);
         Ok(interactions.pop())
     }
 
     pub async fn list_awaiting_resume(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
         let mut interactions = self.list_all().await?;
         interactions.retain(|interaction| interaction.blocking && interaction.awaiting_resume);
-        interactions.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
+        interactions.sort_by_key(|interaction| interaction.requested_at);
         Ok(interactions)
     }
 
@@ -290,7 +290,7 @@ impl InteractionStore {
                 && interaction.issue_id == issue_id
                 && interaction.step_name == step_name
         });
-        interactions.sort_by(|left, right| left.requested_at.cmp(&right.requested_at));
+        interactions.sort_by_key(|interaction| interaction.requested_at);
         Ok(interactions.into_iter().next())
     }
 
