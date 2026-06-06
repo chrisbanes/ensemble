@@ -102,6 +102,8 @@ pub struct InteractionRequest {
     #[serde(default)]
     pub thread_root_comment_url: Option<String>,
     #[serde(default)]
+    pub last_processed_comment_id: Option<String>,
+    #[serde(default)]
     pub accepted_command: Option<AcceptedInteractionCommand>,
     #[serde(default)]
     pub ignored_commands: Vec<IgnoredInteractionCommand>,

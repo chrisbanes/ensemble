@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -15,7 +16,7 @@ use crate::interaction::model::{
 pub struct InteractionStore {
     config_dir: PathBuf,
     create_mutex: std::sync::Arc<Mutex<()>>,
-    command_mutex: std::sync::Arc<Mutex<()>>,
+    command_locks: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>>,
 }
 
 impl InteractionStore {
@@ -23,8 +24,16 @@ impl InteractionStore {
         Self {
             config_dir,
             create_mutex: std::sync::Arc::new(Mutex::new(())),
-            command_mutex: std::sync::Arc::new(Mutex::new(())),
+            command_locks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    fn command_lock_for(&self, id: &str) -> std::sync::Arc<Mutex<()>> {
+        let mut locks = self.command_locks.lock().unwrap();
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -138,12 +147,27 @@ impl InteractionStore {
         Ok(interaction)
     }
 
+    pub async fn update_last_processed_comment(
+        &self,
+        id: &str,
+        comment_id: String,
+    ) -> Result<InteractionRequest, InteractionError> {
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+        interaction.last_processed_comment_id = Some(comment_id);
+        self.write_interaction(&interaction).await?;
+        Ok(interaction)
+    }
+
     pub async fn accept_first_command(
         &self,
         id: &str,
         command: AcceptedInteractionCommand,
     ) -> Result<InteractionRequest, InteractionError> {
-        let _guard = self.command_mutex.lock().await;
+        let lock = self.command_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -173,7 +197,8 @@ impl InteractionStore {
         id: &str,
         command: IgnoredInteractionCommand,
     ) -> Result<InteractionRequest, InteractionError> {
-        let _guard = self.command_mutex.lock().await;
+        let lock = self.command_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -420,6 +445,7 @@ mod tests {
             artifacts: vec!["docs/spec.md".to_string()],
             thread_root_comment_id: None,
             thread_root_comment_url: None,
+            last_processed_comment_id: None,
             accepted_command: None,
             ignored_commands: vec![],
             response: None,

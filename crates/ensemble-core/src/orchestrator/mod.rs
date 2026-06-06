@@ -28,6 +28,7 @@ use crate::config::ensemble::EnsembleConfig;
 use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
+use crate::history_store::store::HistoryStore;
 use crate::interaction::model::{
     AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionResponse,
 };
@@ -97,6 +98,7 @@ pub struct Orchestrator {
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
+    history_store: Option<HistoryStore>,
     event_bus: EventBus,
     timeline_writer: TimelineWriter,
     worker_tx: mpsc::Sender<WorkerEvent>,
@@ -175,6 +177,17 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            history_store: futures::executor::block_on(HistoryStore::new(
+                parts.workspace_root.join(".ensemble").join("history.db"),
+            ))
+            .map_err(|error| {
+                warn!(
+                    error = %error,
+                    "failed to initialize sqlite history store; continuing with file persistence only"
+                );
+                error
+            })
+            .ok(),
             event_bus: parts.event_bus,
             timeline_writer: TimelineWriter::new(parts.workspace_root),
             worker_tx,
@@ -409,11 +422,18 @@ impl Orchestrator {
                         .unwrap_or_else(|| issue.identifier.clone());
                     let interaction_request_id =
                         waiting_entry.map(|entry| entry.interaction_request_id);
+                    let history_run_id = running_entry.as_ref().and_then(|e| e.run_id.clone());
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (identifier, interaction_request_id, history_record)
+                    (
+                        identifier,
+                        interaction_request_id,
+                        history_record,
+                        history_run_id,
+                    )
                 };
-                let (identifier, interaction_request_id, history_record) = history_record;
+                let (identifier, interaction_request_id, history_record, history_run_id) =
+                    history_record;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
@@ -426,7 +446,8 @@ impl Orchestrator {
                 }
 
                 if let Some(record) = history_record {
-                    self.append_history_record(record).await;
+                    self.append_history_record(history_run_id.as_deref(), record)
+                        .await;
                 }
             }
 
@@ -454,16 +475,18 @@ impl Orchestrator {
                         .waiting_on_human
                         .get(&issue.id)
                         .map(|entry| entry.interaction_request_id.clone());
+                    let history_run_id = running_entry.as_ref().and_then(|e| e.run_id.clone());
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (interaction_request_id, history_record)
+                    (interaction_request_id, history_record, history_run_id)
                 };
-                let (interaction_request_id, history_record) = result;
+                let (interaction_request_id, history_record, history_run_id) = result;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
                 if let Some(record) = history_record {
-                    self.append_history_record(record).await;
+                    self.append_history_record(history_run_id.as_deref(), record)
+                        .await;
                 }
             }
         }
@@ -1095,9 +1118,13 @@ impl Orchestrator {
                                 }
                                 state.clear_finalize_state(issue_id);
 
+                                let history_run_id = running_entry
+                                    .as_ref()
+                                    .and_then(|entry| entry.run_id.clone());
                                 drop(state);
                                 if let Some(record) = history_record {
-                                    self.append_history_record(record).await;
+                                    self.append_history_record(history_run_id.as_deref(), record)
+                                        .await;
                                 }
                             } else {
                                 if self.tracker.supports_writes()
@@ -1130,9 +1157,11 @@ impl Orchestrator {
                             let mut history_record = None;
                             let mut completed_identifier = None;
                             let mut rejection_comment = None;
+                            let mut history_run_id = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                                 completed_identifier = Some(entry.identifier.clone());
+                                history_run_id = entry.run_id.clone();
                                 let retry_scheduled = schedule_failure_retry(
                                     &mut state,
                                     issue_id,
@@ -1187,7 +1216,8 @@ impl Orchestrator {
                                     .await;
                                 }
                                 if let Some(record) = history_record {
-                                    self.append_history_record(record).await;
+                                    self.append_history_record(history_run_id.as_deref(), record)
+                                        .await;
                                 }
                             }
                         }
@@ -1300,9 +1330,11 @@ impl Orchestrator {
                 let mut final_failure = false;
                 let mut history_record = None;
                 let mut completed_identifier = None;
+                let mut history_run_id = None;
 
                 if let Some(entry) = state.remove_running(issue_id) {
                     completed_identifier = Some(entry.identifier.clone());
+                    history_run_id = entry.run_id.clone();
                     state.add_runtime_seconds(&entry);
                     let retry_scheduled = schedule_failure_retry(
                         &mut state,
@@ -1350,7 +1382,8 @@ impl Orchestrator {
                 drop(state);
                 if final_failure {
                     if let Some(record) = history_record {
-                        self.append_history_record(record).await;
+                        self.append_history_record(history_run_id.as_deref(), record)
+                            .await;
                     }
                 }
             }
@@ -1683,6 +1716,39 @@ impl Orchestrator {
         interaction.agent_total_tokens = waiting_total_tokens;
         self.interaction_store.create(interaction.clone()).await?;
 
+        let root_body = format_interaction_thread_root_comment(&interaction);
+        match self
+            .tracker
+            .create_interaction_thread_root(&interaction.issue_id, &root_body)
+            .await
+        {
+            Ok(root) => {
+                if let Err(error) = self
+                    .interaction_store
+                    .attach_thread_metadata(
+                        &interaction.id,
+                        root.comment_id.clone(),
+                        root.comment_url.clone(),
+                    )
+                    .await
+                {
+                    warn!(
+                        interaction_id = %interaction.id,
+                        error = %error,
+                        "failed to persist interaction thread metadata for approval gate"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    interaction_id = %interaction.id,
+                    issue_id = %interaction.issue_id,
+                    error = %error,
+                    "failed to create interaction thread root for approval gate"
+                );
+            }
+        }
+
         if let Some(state_name) = mirror_state {
             if self.tracker.supports_writes() {
                 if let Err(error) = self.tracker.set_issue_state(issue_id, &state_name).await {
@@ -1788,9 +1854,14 @@ impl Orchestrator {
                 continue;
             };
 
+            let anchor_id = interaction
+                .last_processed_comment_id
+                .as_deref()
+                .unwrap_or(&root_comment_id);
+
             let comments = match self
                 .tracker
-                .list_comments_after(&interaction.issue_id, &root_comment_id)
+                .list_comments_after(&interaction.issue_id, anchor_id)
                 .await
             {
                 Ok(comments) => comments,
@@ -1808,6 +1879,8 @@ impl Orchestrator {
             // If this becomes expensive on very long-lived issues, add a persisted
             // per-interaction checkpoint to avoid repeated full-history scans.
 
+            let last_comment_id = comments.last().map(|c| c.comment_id.clone());
+
             for comment in comments {
                 if interaction
                     .accepted_command
@@ -1822,10 +1895,9 @@ impl Orchestrator {
                 }
 
                 let marker_prefix = "<!-- ensemble:interaction:";
+                let interaction_marker = format!("{marker_prefix}{} -->", interaction.id);
                 if comment.body.contains(marker_prefix)
-                    && !comment
-                        .body
-                        .contains(&format!("{marker_prefix}{} -->", interaction.id))
+                    && !comment.body.contains(&interaction_marker)
                 {
                     interaction = self
                         .append_ignored_command(
@@ -1833,6 +1905,19 @@ impl Orchestrator {
                             None,
                             &comment,
                             "interaction_marker_mismatch",
+                        )
+                        .await;
+                    continue;
+                }
+
+                if !comment.body.contains(marker_prefix) && !comment.body.contains(&interaction.id)
+                {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            None,
+                            &comment,
+                            "comment_not_scoped_to_interaction",
                         )
                         .await;
                     continue;
@@ -1948,6 +2033,22 @@ impl Orchestrator {
 
                 let mut state = self.state.write().await;
                 state.queue_resume(&interaction.issue_id);
+            }
+
+            if let Some(last_id) = last_comment_id {
+                if interaction.last_processed_comment_id.as_deref() != Some(&last_id) {
+                    if let Err(error) = self
+                        .interaction_store
+                        .update_last_processed_comment(&interaction.id, last_id)
+                        .await
+                    {
+                        warn!(
+                            interaction_id = %interaction.id,
+                            error = %error,
+                            "failed to update last processed comment cursor"
+                        );
+                    }
+                }
             }
         }
     }
@@ -2617,7 +2718,18 @@ impl Orchestrator {
         None
     }
 
-    async fn append_history_record(&self, record: HistoryRecord) {
+    async fn append_history_record(&self, run_id: Option<&str>, record: HistoryRecord) {
+        if let (Some(run_id), Some(store)) = (run_id, &self.history_store) {
+            if let Err(error) = store.append_history_record(run_id, &record).await {
+                warn!(
+                    run_id = %run_id,
+                    issue_id = %record.issue_id,
+                    error = %error,
+                    "failed to append history record to sqlite"
+                );
+            }
+        }
+
         let history_path = self.workspace_mgr.root().join("ensemble_history.jsonl");
         let _guard = self.history_write_lock.lock().await;
         let writer = HistoryWriter::new(history_path);
@@ -3119,7 +3231,7 @@ impl Orchestrator {
                         }
 
                         if let Some(record) = history_record {
-                            self.append_history_record(record).await;
+                            self.append_history_record(None, record).await;
                         }
                     }
                     PipelineAction::Failed { reason, .. } => {
@@ -3168,7 +3280,7 @@ impl Orchestrator {
                         }
 
                         if let Some(record) = history_record {
-                            self.append_history_record(record).await;
+                            self.append_history_record(None, record).await;
                         }
                     }
                     PipelineAction::Waiting
@@ -3461,6 +3573,7 @@ fn build_interaction_request(
         resolved_at: None,
         thread_root_comment_id: None,
         thread_root_comment_url: None,
+        last_processed_comment_id: None,
         accepted_command: None,
         ignored_commands: vec![],
     }
@@ -6084,6 +6197,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6202,6 +6316,7 @@ agent:
                 resolved_at: Some(Utc::now()),
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6223,7 +6338,7 @@ agent:
         let comment_ts = Utc::now();
         let comments = Arc::new(RwLock::new(vec![crate::tracker::model::TrackerComment {
             comment_id: "c-1".to_string(),
-            body: "/answer use staging".to_string(),
+            body: "/answer use staging\n\n<!-- ensemble:interaction:interaction-1 -->".to_string(),
             author: "alice".to_string(),
             created_at: Some(comment_ts),
             updated_at: Some(comment_ts),
@@ -6301,6 +6416,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: Some("root-1".to_string()),
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6403,6 +6519,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: Some("root-1".to_string()),
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6488,6 +6605,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6597,6 +6715,7 @@ agent:
                 resolved_at: Some(Utc::now()),
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6671,6 +6790,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6759,6 +6879,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6881,6 +7002,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -6993,6 +7115,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -7107,6 +7230,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -7224,6 +7348,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -7563,6 +7688,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -7635,6 +7761,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -7740,6 +7867,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -7908,6 +8036,7 @@ agent:
                 resolved_at: None,
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })
@@ -8319,6 +8448,7 @@ agent:
                 resolved_at: Some(Utc::now()),
                 thread_root_comment_id: None,
                 thread_root_comment_url: None,
+                last_processed_comment_id: None,
                 accepted_command: None,
                 ignored_commands: vec![],
             })

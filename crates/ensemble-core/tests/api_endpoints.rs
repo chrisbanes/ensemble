@@ -153,6 +153,7 @@ fn test_interaction(id: &str, issue_id: &str, issue_identifier: &str) -> Interac
         artifacts: vec!["docs/spec.md".to_string()],
         thread_root_comment_id: None,
         thread_root_comment_url: None,
+        last_processed_comment_id: None,
         accepted_command: None,
         ignored_commands: vec![],
         response: None,
