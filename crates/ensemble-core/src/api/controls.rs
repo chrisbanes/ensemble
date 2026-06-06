@@ -672,7 +672,6 @@ mod tests {
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::{ConcurrencyConfig, StepConfig};
-    use crate::interaction::InteractionRequest;
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
     };
