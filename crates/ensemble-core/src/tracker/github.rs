@@ -170,6 +170,41 @@ mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
 }
 "#;
 
+const REPOSITORY_LABEL_QUERY: &str = r#"
+query($owner: String!, $repo: String!, $name: String!) {
+  repository(owner: $owner, name: $repo) {
+    label(name: $name) {
+      id
+      name
+    }
+  }
+}
+"#;
+
+const ADD_LABELS_MUTATION: &str = r#"
+mutation($labelableId: ID!, $labelIds: [ID!]!) {
+  addLabelsToLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+    labelable {
+      ... on Issue {
+        id
+      }
+    }
+  }
+}
+"#;
+
+const REMOVE_LABELS_MUTATION: &str = r#"
+mutation($labelableId: ID!, $labelIds: [ID!]!) {
+  removeLabelsFromLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
+    labelable {
+      ... on Issue {
+        id
+      }
+    }
+  }
+}
+"#;
+
 const FIND_PROJECT_ITEM_QUERY: &str = r#"
 query($nodeId: ID!) {
   node(id: $nodeId) {
@@ -782,6 +817,89 @@ impl GithubTracker {
         Ok(issues)
     }
 
+    async fn repository_label_id(&self, name: &str) -> Result<Option<String>, TrackerError> {
+        let variables = json!({
+            "owner": self.owner,
+            "repo": self.repo,
+            "name": name,
+        });
+        let data = self.graphql(REPOSITORY_LABEL_QUERY, variables).await?;
+        Ok(data
+            .pointer("/repository/label/id")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned))
+    }
+
+    async fn configured_state_label_ids(&self) -> Result<HashMap<String, String>, TrackerError> {
+        let mut labels = HashMap::new();
+        for state in self.active_states.iter().chain(self.terminal_states.iter()) {
+            let key = state.to_lowercase();
+            if labels.contains_key(&key) {
+                continue;
+            }
+            if let Some(label_id) = self.repository_label_id(state).await? {
+                labels.insert(key, label_id);
+            }
+        }
+        Ok(labels)
+    }
+
+    async fn set_repo_label_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+        let current = self
+            .fetch_states_by_node_ids(&[id.to_string()])
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!("issue not found for node ID: {id}"),
+            })?;
+
+        let state_label_ids = self.configured_state_label_ids().await?;
+        let target_label_id = state_label_ids
+            .get(&state.to_lowercase())
+            .cloned()
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "repository label for configured tracker state '{state}' was not found"
+                ),
+            })?;
+
+        let remove_label_ids: Vec<String> = current
+            .labels
+            .iter()
+            .filter_map(|label| state_label_ids.get(&label.to_lowercase()).cloned())
+            .filter(|label_id| label_id != &target_label_id)
+            .collect();
+
+        if !remove_label_ids.is_empty() {
+            self.graphql(
+                REMOVE_LABELS_MUTATION,
+                json!({
+                    "labelableId": id,
+                    "labelIds": remove_label_ids,
+                }),
+            )
+            .await?;
+        }
+
+        let already_has_target = current
+            .labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(state));
+        if !already_has_target {
+            self.graphql(
+                ADD_LABELS_MUTATION,
+                json!({
+                    "labelableId": id,
+                    "labelIds": [target_label_id],
+                }),
+            )
+            .await?;
+        }
+
+        Ok(())
+    }
+
     /// Find the project item ID for an issue node within the configured project.
     async fn find_project_item_id(&self, issue_node_id: &str) -> Result<String, TrackerError> {
         let variables = json!({ "nodeId": issue_node_id });
@@ -975,8 +1093,7 @@ impl IssueTracker for GithubTracker {
     }
 
     fn supports_writes(&self) -> bool {
-        // Repo mode doesn't support state writes yet (label-based transitions not implemented).
-        self.project_number.is_some()
+        true
     }
 
     async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
@@ -1029,12 +1146,7 @@ impl IssueTracker for GithubTracker {
                 .await?;
             Ok(())
         } else {
-            tracing::warn!(
-                issue_id = id,
-                target_state = state,
-                "set_issue_state in repo mode: label-based state transitions not yet implemented"
-            );
-            Err(TrackerError::WritesNotSupported)
+            self.set_repo_label_state(id, state).await
         }
     }
 }
@@ -1938,5 +2050,87 @@ mod tests {
         assert_eq!(issues.len(), 1);
         // Label "TODO" (lowercased to "todo") should map to canonical "Todo"
         assert_eq!(issues[0].state, "Todo");
+    }
+
+    #[tokio::test]
+    async fn repo_mode_set_issue_state_replaces_configured_state_labels() {
+        let server = MockServer::start().await;
+
+        let state_response = graphql_response(json!({
+            "nodes": [
+                {
+                    "id": "I_issue1",
+                    "number": 1,
+                    "title": "Move me",
+                    "state": "OPEN",
+                    "url": "https://github.com/acme/my-repo/issues/1",
+                    "labels": {
+                        "nodes": [
+                            { "name": "Todo" },
+                            { "name": "bug" }
+                        ]
+                    },
+                    "projectItems": { "nodes": [] }
+                }
+            ]
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&state_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        for (name, id) in [
+            ("Todo", Some("L_todo")),
+            ("In Progress", Some("L_progress")),
+            ("Done", Some("L_done")),
+            ("Closed", None),
+        ] {
+            let label_response = graphql_response(json!({
+                "repository": {
+                    "label": id.map(|id| json!({ "id": id, "name": name }))
+                }
+            }));
+            Mock::given(method("POST"))
+                .and(path("/graphql"))
+                .and(body_string_contains(&format!("\"name\":\"{name}\"")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&label_response))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let remove_response = graphql_response(json!({
+            "removeLabelsFromLabelable": {
+                "labelable": { "id": "I_issue1" }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("removeLabelsFromLabelable"))
+            .and(body_string_contains("L_todo"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&remove_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let add_response = graphql_response(json!({
+            "addLabelsToLabelable": {
+                "labelable": { "id": "I_issue1" }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addLabelsToLabelable"))
+            .and(body_string_contains("L_done"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&add_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), None);
+        tracker.set_issue_state("I_issue1", "Done").await.unwrap();
     }
 }

@@ -82,6 +82,7 @@ const HISTORY_OUTCOME_STOPPED: &str = "stopped";
 const HISTORY_VERDICT_APPROVED: &str = "approved";
 const HISTORY_VERDICT_REJECTED: &str = "rejected";
 const HISTORY_VERDICT_FAILED: &str = "failed";
+const REJECTION_COMMENT_PREFIX: &str = "Ensemble pipeline rejected";
 
 /// The main orchestrator that manages the poll-dispatch-reconcile loop.
 pub struct Orchestrator {
@@ -1150,6 +1151,7 @@ impl Orchestrator {
                             let mut history_record = None;
                             let mut history_run_id = None;
                             let mut completed_identifier = None;
+                            let mut rejection_comment = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                                 completed_identifier = Some(entry.identifier.clone());
@@ -1166,6 +1168,8 @@ impl Orchestrator {
                                 final_failure = retry_scheduled.is_none();
                                 if final_failure {
                                     history_record = state.get_pipeline_run(issue_id).map(|run| {
+                                        rejection_comment =
+                                            Self::rejection_comment_for_step(run, &step);
                                         self.build_history_record(
                                             issue_id,
                                             HISTORY_OUTCOME_FAILED,
@@ -1199,6 +1203,12 @@ impl Orchestrator {
 
                             drop(state);
                             if final_failure {
+                                if let Some((step_name, summary)) = rejection_comment {
+                                    self.post_rejection_summary_comment(
+                                        issue_id, &step_name, &summary,
+                                    )
+                                    .await;
+                                }
                                 if let Some(record) = history_record {
                                     self.append_history_record(history_run_id.as_deref(), record)
                                         .await;
@@ -1370,6 +1380,43 @@ impl Orchestrator {
                             .await;
                     }
                 }
+            }
+        }
+    }
+
+    fn rejection_comment_for_step(run: &PipelineRun, step_name: &str) -> Option<(String, String)> {
+        match run.step_states.get(step_name) {
+            Some(StepState::Rejected { summary }) if !summary.trim().is_empty() => {
+                Some((step_name.to_string(), summary.trim().to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    async fn post_rejection_summary_comment(&self, issue_id: &str, step_name: &str, summary: &str) {
+        let body = format!("{REJECTION_COMMENT_PREFIX} at step `{step_name}`:\n\n{summary}");
+        match self.tracker.add_comment(issue_id, &body).await {
+            Ok(()) => {
+                info!(
+                    issue_id = %issue_id,
+                    step = %step_name,
+                    "posted rejection summary to tracker"
+                );
+            }
+            Err(crate::tracker::TrackerError::WritesNotSupported) => {
+                debug!(
+                    issue_id = %issue_id,
+                    step = %step_name,
+                    "tracker does not support rejection summary comments"
+                );
+            }
+            Err(error) => {
+                warn!(
+                    issue_id = %issue_id,
+                    step = %step_name,
+                    error = %error,
+                    "failed to post rejection summary to tracker"
+                );
             }
         }
     }
@@ -3286,6 +3333,51 @@ mod tests {
         }
     }
 
+    struct CommentRecordingTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        comments: Arc<RwLock<Vec<(String, String)>>>,
+    }
+
+    #[async_trait]
+    impl IssueTracker for CommentRecordingTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self.issues.read().await.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            let states_lower: Vec<String> = states.iter().map(|s| s.to_lowercase()).collect();
+            Ok(issues
+                .iter()
+                .filter(|i| states_lower.contains(&i.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|i| ids.contains(&i.id))
+                .cloned()
+                .collect())
+        }
+
+        async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
+            self.comments
+                .write()
+                .await
+                .push((id.to_string(), body.to_string()));
+            Ok(())
+        }
+    }
+
     /// Mock agent runner that completes immediately.
     struct MockRunner {
         delay_ms: u64,
@@ -3912,6 +4004,80 @@ agent:
 
         let state = orchestrator.state.read().await;
         assert!(state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn terminal_rejection_posts_one_tracker_comment_after_retries_are_exhausted() {
+        let mut raw_config = make_config();
+        raw_config.max_cycles = 2;
+        let config = Arc::new(RwLock::new(raw_config));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let comments = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(CommentRecordingTracker {
+            issues,
+            comments: Arc::clone(&comments),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        for attempt in [None, Some(1)] {
+            {
+                let cfg = config.read().await;
+                let mut state = orchestrator.state.write().await;
+                state.add_running(&test_issue("1", "Todo"), attempt);
+                let dag = build_dag(&cfg.steps).unwrap();
+                let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+                pipeline_run.start();
+                pipeline_run.mark_running("build", "session-1".to_string());
+                state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            }
+
+            let workspace = orchestrator
+                .workspace_mgr
+                .workspace_path("repo#1")
+                .expect("workspace path");
+            tokio::fs::create_dir_all(workspace.join(".ensemble"))
+                .await
+                .unwrap();
+            tokio::fs::write(
+                workspace.join(".ensemble").join("verdict.json"),
+                r#"{"verdict":"reject","summary":"tests failed"}"#,
+            )
+            .await
+            .unwrap();
+
+            orchestrator
+                .handle_worker_exit(
+                    "1",
+                    "build",
+                    WorkerResult::Success {
+                        runtime_verdict: None,
+                        approval_request: None,
+                    },
+                )
+                .await;
+        }
+
+        let comments = comments.read().await;
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].0, "1");
+        assert!(comments[0].1.contains("Ensemble pipeline rejected"));
+        assert!(comments[0].1.contains("tests failed"));
     }
 
     #[tokio::test]

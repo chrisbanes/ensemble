@@ -2,8 +2,8 @@
 
 ## What's working today
 
-- **Configuration** — `ensemble.yaml` loader with typed config, environment variable resolution, and validation
-- **Trackers** — GitHub Projects v2 (full GraphQL read/write) and local TODO file backends
+- **Configuration** — `config.yaml` loader with typed config, environment variable resolution, and validation
+- **Trackers** — GitHub Projects v2, GitHub repository labels, Notion, and local TODO file backends
 - **Pipelines** — DAG-based step execution with sequential and parallel steps
 - **Verdicts** — ACP protocol and `.ensemble/verdict.json` file fallback
 - **Agents** — ACP client over stdio (JSON-RPC 2.0) for agent communication
@@ -13,13 +13,12 @@
 - **Live streaming** — WebSocket endpoint for real-time pipeline events
 - **Dashboard** — React SPA with issue overview, detail views, and history
 - **Init wizard** — `ensemble init` interactive setup with agent discovery
-- **Desktop app** — Tauri 2 scaffold
+- **Desktop app** — Tauri 2 shell that serves the shared dashboard and starts the shared orchestrator runtime
 
 ## What's coming
 
-- **CLI orchestrator wiring** — the orchestrator loop is implemented but not yet spawned by `ensemble run` (it's the last integration step)
-- **Desktop integration** — connecting the Tauri shell to ensemble-core so the desktop app starts the orchestrator and serves the dashboard
-- **Homebrew distribution** — `brew install ensemble`
+- **Release verification** — cut and verify the first public Homebrew release from the tag-driven release workflow
+- **Richer tracker feedback** — continue expanding tracker comments and handoff summaries where the backend supports them
 
 ## Not planned
 

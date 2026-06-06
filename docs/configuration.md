@@ -167,7 +167,7 @@ Defines where Ensemble reads and writes issues.
 |-------|------|---------|-------------|
 | `repository` | string | — | GitHub repo in `owner/name` format |
 | `api_key` | string | — | GitHub token (use `$GITHUB_TOKEN`). If missing, Ensemble falls back to `gh auth token`. |
-| `project_number` | integer | — | GitHub Projects v2 project number |
+| `project_number` | integer | — | GitHub Projects v2 project number. If omitted, Ensemble uses repository labels whose names match configured tracker states for state reads/writes. |
 | `endpoint` | string | `https://api.github.com/graphql` | Custom tracker API endpoint. For GitHub, this is the GraphQL endpoint (for GitHub Enterprise). For Notion, this overrides the Notion API base URL (`https://api.notion.com` by default). |
 | `gh_hostname` | string | — | Hostname passed to `gh auth token --hostname` (overrides endpoint-derived host) |
 | `labels_filter` | list of strings | `[]` | Only process issues with these labels |
