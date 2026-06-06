@@ -675,7 +675,6 @@ mod tests {
     use crate::interaction::InteractionRequest;
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
-        WaitingOnHumanEntry,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
