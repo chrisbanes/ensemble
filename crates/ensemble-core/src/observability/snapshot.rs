@@ -45,7 +45,6 @@ pub struct WaitingInteractionRow {
     pub issue_id: String,
     pub issue_identifier: String,
     pub interaction_request_id: String,
-    pub question: String,
     pub step_name: String,
     pub requested_at: DateTime<Utc>,
 }
@@ -799,7 +798,6 @@ fn waiting_entry_to_row(
         issue_id: entry.issue_id.clone(),
         issue_identifier: entry.identifier.clone(),
         interaction_request_id: entry.interaction_request_id.clone(),
-        question: entry.prompt.clone(),
         step_name: entry.step_name.clone(),
         requested_at: entry.requested_at,
     }
@@ -831,7 +829,7 @@ fn pending_input_summary(
         suggested_answer,
         extra_context: interaction.step_tracker_state.clone(),
         step_name: entry.step_name.clone(),
-        agent_name: entry.agent_name.clone(),
+        agent_name: interaction.agent_name.clone(),
         requested_at: entry.requested_at,
     }
 }
@@ -1039,7 +1037,6 @@ mod tests {
         assert_eq!(row.issue_id, "NODE_789");
         assert_eq!(row.issue_identifier, "my-repo#77");
         assert_eq!(row.interaction_request_id, "interaction-1");
-        assert_eq!(row.question, "Need input");
         assert_eq!(row.step_name, "review");
     }
 

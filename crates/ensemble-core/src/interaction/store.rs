@@ -390,18 +390,14 @@ mod tests {
     use crate::interaction::error::InteractionError;
     use crate::interaction::model::{
         AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionRequest,
-        InteractionResponse, InteractionStatus,
+        InteractionResponse, InteractionResumeStrategy, InteractionStatus,
     };
     use chrono::Utc;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Barrier;
 
-    fn sample_question(
-        id: &str,
-        issue_id: &str,
-        issue_identifier: &str,
-    ) -> InteractionRequest {
+    fn sample_question(id: &str, issue_id: &str, issue_identifier: &str) -> InteractionRequest {
         InteractionRequest {
             id: id.to_string(),
             schema_version: 1,
@@ -417,6 +413,7 @@ mod tests {
             status: InteractionStatus::Open,
             blocking: true,
             awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::default(),
             title: "Need clarification".to_string(),
             body: "Pick the target environment".to_string(),
             options: vec!["staging".to_string(), "production".to_string()],
@@ -426,6 +423,10 @@ mod tests {
             accepted_command: None,
             ignored_commands: vec![],
             response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
             requested_at: Utc::now(),
             resolved_at: None,
         }
@@ -564,19 +565,11 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_question(
-                "int_waiting_open",
-                "issue-1",
-                "ACME-1",
-            ))
+            .create(sample_question("int_waiting_open", "issue-1", "ACME-1"))
             .await
             .unwrap();
         store
-            .create(sample_question(
-                "int_waiting_resolved",
-                "issue-2",
-                "ACME-2",
-            ))
+            .create(sample_question("int_waiting_resolved", "issue-2", "ACME-2"))
             .await
             .unwrap();
         store

@@ -1,12 +1,24 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionKind {
+    #[serde(alias = "brainstorm_prompt")]
+    #[default]
     Question,
+    #[serde(alias = "approval_gate")]
     Approval,
+    #[serde(alias = "manual_decision")]
     Handoff,
+}
+
+/// Backward-compatible aliases for code that still references old variant names.
+#[allow(non_upper_case_globals)]
+impl InteractionKind {
+    pub const BrainstormPrompt: Self = Self::Question;
+    pub const ApprovalGate: Self = Self::Approval;
+    pub const ManualDecision: Self = Self::Handoff;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -25,6 +37,17 @@ impl InteractionStatus {
             InteractionStatus::Cancelled => "cancelled",
         }
     }
+}
+
+/// Backward-compatible resume strategy. The orchestrator always uses RerunStep behavior;
+/// this enum is retained only for deserialization compatibility with persisted interaction
+/// requests that include a `resume_strategy` field.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionResumeStrategy {
+    #[default]
+    RerunStep,
+    AdvanceAfterStep,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -68,6 +91,8 @@ pub struct InteractionRequest {
     pub blocking: bool,
     #[serde(default = "default_awaiting_resume")]
     pub awaiting_resume: bool,
+    #[serde(default)]
+    pub resume_strategy: InteractionResumeStrategy,
     pub title: String,
     pub body: String,
     pub options: Vec<String>,
@@ -81,6 +106,14 @@ pub struct InteractionRequest {
     #[serde(default)]
     pub ignored_commands: Vec<IgnoredInteractionCommand>,
     pub response: Option<InteractionResponse>,
+    #[serde(default)]
+    pub waiting_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub agent_input_tokens: u64,
+    #[serde(default)]
+    pub agent_output_tokens: u64,
+    #[serde(default)]
+    pub agent_total_tokens: u64,
     pub requested_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
 }
