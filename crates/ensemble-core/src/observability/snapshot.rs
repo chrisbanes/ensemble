@@ -253,7 +253,7 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
             completed_at: entry.completed_at,
         })
         .collect();
-    completed_rows.sort_by(|a, b| b.completed_at.cmp(&a.completed_at));
+    completed_rows.sort_by_key(|row| std::cmp::Reverse(row.completed_at));
 
     // Compute live seconds_running: cumulative from ended sessions + active elapsed
     let active_elapsed: f64 = state

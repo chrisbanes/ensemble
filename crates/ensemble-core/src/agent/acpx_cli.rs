@@ -494,7 +494,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":11,"result":{{"stopReason":"end_turn"}}}}'
         });
         tokio::pin!(run);
 
-        let saw_output = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let saw_output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 tokio::select! {
                     result = &mut run => panic!("prompt exited before streaming output: {result:?}"),

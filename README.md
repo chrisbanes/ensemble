@@ -4,11 +4,14 @@ Ensemble is a service that orchestrates coding agents against your issue tracker
 
 ## How it works
 
-Ensemble reads issues from a tracker (GitHub Projects or a local TODO file), creates a workspace directory for each one, and runs a pipeline of named agents against it. Each agent gets a prompt rendered from the issue context. Agents report verdicts (approve/reject), and Ensemble transitions the issue state accordingly. Failed issues retry with exponential backoff.
+Ensemble reads issues from a tracker (GitHub Projects/repository labels, Notion, or a local TODO file), creates a workspace directory for each one, and runs a pipeline of named agents against it. Each agent gets a prompt rendered from the issue context. Agents report verdicts (approve/reject), and Ensemble transitions the issue state accordingly. Failed issues retry with exponential backoff.
 
 All behavior is configured in a `config.yaml` file that lives in a configuration directory (default: `~/.config/ensemble/` on Linux, `~/Library/Application Support/ensemble/` on macOS).
 
 ## Install
+
+Tagged releases publish CLI and desktop artifacts and update the Homebrew tap. Once a release is
+available:
 
 ```sh
 brew install ensemble
@@ -97,7 +100,7 @@ This opens the resolved configuration directory in your system's file manager. I
 
 ## Core concepts
 
-**Trackers** connect Ensemble to your issue source. Supported: GitHub Projects (`github`) and local TODO files (`todo_file`). The tracker defines which states are active (pollable) and terminal (done). For `todo_file`, the default path is `~/ensemble/TODO.md`.
+**Trackers** connect Ensemble to your issue source. Supported: GitHub Projects/repository labels (`github`), Notion (`notion`), and local TODO files (`todo_file`). The tracker defines which states are active (pollable) and terminal (done). For `todo_file`, the default path is `~/ensemble/TODO.md`.
 
 **Agents** are named definitions that pair an executor (like `claude-code`) with a prompt. Prompts can be inline strings or [Liquid](https://shopify.github.io/liquid/) template files with access to issue context.
 
