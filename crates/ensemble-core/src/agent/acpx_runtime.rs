@@ -1,7 +1,13 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::error::AgentError;
+use crate::observability::events_contract::{
+    elapsed_ms, ACPX_PROMPT_CANCELLED, ACPX_PROMPT_COMPLETED, ACPX_PROMPT_FAILED,
+};
 
 use super::acpx_cli::AcpxCli;
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
@@ -104,6 +110,9 @@ impl AcpxRuntime {
             session_name,
             "starting acpx prompt"
         );
+        let event_count = Arc::new(AtomicUsize::new(0));
+        let prompt_start = std::time::Instant::now();
+        let cb_count = event_count.clone();
         let run_prompt = self.cli.run_prompt(
             acpx_agent,
             &session_name,
@@ -111,6 +120,7 @@ impl AcpxRuntime {
             prompt,
             agent.model.as_deref(),
             |event| {
+                cb_count.fetch_add(1, Ordering::Relaxed);
                 emit_event(
                     &request.event_tx,
                     &request.issue.id,
@@ -161,6 +171,15 @@ impl AcpxRuntime {
                     agent.model.as_deref(),
                 )
                 .await;
+                info!(
+                    event = ACPX_PROMPT_CANCELLED,
+                    issue_id = %request.issue.id,
+                    step = request.step_name,
+                    session_name,
+                    event_count = event_count.load(Ordering::Relaxed),
+                    duration_ms = elapsed_ms(prompt_start),
+                    "acpx prompt cancelled"
+                );
                 return Err(AgentError::TurnCancelled);
             }
         };
@@ -174,13 +193,40 @@ impl AcpxRuntime {
         )
         .await;
 
-        let prompt_outcome = prompt_result?;
+        let count = event_count.load(Ordering::Relaxed);
+        let duration = elapsed_ms(prompt_start);
 
-        Ok(detect_worker_result_with_runtime_verdict(
-            request.workspace_path,
-            prompt_outcome.runtime_verdict,
-        )
-        .await)
+        match prompt_result {
+            Ok(outcome) => {
+                info!(
+                    event = ACPX_PROMPT_COMPLETED,
+                    issue_id = %request.issue.id,
+                    step = request.step_name,
+                    session_name,
+                    event_count = count,
+                    duration_ms = duration,
+                    "acpx prompt completed"
+                );
+                Ok(detect_worker_result_with_runtime_verdict(
+                    request.workspace_path,
+                    outcome.runtime_verdict,
+                )
+                .await)
+            }
+            Err(e) => {
+                warn!(
+                    event = ACPX_PROMPT_FAILED,
+                    issue_id = %request.issue.id,
+                    step = request.step_name,
+                    session_name,
+                    event_count = count,
+                    duration_ms = duration,
+                    error = %e,
+                    "acpx prompt failed"
+                );
+                Err(e)
+            }
+        }
     }
 }
 
