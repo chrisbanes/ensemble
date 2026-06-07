@@ -45,7 +45,7 @@ use crate::observability::events_contract::{
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
 use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
-use crate::timeline::writer::TimelineWriter;
+use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::finalize::FinalizeMode;
@@ -100,7 +100,7 @@ pub struct Orchestrator {
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
     history_store: Option<HistoryStore>,
     event_bus: EventBus,
-    timeline_writer: TimelineWriter,
+    timeline_persistence: Option<TimelinePersistence>,
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -189,7 +189,7 @@ impl Orchestrator {
             })
             .ok(),
             event_bus: parts.event_bus,
-            timeline_writer: TimelineWriter::new(parts.workspace_root),
+            timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root)),
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -300,6 +300,12 @@ impl Orchestrator {
                 }
             }
         }
+
+        info!("orchestrator stopped, flushing timeline persistence");
+        if let Some(mut persistence) = self.timeline_persistence.take() {
+            persistence.flush().await;
+        }
+        info!("timeline persistence flushed");
 
         info!("orchestrator stopped");
     }
@@ -3477,13 +3483,8 @@ impl Orchestrator {
         self.event_bus.publish(event);
 
         if let Some((run_id, record)) = timeline_entry {
-            if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
-                warn!(
-                    event = "timeline_persist_failed",
-                    run_id = %run_id,
-                    error = %error,
-                    "failed to persist timeline event"
-                );
+            if let Some(ref persistence) = self.timeline_persistence {
+                persistence.send(run_id, record);
             }
         }
     }
@@ -8157,7 +8158,13 @@ agent:
             .expect("event should be published despite persist failure")
             .expect("receiver should get event");
         assert_eq!(received.issue_identifier(), "repo#1");
-        assert!(!orchestrator.timeline_writer.events_path("run-1").exists());
+        let path = dir
+            .path()
+            .join(".ensemble")
+            .join("runs")
+            .join("run-1")
+            .join("events.jsonl");
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -8175,7 +8182,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator = Orchestrator::new(
+        let mut orchestrator = Orchestrator::new(
             config,
             tracker,
             runner,
@@ -8205,8 +8212,17 @@ agent:
             .expect("receiver should get event");
         assert_eq!(received.issue_identifier(), "repo#1");
 
-        let path = orchestrator.timeline_writer.events_path("run-1");
-        assert!(path.exists());
+        if let Some(ref mut persistence) = orchestrator.timeline_persistence {
+            persistence.flush().await;
+        }
+
+        let path = dir
+            .path()
+            .join(".ensemble")
+            .join("runs")
+            .join("run-1")
+            .join("events.jsonl");
+        assert!(path.exists(), "file should exist after flush");
         let contents = tokio::fs::read_to_string(path).await.unwrap();
         let record: crate::timeline::model::TimelineEventRecord =
             serde_json::from_str(contents.lines().next().unwrap()).unwrap();
@@ -8490,7 +8506,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator = Orchestrator::new(
+        let mut orchestrator = Orchestrator::new(
             config.clone(),
             tracker,
             runner,
@@ -8529,6 +8545,10 @@ agent:
             )
             .await;
 
+        if let Some(ref mut persistence) = orchestrator.timeline_persistence {
+            persistence.flush().await;
+        }
+
         let run_id = {
             let state = orchestrator.state.read().await;
             state
@@ -8544,38 +8564,45 @@ agent:
         };
 
         if let Some(run_id) = run_id {
-            let events_path = orchestrator.timeline_writer.events_path(&run_id);
-            if events_path.exists() {
-                let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
-                let mut question_asked_sequence: Option<u64> = None;
-                let mut input_requested_sequence: Option<u64> = None;
+            let events_path = dir
+                .path()
+                .join(".ensemble")
+                .join("runs")
+                .join(&run_id)
+                .join("events.jsonl");
+            assert!(
+                events_path.exists(),
+                "timeline events file should exist after flush"
+            );
+            let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
+            let mut question_asked_sequence: Option<u64> = None;
+            let mut input_requested_sequence: Option<u64> = None;
 
-                for line in contents.lines() {
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                        continue;
-                    };
-                    let event_type = value
-                        .get("event_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let sequence = value.get("sequence").and_then(|v| v.as_u64());
+            for line in contents.lines() {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let event_type = value
+                    .get("event_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let sequence = value.get("sequence").and_then(|v| v.as_u64());
 
-                    match event_type {
-                        "question_asked" => question_asked_sequence = sequence,
-                        "input_requested" => input_requested_sequence = sequence,
-                        _ => {}
-                    }
+                match event_type {
+                    "question_asked" => question_asked_sequence = sequence,
+                    "input_requested" => input_requested_sequence = sequence,
+                    _ => {}
                 }
-
-                assert!(
-                    question_asked_sequence.is_some() && input_requested_sequence.is_some(),
-                    "timeline should contain both question_asked and input_requested events"
-                );
-                assert_ne!(
-                    question_asked_sequence, input_requested_sequence,
-                    "question_asked and input_requested must not reuse the same sequence number"
-                );
             }
+
+            assert!(
+                question_asked_sequence.is_some() && input_requested_sequence.is_some(),
+                "timeline should contain both question_asked and input_requested events"
+            );
+            assert_ne!(
+                question_asked_sequence, input_requested_sequence,
+                "question_asked and input_requested must not reuse the same sequence number"
+            );
         }
     }
 }
