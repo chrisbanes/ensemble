@@ -7,6 +7,14 @@ use super::acpx_cli::AcpxCli;
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
 use super::{detect_worker_result_with_runtime_verdict, AgentRunRequest};
 
+/// Agent runtime backed by the `acpx` CLI tool.
+///
+/// Each call to [`run_step`](AcpxRuntime::run_step) creates a fresh acpx
+/// session scoped to the `(issue, step, attempt)` triple — different steps
+/// never share a session and retries are isolated from prior state.
+///
+/// See `docs/superpowers/specs/2026-04-05-acpx-runtime-integration-design.md`
+/// for the full session model rationale.
 pub struct AcpxRuntime {
     cli: AcpxCli,
 }
@@ -30,6 +38,12 @@ impl AcpxRuntime {
         Self { cli }
     }
 
+    /// Execute a single step attempt via acpx.
+    ///
+    /// Creates a one-shot session named `{issue_id}-{step}-attempt-{attempt}`,
+    /// streams the prompt, and returns a [`WorkerResult`] containing the
+    /// runtime verdict (if any). The session is closed before this method
+    /// returns, regardless of success or failure.
     pub async fn run_step(
         &self,
         request: &AgentRunRequest<'_>,
