@@ -45,7 +45,7 @@ use crate::observability::events_contract::{
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
 use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
-use crate::timeline::writer::TimelineWriter;
+use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::Issue;
 use crate::tracker::IssueTracker;
 use crate::workspace::finalize::FinalizeMode;
@@ -100,7 +100,7 @@ pub struct Orchestrator {
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
     history_store: Option<HistoryStore>,
     event_bus: EventBus,
-    timeline_writer: TimelineWriter,
+    timeline_persistence: Option<TimelinePersistence>,
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -189,7 +189,7 @@ impl Orchestrator {
             })
             .ok(),
             event_bus: parts.event_bus,
-            timeline_writer: TimelineWriter::new(parts.workspace_root),
+            timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root)),
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -300,6 +300,12 @@ impl Orchestrator {
                 }
             }
         }
+
+        info!("orchestrator stopped, flushing timeline persistence");
+        if let Some(persistence) = self.timeline_persistence.take() {
+            persistence.flush().await;
+        }
+        info!("timeline persistence flushed");
 
         info!("orchestrator stopped");
     }
@@ -3477,13 +3483,8 @@ impl Orchestrator {
         self.event_bus.publish(event);
 
         if let Some((run_id, record)) = timeline_entry {
-            if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
-                warn!(
-                    event = "timeline_persist_failed",
-                    run_id = %run_id,
-                    error = %error,
-                    "failed to persist timeline event"
-                );
+            if let Some(ref persistence) = self.timeline_persistence {
+                persistence.send(run_id, record);
             }
         }
     }
