@@ -110,6 +110,8 @@ This opens the resolved configuration directory in your system's file manager. I
 
 **Verdicts** are how agents report results. An agent can approve (step passes) or reject with a summary (step fails). Ensemble reads verdicts from the ACP protocol or a `.ensemble/verdict.json` file in the workspace.
 
+**Human interactions** are thread-scoped and deterministic: when an agent blocks for human input, Ensemble creates a tracker thread and accepts strict slash commands (`/approve`, `/reject`, `/answer`) with first-valid-command-wins semantics.
+
 ## Documentation
 
 - [Configuration Reference](docs/configuration.md) — every `config.yaml` field

@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::config::ensemble::{EnsembleConfig, PermissionMode};
+use crate::config::ensemble::{EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode};
 use crate::config::template::render_prompt_with_interaction_response;
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
@@ -34,6 +34,11 @@ If you cannot return a structured runtime verdict, write .ensemble/verdict.json 
 {\"verdict\":\"approve\"}\n\
 or\n\
 {\"verdict\":\"reject\",\"summary\":\"<reason>\"}";
+
+const DEFAULT_INTERACTION_POLICY_INSTRUCTION: &str = "\
+When you need human input, prefer batching related questions into a single interaction request instead of asking one-by-one.\n\
+This is a soft preference: ask a single urgent question when sequential discovery or risk requires it.\n\
+For each question include: the question, why it matters, and the default you will assume if unanswered.";
 
 pub struct AgentRunRequest<'a> {
     pub config: Arc<EnsembleConfig>,
@@ -62,6 +67,15 @@ pub trait AgentRunner: Send + Sync {
 /// Real ACP agent runner that implements the full worker loop from SPEC.md Section 16.5.
 pub struct AcpAgentRunner;
 
+struct BuildPromptRequest<'a> {
+    issue: &'a Issue,
+    agent_name: &'a str,
+    step_name: &'a str,
+    attempt: Option<u32>,
+    workspace_path: &'a Path,
+    turn_number: u32,
+}
+
 impl AcpAgentRunner {
     pub fn new(_config: Arc<RwLock<EnsembleConfig>>) -> Self {
         Self
@@ -73,12 +87,16 @@ impl AcpAgentRunner {
     async fn build_prompt(
         &self,
         config: &EnsembleConfig,
-        issue: &Issue,
-        agent_name: &str,
-        attempt: Option<u32>,
-        workspace_path: &Path,
-        turn_number: u32,
+        request: BuildPromptRequest<'_>,
     ) -> Result<String, AgentError> {
+        let BuildPromptRequest {
+            issue,
+            agent_name,
+            step_name,
+            attempt,
+            workspace_path,
+            turn_number,
+        } = request;
         if turn_number == 1 {
             let agent_config =
                 config
@@ -122,6 +140,10 @@ impl AcpAgentRunner {
                 reason: e.to_string(),
             })?;
 
+            let rendered = maybe_append_interaction_policy_instruction(
+                rendered,
+                resolve_interaction_policy_instruction(config, agent_name, step_name).as_deref(),
+            );
             Ok(maybe_append_verdict_fallback_instruction(
                 rendered,
                 config.agent.inject_verdict_fallback_instructions,
@@ -168,6 +190,67 @@ fn maybe_append_verdict_fallback_instruction(prompt: String, enabled: bool) -> S
         VERDICT_FALLBACK_INSTRUCTION.to_string()
     } else {
         format!("{trimmed}\n\n{VERDICT_FALLBACK_INSTRUCTION}")
+    }
+}
+
+fn resolve_interaction_policy_instruction(
+    config: &EnsembleConfig,
+    agent_name: &str,
+    step_name: &str,
+) -> Option<String> {
+    let global_default = config
+        .agent
+        .interaction_policy_text
+        .clone()
+        .unwrap_or_else(|| DEFAULT_INTERACTION_POLICY_INSTRUCTION.to_string());
+
+    let step_override = config
+        .agent
+        .interaction_policy_overrides
+        .steps
+        .get(step_name);
+    let agent_override = config
+        .agent
+        .interaction_policy_overrides
+        .agents
+        .get(agent_name);
+    let selected_override = step_override.or(agent_override);
+
+    if let Some(override_config) = selected_override {
+        return match override_config.mode {
+            InteractionPolicyOverrideMode::Off => None,
+            InteractionPolicyOverrideMode::Inherit => config
+                .agent
+                .inject_interaction_policy_instructions
+                .then_some(global_default),
+            InteractionPolicyOverrideMode::Custom => {
+                Some(override_config.text.clone().unwrap_or(global_default))
+            }
+        };
+    }
+
+    config
+        .agent
+        .inject_interaction_policy_instructions
+        .then_some(global_default)
+}
+
+fn maybe_append_interaction_policy_instruction(
+    prompt: String,
+    instruction: Option<&str>,
+) -> String {
+    let Some(instruction) = instruction else {
+        return prompt;
+    };
+    if prompt.contains(instruction) {
+        return prompt;
+    }
+
+    let trimmed = prompt.trim_end();
+    if trimmed.is_empty() {
+        instruction.to_string()
+    } else {
+        format!("{trimmed}\n\n{instruction}")
     }
 }
 
@@ -431,11 +514,14 @@ impl AgentRunner for AcpAgentRunner {
                 let prompt = self
                     .build_prompt(
                         config.as_ref(),
-                        request.issue,
-                        request.agent_name,
-                        request.attempt,
-                        workspace_path,
-                        1,
+                        BuildPromptRequest {
+                            issue: request.issue,
+                            agent_name: request.agent_name,
+                            step_name: request.step_name,
+                            attempt: request.attempt,
+                            workspace_path,
+                            turn_number: 1,
+                        },
                     )
                     .await?;
                 AcpxRuntime::new().run_step(&request, &prompt).await
@@ -511,11 +597,14 @@ impl AcpAgentRunner {
             let prompt = match self
                 .build_prompt(
                     config.as_ref(),
-                    issue,
-                    agent_name,
-                    attempt,
-                    workspace_path,
-                    turn_number,
+                    BuildPromptRequest {
+                        issue,
+                        agent_name,
+                        step_name,
+                        attempt,
+                        workspace_path,
+                        turn_number,
+                    },
                 )
                 .await
             {
@@ -1009,6 +1098,77 @@ exit 0
         assert_eq!(rendered.matches("write .ensemble/verdict.json").count(), 1);
     }
 
+    #[test]
+    fn appends_default_interaction_policy_when_enabled() {
+        let prompt = "Do the work.".to_string();
+        let rendered = maybe_append_interaction_policy_instruction(
+            prompt,
+            Some(DEFAULT_INTERACTION_POLICY_INSTRUCTION),
+        );
+        assert!(rendered.contains("prefer batching related questions"));
+        assert!(rendered.contains("soft preference"));
+    }
+
+    #[test]
+    fn interaction_policy_override_precedence_step_then_agent() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    prompt: "Build."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  inject_interaction_policy_instructions: true
+  interaction_policy_text: "global"
+  interaction_policy_overrides:
+    agents:
+      builder:
+        mode: custom
+        text: "agent custom"
+    steps:
+      build:
+        mode: custom
+        text: "step custom"
+"#,
+        )
+        .unwrap();
+
+        let selected = resolve_interaction_policy_instruction(&config, "builder", "build");
+        assert_eq!(selected.as_deref(), Some("step custom"));
+    }
+
+    #[test]
+    fn interaction_policy_can_be_disabled_globally() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    prompt: "Build."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  inject_interaction_policy_instructions: false
+"#,
+        )
+        .unwrap();
+
+        let selected = resolve_interaction_policy_instruction(&config, "builder", "build");
+        assert_eq!(selected, None);
+    }
+
     #[tokio::test]
     async fn detects_interaction_request_file_and_returns_blocked_result() {
         let workspace = tempfile::TempDir::new().unwrap();
@@ -1180,6 +1340,7 @@ exit 0
     #[tokio::test]
     async fn writes_interaction_response_file_before_resume_prompt_render() {
         let workspace = tempfile::TempDir::new().unwrap();
+        let issue = test_issue();
         let response = InteractionResponseEnvelope {
             schema_version: 1,
             interaction_id: "int_123".to_string(),
@@ -1199,11 +1360,14 @@ exit 0
         AcpAgentRunner
             .build_prompt(
                 test_config().as_ref(),
-                &test_issue(),
-                "builder",
-                None,
-                workspace.path(),
-                1,
+                BuildPromptRequest {
+                    issue: &issue,
+                    agent_name: "builder",
+                    step_name: "build",
+                    attempt: None,
+                    workspace_path: workspace.path(),
+                    turn_number: 1,
+                },
             )
             .await
             .unwrap();
@@ -1336,6 +1500,7 @@ exit 0
     #[tokio::test]
     async fn build_prompt_includes_interaction_response_context() {
         let workspace = tempfile::TempDir::new().unwrap();
+        let issue = test_issue();
         let config = Arc::new(
             parse_config(
                 r#"
@@ -1379,11 +1544,14 @@ on_failure: Todo
         let prompt = AcpAgentRunner
             .build_prompt(
                 config.as_ref(),
-                &test_issue(),
-                "builder",
-                Some(2),
-                workspace.path(),
-                1,
+                BuildPromptRequest {
+                    issue: &issue,
+                    agent_name: "builder",
+                    step_name: "build",
+                    attempt: Some(2),
+                    workspace_path: workspace.path(),
+                    turn_number: 1,
+                },
             )
             .await
             .unwrap();
@@ -1418,6 +1586,7 @@ on_failure: Todo
     #[tokio::test]
     async fn build_prompt_without_template_reference_still_succeeds_with_response_file() {
         let workspace = tempfile::TempDir::new().unwrap();
+        let issue = test_issue();
         write_interaction_response_file(
             workspace.path(),
             &InteractionResponseEnvelope {
@@ -1438,11 +1607,14 @@ on_failure: Todo
         let prompt = AcpAgentRunner
             .build_prompt(
                 test_config().as_ref(),
-                &test_issue(),
-                "builder",
-                None,
-                workspace.path(),
-                1,
+                BuildPromptRequest {
+                    issue: &issue,
+                    agent_name: "builder",
+                    step_name: "build",
+                    attempt: None,
+                    workspace_path: workspace.path(),
+                    turn_number: 1,
+                },
             )
             .await
             .unwrap();

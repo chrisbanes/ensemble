@@ -25,54 +25,18 @@ When a step runs, Ensemble:
 3. Waits for the agent to finish
 4. Collects a verdict (approve or reject)
 
-If a step requests operator input, Ensemble records a **Needs Input** interaction and pauses only
-that issue. The operator can submit a response from Web/Tauri, and the orchestrator resumes the
-issue on the next tick while other issues continue.
+## Clarification request style (batched by default)
 
-## Approval gates
+Ensemble now injects interaction-policy guidance into prompts by default. Agents are expected to:
 
-Steps can also pause at an explicit post-step approval boundary:
+- Prefer batching related clarifying questions into one interaction request (soft preference).
+- Ask one-by-one only when urgency or sequential discovery requires it.
+- For each question include:
+  - the question
+  - why it matters
+  - the default assumption if unanswered
 
-```yaml
-steps:
-  - name: plan
-    agent: planner
-    tracker_state: Planning
-    approval:
-      mode: when_requested_by_agent
-      state: Plan Review
-  - name: implement
-    agent: builder
-```
-
-How approval gates work:
-
-1. The step runs normally.
-2. If the gate is triggered, Ensemble moves the successful step into an approval hold before it can
-   transition to a final passed or rejected outcome.
-3. If `approval.state` is set, Ensemble mirrors that state to the tracker while waiting.
-4. Downstream steps do not start until a human approves or rejects the gate.
-
-Approval modes:
-
-- `always` pauses after every successful run of that step.
-- `when_requested_by_agent` pauses only when the agent requests approval with `.ensemble/approval-request.json`.
-
-Operator actions:
-
-- **Approve** resumes the pipeline from the next step.
-- **Reject** stops the pipeline and applies `on_failure`.
-
-When submitting input through the API, approval gates require an explicit outcome:
-
-```json
-{
-  "response": "Looks good. Proceed.",
-  "outcome": "approve"
-}
-```
-
-Valid approval outcomes are `approve` and `reject`.
+You can customize or disable this with `agent.interaction_policy_*` settings in `config.yaml`.
 
 ## Sequential and parallel steps
 

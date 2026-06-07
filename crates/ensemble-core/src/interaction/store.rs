@@ -1,4 +1,5 @@
 use chrono::Utc;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -7,13 +8,15 @@ use tokio::sync::Mutex;
 use crate::config::location::interactions_state_dir;
 use crate::interaction::error::InteractionError;
 use crate::interaction::model::{
-    AgentAsk, InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+    AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionRequest,
+    InteractionResponse, InteractionStatus,
 };
 
 #[derive(Debug, Clone)]
 pub struct InteractionStore {
     config_dir: PathBuf,
     create_mutex: std::sync::Arc<Mutex<()>>,
+    command_locks: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>>,
 }
 
 impl InteractionStore {
@@ -21,7 +24,16 @@ impl InteractionStore {
         Self {
             config_dir,
             create_mutex: std::sync::Arc::new(Mutex::new(())),
+            command_locks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    fn command_lock_for(&self, id: &str) -> std::sync::Arc<Mutex<()>> {
+        let mut locks = self.command_locks.lock().unwrap();
+        locks
+            .entry(id.to_string())
+            .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
+            .clone()
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -119,6 +131,83 @@ impl InteractionStore {
         Ok(interaction)
     }
 
+    pub async fn attach_thread_metadata(
+        &self,
+        id: &str,
+        root_comment_id: String,
+        root_comment_url: Option<String>,
+    ) -> Result<InteractionRequest, InteractionError> {
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+        interaction.thread_root_comment_id = Some(root_comment_id);
+        interaction.thread_root_comment_url = root_comment_url;
+        self.write_interaction(&interaction).await?;
+        Ok(interaction)
+    }
+
+    pub async fn update_last_processed_comment(
+        &self,
+        id: &str,
+        comment_id: String,
+    ) -> Result<InteractionRequest, InteractionError> {
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+        interaction.last_processed_comment_id = Some(comment_id);
+        self.write_interaction(&interaction).await?;
+        Ok(interaction)
+    }
+
+    pub async fn accept_first_command(
+        &self,
+        id: &str,
+        command: AcceptedInteractionCommand,
+    ) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.command_lock_for(id);
+        let _guard = lock.lock().await;
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+
+        match interaction.status {
+            InteractionStatus::Resolved => {
+                return Err(InteractionError::AlreadyResolved { id: id.to_string() });
+            }
+            InteractionStatus::Cancelled => {
+                return Err(InteractionError::AlreadyCancelled { id: id.to_string() });
+            }
+            InteractionStatus::Open => {}
+        }
+
+        if interaction.accepted_command.is_some() {
+            return Err(InteractionError::CommandAlreadyAccepted { id: id.to_string() });
+        }
+
+        interaction.accepted_command = Some(command);
+        self.write_interaction(&interaction).await?;
+        Ok(interaction)
+    }
+
+    pub async fn append_ignored_command(
+        &self,
+        id: &str,
+        command: IgnoredInteractionCommand,
+    ) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.command_lock_for(id);
+        let _guard = lock.lock().await;
+        let mut interaction = self
+            .get(id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+        interaction.ignored_commands.push(command);
+        self.write_interaction(&interaction).await?;
+        Ok(interaction)
+    }
+
     pub async fn cancel(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
         let mut interaction = self
             .get(id)
@@ -142,7 +231,6 @@ impl InteractionStore {
         Ok(interaction)
     }
 
-    /// Marks an interaction as no longer awaiting resume (human has responded).
     pub async fn mark_resumed(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
         let mut interaction = self
             .get(id)
@@ -154,69 +242,6 @@ impl InteractionStore {
         Ok(interaction)
     }
 
-    /// Creates a new agent ask interaction, failing if an unresolved ask already exists
-    /// for the same issue and step combination.
-    pub async fn create_ask(&self, ask: AgentAsk) -> Result<AgentAsk, InteractionError> {
-        let _guard = self.create_mutex.lock().await;
-
-        if self
-            .current_unresolved_ask_for_ticket_step(&ask.issue_id, &ask.step_name)
-            .await?
-            .is_some()
-        {
-            return Err(InteractionError::OpenBlockingInteractionExists {
-                issue_id: ask.issue_id.clone(),
-            });
-        }
-
-        let interaction: InteractionRequest = ask.clone().into();
-        self.write_new_interaction(&interaction).await?;
-        Ok(ask)
-    }
-
-    /// Replies to an open interaction with a text response, resolving it.
-    /// Only valid for `BrainstormPrompt` interactions where a `Question` response is expected.
-    pub async fn reply(&self, id: &str, response: String) -> Result<AgentAsk, InteractionError> {
-        let mut interaction = self
-            .get(id)
-            .await?
-            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
-
-        validate_status_open(&interaction)?;
-
-        let question_response = InteractionResponse::Question {
-            response_schema_version: 1,
-            text: response,
-            selected_option: None,
-        };
-        validate_response_kind(&interaction.kind, &question_response)?;
-
-        interaction.status = InteractionStatus::Resolved;
-        interaction.awaiting_resume = true;
-        interaction.response = Some(question_response);
-        interaction.resolved_at = Some(Utc::now());
-        self.write_interaction(&interaction).await?;
-        Ok(interaction.into())
-    }
-
-    /// Cancels an open interaction, marking it as resolved without a response.
-    pub async fn cancel_ask(&self, id: &str) -> Result<AgentAsk, InteractionError> {
-        let mut interaction = self
-            .get(id)
-            .await?
-            .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
-
-        validate_status_open(&interaction)?;
-
-        interaction.status = InteractionStatus::Cancelled;
-        interaction.awaiting_resume = false;
-        interaction.resolved_at = Some(Utc::now());
-        self.write_interaction(&interaction).await?;
-        Ok(interaction.into())
-    }
-
-    /// Clears the waiting state of an interaction, either cancelling open interactions
-    /// or marking resolved/cancelled interactions as no longer awaiting resume.
     pub async fn clear_waiting_state(
         &self,
         id: &str,
@@ -268,30 +293,6 @@ impl InteractionStore {
         Ok(existing
             .into_iter()
             .find(|candidate| candidate.blocking && candidate.issue_id == issue_id))
-    }
-
-    async fn current_unresolved_ask_for_ticket_step(
-        &self,
-        issue_id: &str,
-        step_name: &str,
-    ) -> Result<Option<AgentAsk>, InteractionError> {
-        let existing = self.find_open_interaction_for(issue_id, step_name).await?;
-        Ok(existing.map(Into::into))
-    }
-
-    async fn find_open_interaction_for(
-        &self,
-        issue_id: &str,
-        step_name: &str,
-    ) -> Result<Option<InteractionRequest>, InteractionError> {
-        let mut interactions = self.list_all().await?;
-        interactions.retain(|interaction| {
-            interaction.status == InteractionStatus::Open
-                && interaction.issue_id == issue_id
-                && interaction.step_name == step_name
-        });
-        interactions.sort_by_key(|interaction| interaction.requested_at);
-        Ok(interactions.into_iter().next())
     }
 
     async fn write_interaction(
@@ -354,18 +355,6 @@ impl InteractionStore {
     }
 }
 
-fn validate_status_open(interaction: &InteractionRequest) -> Result<(), InteractionError> {
-    match interaction.status {
-        InteractionStatus::Open => Ok(()),
-        InteractionStatus::Resolved => Err(InteractionError::AlreadyResolved {
-            id: interaction.id.clone(),
-        }),
-        InteractionStatus::Cancelled => Err(InteractionError::AlreadyCancelled {
-            id: interaction.id.clone(),
-        }),
-    }
-}
-
 fn validate_response_kind(
     kind: &InteractionKind,
     response: &InteractionResponse,
@@ -373,13 +362,13 @@ fn validate_response_kind(
     let valid = matches!(
         (kind, response),
         (
-            InteractionKind::BrainstormPrompt,
+            InteractionKind::Question,
             InteractionResponse::Question { .. }
         ) | (
-            InteractionKind::ApprovalGate,
+            InteractionKind::Approval,
             InteractionResponse::Approval { .. }
         ) | (
-            InteractionKind::ManualDecision,
+            InteractionKind::Handoff,
             InteractionResponse::Handoff { .. }
         )
     );
@@ -396,9 +385,9 @@ fn validate_response_kind(
 
 fn interaction_kind_name(kind: &InteractionKind) -> &'static str {
     match kind {
-        InteractionKind::BrainstormPrompt => "brainstorm_prompt",
-        InteractionKind::ApprovalGate => "approval_gate",
-        InteractionKind::ManualDecision => "manual_decision",
+        InteractionKind::Question => "question",
+        InteractionKind::Approval => "approval",
+        InteractionKind::Handoff => "handoff",
     }
 }
 
@@ -425,19 +414,15 @@ mod tests {
     use super::InteractionStore;
     use crate::interaction::error::InteractionError;
     use crate::interaction::model::{
-        InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
-        InteractionStatus,
+        AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionRequest,
+        InteractionResponse, InteractionResumeStrategy, InteractionStatus,
     };
     use chrono::Utc;
     use std::sync::Arc;
     use tempfile::tempdir;
     use tokio::sync::Barrier;
 
-    fn sample_brainstorm_prompt(
-        id: &str,
-        issue_id: &str,
-        issue_identifier: &str,
-    ) -> InteractionRequest {
+    fn sample_question(id: &str, issue_id: &str, issue_identifier: &str) -> InteractionRequest {
         InteractionRequest {
             id: id.to_string(),
             schema_version: 1,
@@ -449,15 +434,20 @@ mod tests {
             agent_name: "reviewer".to_string(),
             step_depends: vec![],
             step_tracker_state: None,
-            kind: InteractionKind::BrainstormPrompt,
+            kind: InteractionKind::Question,
             status: InteractionStatus::Open,
             blocking: true,
             awaiting_resume: true,
-            resume_strategy: InteractionResumeStrategy::RerunStep,
+            resume_strategy: InteractionResumeStrategy::default(),
             title: "Need clarification".to_string(),
             body: "Pick the target environment".to_string(),
             options: vec!["staging".to_string(), "production".to_string()],
             artifacts: vec!["docs/spec.md".to_string()],
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: vec![],
             response: None,
             waiting_started_at: None,
             agent_input_tokens: 0,
@@ -472,7 +462,7 @@ mod tests {
     async fn saves_and_loads_interaction_request() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_brainstorm_prompt("int_123", "issue-1", "ACME-1");
+        let interaction = sample_question("int_123", "issue-1", "ACME-1");
 
         store.create(interaction.clone()).await.unwrap();
 
@@ -490,16 +480,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stores_brainstorm_prompt_interaction() {
+    async fn stores_question_interaction() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_brainstorm_prompt("int_brainstorm", "issue-1", "ACME-1");
+        let interaction = sample_question("int_question", "issue-1", "ACME-1");
 
         let saved = store.create(interaction).await.unwrap();
-        assert_eq!(saved.kind, InteractionKind::BrainstormPrompt);
+        assert_eq!(saved.kind, InteractionKind::Question);
 
-        let loaded = store.get("int_brainstorm").await.unwrap().unwrap();
-        assert_eq!(loaded.kind, InteractionKind::BrainstormPrompt);
+        let loaded = store.get("int_question").await.unwrap().unwrap();
+        assert_eq!(loaded.kind, InteractionKind::Question);
     }
 
     #[tokio::test]
@@ -508,7 +498,7 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_open", "issue-1", "ACME-1"))
+            .create(sample_question("int_open", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -525,7 +515,7 @@ mod tests {
             .unwrap();
         assert_eq!(resolved.status, InteractionStatus::Resolved);
 
-        let second = sample_brainstorm_prompt("int_open_2", "issue-2", "ACME-2");
+        let second = sample_question("int_open_2", "issue-2", "ACME-2");
         store.create(second.clone()).await.unwrap();
 
         let open = store.list_open().await.unwrap();
@@ -539,7 +529,7 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_invalid", "issue-1", "ACME-1"))
+            .create(sample_question("int_invalid", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -564,7 +554,7 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_resolve", "issue-1", "ACME-1"))
+            .create(sample_question("int_resolve", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -601,19 +591,11 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt(
-                "int_waiting_open",
-                "issue-1",
-                "ACME-1",
-            ))
+            .create(sample_question("int_waiting_open", "issue-1", "ACME-1"))
             .await
             .unwrap();
         store
-            .create(sample_brainstorm_prompt(
-                "int_waiting_resolved",
-                "issue-2",
-                "ACME-2",
-            ))
+            .create(sample_question("int_waiting_resolved", "issue-2", "ACME-2"))
             .await
             .unwrap();
         store
@@ -641,7 +623,7 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_cancel", "issue-1", "ACME-1"))
+            .create(sample_question("int_cancel", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
@@ -659,12 +641,12 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_one", "issue-1", "ACME-1"))
+            .create(sample_question("int_one", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
         let err = store
-            .create(sample_brainstorm_prompt("int_two", "issue-1", "ACME-1"))
+            .create(sample_question("int_two", "issue-1", "ACME-1"))
             .await
             .unwrap_err();
 
@@ -684,14 +666,14 @@ mod tests {
         let first = tokio::spawn(async move {
             first_barrier.wait().await;
             first_store
-                .create(sample_brainstorm_prompt("int_one", "issue-1", "ACME-1"))
+                .create(sample_question("int_one", "issue-1", "ACME-1"))
                 .await
         });
 
         let second = tokio::spawn(async move {
             second_barrier.wait().await;
             second_store
-                .create(sample_brainstorm_prompt("int_two", "issue-1", "ACME-1"))
+                .create(sample_question("int_two", "issue-1", "ACME-1"))
                 .await
         });
 
@@ -716,7 +698,7 @@ mod tests {
     async fn atomic_write_replaces_file_without_leaving_temp_file() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_brainstorm_prompt("int_atomic", "issue-1", "ACME-1");
+        let interaction = sample_question("int_atomic", "issue-1", "ACME-1");
         let shared_temp_path = store.interactions_dir().join("int_atomic.json.tmp");
 
         store.write_interaction(&interaction).await.unwrap();
@@ -738,12 +720,12 @@ mod tests {
         let store = InteractionStore::new(dir.path().to_path_buf());
 
         store
-            .create(sample_brainstorm_prompt("int_dup", "issue-1", "ACME-1"))
+            .create(sample_question("int_dup", "issue-1", "ACME-1"))
             .await
             .unwrap();
 
         let err = store
-            .create(sample_brainstorm_prompt("int_dup", "issue-2", "ACME-2"))
+            .create(sample_question("int_dup", "issue-2", "ACME-2"))
             .await
             .unwrap_err();
 
@@ -754,10 +736,165 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn thread_metadata_roundtrip_is_persisted() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(sample_question("int_thread", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        store
+            .attach_thread_metadata(
+                "int_thread",
+                "comment-123".to_string(),
+                Some("https://example.test/comment/123".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.get("int_thread").await.unwrap().unwrap();
+        assert_eq!(
+            loaded.thread_root_comment_id.as_deref(),
+            Some("comment-123")
+        );
+        assert_eq!(
+            loaded.thread_root_comment_url.as_deref(),
+            Some("https://example.test/comment/123")
+        );
+    }
+
+    #[tokio::test]
+    async fn accepts_first_command_and_rejects_second() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(sample_question("int_cmd", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        let accepted = AcceptedInteractionCommand {
+            command: "/approve".to_string(),
+            raw_body: "/approve".to_string(),
+            author: "alice".to_string(),
+            comment_id: "c1".to_string(),
+            received_at: Utc::now(),
+        };
+        store
+            .accept_first_command("int_cmd", accepted)
+            .await
+            .unwrap();
+
+        let err = store
+            .accept_first_command(
+                "int_cmd",
+                AcceptedInteractionCommand {
+                    command: "/reject".to_string(),
+                    raw_body: "/reject nope".to_string(),
+                    author: "bob".to_string(),
+                    comment_id: "c2".to_string(),
+                    received_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            InteractionError::CommandAlreadyAccepted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn appends_ignored_commands() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(sample_question("int_ignored", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        store
+            .append_ignored_command(
+                "int_ignored",
+                IgnoredInteractionCommand {
+                    command: Some("/approve".to_string()),
+                    raw_body: "/approve".to_string(),
+                    author: "alice".to_string(),
+                    comment_id: "c1".to_string(),
+                    received_at: Utc::now(),
+                    reason: "already_resolved".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let loaded = store.get("int_ignored").await.unwrap().unwrap();
+        assert_eq!(loaded.ignored_commands.len(), 1);
+        assert_eq!(loaded.ignored_commands[0].reason, "already_resolved");
+    }
+
+    #[tokio::test]
+    async fn cannot_accept_command_when_interaction_is_resolved_or_cancelled() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(sample_question("int_closed", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+        store
+            .resolve(
+                "int_closed",
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "answer".to_string(),
+                    selected_option: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .accept_first_command(
+                "int_closed",
+                AcceptedInteractionCommand {
+                    command: "/approve".to_string(),
+                    raw_body: "/approve".to_string(),
+                    author: "alice".to_string(),
+                    comment_id: "c1".to_string(),
+                    received_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, InteractionError::AlreadyResolved { .. }));
+
+        store
+            .create(sample_question("int_cancelled", "issue-2", "ACME-2"))
+            .await
+            .unwrap();
+        store.cancel("int_cancelled").await.unwrap();
+
+        let err = store
+            .accept_first_command(
+                "int_cancelled",
+                AcceptedInteractionCommand {
+                    command: "/approve".to_string(),
+                    raw_body: "/approve".to_string(),
+                    author: "alice".to_string(),
+                    comment_id: "c2".to_string(),
+                    received_at: Utc::now(),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, InteractionError::AlreadyCancelled { .. }));
+    }
+
+    #[tokio::test]
     async fn write_interaction_ignores_stale_shared_temp_name() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
-        let interaction = sample_brainstorm_prompt("int_tmp", "issue-1", "ACME-1");
+        let interaction = sample_question("int_tmp", "issue-1", "ACME-1");
         let stale_path = store.interactions_dir().join("int_tmp.json.tmp");
 
         tokio::fs::create_dir_all(store.interactions_dir())
@@ -772,114 +909,5 @@ mod tests {
         let loaded = store.get("int_tmp").await.unwrap().unwrap();
         assert_eq!(loaded.id, "int_tmp");
         assert!(tokio::fs::try_exists(&stale_path).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn create_question_ask_defaults_to_open_waiting_for_human() {
-        let dir = tempdir().unwrap();
-        let store = InteractionStore::new(dir.path().to_path_buf());
-
-        let ask = crate::interaction::model::AgentAsk {
-            id: "ask_1".to_string(),
-            issue_id: "issue-1".to_string(),
-            issue_identifier: "PROJ-1".to_string(),
-            step_name: "review".to_string(),
-            agent_name: "reviewer".to_string(),
-            question: "Which environment should I deploy to?".to_string(),
-            why_blocked: "Need human input to proceed".to_string(),
-            suggested_answer: None,
-            extra_context: None,
-            status: crate::interaction::model::InteractionStatus::Open,
-            awaiting_resume: true,
-            requested_at: chrono::Utc::now(),
-            resolved_at: None,
-        };
-
-        let created = store.create_ask(ask.clone()).await.unwrap();
-        assert_eq!(
-            created.status,
-            crate::interaction::model::InteractionStatus::Open
-        );
-        assert!(created.awaiting_resume);
-        assert!(created.resolved_at.is_none());
-    }
-
-    #[tokio::test]
-    async fn resolving_an_ask_marks_it_resolved_and_awaiting_resume() {
-        let dir = tempdir().unwrap();
-        let store = InteractionStore::new(dir.path().to_path_buf());
-
-        let ask = crate::interaction::model::AgentAsk {
-            id: "ask_resolve".to_string(),
-            issue_id: "issue-2".to_string(),
-            issue_identifier: "PROJ-2".to_string(),
-            step_name: "review".to_string(),
-            agent_name: "reviewer".to_string(),
-            question: "Is this ready to merge?".to_string(),
-            why_blocked: "Need approval".to_string(),
-            suggested_answer: None,
-            extra_context: None,
-            status: crate::interaction::model::InteractionStatus::Open,
-            awaiting_resume: true,
-            requested_at: chrono::Utc::now(),
-            resolved_at: None,
-        };
-
-        store.create_ask(ask).await.unwrap();
-
-        let resolved = store
-            .reply("ask_resolve", "Yes, looks good".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(
-            resolved.status,
-            crate::interaction::model::InteractionStatus::Resolved
-        );
-        assert!(resolved.awaiting_resume);
-        assert!(resolved.resolved_at.is_some());
-    }
-
-    #[tokio::test]
-    async fn only_one_unresolved_ask_can_exist_for_a_ticket_step_pair() {
-        let dir = tempdir().unwrap();
-        let store = InteractionStore::new(dir.path().to_path_buf());
-
-        let first_ask = crate::interaction::model::AgentAsk {
-            id: "ask_first".to_string(),
-            issue_id: "issue-1".to_string(),
-            issue_identifier: "PROJ-1".to_string(),
-            step_name: "review".to_string(),
-            agent_name: "reviewer".to_string(),
-            question: "First question".to_string(),
-            why_blocked: "Blocked".to_string(),
-            suggested_answer: None,
-            extra_context: None,
-            status: crate::interaction::model::InteractionStatus::Open,
-            awaiting_resume: true,
-            requested_at: chrono::Utc::now(),
-            resolved_at: None,
-        };
-
-        store.create_ask(first_ask).await.unwrap();
-
-        let second_ask = crate::interaction::model::AgentAsk {
-            id: "ask_second".to_string(),
-            issue_id: "issue-1".to_string(),
-            issue_identifier: "PROJ-1".to_string(),
-            step_name: "review".to_string(),
-            agent_name: "reviewer".to_string(),
-            question: "Second question".to_string(),
-            why_blocked: "Blocked again".to_string(),
-            suggested_answer: None,
-            extra_context: None,
-            status: crate::interaction::model::InteractionStatus::Open,
-            awaiting_resume: true,
-            requested_at: chrono::Utc::now(),
-            resolved_at: None,
-        };
-
-        let err = store.create_ask(second_ask).await.unwrap_err();
-        assert!(err.to_string().contains("open blocking interaction"));
     }
 }

@@ -29,8 +29,11 @@ use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
 use crate::history_store::store::HistoryStore;
+use crate::interaction::model::{
+    AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionResponse,
+};
 use crate::interaction::{
-    InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
+    parse_interaction_command, InteractionCommand, InteractionResumeStrategy, InteractionStatus,
     InteractionStore,
 };
 use crate::observability::events::{EventBus, PipelineEvent};
@@ -330,6 +333,7 @@ impl Orchestrator {
         }
 
         self.hydrate_waiting_on_human_from_store().await;
+        self.process_waiting_interaction_commands().await;
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
@@ -399,9 +403,6 @@ impl Orchestrator {
                     if let Some(entry) = running_entry.as_ref() {
                         state.add_runtime_seconds(entry);
                     }
-                    let run_id = running_entry
-                        .as_ref()
-                        .and_then(|entry| entry.run_id.clone());
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
                             self.build_history_record(
@@ -421,11 +422,18 @@ impl Orchestrator {
                         .unwrap_or_else(|| issue.identifier.clone());
                     let interaction_request_id =
                         waiting_entry.map(|entry| entry.interaction_request_id);
+                    let history_run_id = running_entry.as_ref().and_then(|e| e.run_id.clone());
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (identifier, interaction_request_id, run_id, history_record)
+                    (
+                        identifier,
+                        interaction_request_id,
+                        history_record,
+                        history_run_id,
+                    )
                 };
-                let (identifier, interaction_request_id, run_id, history_record) = history_record;
+                let (identifier, interaction_request_id, history_record, history_run_id) =
+                    history_record;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
@@ -438,7 +446,8 @@ impl Orchestrator {
                 }
 
                 if let Some(record) = history_record {
-                    self.append_history_record(run_id.as_deref(), record).await;
+                    self.append_history_record(history_run_id.as_deref(), record)
+                        .await;
                 }
             }
 
@@ -450,9 +459,6 @@ impl Orchestrator {
                     if let Some(entry) = running_entry.as_ref() {
                         state.add_runtime_seconds(entry);
                     }
-                    let run_id = running_entry
-                        .as_ref()
-                        .and_then(|entry| entry.run_id.clone());
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
                             self.build_history_record(
@@ -469,16 +475,18 @@ impl Orchestrator {
                         .waiting_on_human
                         .get(&issue.id)
                         .map(|entry| entry.interaction_request_id.clone());
+                    let history_run_id = running_entry.as_ref().and_then(|e| e.run_id.clone());
                     state.release_claim(&issue.id);
                     state.remove_pipeline_run(&issue.id);
-                    (interaction_request_id, run_id, history_record)
+                    (interaction_request_id, history_record, history_run_id)
                 };
-                let (interaction_request_id, run_id, history_record) = result;
+                let (interaction_request_id, history_record, history_run_id) = result;
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
                 if let Some(record) = history_record {
-                    self.append_history_record(run_id.as_deref(), record).await;
+                    self.append_history_record(history_run_id.as_deref(), record)
+                        .await;
                 }
             }
         }
@@ -1110,15 +1118,13 @@ impl Orchestrator {
                                 }
                                 state.clear_finalize_state(issue_id);
 
+                                let history_run_id = running_entry
+                                    .as_ref()
+                                    .and_then(|entry| entry.run_id.clone());
                                 drop(state);
                                 if let Some(record) = history_record {
-                                    self.append_history_record(
-                                        running_entry
-                                            .as_ref()
-                                            .and_then(|entry| entry.run_id.as_deref()),
-                                        record,
-                                    )
-                                    .await;
+                                    self.append_history_record(history_run_id.as_deref(), record)
+                                        .await;
                                 }
                             } else {
                                 if self.tracker.supports_writes()
@@ -1149,9 +1155,9 @@ impl Orchestrator {
                             let completed_at = Utc::now();
                             let mut final_failure = false;
                             let mut history_record = None;
-                            let mut history_run_id = None;
                             let mut completed_identifier = None;
                             let mut rejection_comment = None;
+                            let mut history_run_id = None;
                             if let Some(entry) = state.remove_running(issue_id) {
                                 state.add_runtime_seconds(&entry);
                                 completed_identifier = Some(entry.identifier.clone());
@@ -1323,8 +1329,8 @@ impl Orchestrator {
                 let completed_at = Utc::now();
                 let mut final_failure = false;
                 let mut history_record = None;
-                let mut history_run_id = None;
                 let mut completed_identifier = None;
+                let mut history_run_id = None;
 
                 if let Some(entry) = state.remove_running(issue_id) {
                     completed_identifier = Some(entry.identifier.clone());
@@ -1499,6 +1505,38 @@ impl Orchestrator {
         interaction.agent_output_tokens = waiting_output_tokens;
         interaction.agent_total_tokens = waiting_total_tokens;
         self.interaction_store.create(interaction.clone()).await?;
+        let root_body = format_interaction_thread_root_comment(&interaction);
+        match self
+            .tracker
+            .create_interaction_thread_root(&interaction.issue_id, &root_body)
+            .await
+        {
+            Ok(root) => {
+                if let Err(error) = self
+                    .interaction_store
+                    .attach_thread_metadata(
+                        &interaction.id,
+                        root.comment_id.clone(),
+                        root.comment_url.clone(),
+                    )
+                    .await
+                {
+                    warn!(
+                        interaction_id = %interaction.id,
+                        error = %error,
+                        "failed to persist interaction thread metadata"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    interaction_id = %interaction.id,
+                    issue_id = %interaction.issue_id,
+                    error = %error,
+                    "failed to create interaction thread root comment"
+                );
+            }
+        }
 
         let mut state = self.state.write().await;
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
@@ -1678,6 +1716,39 @@ impl Orchestrator {
         interaction.agent_total_tokens = waiting_total_tokens;
         self.interaction_store.create(interaction.clone()).await?;
 
+        let root_body = format_interaction_thread_root_comment(&interaction);
+        match self
+            .tracker
+            .create_interaction_thread_root(&interaction.issue_id, &root_body)
+            .await
+        {
+            Ok(root) => {
+                if let Err(error) = self
+                    .interaction_store
+                    .attach_thread_metadata(
+                        &interaction.id,
+                        root.comment_id.clone(),
+                        root.comment_url.clone(),
+                    )
+                    .await
+                {
+                    warn!(
+                        interaction_id = %interaction.id,
+                        error = %error,
+                        "failed to persist interaction thread metadata for approval gate"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    interaction_id = %interaction.id,
+                    issue_id = %interaction.issue_id,
+                    error = %error,
+                    "failed to create interaction thread root for approval gate"
+                );
+            }
+        }
+
         if let Some(state_name) = mirror_state {
             if self.tracker.supports_writes() {
                 if let Err(error) = self.tracker.set_issue_state(issue_id, &state_name).await {
@@ -1749,6 +1820,271 @@ impl Orchestrator {
         .await;
 
         Ok(())
+    }
+
+    async fn process_waiting_interaction_commands(&self) {
+        let waiting_entries = {
+            let state = self.state.read().await;
+            state
+                .waiting_on_human
+                .values()
+                .cloned()
+                .collect::<Vec<WaitingOnHumanEntry>>()
+        };
+
+        for waiting in waiting_entries {
+            let mut interaction = match self
+                .interaction_store
+                .get(&waiting.interaction_request_id)
+                .await
+            {
+                Ok(Some(interaction)) => interaction,
+                Ok(None) => continue,
+                Err(error) => {
+                    warn!(
+                        interaction_id = %waiting.interaction_request_id,
+                        error = %error,
+                        "failed to load interaction while processing thread commands"
+                    );
+                    continue;
+                }
+            };
+
+            let Some(root_comment_id) = interaction.thread_root_comment_id.clone() else {
+                continue;
+            };
+
+            let anchor_id = interaction
+                .last_processed_comment_id
+                .as_deref()
+                .unwrap_or(&root_comment_id);
+
+            let comments = match self
+                .tracker
+                .list_comments_after(&interaction.issue_id, anchor_id)
+                .await
+            {
+                Ok(comments) => comments,
+                Err(error) => {
+                    warn!(
+                        interaction_id = %interaction.id,
+                        issue_id = %interaction.issue_id,
+                        error = %error,
+                        "failed to list interaction thread comments"
+                    );
+                    continue;
+                }
+            };
+            // v1 currently asks the tracker adapter for comments after the root anchor.
+            // If this becomes expensive on very long-lived issues, add a persisted
+            // per-interaction checkpoint to avoid repeated full-history scans.
+
+            let last_comment_id = comments.last().map(|c| c.comment_id.clone());
+
+            for comment in comments {
+                if interaction
+                    .accepted_command
+                    .as_ref()
+                    .is_some_and(|accepted| accepted.comment_id == comment.comment_id)
+                    || interaction
+                        .ignored_commands
+                        .iter()
+                        .any(|ignored| ignored.comment_id == comment.comment_id)
+                {
+                    continue;
+                }
+
+                let marker_prefix = "<!-- ensemble:interaction:";
+                let interaction_marker = format!("{marker_prefix}{} -->", interaction.id);
+                if comment.body.contains(marker_prefix)
+                    && !comment.body.contains(&interaction_marker)
+                {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            None,
+                            &comment,
+                            "interaction_marker_mismatch",
+                        )
+                        .await;
+                    continue;
+                }
+
+                if !comment.body.contains(marker_prefix) && !comment.body.contains(&interaction.id)
+                {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            None,
+                            &comment,
+                            "comment_not_scoped_to_interaction",
+                        )
+                        .await;
+                    continue;
+                }
+
+                if comment
+                    .updated_at
+                    .zip(comment.created_at)
+                    .is_some_and(|(updated, created)| updated > created)
+                {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            None,
+                            &comment,
+                            "edited_comments_not_supported",
+                        )
+                        .await;
+                    continue;
+                }
+
+                let parsed = match parse_interaction_command(&comment.body) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                None,
+                                &comment,
+                                "not_a_supported_command",
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                let response = match response_from_command(&interaction.kind, &parsed) {
+                    Some(response) => response,
+                    None => {
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                Some(parsed.command_name()),
+                                &comment,
+                                "command_invalid_for_interaction_kind",
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+
+                if interaction.accepted_command.is_some() {
+                    interaction = self
+                        .append_ignored_command(
+                            &interaction,
+                            Some(parsed.command_name()),
+                            &comment,
+                            "interaction_already_locked",
+                        )
+                        .await;
+                    continue;
+                }
+
+                let accepted_result = self
+                    .interaction_store
+                    .accept_first_command(
+                        &interaction.id,
+                        AcceptedInteractionCommand {
+                            command: parsed.command_name().to_string(),
+                            raw_body: comment.body.clone(),
+                            author: comment.author.clone(),
+                            comment_id: comment.comment_id.clone(),
+                            received_at: comment.created_at.unwrap_or_else(Utc::now),
+                        },
+                    )
+                    .await;
+
+                match accepted_result {
+                    Ok(updated) => interaction = updated,
+                    Err(error) => {
+                        warn!(
+                            interaction_id = %interaction.id,
+                            error = %error,
+                            "failed to accept interaction command"
+                        );
+                        interaction = self
+                            .append_ignored_command(
+                                &interaction,
+                                Some(parsed.command_name()),
+                                &comment,
+                                "interaction_already_locked",
+                            )
+                            .await;
+                        continue;
+                    }
+                }
+
+                match self
+                    .interaction_store
+                    .resolve(&interaction.id, response)
+                    .await
+                {
+                    Ok(updated) => interaction = updated,
+                    Err(error) => {
+                        warn!(
+                            interaction_id = %interaction.id,
+                            error = %error,
+                            "failed to resolve interaction from thread command"
+                        );
+                        continue;
+                    }
+                }
+
+                let mut state = self.state.write().await;
+                state.queue_resume(&interaction.issue_id);
+            }
+
+            if let Some(last_id) = last_comment_id {
+                if interaction.last_processed_comment_id.as_deref() != Some(&last_id) {
+                    if let Err(error) = self
+                        .interaction_store
+                        .update_last_processed_comment(&interaction.id, last_id)
+                        .await
+                    {
+                        warn!(
+                            interaction_id = %interaction.id,
+                            error = %error,
+                            "failed to update last processed comment cursor"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    async fn append_ignored_command(
+        &self,
+        interaction: &crate::interaction::model::InteractionRequest,
+        command: Option<&str>,
+        comment: &crate::tracker::model::TrackerComment,
+        reason: &str,
+    ) -> crate::interaction::model::InteractionRequest {
+        match self
+            .interaction_store
+            .append_ignored_command(
+                &interaction.id,
+                IgnoredInteractionCommand {
+                    command: command.map(ToString::to_string),
+                    raw_body: comment.body.clone(),
+                    author: comment.author.clone(),
+                    comment_id: comment.comment_id.clone(),
+                    received_at: comment.created_at.unwrap_or_else(Utc::now),
+                    reason: reason.to_string(),
+                },
+            )
+            .await
+        {
+            Ok(updated) => updated,
+            Err(error) => {
+                warn!(
+                    interaction_id = %interaction.id,
+                    error = %error,
+                    "failed to append ignored interaction command"
+                );
+                interaction.clone()
+            }
+        }
     }
 
     async fn hydrate_waiting_on_human_from_store(&self) {
@@ -1945,6 +2281,9 @@ impl Orchestrator {
         {
             FinalizeStatus::SkippedHeadless
         } else {
+            // Initial finalize execution in this method is synchronous per repo,
+            // so issue-level `InProgress` is not expected here. `InProgress`
+            // is used later for operator-approved/retry flows.
             FinalizeStatus::Succeeded
         };
 
@@ -2380,22 +2719,15 @@ impl Orchestrator {
     }
 
     async fn append_history_record(&self, run_id: Option<&str>, record: HistoryRecord) {
-        if let Some(run_id) = run_id {
-            if let Some(store) = &self.history_store {
-                if let Err(error) = store.append_history_record(run_id, &record).await {
-                    warn!(
-                        run_id = %run_id,
-                        issue_id = %record.issue_id,
-                        error = %error,
-                        "failed to append history record to sqlite"
-                    );
-                }
+        if let (Some(run_id), Some(store)) = (run_id, &self.history_store) {
+            if let Err(error) = store.append_history_record(run_id, &record).await {
+                warn!(
+                    run_id = %run_id,
+                    issue_id = %record.issue_id,
+                    error = %error,
+                    "failed to append history record to sqlite"
+                );
             }
-        } else if self.history_store.is_some() {
-            warn!(
-                issue_id = %record.issue_id,
-                "missing run_id; skipping sqlite history write"
-            );
         }
 
         let history_path = self.workspace_mgr.root().join("ensemble_history.jsonl");
@@ -2828,12 +3160,8 @@ impl Orchestrator {
                             .run_finalize_phase(&issue.identifier, &current_config)
                             .await;
                         let completed_at = Utc::now();
-                        let (tracker_state, history_run_id, history_record, tracker_error_message) = {
+                        let (tracker_state, history_record, tracker_error_message) = {
                             let mut state = self.state.write().await;
-                            let history_run_id = state
-                                .waiting_on_human
-                                .get(&issue.id)
-                                .and_then(|entry| entry.run_id.clone());
                             let history_record =
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
@@ -2866,7 +3194,6 @@ impl Orchestrator {
                                     self.tracker
                                         .supports_writes()
                                         .then(|| current_config.on_success.clone()),
-                                    history_run_id,
                                     history_record,
                                     "failed to set tracker success state after approval resume",
                                 )
@@ -2883,7 +3210,6 @@ impl Orchestrator {
 
                                 (
                                     tracker_state,
-                                    None,
                                     None,
                                     "failed to set tracker failure state after approval finalize failure",
                                 )
@@ -2905,18 +3231,13 @@ impl Orchestrator {
                         }
 
                         if let Some(record) = history_record {
-                            self.append_history_record(history_run_id.as_deref(), record)
-                                .await;
+                            self.append_history_record(None, record).await;
                         }
                     }
                     PipelineAction::Failed { reason, .. } => {
                         let completed_at = Utc::now();
-                        let (history_run_id, history_record) = {
+                        let history_record = {
                             let mut state = self.state.write().await;
-                            let history_run_id = state
-                                .waiting_on_human
-                                .get(&issue.id)
-                                .and_then(|entry| entry.run_id.clone());
                             let history_record =
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
@@ -2941,7 +3262,7 @@ impl Orchestrator {
                             state.remove_pipeline_run(&issue.id);
                             state.clear_finalize_state(&issue.id);
 
-                            (history_run_id, history_record)
+                            history_record
                         };
 
                         if self.tracker.supports_writes() {
@@ -2959,8 +3280,7 @@ impl Orchestrator {
                         }
 
                         if let Some(record) = history_record {
-                            self.append_history_record(history_run_id.as_deref(), record)
-                                .await;
+                            self.append_history_record(None, record).await;
                         }
                     }
                     PipelineAction::Waiting
@@ -3157,17 +3477,6 @@ impl Orchestrator {
         self.event_bus.publish(event);
 
         if let Some((run_id, record)) = timeline_entry {
-            if let Some(store) = &self.history_store {
-                if let Err(error) = store.append_timeline_event(&record).await {
-                    warn!(
-                        event = "timeline_persist_failed",
-                        run_id = %run_id,
-                        error = %error,
-                        "failed to persist timeline event to sqlite"
-                    );
-                }
-            }
-
             if let Err(error) = self.timeline_writer.append(&run_id, &record).await {
                 warn!(
                     event = "timeline_persist_failed",
@@ -3262,6 +3571,102 @@ fn build_interaction_request(
         agent_total_tokens: 0,
         requested_at,
         resolved_at: None,
+        thread_root_comment_id: None,
+        thread_root_comment_url: None,
+        last_processed_comment_id: None,
+        accepted_command: None,
+        ignored_commands: vec![],
+    }
+}
+
+fn format_interaction_thread_root_comment(
+    interaction: &crate::interaction::InteractionRequest,
+) -> String {
+    format!(
+        concat!(
+            "Ensemble requires input to continue.\n\n",
+            "**Interaction ID:** `{}`\n",
+            "**Kind:** `{}`\n\n",
+            "{}\n\n",
+            "Valid commands:\n",
+            "- `/approve`\n",
+            "- `/reject <reason>`\n",
+            "- `/answer <text>`\n\n",
+            "<!-- ensemble:interaction:{} -->"
+        ),
+        interaction.id,
+        match interaction.kind {
+            InteractionKind::Question => "question",
+            InteractionKind::Approval => "approval",
+            InteractionKind::Handoff => "handoff",
+        },
+        interaction.body,
+        interaction.id
+    )
+}
+
+fn response_from_command(
+    kind: &InteractionKind,
+    command: &InteractionCommand,
+) -> Option<InteractionResponse> {
+    match (kind, command) {
+        (InteractionKind::Question, InteractionCommand::Answer { text }) => {
+            Some(InteractionResponse::Question {
+                response_schema_version: 1,
+                text: text.clone(),
+                selected_option: None,
+            })
+        }
+        (InteractionKind::Approval, InteractionCommand::Approve) => {
+            Some(InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved: true,
+                reason: None,
+            })
+        }
+        (InteractionKind::Approval, InteractionCommand::Reject { reason }) => {
+            Some(InteractionResponse::Approval {
+                response_schema_version: 1,
+                approved: false,
+                reason: Some(reason.clone()),
+            })
+        }
+        (InteractionKind::Handoff, InteractionCommand::Approve) => {
+            Some(InteractionResponse::Handoff {
+                response_schema_version: 1,
+                completed: true,
+                notes: None,
+            })
+        }
+        (InteractionKind::Handoff, InteractionCommand::Reject { reason }) => {
+            Some(InteractionResponse::Handoff {
+                response_schema_version: 1,
+                completed: false,
+                notes: Some(reason.clone()),
+            })
+        }
+        (InteractionKind::Handoff, InteractionCommand::Answer { text }) => {
+            Some(InteractionResponse::Handoff {
+                response_schema_version: 1,
+                completed: true,
+                notes: Some(text.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
+trait InteractionCommandExt {
+    fn command_name(&self) -> &'static str;
+}
+
+impl InteractionCommandExt for InteractionCommand {
+    fn command_name(&self) -> &'static str {
+        match self {
+            InteractionCommand::Approve => "/approve",
+            InteractionCommand::Reject { .. } => "/reject",
+            InteractionCommand::Answer { .. } => "/answer",
+        }
     }
 }
 
@@ -3274,9 +3679,9 @@ fn sanitize_interaction_fragment(value: &str) -> String {
 
 fn interaction_kind_name(kind: &InteractionKind) -> &'static str {
     match kind {
-        InteractionKind::BrainstormPrompt => "brainstorm_prompt",
-        InteractionKind::ApprovalGate => "approval_gate",
-        InteractionKind::ManualDecision => "manual_decision",
+        InteractionKind::Question => "question",
+        InteractionKind::Approval => "approval",
+        InteractionKind::Handoff => "handoff",
     }
 }
 
@@ -3299,6 +3704,11 @@ mod tests {
     /// Mock tracker for orchestrator tests.
     struct MockTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
+    }
+
+    struct CommandMockTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        comments: Arc<RwLock<Vec<crate::tracker::model::TrackerComment>>>,
     }
 
     #[async_trait]
@@ -3328,6 +3738,76 @@ mod tests {
                 .filter(|i| ids.contains(&i.id))
                 .cloned()
                 .collect())
+        }
+
+        async fn create_interaction_thread_root(
+            &self,
+            id: &str,
+            _body: &str,
+        ) -> Result<crate::tracker::model::InteractionThreadRoot, TrackerError> {
+            Ok(crate::tracker::model::InteractionThreadRoot {
+                comment_id: format!("root-{id}"),
+                comment_url: None,
+            })
+        }
+
+        async fn list_comments_after(
+            &self,
+            _id: &str,
+            _after_comment_id: &str,
+        ) -> Result<Vec<crate::tracker::model::TrackerComment>, TrackerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for CommandMockTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self.issues.read().await.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            let states_lower: Vec<String> = states.iter().map(|s| s.to_lowercase()).collect();
+            Ok(issues
+                .iter()
+                .filter(|i| states_lower.contains(&i.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|i| ids.contains(&i.id))
+                .cloned()
+                .collect())
+        }
+
+        async fn create_interaction_thread_root(
+            &self,
+            id: &str,
+            _body: &str,
+        ) -> Result<crate::tracker::model::InteractionThreadRoot, TrackerError> {
+            Ok(crate::tracker::model::InteractionThreadRoot {
+                comment_id: format!("root-{id}"),
+                comment_url: None,
+            })
+        }
+
+        async fn list_comments_after(
+            &self,
+            _id: &str,
+            _after_comment_id: &str,
+        ) -> Result<Vec<crate::tracker::model::TrackerComment>, TrackerError> {
+            Ok(self.comments.read().await.clone())
         }
     }
 
@@ -5715,6 +6195,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -5829,6 +6314,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -5839,6 +6329,213 @@ agent:
         assert!(state.is_running("1"));
         assert!(!state.is_waiting_on_human("1"));
         assert!(!state.is_resume_requested("1"));
+    }
+
+    #[tokio::test]
+    async fn thread_answer_command_resolves_open_interaction_on_tick() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let comment_ts = Utc::now();
+        let comments = Arc::new(RwLock::new(vec![crate::tracker::model::TrackerComment {
+            comment_id: "c-1".to_string(),
+            body: "/answer use staging\n\n<!-- ensemble:interaction:interaction-1 -->".to_string(),
+            author: "alice".to_string(),
+            created_at: Some(comment_ts),
+            updated_at: Some(comment_ts),
+        }]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(CommandMockTracker { issues, comments });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let cfg = config.read().await;
+            state.init_state_lists(&cfg);
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                kind: InteractionKind::Question,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
+            });
+        }
+
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::default(),
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: Some("root-1".to_string()),
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let interaction = store.get("interaction-1").await.unwrap().unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Resolved);
+        assert!(interaction.accepted_command.is_some());
+        assert!(matches!(
+            interaction.response,
+            Some(InteractionResponse::Question { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn thread_command_with_mismatched_interaction_marker_is_ignored() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let comment_ts = Utc::now();
+        let comments = Arc::new(RwLock::new(vec![crate::tracker::model::TrackerComment {
+            comment_id: "c-2".to_string(),
+            body: "/answer use staging\n<!-- ensemble:interaction:other-id -->".to_string(),
+            author: "alice".to_string(),
+            created_at: Some(comment_ts),
+            updated_at: Some(comment_ts),
+        }]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(CommandMockTracker { issues, comments });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let cfg = config.read().await;
+            state.init_state_lists(&cfg);
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                kind: InteractionKind::Question,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
+            });
+        }
+
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::default(),
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: Some("root-1".to_string()),
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let interaction = store.get("interaction-1").await.unwrap().unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Open);
+        assert!(interaction.accepted_command.is_none());
+        assert_eq!(interaction.ignored_commands.len(), 1);
+        assert_eq!(
+            interaction.ignored_commands[0].reason,
+            "interaction_marker_mismatch"
+        );
     }
 
     #[tokio::test]
@@ -5906,6 +6603,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6011,6 +6713,11 @@ agent:
                 agent_total_tokens: 168,
                 requested_at,
                 resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6081,6 +6788,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6165,6 +6877,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6283,6 +7000,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6391,6 +7113,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6501,6 +7228,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6614,6 +7346,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -6949,6 +7686,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7017,6 +7759,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7118,6 +7865,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7282,6 +8034,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();
@@ -7689,6 +8446,11 @@ agent:
                 agent_total_tokens: 0,
                 requested_at: Utc::now(),
                 resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
             })
             .await
             .unwrap();

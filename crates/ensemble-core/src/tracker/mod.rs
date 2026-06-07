@@ -6,7 +6,7 @@ pub mod todo_file;
 
 use crate::config::ensemble::TrackerConfig;
 use async_trait::async_trait;
-use model::Issue;
+use model::{InteractionThreadRoot, Issue, TrackerComment};
 
 /// Error type for tracker operations.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +76,24 @@ pub trait IssueTracker: Send + Sync {
 
     /// Add a comment to an issue in the tracker.
     async fn add_comment(&self, _id: &str, _body: &str) -> Result<(), TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
+
+    /// Create the root comment used as the interaction "thread" anchor.
+    async fn create_interaction_thread_root(
+        &self,
+        _id: &str,
+        _body: &str,
+    ) -> Result<InteractionThreadRoot, TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
+
+    /// List issue comments posted after the given anchor comment id.
+    async fn list_comments_after(
+        &self,
+        _id: &str,
+        _after_comment_id: &str,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
         Err(TrackerError::WritesNotSupported)
     }
 }
