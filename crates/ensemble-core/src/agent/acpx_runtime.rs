@@ -54,23 +54,33 @@ impl AcpxRuntime {
         let step_comp = sanitize_session_component(request.step_name);
         let attempt = request.attempt.unwrap_or(1);
 
-        // Reserve space for dashes and the -attempt-N suffix,
-        // then split remaining space between id and step components.
-        // This ensures the suffix is never truncated away, preventing
-        // session name collisions between different attempts.
+        // Build the core (id + step) and suffix separately. If the total
+        // exceeds the cap, hash the full core and append the digest so
+        // distinct long values that share a truncated prefix still produce
+        // unique session names.
+        let core = format!("{}-{}", id_comp, step_comp);
         let suffix = format!("-attempt-{}", attempt);
-        let total_len = id_comp.len() + step_comp.len() + suffix.len() + 1;
+        let total_len = core.len() + suffix.len();
 
         let session_name = if total_len > MAX_SESSION_NAME_LEN {
-            let available = MAX_SESSION_NAME_LEN.saturating_sub(suffix.len() + 1);
-            let half = available / 2;
-            let mut id = id_comp;
-            let mut step = step_comp;
-            id.truncate(half);
-            step.truncate(available.saturating_sub(half));
-            format!("{}-{}{}", id, step, suffix)
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = DefaultHasher::new();
+            core.hash(&mut hasher);
+            let digest = format!("{:x}", hasher.finish());
+            let short_digest = &digest[..8];
+
+            let prefix_len = MAX_SESSION_NAME_LEN
+                .saturating_sub(suffix.len())
+                .saturating_sub(short_digest.len() + 1);
+            let mut result = core[..prefix_len].to_string();
+            result.push('-');
+            result.push_str(short_digest);
+            result.push_str(&suffix);
+            result
         } else {
-            format!("{}-{}{}", id_comp, step_comp, suffix)
+            format!("{}{}", core, suffix)
         };
 
         debug!(
@@ -221,9 +231,23 @@ fn sanitize_session_component(value: &str) -> String {
         return FALLBACK_COMPONENT.to_string();
     }
 
-    let mut result = trimmed.to_string();
-    result.truncate(MAX_COMPONENT_LEN);
-    result
+    if trimmed.len() > MAX_COMPONENT_LEN {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        trimmed.hash(&mut hasher);
+        let digest = format!("{:x}", hasher.finish());
+        let short_digest = &digest[..8];
+
+        let prefix_len = MAX_COMPONENT_LEN.saturating_sub(short_digest.len() + 1);
+        let mut result = trimmed[..prefix_len].to_string();
+        result.push('-');
+        result.push_str(short_digest);
+        result
+    } else {
+        trimmed.to_string()
+    }
 }
 
 async fn emit_event(
@@ -603,10 +627,21 @@ exit 1
 
     #[test]
     fn sanitize_session_component_truncates_to_max_length() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
         let long = "a".repeat(500);
         let result = sanitize_session_component(&long);
         assert_eq!(result.len(), 64);
         assert!(result.starts_with("aaaaaaaa"));
+
+        let mut hasher = DefaultHasher::new();
+        long.hash(&mut hasher);
+        let digest = format!("{:x}", hasher.finish());
+        let short_digest = &digest[..8];
+        let prefix_len = 64_usize.saturating_sub(short_digest.len() + 1);
+        let expected = format!("{}-{}", "a".repeat(prefix_len), short_digest);
+        assert_eq!(result, expected);
     }
 
     #[test]
