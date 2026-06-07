@@ -17,6 +17,9 @@ pub const WORKSPACE_HOOK_FAILED: &str = "workspace.hook_failed";
 pub const WORKSPACE_GIT_COMMAND_STARTED: &str = "workspace.git_command_started";
 pub const WORKSPACE_GIT_COMMAND_FINISHED: &str = "workspace.git_command_finished";
 pub const AGENT_MESSAGE: &str = "agent.message";
+pub const ACPX_PROMPT_COMPLETED: &str = "acpx.prompt_completed";
+pub const ACPX_PROMPT_FAILED: &str = "acpx.prompt_failed";
+pub const ACPX_PROMPT_CANCELLED: &str = "acpx.prompt_cancelled";
 
 pub fn elapsed_ms(start: std::time::Instant) -> u128 {
     start.elapsed().as_millis()
@@ -39,6 +42,9 @@ mod tests {
             WORKSPACE_GIT_COMMAND_FINISHED,
             "workspace.git_command_finished"
         );
+        assert_eq!(ACPX_PROMPT_COMPLETED, "acpx.prompt_completed");
+        assert_eq!(ACPX_PROMPT_FAILED, "acpx.prompt_failed");
+        assert_eq!(ACPX_PROMPT_CANCELLED, "acpx.prompt_cancelled");
     }
 
     #[test]

@@ -50,6 +50,14 @@ fn main() {
     // which would deadlock (cargo already holds the build lock).
     let openapi_json = ui_dir.join("openapi.json");
     if !openapi_json.exists() {
+        if prebuilt_spa_exists(assets_dir) {
+            println!(
+                "cargo:warning=openapi.json not found at {}. Using existing embedded UI assets.",
+                openapi_json.display()
+            );
+            println!("cargo:warning=Run `pnpm run codegen:spec` in crates/ensemble-ui/src-ui/ to regenerate it.");
+            return;
+        }
         println!(
             "cargo:warning=openapi.json not found at {}. UI will not be embedded.",
             openapi_json.display()

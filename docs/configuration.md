@@ -393,7 +393,7 @@ Use `mode: off` to suppress auto-injection for a specific agent or step.
 
 `agent.permission_request_policy` only applies to direct ACP runtime paths. If all configured agents resolve to the `acpx` runtime, leave this at its default. In mixed configurations, it still applies only to agents using the direct runtime; to customize permission handling for an `acpx`-resolved agent, switch that agent to `runtime: direct`.
 
-Legacy note: `agent.permission_policy` is still accepted as a deprecated alias for `agent.permission_request_policy` during config parsing.
+Legacy note: `agent.permission_policy` is still accepted as a deprecated alias for `agent.permission_request_policy` during config parsing. This alias will be removed in v0.4.0.
 
 ## Prompt templates
 

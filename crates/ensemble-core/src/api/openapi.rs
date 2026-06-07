@@ -123,7 +123,7 @@ use utoipa::OpenApi;
         crate::history::reader::HistoryResponse,
         // Timeline types
         crate::timeline::model::TimelineEventRecord,
-        crate::timeline::reader::TimelineResponse,
+        crate::timeline::TimelineResponse,
         // Conversation types
         crate::api::conversation::ConversationResponse,
         crate::api::conversation::ConversationMessage,
