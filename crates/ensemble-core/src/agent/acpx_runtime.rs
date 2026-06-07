@@ -183,8 +183,11 @@ fn test_acpx_executable() -> Option<String> {
         .or_else(|| std::env::var("ENSEMBLE_TEST_ACPX_BIN").ok())
 }
 
+const MAX_COMPONENT_LEN: usize = 64;
+const FALLBACK_COMPONENT: &str = "unknown";
+
 fn sanitize_session_component(value: &str) -> String {
-    value
+    let sanitized: String = value
         .chars()
         .map(|ch| {
             if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
@@ -193,7 +196,16 @@ fn sanitize_session_component(value: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        return FALLBACK_COMPONENT.to_string();
+    }
+
+    let mut result = trimmed.to_string();
+    result.truncate(MAX_COMPONENT_LEN);
+    result
 }
 
 async fn emit_event(
@@ -569,5 +581,26 @@ exit 1
 
         assert!(saw_cancelled);
         assert!(workspace.path().join("cancelled.flag").exists());
+    }
+
+    #[test]
+    fn sanitize_session_component_truncates_to_max_length() {
+        let long = "a".repeat(500);
+        let result = sanitize_session_component(&long);
+        assert_eq!(result.len(), 64);
+        assert!(result.starts_with("aaaaaaaa"));
+    }
+
+    #[test]
+    fn sanitize_session_component_replaces_all_invalid_with_unknown() {
+        let result = sanitize_session_component("!!!");
+        assert_eq!(result, "unknown");
+    }
+
+    #[test]
+    fn sanitize_session_component_handles_long_invalid_input() {
+        let input = "!@#$%".repeat(200);
+        let result = sanitize_session_component(&input);
+        assert_eq!(result, "unknown");
     }
 }
