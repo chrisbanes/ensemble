@@ -31,8 +31,11 @@ pub struct WaitingOnHumanEntry {
     pub identifier: String,
     pub interaction_request_id: String,
     pub step_name: String,
+    #[serde(default)]
     pub kind: InteractionKind,
+    #[serde(default)]
     pub prompt: String,
+    #[serde(default)]
     pub agent_name: String,
     pub retry_attempt: Option<u32>,
     #[serde(default)]
@@ -766,7 +769,7 @@ mod tests {
             identifier: "repo#1".to_string(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "build".to_string(),
-            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            kind: InteractionKind::Question,
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: None,
@@ -802,7 +805,7 @@ mod tests {
             identifier: "repo#1".to_string(),
             interaction_request_id: "interaction-1".to_string(),
             step_name: "build".to_string(),
-            kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+            kind: InteractionKind::Question,
             prompt: "Need input".to_string(),
             agent_name: "builder".to_string(),
             retry_attempt: None,

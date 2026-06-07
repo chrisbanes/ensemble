@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use tracing::{debug, info, warn};
 
-use super::model::Issue;
+use super::model::{InteractionThreadRoot, Issue, TrackerComment};
 use super::{IssueTracker, TrackerError};
 
 // --- GraphQL query constants ---
@@ -149,6 +149,31 @@ mutation($subjectId: ID!, $body: String!) {
     commentEdge {
       node {
         id
+        url
+      }
+    }
+  }
+}
+"#;
+
+const ISSUE_COMMENTS_QUERY: &str = r#"
+query($issueId: ID!, $cursor: String) {
+  node(id: $issueId) {
+    ... on Issue {
+      comments(first: 100, after: $cursor) {
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+          author {
+            login
+          }
+        }
       }
     }
   }
@@ -1112,6 +1137,130 @@ impl IssueTracker for GithubTracker {
         });
         self.graphql(ADD_COMMENT_MUTATION, variables).await?;
         Ok(())
+    }
+
+    async fn create_interaction_thread_root(
+        &self,
+        id: &str,
+        body: &str,
+    ) -> Result<InteractionThreadRoot, TrackerError> {
+        let variables = json!({
+            "subjectId": id,
+            "body": body,
+        });
+        let data = self.graphql(ADD_COMMENT_MUTATION, variables).await?;
+        let node = data
+            .pointer("/addComment/commentEdge/node")
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: "missing addComment.commentEdge.node payload".to_string(),
+            })?;
+        let comment_id = node.get("id").and_then(Value::as_str).ok_or_else(|| {
+            TrackerError::UnexpectedPayload {
+                reason: "missing comment id in addComment payload".to_string(),
+            }
+        })?;
+        let comment_url = node
+            .get("url")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+        Ok(InteractionThreadRoot {
+            comment_id: comment_id.to_string(),
+            comment_url,
+        })
+    }
+
+    async fn list_comments_after(
+        &self,
+        id: &str,
+        after_comment_id: &str,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        let mut cursor: Option<String> = None;
+        let mut comments = Vec::new();
+        loop {
+            let variables = json!({
+                "issueId": id,
+                "cursor": cursor,
+            });
+            let data = self.graphql(ISSUE_COMMENTS_QUERY, variables).await?;
+            let comments_node =
+                data.pointer("/node/comments")
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: "missing issue comments payload".to_string(),
+                    })?;
+            let nodes = comments_node
+                .get("nodes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: "missing issue comments nodes".to_string(),
+                })?;
+
+            for node in nodes {
+                let comment_id = node.get("id").and_then(Value::as_str).ok_or_else(|| {
+                    TrackerError::UnexpectedPayload {
+                        reason: "missing issue comment id".to_string(),
+                    }
+                })?;
+                let body = node.get("body").and_then(Value::as_str).ok_or_else(|| {
+                    TrackerError::UnexpectedPayload {
+                        reason: "missing issue comment body".to_string(),
+                    }
+                })?;
+                comments.push(TrackerComment {
+                    comment_id: comment_id.to_string(),
+                    body: body.to_string(),
+                    author: node
+                        .pointer("/author/login")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string(),
+                    created_at: node
+                        .get("createdAt")
+                        .and_then(Value::as_str)
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc)),
+                    updated_at: node
+                        .get("updatedAt")
+                        .and_then(Value::as_str)
+                        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                        .map(|value| value.with_timezone(&Utc)),
+                });
+            }
+
+            let page_info =
+                comments_node
+                    .get("pageInfo")
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: "missing issue comments pageInfo".to_string(),
+                    })?;
+            let has_next = page_info
+                .get("hasNextPage")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !has_next {
+                break;
+            }
+            cursor = page_info
+                .get("endCursor")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+            if cursor.is_none() {
+                return Err(TrackerError::MissingEndCursor);
+            }
+        }
+
+        comments.sort_by(|left, right| {
+            left.created_at
+                .cmp(&right.created_at)
+                .then_with(|| left.comment_id.cmp(&right.comment_id))
+        });
+        if let Some(anchor_index) = comments
+            .iter()
+            .position(|comment| comment.comment_id == after_comment_id)
+        {
+            Ok(comments.into_iter().skip(anchor_index + 1).collect())
+        } else {
+            Ok(Vec::new())
+        }
     }
 
     async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
@@ -2224,5 +2373,128 @@ mod tests {
 
         let tracker = create_test_tracker(&server.uri(), None);
         tracker.set_issue_state("I_issue1", "Failed").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn create_interaction_thread_root_returns_comment_metadata() {
+        let server = MockServer::start().await;
+
+        let response = graphql_response(json!({
+            "addComment": {
+                "commentEdge": {
+                    "node": {
+                        "id": "C_123",
+                        "url": "https://github.com/acme/my-repo/issues/1#issuecomment-123"
+                    }
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addComment"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let root = tracker
+            .create_interaction_thread_root("ISSUE_NODE_1", "Need input")
+            .await
+            .unwrap();
+
+        assert_eq!(root.comment_id, "C_123");
+        assert_eq!(
+            root.comment_url.as_deref(),
+            Some("https://github.com/acme/my-repo/issues/1#issuecomment-123")
+        );
+    }
+
+    #[tokio::test]
+    async fn list_comments_after_returns_comments_after_anchor() {
+        let server = MockServer::start().await;
+
+        let response = graphql_response(json!({
+            "node": {
+                "comments": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [
+                        {
+                            "id": "C_1",
+                            "body": "root",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                            "author": { "login": "bot" }
+                        },
+                        {
+                            "id": "C_2",
+                            "body": "/approve",
+                            "createdAt": "2026-01-01T00:01:00Z",
+                            "updatedAt": "2026-01-01T00:01:00Z",
+                            "author": { "login": "alice" }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("comments(first: 100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let comments = tracker
+            .list_comments_after("ISSUE_NODE_1", "C_1")
+            .await
+            .unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].comment_id, "C_2");
+        assert_eq!(comments[0].author, "alice");
+    }
+
+    #[tokio::test]
+    async fn list_comments_after_rejects_missing_required_comment_fields() {
+        let server = MockServer::start().await;
+
+        let response = graphql_response(json!({
+            "node": {
+                "comments": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [
+                        {
+                            "id": "C_1",
+                            "body": "root",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                            "author": { "login": "bot" }
+                        },
+                        {
+                            "id": "C_2",
+                            "createdAt": "2026-01-01T00:01:00Z",
+                            "updatedAt": "2026-01-01T00:01:00Z",
+                            "author": { "login": "alice" }
+                        }
+                    ]
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let err = tracker
+            .list_comments_after("ISSUE_NODE_1", "C_1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, TrackerError::UnexpectedPayload { .. }));
+        assert!(err.to_string().contains("missing issue comment body"));
     }
 }

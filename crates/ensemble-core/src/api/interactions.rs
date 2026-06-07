@@ -113,6 +113,9 @@ fn interaction_error_response(error: InteractionError) -> (StatusCode, Json<serd
         InteractionError::NotFound { .. } => (StatusCode::NOT_FOUND, "interaction_not_found"),
         InteractionError::AlreadyResolved { .. } => (StatusCode::CONFLICT, "already_resolved"),
         InteractionError::AlreadyCancelled { .. } => (StatusCode::CONFLICT, "already_cancelled"),
+        InteractionError::CommandAlreadyAccepted { .. } => {
+            (StatusCode::CONFLICT, "command_already_accepted")
+        }
         InteractionError::InvalidResponse { .. } => (StatusCode::BAD_REQUEST, "invalid_response"),
         InteractionError::OpenBlockingInteractionExists { .. }
         | InteractionError::ConcurrentModification { .. }

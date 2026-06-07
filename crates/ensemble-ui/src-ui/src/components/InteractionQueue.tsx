@@ -42,7 +42,6 @@ export default function InteractionQueue({ interactions }: InteractionQueueProps
       <TableHeader>
         <TableRow>
           <TableHead>Issue</TableHead>
-          <TableHead>Question</TableHead>
           <TableHead>Step</TableHead>
           <TableHead>Age</TableHead>
         </TableRow>
@@ -57,9 +56,6 @@ export default function InteractionQueue({ interactions }: InteractionQueueProps
               >
                 {interaction.issue_identifier}
               </Link>
-            </TableCell>
-            <TableCell className="text-muted-foreground">
-              <p className="font-medium">{interaction.question}</p>
             </TableCell>
             <TableCell className="text-muted-foreground">
               <p className="font-medium">{interaction.step_name}</p>

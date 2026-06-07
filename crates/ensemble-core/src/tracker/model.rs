@@ -85,6 +85,21 @@ pub struct AgentTotals {
     pub seconds_running: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InteractionThreadRoot {
+    pub comment_id: String,
+    pub comment_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrackerComment {
+    pub comment_id: String,
+    pub body: String,
+    pub author: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
 /// Sanitize an issue identifier for use as a workspace directory name.
 /// Only [A-Za-z0-9._-] are allowed; all other characters become '_'.
 /// Returns None if the result would be unsafe (empty, ".", or "..").

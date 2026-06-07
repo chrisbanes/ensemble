@@ -437,6 +437,37 @@ pub struct AgentRuntimeConfig {
     #[serde(default = "default_inject_verdict_fallback_instructions")]
     #[serde(alias = "inject_verdict_instructions")]
     pub inject_verdict_fallback_instructions: bool,
+    #[serde(default = "default_inject_interaction_policy_instructions")]
+    pub inject_interaction_policy_instructions: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_policy_text: Option<String>,
+    #[serde(default)]
+    pub interaction_policy_overrides: InteractionPolicyOverridesConfig,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct InteractionPolicyOverridesConfig {
+    #[serde(default)]
+    pub agents: HashMap<String, InteractionPolicyOverrideConfig>,
+    #[serde(default)]
+    pub steps: HashMap<String, InteractionPolicyOverrideConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct InteractionPolicyOverrideConfig {
+    #[serde(default)]
+    pub mode: InteractionPolicyOverrideMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionPolicyOverrideMode {
+    #[default]
+    Inherit,
+    Custom,
+    Off,
 }
 
 fn default_agent_max_turns() -> u32 {
@@ -475,6 +506,10 @@ fn default_inject_verdict_fallback_instructions() -> bool {
     true
 }
 
+fn default_inject_interaction_policy_instructions() -> bool {
+    true
+}
+
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -487,6 +522,10 @@ impl Default for AgentRuntimeConfig {
             read_timeout_ms: default_read_timeout_ms(),
             stall_timeout_ms: default_stall_timeout_ms(),
             inject_verdict_fallback_instructions: default_inject_verdict_fallback_instructions(),
+            inject_interaction_policy_instructions: default_inject_interaction_policy_instructions(
+            ),
+            interaction_policy_text: None,
+            interaction_policy_overrides: InteractionPolicyOverridesConfig::default(),
         }
     }
 }
@@ -1363,6 +1402,11 @@ on_failure: Failed
         assert_eq!(config.agent.turn_timeout_ms, 3_600_000);
         assert_eq!(config.agent.read_timeout_ms, 5_000);
         assert_eq!(config.agent.stall_timeout_ms, 300_000);
+        assert!(config.agent.inject_verdict_fallback_instructions);
+        assert!(config.agent.inject_interaction_policy_instructions);
+        assert!(config.agent.interaction_policy_text.is_none());
+        assert!(config.agent.interaction_policy_overrides.agents.is_empty());
+        assert!(config.agent.interaction_policy_overrides.steps.is_empty());
 
         // TrackerConfig defaults
         assert_eq!(config.tracker.active_states, vec!["Todo", "In Progress"]);
@@ -1416,6 +1460,61 @@ human_interaction:
             config.human_interaction.default_resume_mode,
             HumanResumeMode::Manual
         );
+    }
+
+    #[test]
+    fn parses_interaction_policy_overrides() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing."
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+agent:
+  inject_interaction_policy_instructions: true
+  interaction_policy_text: "Global policy"
+  interaction_policy_overrides:
+    agents:
+      build:
+        mode: custom
+        text: "Agent policy"
+    steps:
+      build:
+        mode: off
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        assert!(config.agent.inject_interaction_policy_instructions);
+        assert_eq!(
+            config.agent.interaction_policy_text.as_deref(),
+            Some("Global policy")
+        );
+
+        let agent_override = config
+            .agent
+            .interaction_policy_overrides
+            .agents
+            .get("build")
+            .expect("agent override should exist");
+        assert_eq!(agent_override.mode, InteractionPolicyOverrideMode::Custom);
+        assert_eq!(agent_override.text.as_deref(), Some("Agent policy"));
+
+        let step_override = config
+            .agent
+            .interaction_policy_overrides
+            .steps
+            .get("build")
+            .expect("step override should exist");
+        assert_eq!(step_override.mode, InteractionPolicyOverrideMode::Off);
+        assert_eq!(step_override.text, None);
     }
 
     #[test]

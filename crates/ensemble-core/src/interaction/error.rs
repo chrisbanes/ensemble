@@ -14,6 +14,8 @@ pub enum InteractionError {
     OpenBlockingInteractionExists { issue_id: String },
     #[error("interaction already exists: {id}")]
     ConcurrentModification { id: String },
+    #[error("interaction already accepted a command: {id}")]
+    CommandAlreadyAccepted { id: String },
     #[error("interaction I/O error: {reason}")]
     Io { reason: String },
     #[error("interaction serialization error: {reason}")]
