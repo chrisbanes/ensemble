@@ -60,7 +60,7 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use tempfile::TempDir;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     fn sample_event(run_id: &str, sequence: u64) -> TimelineEventRecord {
         TimelineEventRecord {
@@ -84,7 +84,7 @@ mod tests {
         let record = sample_event("run-1", 1);
 
         persistence.send("run-1".to_string(), record.clone());
-        sleep(Duration::from_millis(50)).await;
+        persistence.flush().await;
 
         let path = temp_dir
             .path()
@@ -109,7 +109,7 @@ mod tests {
         for i in 1..=10 {
             persistence.send("run-1".to_string(), sample_event("run-1", i));
         }
-        sleep(Duration::from_millis(50)).await;
+        persistence.flush().await;
 
         let path = temp_dir
             .path()
@@ -160,5 +160,39 @@ mod tests {
         assert!(path.exists());
         let contents = tokio::fs::read_to_string(path).await.unwrap();
         assert_eq!(contents.lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn write_failure_is_logged_and_non_fatal() {
+        let temp_dir = TempDir::new().unwrap();
+        let ensemble_dir = temp_dir.path().join(".ensemble");
+        tokio::fs::create_dir_all(&ensemble_dir).await.unwrap();
+        tokio::fs::write(&ensemble_dir.join("runs"), "blocked")
+            .await
+            .unwrap();
+
+        let persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
+        let record = sample_event("run-1", 1);
+
+        persistence.send("run-1".to_string(), record.clone());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tokio::fs::remove_file(&ensemble_dir.join("runs"))
+            .await
+            .unwrap();
+
+        persistence.send("run-1".to_string(), record);
+        persistence.flush().await;
+
+        let path = temp_dir
+            .path()
+            .join(".ensemble")
+            .join("runs")
+            .join("run-1")
+            .join("events.jsonl");
+        assert!(
+            path.exists(),
+            "file should exist after blocking file removed"
+        );
     }
 }
