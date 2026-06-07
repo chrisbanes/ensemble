@@ -721,7 +721,7 @@ fn normalize_agent_permission_request_policy(
 
     if let Some(legacy_value) = legacy_value {
         tracing::warn!(
-            "'agent.permission_policy' is deprecated; use 'agent.permission_request_policy' instead"
+            "'agent.permission_policy' is deprecated and will be removed in v0.4.0; use 'agent.permission_request_policy' instead"
         );
 
         if let Some(canonical_value) = canonical_value {
@@ -1840,6 +1840,7 @@ agent:
             assert!(output.contains("permission_policy"));
             assert!(output.contains("permission_request_policy"));
             assert!(output.contains("deprecated"));
+            assert!(output.contains("v0.4.0"));
         }
     }
 
