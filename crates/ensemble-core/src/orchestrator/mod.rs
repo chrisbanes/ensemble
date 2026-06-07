@@ -302,7 +302,7 @@ impl Orchestrator {
         }
 
         info!("orchestrator stopped, flushing timeline persistence");
-        if let Some(persistence) = self.timeline_persistence.take() {
+        if let Some(mut persistence) = self.timeline_persistence.take() {
             persistence.flush().await;
         }
         info!("timeline persistence flushed");
@@ -8182,7 +8182,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator = Orchestrator::new(
+        let mut orchestrator = Orchestrator::new(
             config,
             tracker,
             runner,
@@ -8212,8 +8212,9 @@ agent:
             .expect("receiver should get event");
         assert_eq!(received.issue_identifier(), "repo#1");
 
-        // Wait for background persistence task to write
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(ref mut persistence) = orchestrator.timeline_persistence {
+            persistence.flush().await;
+        }
 
         let path = dir
             .path()
@@ -8505,7 +8506,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator = Orchestrator::new(
+        let mut orchestrator = Orchestrator::new(
             config.clone(),
             tracker,
             runner,
@@ -8544,6 +8545,10 @@ agent:
             )
             .await;
 
+        if let Some(ref mut persistence) = orchestrator.timeline_persistence {
+            persistence.flush().await;
+        }
+
         let run_id = {
             let state = orchestrator.state.read().await;
             state
@@ -8565,37 +8570,39 @@ agent:
                 .join("runs")
                 .join(&run_id)
                 .join("events.jsonl");
-            if events_path.exists() {
-                let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
-                let mut question_asked_sequence: Option<u64> = None;
-                let mut input_requested_sequence: Option<u64> = None;
+            assert!(
+                events_path.exists(),
+                "timeline events file should exist after flush"
+            );
+            let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
+            let mut question_asked_sequence: Option<u64> = None;
+            let mut input_requested_sequence: Option<u64> = None;
 
-                for line in contents.lines() {
-                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                        continue;
-                    };
-                    let event_type = value
-                        .get("event_type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let sequence = value.get("sequence").and_then(|v| v.as_u64());
+            for line in contents.lines() {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                    continue;
+                };
+                let event_type = value
+                    .get("event_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let sequence = value.get("sequence").and_then(|v| v.as_u64());
 
-                    match event_type {
-                        "question_asked" => question_asked_sequence = sequence,
-                        "input_requested" => input_requested_sequence = sequence,
-                        _ => {}
-                    }
+                match event_type {
+                    "question_asked" => question_asked_sequence = sequence,
+                    "input_requested" => input_requested_sequence = sequence,
+                    _ => {}
                 }
-
-                assert!(
-                    question_asked_sequence.is_some() && input_requested_sequence.is_some(),
-                    "timeline should contain both question_asked and input_requested events"
-                );
-                assert_ne!(
-                    question_asked_sequence, input_requested_sequence,
-                    "question_asked and input_requested must not reuse the same sequence number"
-                );
             }
+
+            assert!(
+                question_asked_sequence.is_some() && input_requested_sequence.is_some(),
+                "timeline should contain both question_asked and input_requested events"
+            );
+            assert_ne!(
+                question_asked_sequence, input_requested_sequence,
+                "question_asked and input_requested must not reuse the same sequence number"
+            );
         }
     }
 }

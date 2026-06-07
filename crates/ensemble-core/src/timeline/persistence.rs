@@ -13,14 +13,14 @@ struct PersistRequest {
 }
 
 pub struct TimelinePersistence {
-    sender: mpsc::UnboundedSender<PersistRequest>,
+    sender: Option<mpsc::Sender<PersistRequest>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl TimelinePersistence {
     pub fn new(workspace_root: PathBuf) -> Self {
         let writer = TimelineWriter::new(workspace_root);
-        let (sender, mut receiver) = mpsc::unbounded_channel::<PersistRequest>();
+        let (sender, mut receiver) = mpsc::channel::<PersistRequest>(10_000);
 
         let handle = tokio::spawn(async move {
             while let Some(req) = receiver.recv().await {
@@ -36,21 +36,44 @@ impl TimelinePersistence {
         });
 
         Self {
-            sender,
+            sender: Some(sender),
             handle: Some(handle),
         }
     }
 
     pub fn send(&self, run_id: String, record: TimelineEventRecord) {
-        if self.sender.send(PersistRequest { run_id, record }).is_err() {
-            warn!("timeline persist channel closed; event dropped");
+        if let Some(ref sender) = self.sender {
+            match sender.try_send(PersistRequest { run_id, record }) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    warn!("timeline persist channel full; event dropped");
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    warn!("timeline persist channel closed; event dropped");
+                }
+            }
         }
     }
 
-    pub async fn flush(mut self) {
-        drop(self.sender);
+    pub async fn flush(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            drop(sender);
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for TimelinePersistence {
+    fn drop(&mut self) {
+        if self.handle.is_some() {
+            if let Some(sender) = self.sender.take() {
+                drop(sender);
+            }
+            if let Some(handle) = self.handle.take() {
+                handle.abort();
+            }
         }
     }
 }
@@ -80,7 +103,7 @@ mod tests {
     #[tokio::test]
     async fn send_creates_file_and_writes_event() {
         let temp_dir = TempDir::new().unwrap();
-        let persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
+        let mut persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
         let record = sample_event("run-1", 1);
 
         persistence.send("run-1".to_string(), record.clone());
@@ -104,7 +127,7 @@ mod tests {
     #[tokio::test]
     async fn ordering_preserved_across_multiple_events() {
         let temp_dir = TempDir::new().unwrap();
-        let persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
+        let mut persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
 
         for i in 1..=10 {
             persistence.send("run-1".to_string(), sample_event("run-1", i));
@@ -145,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn flush_waits_for_pending_events() {
         let temp_dir = TempDir::new().unwrap();
-        let persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
+        let mut persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
         let record = sample_event("run-1", 1);
 
         persistence.send("run-1".to_string(), record);
@@ -171,11 +194,12 @@ mod tests {
             .await
             .unwrap();
 
-        let persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
+        let mut persistence = TimelinePersistence::new(temp_dir.path().to_path_buf());
         let record = sample_event("run-1", 1);
 
         persistence.send("run-1".to_string(), record.clone());
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Briefly wait for the background task to attempt the first (failing) write
+        tokio::time::sleep(Duration::from_millis(10)).await;
 
         tokio::fs::remove_file(&ensemble_dir.join("runs"))
             .await
