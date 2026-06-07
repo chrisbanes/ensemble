@@ -1,6 +1,6 @@
 use super::{IssueTracker, TrackerError};
 use crate::config::ensemble::TrackerConfig;
-use crate::tracker::model::Issue;
+use crate::tracker::model::{InteractionThreadRoot, Issue, TrackerComment};
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Url;
@@ -539,6 +539,22 @@ impl IssueTracker for NotionTracker {
                 }))
         })
         .await
+    }
+
+    async fn create_interaction_thread_root(
+        &self,
+        _id: &str,
+        _body: &str,
+    ) -> Result<InteractionThreadRoot, TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
+
+    async fn list_comments_after(
+        &self,
+        _id: &str,
+        _after_comment_id: &str,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        Err(TrackerError::WritesNotSupported)
     }
 }
 

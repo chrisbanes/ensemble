@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::path::PathBuf;
 use tracing::warn;
 
-use super::model::Issue;
+use super::model::{InteractionThreadRoot, Issue, TrackerComment};
 use super::{IssueTracker, TrackerError};
 
 /// Issue tracker backed by a local Markdown file.
@@ -464,6 +464,22 @@ impl IssueTracker for TodoFileTracker {
         }
 
         Ok(())
+    }
+
+    async fn create_interaction_thread_root(
+        &self,
+        _id: &str,
+        _body: &str,
+    ) -> Result<InteractionThreadRoot, TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
+
+    async fn list_comments_after(
+        &self,
+        _id: &str,
+        _after_comment_id: &str,
+    ) -> Result<Vec<TrackerComment>, TrackerError> {
+        Err(TrackerError::WritesNotSupported)
     }
 }
 
