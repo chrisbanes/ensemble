@@ -138,7 +138,7 @@ impl AcpxCli {
         debug!(agent = %agent, session = %session_name, path = %stderr_path.display(), "acpx stderr -> {}", stderr_path.display());
 
         let agent_name = agent.to_string();
-        tokio::spawn(async move {
+        let stderr_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             let mut line_count: u64 = 0;
             let mut lines_since_last: u64 = 0;
@@ -252,6 +252,8 @@ impl AcpxCli {
         let status = child.wait().await.map_err(|e| AgentError::IoError {
             reason: format!("failed to wait for acpx prompt: {e}"),
         })?;
+        // Wait for the stderr sink to finish draining and flushing.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stderr_task).await;
         if !status.success() {
             return Err(AgentError::AcpxCommandFailed {
                 command: "prompt".to_string(),
