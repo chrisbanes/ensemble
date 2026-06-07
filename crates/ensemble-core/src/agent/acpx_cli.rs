@@ -3,7 +3,7 @@ use std::path::Path;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::error::AgentError;
 
@@ -116,12 +116,70 @@ impl AcpxCli {
             reason: "failed to capture acpx stderr".to_string(),
         })?;
 
-        // Spawn a task to forward stderr to tracing
+        let stderr_path = cwd
+            .join(".ensemble")
+            .join(format!("acpx-stderr-{}.log", session_name));
+        let parent = stderr_path.parent().ok_or_else(|| AgentError::IoError {
+            reason: "stderr path has no parent".to_string(),
+        })?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to create .ensemble directory: {e}"),
+            })?;
+        let mut stderr_file =
+            tokio::fs::File::create(&stderr_path)
+                .await
+                .map_err(|e| AgentError::IoError {
+                    reason: format!("failed to create stderr log file: {e}"),
+                })?;
+
+        let stderr_path_clone = stderr_path.clone();
+        debug!(agent = %agent, session = %session_name, path = %stderr_path.display(), "acpx stderr -> {}", stderr_path.display());
+
         let agent_name = agent.to_string();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                debug!(agent = %agent_name, "acpx stderr: {}", line);
+            let mut line_count: u64 = 0;
+            let mut lines_since_last: u64 = 0;
+            let mut last_report = tokio::time::Instant::now();
+            let mut write_failed = false;
+
+            while let Some(line_result) = reader.next_line().await.transpose() {
+                match line_result {
+                    Ok(line) => {
+                        line_count += 1;
+                        lines_since_last += 1;
+                        if let Err(e) = (async {
+                            stderr_file.write_all(line.as_bytes()).await?;
+                            stderr_file.write_all(b"\n").await
+                        })
+                        .await
+                        {
+                            warn!(agent = %agent_name, error = %e, "failed to write acpx stderr to file");
+                            write_failed = true;
+                            break;
+                        }
+
+                        if last_report.elapsed() >= tokio::time::Duration::from_secs(5) {
+                            let _ = stderr_file.flush().await;
+                            if lines_since_last > 0 {
+                                debug!(agent = %agent_name, lines = lines_since_last, path = %stderr_path_clone.display(), "acpx stderr: {} lines since last summary", lines_since_last);
+                            }
+                            lines_since_last = 0;
+                            last_report = tokio::time::Instant::now();
+                        }
+                    }
+                    Err(e) => {
+                        debug!(agent = %agent_name, error = %e, "acpx stderr read error");
+                        break;
+                    }
+                }
+            }
+
+            if !write_failed && line_count > 0 {
+                let _ = stderr_file.flush().await;
+                debug!(agent = %agent_name, total_lines = line_count, path = %stderr_path_clone.display(), "acpx stderr complete: {}", stderr_path_clone.display());
             }
         });
 
@@ -718,5 +776,81 @@ exec 0<&-
             !alive,
             "acpx child should be terminated after stdin write failure"
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_stderr_lines_written_to_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}
+{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}
+JSON
+echo "stderr line 1" >&2
+echo "stderr line 2" >&2
+echo "stderr line 3" >&2
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .run_prompt("codex", "test-session", dir.path(), "hi", None, |_| async {
+            })
+            .await
+            .unwrap();
+
+        // Give the background stderr task time to finish writing and flushing.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let stderr_path = dir
+            .path()
+            .join(".ensemble")
+            .join("acpx-stderr-test-session.log");
+        assert!(stderr_path.exists(), "stderr log file should exist");
+        let content = std::fs::read_to_string(&stderr_path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 3, "should have 3 stderr lines");
+        assert_eq!(lines[0], "stderr line 1");
+        assert_eq!(lines[1], "stderr line 2");
+        assert_eq!(lines[2], "stderr line 3");
+    }
+
+    #[tokio::test]
+    async fn prompt_empty_stderr_produces_empty_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}
+{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .run_prompt(
+                "codex",
+                "empty-session",
+                dir.path(),
+                "hi",
+                None,
+                |_| async {},
+            )
+            .await
+            .unwrap();
+
+        let stderr_path = dir
+            .path()
+            .join(".ensemble")
+            .join("acpx-stderr-empty-session.log");
+        // File may be absent or present; if present it must be 0 bytes.
+        if stderr_path.exists() {
+            let metadata = std::fs::metadata(&stderr_path).unwrap();
+            assert_eq!(metadata.len(), 0, "stderr log should be 0 bytes");
+        }
     }
 }
