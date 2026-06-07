@@ -51,7 +51,10 @@ fn main() {
     let openapi_json = ui_dir.join("openapi.json");
     if !openapi_json.exists() {
         if prebuilt_spa_exists(assets_dir) {
-            println!("cargo:warning=openapi.json not found at {}. Using existing embedded UI assets.", openapi_json.display());
+            println!(
+                "cargo:warning=openapi.json not found at {}. Using existing embedded UI assets.",
+                openapi_json.display()
+            );
             println!("cargo:warning=Run `pnpm run codegen:spec` in crates/ensemble-ui/src-ui/ to regenerate it.");
             return;
         }
