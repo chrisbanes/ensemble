@@ -24,7 +24,9 @@ fn is_safe_run_id(run_id: &str) -> bool {
     ),
     responses(
         (status = 200, description = "Timeline events", body = TimelineResponse),
-        (status = 500, description = "Read error", body = crate::api::handlers::ApiError)
+        (status = 400, description = "Invalid run_id", body = crate::api::handlers::ApiError),
+        (status = 500, description = "Read error", body = crate::api::handlers::ApiError),
+        (status = 503, description = "History store unavailable", body = crate::api::handlers::ApiError)
     ),
     tag = "history"
 )]
@@ -196,5 +198,24 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_timeline_returns_503_when_history_store_unavailable() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut state = build_app_state(temp_dir.path().to_string_lossy().to_string());
+        state.history_store = None;
+        let response = get_timeline(
+            State(state),
+            Path("repo#1".to_string()),
+            Query(TimelineQuery {
+                run_id: "run-1".to_string(),
+                cursor: None,
+                limit: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

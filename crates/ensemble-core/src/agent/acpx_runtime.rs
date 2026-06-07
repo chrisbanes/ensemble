@@ -110,6 +110,8 @@ impl AcpxRuntime {
             session_name,
             "starting acpx prompt"
         );
+        // Count prompt-streaming events only; SessionStarted is emitted
+        // separately above and intentionally excluded from this count.
         let event_count = Arc::new(AtomicUsize::new(0));
         let prompt_start = std::time::Instant::now();
         let cb_count = event_count.clone();
