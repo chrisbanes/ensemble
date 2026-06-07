@@ -8158,7 +8158,8 @@ agent:
             .expect("event should be published despite persist failure")
             .expect("receiver should get event");
         assert_eq!(received.issue_identifier(), "repo#1");
-        assert!(!orchestrator.timeline_writer.events_path("run-1").exists());
+        let path = dir.path().join(".ensemble").join("runs").join("run-1").join("events.jsonl");
+        assert!(!path.exists());
     }
 
     #[tokio::test]
@@ -8206,8 +8207,11 @@ agent:
             .expect("receiver should get event");
         assert_eq!(received.issue_identifier(), "repo#1");
 
-        let path = orchestrator.timeline_writer.events_path("run-1");
-        assert!(path.exists());
+        // Wait for background persistence task to write
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let path = dir.path().join(".ensemble").join("runs").join("run-1").join("events.jsonl");
+        assert!(path.exists(), "file should exist after flush");
         let contents = tokio::fs::read_to_string(path).await.unwrap();
         let record: crate::timeline::model::TimelineEventRecord =
             serde_json::from_str(contents.lines().next().unwrap()).unwrap();
@@ -8545,7 +8549,7 @@ agent:
         };
 
         if let Some(run_id) = run_id {
-            let events_path = orchestrator.timeline_writer.events_path(&run_id);
+            let events_path = dir.path().join(".ensemble").join("runs").join(&run_id).join("events.jsonl");
             if events_path.exists() {
                 let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
                 let mut question_asked_sequence: Option<u64> = None;
