@@ -689,4 +689,122 @@ exit 1
             session_name
         );
     }
+
+    #[tokio::test]
+    async fn acpx_runtime_handles_mostly_invalid_issue_id_and_step_name() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            &workspace,
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":100,"result":{{"stopReason":"end_turn"}}}}'
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("!@#", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "$%^",
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+        };
+
+        let _ = runner.run_step(&request, "finish the task").await.unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let session_name = args
+            .lines()
+            .find(|l| l.contains("sessions ensure --name"))
+            .and_then(|l| l.split("sessions ensure --name ").nth(1))
+            .map(|s| s.split_whitespace().next().unwrap_or(s))
+            .expect("session name should be in args");
+
+        assert_eq!(session_name, "unknown-unknown-attempt-1");
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_handles_extremely_long_all_invalid_inputs() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            &workspace,
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":101,"result":{{"stopReason":"end_turn"}}}}'
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let bad_chars = "!@#$%".repeat(300);
+        let issue = test_issue(&bad_chars, "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: &bad_chars,
+            attempt: Some(1),
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+        };
+
+        let _ = runner.run_step(&request, "finish the task").await.unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let session_name = args
+            .lines()
+            .find(|l| l.contains("sessions ensure --name"))
+            .and_then(|l| l.split("sessions ensure --name ").nth(1))
+            .map(|s| s.split_whitespace().next().unwrap_or(s))
+            .expect("session name should be in args");
+
+        assert_eq!(session_name, "unknown-unknown-attempt-1");
+        assert!(
+            session_name.len() <= 128,
+            "session name length {} exceeds 128",
+            session_name.len()
+        );
+    }
 }
