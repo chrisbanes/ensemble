@@ -48,12 +48,30 @@ impl AcpxRuntime {
             .ok_or_else(|| AgentError::PromptError {
                 reason: format!("agent '{}' is missing acpx_agent", request.agent_name),
             })?;
-        let session_name = format!(
-            "{}-{}-attempt-{}",
-            sanitize_session_component(&request.issue.id),
-            sanitize_session_component(request.step_name),
-            request.attempt.unwrap_or(1)
-        );
+        const MAX_SESSION_NAME_LEN: usize = 128;
+
+        let id_comp = sanitize_session_component(&request.issue.id);
+        let step_comp = sanitize_session_component(request.step_name);
+        let attempt = request.attempt.unwrap_or(1);
+
+        // Reserve space for dashes and the -attempt-N suffix,
+        // then split remaining space between id and step components.
+        // This ensures the suffix is never truncated away, preventing
+        // session name collisions between different attempts.
+        let suffix = format!("-attempt-{}", attempt);
+        let total_len = id_comp.len() + step_comp.len() + suffix.len() + 1;
+
+        let session_name = if total_len > MAX_SESSION_NAME_LEN {
+            let available = MAX_SESSION_NAME_LEN.saturating_sub(suffix.len() + 1);
+            let half = available / 2;
+            let mut id = id_comp;
+            let mut step = step_comp;
+            id.truncate(half);
+            step.truncate(available.saturating_sub(half));
+            format!("{}-{}{}", id, step, suffix)
+        } else {
+            format!("{}-{}{}", id_comp, step_comp, suffix)
+        };
 
         debug!(
             issue_id = %request.issue.id,
@@ -602,5 +620,73 @@ exit 1
         let input = "!@#$%".repeat(200);
         let result = sanitize_session_component(&input);
         assert_eq!(result, "unknown");
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_truncates_total_session_name_length() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            &workspace,
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"stopReason":"end_turn"}}}}'
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let long_id = "a".repeat(500);
+        let long_step = "b".repeat(500);
+        let issue = test_issue(&long_id, "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: &long_step,
+            attempt: Some(99),
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+        };
+
+        let _ = runner.run_step(&request, "finish the task").await.unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let session_name = args
+            .lines()
+            .find(|l| l.contains("sessions ensure --name"))
+            .and_then(|l| l.split("sessions ensure --name ").nth(1))
+            .map(|s| s.split_whitespace().next().unwrap_or(s))
+            .expect("session name should be in args");
+
+        assert!(
+            session_name.len() <= 128,
+            "session name '{}' length {} exceeds 128",
+            session_name,
+            session_name.len()
+        );
+        assert!(
+            session_name.ends_with("-attempt-99"),
+            "session name '{}' does not end with -attempt-99",
+            session_name
+        );
     }
 }
