@@ -7,7 +7,7 @@ use rusqlite::{params, params_from_iter, Connection, TransactionBehavior};
 use crate::history::model::HistoryRecord;
 use crate::history::reader::{HistoryQuery, HistoryResponse};
 use crate::timeline::model::TimelineEventRecord;
-use crate::timeline::reader::{TimelineQuery, TimelineResponse};
+use crate::timeline::{TimelineQuery, TimelineResponse};
 
 #[derive(Debug, Clone)]
 pub struct HistoryStore {
