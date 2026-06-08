@@ -523,6 +523,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
+    cat > /dev/null
     exit 1
     ;;
   *" sessions close "*)
@@ -575,6 +576,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
+    cat > /dev/null
     printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
