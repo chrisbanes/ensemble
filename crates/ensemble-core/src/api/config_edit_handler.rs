@@ -4,6 +4,7 @@ use crate::config::draft::{
     parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState, ConfigStateKind, ValidationIssue,
 };
 use crate::config::ensemble::EnsembleConfig;
+use crate::config_watcher::record_self_write;
 use crate::error::ConfigError;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -294,6 +295,7 @@ pub async fn save_yaml(
     ) {
         Ok(response) => {
             drop(doc_state);
+            record_self_write(&state).await;
             match start_or_replace_registered_orchestrator(&state).await {
                 Ok(_) => (StatusCode::OK, Json(response)),
                 Err(error) => {
@@ -572,6 +574,7 @@ where
         Ok(()) => match reload_document_state(&mut doc_state, &state.config_runtime.config_path) {
             Ok(response) => {
                 drop(doc_state);
+                record_self_write(&state).await;
                 match start_or_replace_registered_orchestrator(&state).await {
                     Ok(_) => (StatusCode::OK, Json(response)),
                     Err(error) => {
@@ -795,6 +798,7 @@ pub async fn save_guided_form(
     ) {
         Ok(response) => {
             drop(doc_state);
+            record_self_write(&state).await;
             match start_or_replace_registered_orchestrator(&state).await {
                 Ok(_) => (StatusCode::OK, Json(response)),
                 Err(error) => {
@@ -817,6 +821,7 @@ pub async fn save_guided_form(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::bootstrap::take_registered_orchestrator;
     use crate::api::test_helpers::app_state_with_missing_config;
     use crate::config::draft::{ConfigStateKind, DraftValidationReport};
     use axum::body::Body;
@@ -1895,6 +1900,36 @@ on_failure: Failed
                 .and_then(|config| config.tracker.api_key.clone()),
             Some("ghp_secret123".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn save_yaml_records_file_mtime_for_watcher_self_write_suppression() {
+        let (state, temp_dir) = test_app_state();
+        let todo_path = temp_dir.path().join("TODO.md");
+        std::fs::write(&todo_path, "## Todo\n").unwrap();
+
+        let request = SaveYamlRequest {
+            raw_yaml: format!(
+                "tracker:\n  kind: todo_file\n  path: {}\npolling:\n  interval_ms: 1234\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n",
+                todo_path.display()
+            ),
+        };
+
+        let (status, _) = save_yaml(axum::extract::State(state.clone()), Json(request)).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let last_mtime =
+            state.config_runtime.last_loaded_mtime.read().await.expect(
+                "save_yaml should record the file mtime so the watcher skips its own reload",
+            );
+        let actual_mtime = std::fs::metadata(&state.config_runtime.config_path)
+            .and_then(|m| m.modified())
+            .expect("config file should exist after save");
+        assert_eq!(last_mtime, actual_mtime);
+
+        if let Some(runtime) = take_registered_orchestrator(&state) {
+            runtime.shutdown().await;
+        }
     }
 
     #[tokio::test]

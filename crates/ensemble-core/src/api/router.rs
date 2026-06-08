@@ -14,6 +14,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::RwLock;
 use utoipa::OpenApi;
 
@@ -22,6 +23,11 @@ use utoipa::OpenApi;
 pub struct ConfigRuntime {
     pub config_path: PathBuf,
     pub document_state: Arc<RwLock<ConfigDocumentState>>,
+    /// mtime of the last config file content we have already applied.
+    /// The watcher uses this to skip filesystem events whose mtime matches
+    /// the content we already loaded, which prevents the watcher from
+    /// re-running the orchestrator restart that the save handler just performed.
+    pub last_loaded_mtime: Arc<RwLock<Option<SystemTime>>>,
 }
 
 /// Shared application state passed to all API handlers.

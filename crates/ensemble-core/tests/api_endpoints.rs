@@ -56,6 +56,7 @@ fn build_app_state(
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
+            last_loaded_mtime: Arc::new(RwLock::new(None)),
         },
         cancellation_registry: new_cancellation_registry(),
     }

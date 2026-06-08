@@ -7,6 +7,7 @@ use ensemble_core::api::bootstrap::{
 };
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
+use ensemble_core::config_watcher::start_config_watcher;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::workspace::finalize::FinalizeMode;
 
@@ -63,6 +64,8 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
+
+    let watcher = start_config_watcher(prepared.app_state.clone());
 
     {
         let document_state = prepared
@@ -134,6 +137,7 @@ pub async fn execute(args: RunArgs) -> ExitCode {
     if let Some(runtime) = take_registered_orchestrator(&prepared.app_state) {
         runtime.shutdown().await;
     }
+    watcher.abort();
     info!("ensemble shut down cleanly");
     ExitCode::SUCCESS
 }
