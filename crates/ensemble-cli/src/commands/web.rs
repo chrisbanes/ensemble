@@ -10,6 +10,7 @@ use ensemble_core::api::bootstrap::{
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
+use ensemble_core::config_watcher::start_config_watcher;
 use ensemble_core::observability::events::EventBus;
 
 use crate::embedded_ui::spa_router;
@@ -119,6 +120,7 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     }
     let has_runnable_config = prepared.has_runnable_config;
     let app_state = prepared.app_state;
+    let watcher = start_config_watcher(app_state.clone());
     if has_runnable_config {
         match start_or_replace_registered_orchestrator(&app_state).await {
             Ok(true) => info!("orchestrator started"),
@@ -227,6 +229,7 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     if let Some(runtime) = take_registered_orchestrator(&app_state) {
         runtime.shutdown().await;
     }
+    watcher.abort();
     info!("HTTP server stopped");
 
     info!("ensemble shut down cleanly");

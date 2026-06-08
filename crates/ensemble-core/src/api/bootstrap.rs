@@ -14,9 +14,14 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::MutexGuard;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::warn;
+
+/// Maximum time the orchestrator restart path will wait for the previous runtime
+/// to shut down gracefully before forcing an abort.
+const ORCHESTRATOR_RESTART_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct PreparedApp {
     pub app_state: AppState,
@@ -52,6 +57,25 @@ impl OrchestratorRuntime {
     pub async fn shutdown(self) {
         self.request_shutdown();
         let _ = self.task.await;
+    }
+
+    /// Attempt a graceful shutdown within `timeout`. If the runtime task does not
+    /// exit before the timeout elapses, the task is aborted so it cannot keep
+    /// polling or running agents concurrently with a replacement orchestrator.
+    pub async fn shutdown_with_timeout(self, timeout: Duration) {
+        self.request_shutdown();
+        let abort_handle = self.task.abort_handle();
+        let join_result = tokio::time::timeout(timeout, self.task).await;
+        match join_result {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) | Err(_) => {
+                abort_handle.abort();
+                warn!(
+                    timeout_secs = timeout.as_secs(),
+                    "orchestrator runtime did not shut down within timeout; aborted"
+                );
+            }
+        }
     }
 }
 
@@ -118,6 +142,7 @@ pub fn build_app_state(
         config_runtime: ConfigRuntime {
             config_path,
             document_state: Arc::new(RwLock::new(document_state)),
+            last_loaded_mtime: Arc::new(RwLock::new(None)),
         },
         cancellation_registry: new_cancellation_registry(),
     };
@@ -232,7 +257,11 @@ pub async fn start_or_replace_registered_orchestrator(
     let started = prepared.is_some();
 
     if let Some(runtime) = take_registered_orchestrator(app_state) {
-        runtime.shutdown().await;
+        // Bounded graceful shutdown so a misbehaving orchestrator cannot block
+        // the restart path indefinitely (which would stall Ctrl+C shutdown).
+        runtime
+            .shutdown_with_timeout(ORCHESTRATOR_RESTART_TIMEOUT)
+            .await;
     }
 
     *registered_orchestrator_guard(app_state) = prepared.map(launch_orchestrator_runtime);
@@ -445,6 +474,35 @@ mod tests {
             .expect("relative config path should not fail")
             .expect("relative config path should start an orchestrator");
         runtime.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_timeout_unblocks_when_task_ignores_shutdown() {
+        // Construct an OrchestratorRuntime whose task ignores the shutdown signal
+        // entirely. shutdown_with_timeout should still return after the timeout.
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async {
+            // Sleep forever; never observe shutdown_rx.
+            futures::future::pending::<()>().await;
+        });
+        let runtime = OrchestratorRuntime { shutdown_tx, task };
+
+        let started = std::time::Instant::now();
+        runtime
+            .shutdown_with_timeout(std::time::Duration::from_millis(200))
+            .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed >= std::time::Duration::from_millis(200),
+            "shutdown_with_timeout waited {:?} (expected >= 200ms)",
+            elapsed
+        );
+        assert!(
+            elapsed < std::time::Duration::from_millis(2_000),
+            "shutdown_with_timeout took {:?}; expected < 2s",
+            elapsed
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ use ensemble_core::api::bootstrap::{
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::api::router::AppState;
 use ensemble_core::config::draft::load_config_document_or_missing;
+use ensemble_core::config_watcher::{start_config_watcher, ConfigWatcherHandle};
 use ensemble_core::observability::events::EventBus;
 
 use crate::embedded_ui::spa_router;
@@ -27,6 +28,10 @@ pub struct DesktopServer {
     pub url: url::Url,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     app_state: AppState,
+    // Held for its `Drop` impl, which aborts the spawned watcher task and keeps
+    // the file-change reload running for the lifetime of the desktop process.
+    #[allow(dead_code)]
+    config_watcher: ConfigWatcherHandle,
 }
 
 impl Drop for DesktopServer {
@@ -99,6 +104,7 @@ pub async fn start_desktop_server(
         );
     }
     let app_state = prepared.app_state;
+    let config_watcher = start_config_watcher(app_state.clone());
     if prepared.has_runnable_config {
         start_or_replace_registered_orchestrator(&app_state)
             .await
@@ -146,6 +152,7 @@ pub async fn start_desktop_server(
         url: server_url,
         shutdown: Some(shutdown_tx),
         app_state,
+        config_watcher,
     })
 }
 
