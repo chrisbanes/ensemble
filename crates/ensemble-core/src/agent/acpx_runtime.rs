@@ -406,6 +406,7 @@ case "$*" in
   exit 0
   ;;
   *" prompt --session "*)
+  cat > /dev/null
   printf '%s\n' \
     '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
     '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
@@ -735,6 +736,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
+    cat > /dev/null
     printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
@@ -803,6 +805,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
+    cat > /dev/null
     printf '%s\n' '{{"jsonrpc":"2.0","id":100,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
@@ -859,6 +862,7 @@ case "$*" in
     exit 0
     ;;
   *" prompt --session "*)
+    cat > /dev/null
     printf '%s\n' '{{"jsonrpc":"2.0","id":101,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
