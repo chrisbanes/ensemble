@@ -60,17 +60,19 @@ impl OrchestratorRuntime {
     }
 
     /// Attempt a graceful shutdown within `timeout`. If the runtime task does not
-    /// exit before the timeout elapses, the task is dropped (which detaches it from
-    /// the runtime) and a warning is logged.
+    /// exit before the timeout elapses, the task is aborted so it cannot keep
+    /// polling or running agents concurrently with a replacement orchestrator.
     pub async fn shutdown_with_timeout(self, timeout: Duration) {
         self.request_shutdown();
+        let abort_handle = self.task.abort_handle();
         let join_result = tokio::time::timeout(timeout, self.task).await;
         match join_result {
             Ok(Ok(())) => {}
             Ok(Err(_)) | Err(_) => {
+                abort_handle.abort();
                 warn!(
                     timeout_secs = timeout.as_secs(),
-                    "orchestrator runtime did not shut down within timeout; abandoning task"
+                    "orchestrator runtime did not shut down within timeout; aborted"
                 );
             }
         }
