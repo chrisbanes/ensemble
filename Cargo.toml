@@ -40,3 +40,4 @@ shellexpand = "3"
 mime_guess = "2"
 opener = "0.7"
 rusqlite = { version = "0.33", features = ["bundled"] }
+agent-client-protocol = "0.14.0"

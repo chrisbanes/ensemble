@@ -31,6 +31,7 @@ shellexpand = { workspace = true }
 shlex = "1"
 mime_guess = { workspace = true }
 rusqlite = { workspace = true }
+agent-client-protocol = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
