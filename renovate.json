@@ -4,8 +4,7 @@
     "config:recommended",
     ":separateMajorReleases",
     ":combinePatchMinorReleases",
-    ":enableVulnerabilityAlerts",
-    ":semverPrefix"
+    ":enableVulnerabilityAlerts"
   ],
   "labels": ["dependencies"],
   "prConcurrentLimit": 5,
