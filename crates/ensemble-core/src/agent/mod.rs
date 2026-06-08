@@ -25,6 +25,7 @@ use events::{
 };
 
 use acpx_runtime::AcpxRuntime;
+use acp_client::{run_acp_session, AcpSessionConfig, TurnResult};
 
 const VERDICT_FALLBACK_INSTRUCTION: &str = "\
 If you cannot return a structured runtime verdict, write .ensemble/verdict.json with:\n\
@@ -541,11 +542,64 @@ impl AgentRunner for AcpAgentRunner {
 impl AcpAgentRunner {
     async fn run_direct_step(
         &self,
-        _request: AgentRunRequest<'_>,
+        request: AgentRunRequest<'_>,
     ) -> Result<WorkerResult, AgentError> {
-        Err(AgentError::TurnFailed {
-            reason: "direct ACP path is being migrated to SDK backend (Task 3)".to_string(),
-        })
+        let config = &request.config;
+        let agent_config = config.agents.get(request.agent_name);
+        let command = resolve_agent_command(agent_config, &config.agent.command);
+
+        let session_mode = if config.agent.session_mode.is_empty() {
+            None
+        } else {
+            Some(config.agent.session_mode.clone())
+        };
+
+        let session_config = AcpSessionConfig {
+            command,
+            workspace_path: request.workspace_path.to_path_buf(),
+            session_mode,
+            permission_request_policy: config.agent.permission_request_policy.clone(),
+            read_timeout_ms: config.agent.read_timeout_ms,
+            turn_timeout_ms: config.agent.turn_timeout_ms,
+        };
+
+        let max_turns = config.agent.max_turns.max(1);
+        let mut prompts = Vec::with_capacity(max_turns as usize);
+        for turn in 1..=max_turns {
+            let prompt = self
+                .build_prompt(
+                    config.as_ref(),
+                    BuildPromptRequest {
+                        issue: request.issue,
+                        agent_name: request.agent_name,
+                        step_name: request.step_name,
+                        attempt: request.attempt,
+                        workspace_path: request.workspace_path,
+                        turn_number: turn,
+                    },
+                )
+                .await?;
+            prompts.push(prompt);
+        }
+
+        let (final_verdict, turn_results) = run_acp_session(
+            session_config,
+            prompts,
+            &request.issue.id,
+            request.step_name,
+            &request.event_tx,
+        )
+        .await?;
+
+        for (i, result) in turn_results.iter().enumerate() {
+            if let TurnResult::Failed { reason, .. } = result {
+                return Err(AgentError::TurnFailed {
+                    reason: format!("turn {} failed: {}", i + 1, reason),
+                });
+            }
+        }
+
+        Ok(detect_worker_result_with_runtime_verdict(request.workspace_path, final_verdict).await)
     }
 }
 
