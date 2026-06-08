@@ -3,9 +3,8 @@
   "extends": [
     "config:recommended",
     ":separateMajorReleases",
-    ":combinePatchMinorUpdates",
-    ":enableVulnerabilityAlerts",
-    ":semverPrefix"
+    ":combinePatchMinorReleases",
+    ":enableVulnerabilityAlerts"
   ],
   "labels": ["dependencies"],
   "prConcurrentLimit": 5,
@@ -40,21 +39,21 @@
     {
       "description": "Group Radix UI packages",
       "matchManagers": ["npm"],
-      "matchPackagePrefixes": ["@radix-ui/"],
+      "matchPackageNames": ["@radix-ui/**"],
       "groupName": "Radix UI",
       "groupSlug": "radix-ui"
     },
     {
       "description": "Group TanStack packages",
       "matchManagers": ["npm"],
-      "matchPackagePrefixes": ["@tanstack/"],
+      "matchPackageNames": ["@tanstack/**"],
       "groupName": "TanStack",
       "groupSlug": "tanstack"
     },
     {
       "description": "Group Testing Library packages",
       "matchManagers": ["npm"],
-      "matchPackagePrefixes": ["@testing-library/"],
+      "matchPackageNames": ["@testing-library/**"],
       "groupName": "Testing Library",
       "groupSlug": "testing-library"
     },
@@ -68,15 +67,14 @@
     {
       "description": "Group Tailwind packages",
       "matchManagers": ["npm"],
-      "matchPackagePrefixes": ["tailwind"],
-      "matchPackageNames": ["@tailwindcss/vite"],
+      "matchPackageNames": ["@tailwindcss/**", "tailwindcss"],
       "groupName": "Tailwind CSS",
       "groupSlug": "tailwind"
     },
     {
       "description": "Group Codemirror packages",
       "matchManagers": ["npm"],
-      "matchPackagePrefixes": ["@codemirror/", "@uiw/"],
+      "matchPackageNames": ["@codemirror/**", "@uiw/**"],
       "groupName": "CodeMirror",
       "groupSlug": "codemirror"
     },
