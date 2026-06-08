@@ -112,63 +112,57 @@ pub async fn run_acp_session(
     let session_error_inner = session_error.clone();
     let session_error_outer = session_error.clone();
 
-    let builder = Client
-        .builder()
-        .name("ensemble")
-        .on_receive_request(
-            async move |request: RequestPermissionRequest,
-                        responder: agent_client_protocol::Responder<RequestPermissionResponse>,
-                        _cx| {
-                let description = serde_json::to_string(&request.tool_call)
-                    .unwrap_or_default();
+    let builder = Client.builder().name("ensemble").on_receive_request(
+        async move |request: RequestPermissionRequest,
+                    responder: agent_client_protocol::Responder<RequestPermissionResponse>,
+                    _cx| {
+            let description = serde_json::to_string(&request.tool_call).unwrap_or_default();
 
-                emit_event(
-                    &event_tx_clone,
-                    &issue_id_owned,
-                    &step_name_owned,
-                    AgentEvent::Warning {
-                        message: format!("permission requested: {description}"),
-                    },
-                )
-                .await;
+            emit_event(
+                &event_tx_clone,
+                &issue_id_owned,
+                &step_name_owned,
+                AgentEvent::Warning {
+                    message: format!("permission requested: {description}"),
+                },
+            )
+            .await;
 
-                let allowed = resolve_permission(&permission_policy, &description);
+            let allowed = resolve_permission(&permission_policy, &description);
 
-                let outcome = if allowed {
-                    if let Some(first_option) = request.options.first() {
-                        let option_id: agent_client_protocol::schema::PermissionOptionId =
-                            first_option.option_id.clone();
-                        agent_client_protocol::schema::RequestPermissionOutcome::Selected(
-                            agent_client_protocol::schema::SelectedPermissionOutcome::new(
-                                option_id,
-                            ),
-                        )
-                    } else {
-                        agent_client_protocol::schema::RequestPermissionOutcome::Cancelled
-                    }
+            let outcome = if allowed {
+                if let Some(first_option) = request.options.first() {
+                    let option_id: agent_client_protocol::schema::PermissionOptionId =
+                        first_option.option_id.clone();
+                    agent_client_protocol::schema::RequestPermissionOutcome::Selected(
+                        agent_client_protocol::schema::SelectedPermissionOutcome::new(option_id),
+                    )
                 } else {
                     agent_client_protocol::schema::RequestPermissionOutcome::Cancelled
-                };
+                }
+            } else {
+                agent_client_protocol::schema::RequestPermissionOutcome::Cancelled
+            };
 
-                let response = RequestPermissionResponse::new(outcome);
+            let response = RequestPermissionResponse::new(outcome);
 
-                emit_event(
-                    &event_tx_clone,
-                    &issue_id_owned,
-                    &step_name_owned,
-                    AgentEvent::Notification {
-                        message: format!(
-                            "permission {}",
-                            if allowed { "approved" } else { "rejected" }
-                        ),
-                    },
-                )
-                .await;
+            emit_event(
+                &event_tx_clone,
+                &issue_id_owned,
+                &step_name_owned,
+                AgentEvent::Notification {
+                    message: format!(
+                        "permission {}",
+                        if allowed { "approved" } else { "rejected" }
+                    ),
+                },
+            )
+            .await;
 
-                responder.respond(response)
-            },
-            agent_client_protocol::on_receive_request!(),
-        );
+            responder.respond(response)
+        },
+        agent_client_protocol::on_receive_request!(),
+    );
 
     let result = builder
         .connect_with(agent, async move |cx| {

@@ -9,23 +9,21 @@ pub mod runtime;
 use std::path::Path;
 use std::sync::Arc;
 
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio::sync::RwLock;
-use tokio_util::sync::CancellationToken;
 use crate::config::ensemble::{EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode};
 use crate::config::template::render_prompt_with_interaction_response;
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
-use events::{
-    InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
-};
+use async_trait::async_trait;
+use events::{InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult};
+use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 
-use acpx_runtime::AcpxRuntime;
 use acp_client::{run_acp_session, AcpSessionConfig, TurnResult};
+use acpx_runtime::AcpxRuntime;
 
 const VERDICT_FALLBACK_INSTRUCTION: &str = "\
 If you cannot return a structured runtime verdict, write .ensemble/verdict.json with:\n\
