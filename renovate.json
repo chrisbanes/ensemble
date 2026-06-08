@@ -1,6 +1,102 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "config:recommended",
+    ":separateMajorReleases",
+    ":combinePatchMinorUpdates",
+    ":enableVulnerabilityAlerts",
+    ":semverPrefix"
+  ],
+  "labels": ["dependencies"],
+  "prConcurrentLimit": 5,
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am every day"]
+  },
+  "platformAutomerge": true,
+  "rangeStrategy": "bump",
+  "ignoreDeps": ["rust-version"],
+  "packageRules": [
+    {
+      "description": "Group Rust workspace ecosystem packages",
+      "matchManagers": ["cargo"],
+      "groupName": "Rust dependencies",
+      "groupSlug": "rust",
+      "matchPackageNames": [
+        "tokio", "tokio-util",
+        "serde", "serde_json", "serde_yaml",
+        "axum", "tower-http",
+        "futures", "futures-util",
+        "tracing", "tracing-subscriber"
+      ]
+    },
+    {
+      "description": "Group Tauri ecosystem together (desktop crate)",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["tauri", "tauri-build"],
+      "groupName": "Tauri dependencies",
+      "groupSlug": "tauri"
+    },
+    {
+      "description": "Group Radix UI packages",
+      "matchManagers": ["npm"],
+      "matchPackagePrefixes": ["@radix-ui/"],
+      "groupName": "Radix UI",
+      "groupSlug": "radix-ui"
+    },
+    {
+      "description": "Group TanStack packages",
+      "matchManagers": ["npm"],
+      "matchPackagePrefixes": ["@tanstack/"],
+      "groupName": "TanStack",
+      "groupSlug": "tanstack"
+    },
+    {
+      "description": "Group Testing Library packages",
+      "matchManagers": ["npm"],
+      "matchPackagePrefixes": ["@testing-library/"],
+      "groupName": "Testing Library",
+      "groupSlug": "testing-library"
+    },
+    {
+      "description": "Group Vite ecosystem",
+      "matchManagers": ["npm"],
+      "matchPackageNames": ["vite", "vitest", "@vitejs/plugin-react"],
+      "groupName": "Vite ecosystem",
+      "groupSlug": "vite"
+    },
+    {
+      "description": "Group Tailwind packages",
+      "matchManagers": ["npm"],
+      "matchPackagePrefixes": ["tailwind"],
+      "matchPackageNames": ["@tailwindcss/vite"],
+      "groupName": "Tailwind CSS",
+      "groupSlug": "tailwind"
+    },
+    {
+      "description": "Group Codemirror packages",
+      "matchManagers": ["npm"],
+      "matchPackagePrefixes": ["@codemirror/", "@uiw/"],
+      "groupName": "CodeMirror",
+      "groupSlug": "codemirror"
+    },
+    {
+      "description": "Auto-merge safe patch updates for Rust",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    },
+    {
+      "description": "Auto-merge safe minor/patch for npm",
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true
+    },
+    {
+      "description": "Separate PRs for major Rust updates",
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "labels": ["dependencies", "breaking"]
+    }
   ]
 }
