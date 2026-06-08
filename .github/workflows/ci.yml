@@ -166,7 +166,6 @@ jobs:
 
   build-cli:
     name: CLI (${{ matrix.target }})
-    if: startsWith(github.ref, 'refs/tags/v')
     needs: frontend
     strategy:
       fail-fast: false
@@ -180,32 +179,39 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v5
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/checkout@v5
 
-      - uses: dtolnay/rust-toolchain@stable
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Download frontend dist
+      - if: startsWith(github.ref, 'refs/tags/v')
+        name: Download frontend dist
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
           path: crates/ensemble-cli/assets/spa/
 
-      - name: Build CLI
+      - if: startsWith(github.ref, 'refs/tags/v')
+        name: Build CLI
         run: cargo build --release -p ensemble-cli --target ${{ matrix.target }}
 
-      - name: Package binary
+      - if: startsWith(github.ref, 'refs/tags/v')
+        name: Package binary
         run: |
           ARCHIVE="ensemble-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
           tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release ensemble
           echo "archive=$ARCHIVE" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
         with:
           name: cli-${{ matrix.target }}
           path: ${{ env.archive }}
