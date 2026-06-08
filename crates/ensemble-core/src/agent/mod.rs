@@ -609,6 +609,7 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
+    use crate::agent::events::AgentEvent;
     use crate::config::ensemble::parse_config;
     use crate::interaction::{InteractionKind, InteractionResponse};
     use tokio_util::sync::CancellationToken;
