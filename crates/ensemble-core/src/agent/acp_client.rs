@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use agent_client_protocol::schema::{
     ContentBlock, InitializeRequest, PermissionOption, PermissionOptionKind, ProtocolVersion,
@@ -230,6 +231,7 @@ pub async fn run_acp_session(
     let session_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let prompts = Arc::new(prompts);
     let session_mode = config.session_mode.clone();
+    let read_timeout_ms = config.read_timeout_ms;
     let turn_timeout_ms = config.turn_timeout_ms;
     let workspace_path = config.workspace_path.clone();
 
@@ -290,212 +292,235 @@ pub async fn run_acp_session(
 
     let result = builder
         .connect_with(agent, async move |cx| {
-            if let Err(e) = cx
-                .send_request(InitializeRequest::new(ProtocolVersion::V1))
-                .block_task()
-                .await
+            match tokio::time::timeout(
+                Duration::from_millis(read_timeout_ms),
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task(),
+            )
+            .await
             {
-                let mut err = session_error_inner.lock().await;
-                *err = Some(format!("initialize failed: {e}"));
-                return Ok(());
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(format!("initialize failed: {e}"));
+                    return Ok(());
+                }
+                Err(_) => {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(format!("response timeout after {read_timeout_ms}ms"));
+                    return Ok(());
+                }
             }
 
             let session_builder = cx.build_session(&workspace_path);
+            let mut session = match tokio::time::timeout(
+                Duration::from_millis(read_timeout_ms),
+                session_builder.block_task().start_session(),
+            )
+            .await
+            {
+                Ok(Ok(session)) => session,
+                Ok(Err(e)) => {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(format!("session error: {e}"));
+                    return Ok(());
+                }
+                Err(_) => {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(format!("response timeout after {read_timeout_ms}ms"));
+                    return Ok(());
+                }
+            };
 
-            if let Err(e) = session_builder
-                .block_task()
-                .run_until(async |mut session| {
-                    let session_id = session.session_id().to_string();
+            let session_id = session.session_id().to_string();
 
-                    emit_event(
-                        event_tx,
-                        issue_id,
-                        step_name,
-                        AgentEvent::SessionStarted {
-                            session_id: session_id.clone(),
-                            agent_pid: agent_pid.lock().await.clone(),
-                        },
+            emit_event(
+                event_tx,
+                issue_id,
+                step_name,
+                AgentEvent::SessionStarted {
+                    session_id: session_id.clone(),
+                    agent_pid: agent_pid.lock().await.clone(),
+                },
+            )
+            .await;
+
+            if let Some(ref mode) = session_mode {
+                if !mode.is_empty() {
+                    match tokio::time::timeout(
+                        Duration::from_millis(read_timeout_ms),
+                        session
+                            .connection()
+                            .send_request(SetSessionModeRequest::new(
+                                session.session_id().clone(),
+                                mode.clone(),
+                            ))
+                            .block_task(),
                     )
-                    .await;
-
-                    if let Some(ref mode) = session_mode {
-                        if !mode.is_empty() {
-                            if let Err(e) = session
-                                .connection()
-                                .send_request(SetSessionModeRequest::new(
-                                    session.session_id().clone(),
-                                    mode.clone(),
-                                ))
-                                .block_task()
-                                .await
-                            {
-                                let mut err = session_error_inner.lock().await;
-                                *err = Some(format!("set_mode failed: {e}"));
-                                return Ok(());
-                            }
-                            debug!(session_id = %session_id, mode = %mode, "session mode set");
-                        }
-                    }
-
-                    for (i, prompt) in prompts.iter().enumerate() {
-                        emit_event(event_tx, issue_id, step_name, AgentEvent::PromptStarted).await;
-
-                        if let Err(e) = session.send_prompt(prompt) {
+                    .await
+                    {
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => {
                             let mut err = session_error_inner.lock().await;
-                            *err = Some(format!("send_prompt failed: {e}"));
+                            *err = Some(format!("set_mode failed: {e}"));
                             return Ok(());
                         }
+                        Err(_) => {
+                            let mut err = session_error_inner.lock().await;
+                            *err = Some(format!("response timeout after {read_timeout_ms}ms"));
+                            return Ok(());
+                        }
+                    }
+                    debug!(session_id = %session_id, mode = %mode, "session mode set");
+                }
+            }
 
-                        let mut last_usage: Option<TokenUsage> = None;
-                        let mut last_runtime_verdict: Option<serde_json::Value> = None;
-                        let mut timed_out = false;
+            for (i, prompt) in prompts.iter().enumerate() {
+                emit_event(event_tx, issue_id, step_name, AgentEvent::PromptStarted).await;
 
-                        let turn_future = async {
-                            loop {
-                                match session.read_update().await {
-                                    Ok(SessionMessage::StopReason(stop)) => {
-                                        let mapped = map_sdk_stop_reason(&stop);
-                                        return Ok((mapped, last_usage, last_runtime_verdict));
+                if let Err(e) = session.send_prompt(prompt) {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(format!("send_prompt failed: {e}"));
+                    return Ok(());
+                }
+
+                let mut last_usage: Option<TokenUsage> = None;
+                let mut last_runtime_verdict: Option<serde_json::Value> = None;
+                let mut timed_out = false;
+
+                let turn_future = async {
+                    loop {
+                        match session.read_update().await {
+                            Ok(SessionMessage::StopReason(stop)) => {
+                                let mapped = map_sdk_stop_reason(&stop);
+                                return Ok((mapped, last_usage, last_runtime_verdict));
+                            }
+                            Ok(SessionMessage::SessionMessage(dispatch)) => {
+                                if let Some(parsed) = parse_sdk_dispatch(dispatch)
+                                    .await
+                                    .map_err(|e| e.to_string())?
+                                {
+                                    if let Some(usage) = parsed.usage {
+                                        last_usage = Some(usage);
                                     }
-                                    Ok(SessionMessage::SessionMessage(dispatch)) => {
-                                        if let Some(parsed) = parse_sdk_dispatch(dispatch)
-                                            .await
-                                            .map_err(|e| e.to_string())?
-                                        {
-                                            if let Some(usage) = parsed.usage {
-                                                last_usage = Some(usage);
-                                            }
-                                            if let Some(verdict) = parsed.verdict {
-                                                last_runtime_verdict = Some(verdict);
-                                            }
-                                            if let Some(content) = parsed.output_text {
-                                                emit_event(
-                                                    event_tx,
-                                                    issue_id,
-                                                    step_name,
-                                                    AgentEvent::OutputChunk {
-                                                        stream: RuntimeStream::Stdout,
-                                                        content,
-                                                    },
-                                                )
-                                                .await;
-                                            }
-                                        }
+                                    if let Some(verdict) = parsed.verdict {
+                                        last_runtime_verdict = Some(verdict);
                                     }
-                                    Err(e) => {
-                                        return Err(format!("read_update failed: {e}"));
+                                    if let Some(content) = parsed.output_text {
+                                        emit_event(
+                                            event_tx,
+                                            issue_id,
+                                            step_name,
+                                            AgentEvent::OutputChunk {
+                                                stream: RuntimeStream::Stdout,
+                                                content,
+                                            },
+                                        )
+                                        .await;
                                     }
-                                    Ok(_) => {}
                                 }
                             }
-                        };
-
-                        let turn_result = tokio::time::timeout(
-                            std::time::Duration::from_millis(turn_timeout_ms),
-                            turn_future,
-                        )
-                        .await;
-
-                        let turn_result = match turn_result {
-                            Ok(Ok((stop_reason, usage, verdict))) => match stop_reason {
-                                super::events::StopReason::EndTurn
-                                | super::events::StopReason::MaxTokens => {
-                                    emit_event(
-                                        event_tx,
-                                        issue_id,
-                                        step_name,
-                                        AgentEvent::RunCompleted {
-                                            usage: usage.clone(),
-                                        },
-                                    )
-                                    .await;
-                                    TurnResult::Completed {
-                                        usage,
-                                        runtime_verdict: verdict,
-                                    }
-                                }
-                                _ => {
-                                    let reason = format!("stop reason: {:?}", stop_reason);
-                                    emit_event(
-                                        event_tx,
-                                        issue_id,
-                                        step_name,
-                                        AgentEvent::RunFailed {
-                                            reason: reason.clone(),
-                                            usage: usage.clone(),
-                                        },
-                                    )
-                                    .await;
-                                    TurnResult::Failed {
-                                        reason,
-                                        usage,
-                                        runtime_verdict: verdict,
-                                    }
-                                }
-                            },
-                            Ok(Err(e)) => {
-                                let mut err = session_error_inner.lock().await;
-                                *err = Some(e);
-                                return Ok(());
+                            Err(e) => {
+                                return Err(format!("read_update failed: {e}"));
                             }
-                            Err(_) => {
-                                timed_out = true;
-                                TurnResult::Failed {
-                                    reason: format!("turn timeout after {turn_timeout_ms}ms"),
-                                    usage: None,
-                                    runtime_verdict: None,
-                                }
-                            }
-                        };
+                            Ok(_) => {}
+                        }
+                    }
+                };
 
-                        if let TurnResult::Completed {
-                            ref runtime_verdict,
-                            ..
-                        } = turn_result
-                        {
-                            if runtime_verdict.is_some() {
-                                let mut v = final_verdict_inner.lock().await;
-                                *v = runtime_verdict.clone();
+                let turn_result =
+                    tokio::time::timeout(Duration::from_millis(turn_timeout_ms), turn_future).await;
+
+                let turn_result = match turn_result {
+                    Ok(Ok((stop_reason, usage, verdict))) => match stop_reason {
+                        super::events::StopReason::EndTurn
+                        | super::events::StopReason::MaxTokens => {
+                            emit_event(
+                                event_tx,
+                                issue_id,
+                                step_name,
+                                AgentEvent::RunCompleted {
+                                    usage: usage.clone(),
+                                },
+                            )
+                            .await;
+                            TurnResult::Completed {
+                                usage,
+                                runtime_verdict: verdict,
                             }
                         }
-
-                        if let TurnResult::Failed { ref reason, .. } = turn_result {
-                            if timed_out {
-                                let mut err = session_error_inner.lock().await;
-                                *err = Some(reason.clone());
-                                turn_results_inner.lock().await.push(turn_result);
-                                return Ok(());
-                            }
-                            if i < prompts.len() - 1 {
-                                warn!(
-                                    issue_id = %issue_id,
-                                    step = step_name,
-                                    turn = i + 1,
-                                    reason = %reason,
-                                    "turn failed, stopping remaining turns"
-                                );
-                                turn_results_inner.lock().await.push(turn_result);
-                                return Ok(());
+                        _ => {
+                            let reason = format!("stop reason: {:?}", stop_reason);
+                            emit_event(
+                                event_tx,
+                                issue_id,
+                                step_name,
+                                AgentEvent::RunFailed {
+                                    reason: reason.clone(),
+                                    usage: usage.clone(),
+                                },
+                            )
+                            .await;
+                            TurnResult::Failed {
+                                reason,
+                                usage,
+                                runtime_verdict: verdict,
                             }
                         }
+                    },
+                    Ok(Err(e)) => {
+                        let mut err = session_error_inner.lock().await;
+                        *err = Some(e);
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        timed_out = true;
+                        TurnResult::Failed {
+                            reason: format!("turn timeout after {turn_timeout_ms}ms"),
+                            usage: None,
+                            runtime_verdict: None,
+                        }
+                    }
+                };
 
-                        info!(
+                if let TurnResult::Completed {
+                    ref runtime_verdict,
+                    ..
+                } = turn_result
+                {
+                    if runtime_verdict.is_some() {
+                        let mut v = final_verdict_inner.lock().await;
+                        *v = runtime_verdict.clone();
+                    }
+                }
+
+                if let TurnResult::Failed { ref reason, .. } = turn_result {
+                    if timed_out {
+                        let mut err = session_error_inner.lock().await;
+                        *err = Some(reason.clone());
+                        turn_results_inner.lock().await.push(turn_result);
+                        return Ok(());
+                    }
+                    if i < prompts.len() - 1 {
+                        warn!(
                             issue_id = %issue_id,
                             step = step_name,
                             turn = i + 1,
-                            "turn completed successfully"
+                            reason = %reason,
+                            "turn failed, stopping remaining turns"
                         );
                         turn_results_inner.lock().await.push(turn_result);
+                        return Ok(());
                     }
-
-                    Ok(())
-                })
-                .await
-            {
-                let mut err = session_error_inner.lock().await;
-                if err.is_none() {
-                    *err = Some(format!("session error: {e}"));
                 }
+
+                info!(
+                    issue_id = %issue_id,
+                    step = step_name,
+                    turn = i + 1,
+                    "turn completed successfully"
+                );
+                turn_results_inner.lock().await.push(turn_result);
             }
 
             Ok(())
@@ -506,7 +531,12 @@ pub async fn run_acp_session(
         let error_msg = e.to_string();
         let captured = session_error_outer.lock().await.clone();
         let msg = captured.unwrap_or(error_msg);
-        if msg.contains("timeout") || msg.contains("TimedOut") {
+        if msg.contains("response timeout") {
+            return Err(AgentError::ResponseTimeout {
+                timeout_ms: read_timeout_ms,
+            });
+        }
+        if msg.contains("turn timeout") || msg.contains("TimedOut") {
             return Err(AgentError::TurnTimeout {
                 timeout_ms: turn_timeout_ms,
             });
@@ -516,7 +546,11 @@ pub async fn run_acp_session(
 
     let captured_error = session_error_outer.lock().await.clone();
     if let Some(error_msg) = captured_error {
-        if error_msg.contains("timeout") || error_msg.contains("TimedOut") {
+        if error_msg.contains("response timeout") {
+            return Err(AgentError::ResponseTimeout {
+                timeout_ms: read_timeout_ms,
+            });
+        } else if error_msg.contains("turn timeout") || error_msg.contains("TimedOut") {
             return Err(AgentError::TurnTimeout {
                 timeout_ms: turn_timeout_ms,
             });
@@ -535,11 +569,13 @@ pub async fn run_acp_session(
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::Duration;
 
     use agent_client_protocol::schema::{
         ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, SessionNotification,
         SessionUpdate, TextContent, UsageUpdate,
     };
+    use tempfile::TempDir;
 
     use super::*;
 
@@ -607,5 +643,33 @@ mod tests {
         let parsed = parse_session_notification(notification);
 
         assert_eq!(parsed.usage.map(|usage| usage.total_tokens), Some(42));
+    }
+
+    #[tokio::test]
+    async fn startup_initialize_uses_configured_read_timeout() {
+        let workspace = TempDir::new().unwrap();
+        let config = AcpSessionConfig {
+            command: "bash -lc 'while IFS= read -r _line; do sleep 60; done'".to_string(),
+            workspace_path: workspace.path().to_path_buf(),
+            session_mode: None,
+            permission_request_policy: "auto_approve_all".to_string(),
+            read_timeout_ms: 50,
+            turn_timeout_ms: 10_000,
+        };
+        let (tx, _rx) = mpsc::channel(10);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            run_acp_session(config, vec!["hello".to_string()], "issue-1", "build", &tx),
+        )
+        .await;
+
+        assert!(
+            matches!(
+                result,
+                Ok(Err(AgentError::ResponseTimeout { timeout_ms: 50 }))
+            ),
+            "startup should return the configured response timeout, got {result:?}"
+        );
     }
 }
