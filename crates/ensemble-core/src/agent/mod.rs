@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
-
 use crate::config::ensemble::{EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode};
 use crate::config::template::render_prompt_with_interaction_response;
 use crate::error::AgentError;
@@ -23,10 +21,9 @@ use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
 use events::{
-    AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
+    InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
 };
 
-use acp_client::{AcpSession, TurnResult};
 use acpx_runtime::AcpxRuntime;
 
 const VERDICT_FALLBACK_INSTRUCTION: &str = "\
@@ -413,6 +410,7 @@ async fn remove_ensemble_file(workspace_path: &Path, filename: &str) -> Result<(
 /// Wraps the argument in single quotes and escapes any embedded single-quote
 /// characters. This prevents shell metacharacter injection when arguments are
 /// interpolated into commands executed via `bash -lc`.
+#[allow(dead_code)]
 fn shell_escape(arg: &str) -> String {
     let mut escaped = String::with_capacity(arg.len() + 2);
     escaped.push('\'');
@@ -435,6 +433,7 @@ fn shell_escape(arg: &str) -> String {
 /// `agent.permission_request_policy` is handled later when ACP permission
 /// callbacks arrive; it does not change the spawn command. Falls back to
 /// `executor` if set, then to the global default.
+#[allow(dead_code)]
 fn resolve_agent_command(
     agent_config: Option<&crate::config::ensemble::AgentConfig>,
     default_command: &str,
@@ -464,6 +463,7 @@ fn resolve_agent_command(
     shell_escape_command(default_command)
 }
 
+#[allow(dead_code)]
 fn shell_escape_command(command: &str) -> String {
     let parts = shlex::split(command)
         .unwrap_or_else(|| command.split_whitespace().map(str::to_string).collect());
@@ -541,153 +541,11 @@ impl AgentRunner for AcpAgentRunner {
 impl AcpAgentRunner {
     async fn run_direct_step(
         &self,
-        request: AgentRunRequest<'_>,
+        _request: AgentRunRequest<'_>,
     ) -> Result<WorkerResult, AgentError> {
-        let AgentRunRequest {
-            config,
-            issue,
-            agent_name,
-            step_name,
-            attempt,
-            workspace_path,
-            event_tx,
-            ..
-        } = request;
-
-        let agent_config = config.agents.get(agent_name);
-        let spawn_command = resolve_agent_command(agent_config, &config.agent.command);
-
-        let mut session = AcpSession::spawn(&spawn_command, workspace_path).await?;
-
-        let cwd_str = workspace_path
-            .to_str()
-            .ok_or_else(|| AgentError::InvalidWorkspaceCwd {
-                path: workspace_path.display().to_string(),
-            })?;
-
-        session.initialize(config.agent.read_timeout_ms).await?;
-
-        let session_id = session
-            .start_session(cwd_str, serde_json::json!({}), config.agent.read_timeout_ms)
-            .await?;
-
-        let _ = event_tx
-            .send(WorkerEvent::AgentUpdate {
-                issue_id: issue.id.clone(),
-                step_name: step_name.to_string(),
-                event: AgentEvent::SessionStarted {
-                    session_id: session_id.clone(),
-                    agent_pid: session.agent_pid().map(|s| s.to_string()),
-                },
-                timestamp: chrono::Utc::now(),
-            })
-            .await;
-
-        if !config.agent.session_mode.is_empty() {
-            session
-                .set_mode(&session_id, &config.agent.session_mode)
-                .await?;
-        }
-
-        let max_turns = config.agent.max_turns;
-        let mut turn_number: u32 = 1;
-
-        let mut final_runtime_verdict: Option<serde_json::Value> = None;
-        let result = loop {
-            let prompt = match self
-                .build_prompt(
-                    config.as_ref(),
-                    BuildPromptRequest {
-                        issue,
-                        agent_name,
-                        step_name,
-                        attempt,
-                        workspace_path,
-                        turn_number,
-                    },
-                )
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    session.cancel(&session_id).await?;
-                    break Err(e);
-                }
-            };
-
-            let turn_result = session
-                .run_turn(
-                    &session_id,
-                    &prompt,
-                    config.agent.turn_timeout_ms,
-                    &config.agent.permission_request_policy,
-                    &issue.id,
-                    step_name,
-                    &event_tx,
-                )
-                .await;
-
-            match turn_result {
-                Ok(TurnResult::Completed {
-                    runtime_verdict, ..
-                }) => {
-                    if runtime_verdict.is_some() {
-                        final_runtime_verdict = runtime_verdict;
-                    }
-                    info!(
-                        issue_id = %issue.id,
-                        identifier = %issue.identifier,
-                        turn = turn_number,
-                        agent = agent_name,
-                        step = step_name,
-                        "turn completed successfully"
-                    );
-                }
-                Ok(TurnResult::Failed {
-                    reason,
-                    runtime_verdict,
-                    ..
-                }) => {
-                    if runtime_verdict.is_some() {
-                        final_runtime_verdict = runtime_verdict;
-                    }
-                    warn!(
-                        issue_id = %issue.id,
-                        identifier = %issue.identifier,
-                        turn = turn_number,
-                        agent = agent_name,
-                        step = step_name,
-                        reason = %reason,
-                        "turn failed"
-                    );
-                    session.cancel(&session_id).await?;
-                    break Err(AgentError::TurnFailed { reason });
-                }
-                Err(e) => {
-                    session.cancel(&session_id).await?;
-                    break Err(e);
-                }
-            }
-
-            if turn_number >= max_turns {
-                info!(
-                    issue_id = %issue.id,
-                    identifier = %issue.identifier,
-                    turns = turn_number,
-                    "reached max turns"
-                );
-                break Ok(());
-            }
-
-            turn_number += 1;
-        };
-
-        let _ = session.cancel(&session_id).await;
-        session.kill().await;
-
-        result?;
-
-        Ok(detect_worker_result_with_runtime_verdict(workspace_path, final_runtime_verdict).await)
+        Err(AgentError::TurnFailed {
+            reason: "direct ACP path is being migrated to SDK backend (Task 3)".to_string(),
+        })
     }
 }
 

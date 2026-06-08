@@ -99,6 +99,7 @@ impl PermissionMode {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn acpx_flag(self) -> &'static str {
         match self {
             Self::ApproveAll => "--approve-all",
