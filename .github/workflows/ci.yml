@@ -43,7 +43,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: crates/ensemble-ui/src-ui/package.json
 
@@ -161,7 +161,7 @@ jobs:
           cp -r crates/ensemble-ui/src-ui/dist/* crates/ensemble-desktop/assets/spa/
 
       # pnpm + node needed for tauri CLI install
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: crates/ensemble-ui/src-ui/package.json
 
