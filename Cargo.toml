@@ -39,6 +39,6 @@ dotenvy = "0.15.7"
 shellexpand = "3.1.2"
 mime_guess = "2.0.5"
 opener = "0.8.4"
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled", "fallible_uint"] }
 agent-client-protocol = "0.14.0"
 notify = "8.2.0"

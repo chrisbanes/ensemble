@@ -102,16 +102,39 @@ impl AcpxCli {
 
         if let Some(mut stdin) = child.stdin.take() {
             if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
-                cleanup_prompt_child(&mut child).await;
-                return Err(AgentError::IoError {
-                    reason: format!("failed to write prompt to acpx stdin: {error}"),
-                });
-            }
-            if let Err(error) = stdin.flush().await {
-                cleanup_prompt_child(&mut child).await;
-                return Err(AgentError::IoError {
-                    reason: format!("failed to flush prompt to acpx stdin: {error}"),
-                });
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    cleanup_prompt_child(&mut child).await;
+                    return Err(AgentError::IoError {
+                        reason: format!("failed to write prompt to acpx stdin: {error}"),
+                    });
+                }
+                // Broken pipe: check if the child already exited. If so, the
+                // prompt write failure is harmless — the downstream code will
+                // still read whatever output the child produced. If the child
+                // is still running, the pipe filled up and this is a real error.
+                if child_has_exited(&mut child) {
+                    drop(stdin);
+                } else {
+                    cleanup_prompt_child(&mut child).await;
+                    return Err(AgentError::IoError {
+                        reason: format!("failed to write prompt to acpx stdin: {error}"),
+                    });
+                }
+            } else if let Err(error) = stdin.flush().await {
+                if error.kind() != std::io::ErrorKind::BrokenPipe {
+                    cleanup_prompt_child(&mut child).await;
+                    return Err(AgentError::IoError {
+                        reason: format!("failed to flush prompt to acpx stdin: {error}"),
+                    });
+                }
+                if child_has_exited(&mut child) {
+                    drop(stdin);
+                } else {
+                    cleanup_prompt_child(&mut child).await;
+                    return Err(AgentError::IoError {
+                        reason: format!("failed to flush prompt to acpx stdin: {error}"),
+                    });
+                }
             }
         }
 
@@ -369,6 +392,10 @@ fn spawn_with_etxtbsy_retry(mut command: Command) -> std::io::Result<tokio::proc
             Err(error) => return Err(error),
         }
     }
+}
+
+fn child_has_exited(child: &mut tokio::process::Child) -> bool {
+    matches!(child.try_wait(), Ok(Some(_)))
 }
 
 async fn cleanup_prompt_child(child: &mut tokio::process::Child) {
