@@ -44,9 +44,15 @@ impl AcpxCli {
             .args(["sessions", "ensure", "--name", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), model, "running acpx sessions ensure");
 
-        let output = command.output().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to run acpx sessions ensure: {e}"),
-        })?;
+        let output = spawn_with_etxtbsy_retry(command)
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to run acpx sessions ensure: {e}"),
+            })?
+            .wait_with_output()
+            .await
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to read acpx sessions ensure output: {e}"),
+            })?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -90,7 +96,7 @@ impl AcpxCli {
             .stderr(std::process::Stdio::piped());
         debug!(agent, session_name, cwd = %cwd.display(), "running acpx prompt");
 
-        let mut child = command.spawn().map_err(|e| AgentError::IoError {
+        let mut child = spawn_with_etxtbsy_retry(command).map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx prompt: {e}"),
         })?;
 
@@ -281,9 +287,15 @@ impl AcpxCli {
         let mut command = self.base_command(agent, cwd, model);
         command.args(["cancel", "--session", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), "running acpx cancel");
-        let status = command.status().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to run acpx cancel: {e}"),
-        })?;
+        let status = spawn_with_etxtbsy_retry(command)
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to run acpx cancel: {e}"),
+            })?
+            .wait()
+            .await
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to wait on acpx cancel: {e}"),
+            })?;
         if !status.success() {
             return Err(AgentError::AcpxCommandFailed {
                 command: "cancel".to_string(),
@@ -303,9 +315,15 @@ impl AcpxCli {
         let mut command = self.base_command(agent, cwd, model);
         command.args(["sessions", "close", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), "running acpx sessions close");
-        let status = command.status().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to run acpx sessions close: {e}"),
-        })?;
+        let status = spawn_with_etxtbsy_retry(command)
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to run acpx sessions close: {e}"),
+            })?
+            .wait()
+            .await
+            .map_err(|e| AgentError::IoError {
+                reason: format!("failed to wait on acpx sessions close: {e}"),
+            })?;
         if !status.success() {
             return Err(AgentError::AcpxCommandFailed {
                 command: "sessions close".to_string(),
@@ -327,6 +345,29 @@ impl AcpxCli {
             .args(["--format", "json", "--json-strict"])
             .arg(agent);
         command
+    }
+}
+
+/// Spawn an `acpx` child process, retrying on `ETXTBSY` ("Text file busy").
+///
+/// On Linux, `Command::spawn` can fail with `ETXTBSY` if the executable was
+/// very recently written to and the kernel's `execve` check still sees a
+/// write reference. This is a known, intermittent race — see
+/// <https://github.com/rust-lang/rust/issues/114554>. In practice it shows up
+/// in the test suite when a mock script is written immediately before being
+/// exec'd. Retrying with a short backoff resolves it deterministically.
+fn spawn_with_etxtbsy_retry(mut command: Command) -> std::io::Result<tokio::process::Child> {
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match command.spawn() {
+            Ok(child) => return Ok(child),
+            Err(error) if error.raw_os_error() == Some(26) && attempt < MAX_ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(attempt as u64 * 10));
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
