@@ -47,7 +47,7 @@
     "@vitejs/plugin-react": "^4.3.0",
     "jsdom": "^26.1.0",
     "orval": "^8.6.2",
-    "typescript": "^5.7.0",
+    "typescript": "^5.9.3",
     "vite": "^6.0.0",
     "vitest": "^4.1.2"
   }
