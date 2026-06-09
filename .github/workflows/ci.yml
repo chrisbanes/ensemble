@@ -6,6 +6,8 @@ on:
     tags: ["v[0-9]*.[0-9]*.[0-9]*"]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * *"
 
 env:
   CARGO_TERM_COLOR: always
@@ -78,9 +80,60 @@ jobs:
           path: crates/ensemble-ui/src-ui/dist/
           retention-days: 1
 
-  tauri:
-    name: Desktop (${{ matrix.name }})
+  # Fast PR/desktop compile job. Runs in parallel with `ci` and `frontend`
+  # (no `needs:`), so PR feedback is bounded by the slowest of the three.
+  # Decision from Task 1: cargo test -p ensemble-desktop links the bin target
+  # which uses tauri::Builder with WebviewWindowBuilder, so on Linux webkit2gtk
+  # must be installed for the test binary to link and run.
+  tauri-pr:
+    name: Tauri PR (${{ matrix.name }})
+    if: "!startsWith(github.ref, 'refs/tags/v')"
+    strategy:
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-latest
+          - name: Mac
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri system dependencies (Linux)
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xvfb
+
+      - name: Run desktop check
+        run: cargo check -p ensemble-desktop --all-targets
+        env:
+          SKIP_UI_BUILD: 1
+
+      - name: Run desktop unit tests
+        run: cargo test -p ensemble-desktop --bin ensemble-desktop -- --nocapture
+        env:
+          SKIP_UI_BUILD: 1
+
+      - name: Run E2E smoke test (verify app launches)
+        run: ${{ matrix.runner == 'ubuntu-latest' && 'xvfb-run -a' || '' }} cargo test -p ensemble-desktop --test e2e app_launches_without_crash -- --ignored --nocapture
+        timeout-minutes: 2
+
+  # Full Tauri bundle (dmg/deb/AppImage). Runs on:
+  #   - push to main (any branch push; no paths filter)
+  #   - schedule (daily 06:00 UTC) to catch packaging regressions
+  #   - push of a tag
+  # PRs do NOT hit this job; PR feedback is the tauri-pr job above.
+  tauri-bundle:
+    name: Tauri Bundle (${{ matrix.name }})
     needs: frontend
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && (github.ref_type == 'tag' || github.ref_type == 'branch'))
     strategy:
       matrix:
         include:
@@ -213,7 +266,7 @@ jobs:
   release:
     name: Release & Homebrew
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build-cli, tauri]
+    needs: [build-cli, tauri-bundle]
     runs-on: ubuntu-latest
     permissions:
       contents: write
