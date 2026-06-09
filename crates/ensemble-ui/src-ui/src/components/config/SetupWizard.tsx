@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useGetSetupDefaults } from "@/generated/api/config/config";
+import { useSetupDefaultsQuery } from "@/hooks";
 import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
 import { useAgentDiscovery } from "@/hooks/useAgentDiscovery";
 import FileBrowser from "./FileBrowser";
@@ -84,9 +84,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   // Prompt mode tracking for each agent (UI-only state)
   const [promptModes, setPromptModes] = useState<Record<number, "inline" | "file">>({});
 
-  const { data: defaultsData, isLoading: isLoadingDefaults } = useGetSetupDefaults({
-    query: { enabled: true },
-  });
+  const { data: defaultsData, isLoading: isLoadingDefaults } = useSetupDefaultsQuery();
   
   // Use progressive agent discovery via SSE
   const {

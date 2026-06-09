@@ -1,36 +1,34 @@
 import { useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useGetState, getGetStateQueryKey } from "./generated/api/state/state";
-import { useGetIssueDetail } from "./generated/api/issues/issues";
-import { getGetIssueDetailQueryKey } from "./generated/api/issues/issues";
-import { useGetConfig } from "./generated/api/config/config";
-import { useGetHistory } from "./generated/api/history/history";
-import { useListDirectory } from "./generated/api/filesystem/filesystem";
+import { getState } from "./generated/api/state/state";
+import { getIssueDetail } from "./generated/api/issues/issues";
+import { getHistory } from "./generated/api/history/history";
+import { listDirectory } from "./generated/api/filesystem/filesystem";
 import {
-  usePostRefresh,
-  usePostResumeIssue,
-  usePostStop,
-  usePostRetry,
+  postRefresh,
+  postResumeIssue,
+  postStop,
+  postRetry,
 } from "./generated/api/controls/controls";
 import {
-  getGetInteractionByIdQueryKey,
-  getListOpenInteractionsQueryKey,
-  useGetInteractionById,
-  useListOpenInteractions,
-  useRespondToInteraction,
-  useCancelInteraction,
+  listOpenInteractions,
+  getInteractionById,
+  respondToInteraction,
+  cancelInteraction,
 } from "./generated/api/interactions/interactions";
 import {
-  useSaveSetup,
-  useValidateSetup,
-  useSaveYaml,
-  useValidateYaml,
-  getGetConfigQueryKey,
-  useValidateGuidedForm,
-  useSaveGuidedForm,
+  saveSetup,
+  validateSetup,
+  saveYaml,
+  validateYaml,
+  saveGuidedForm,
+  validateGuidedForm,
+  getConfig,
+  getSetupDefaults,
 } from "./generated/api/config/config";
-import { useGetConversation } from "./generated/api/conversation/conversation";
+import { getConversation } from "./generated/api/conversation/conversation";
 import type {
+  GetConversationParams,
   GetHistoryParams,
   RuntimeSnapshot,
   IssueDetailSnapshot,
@@ -40,22 +38,39 @@ import type {
   GuidedConfigForm,
   InteractionRequest,
   InteractionDetail,
+  ValidateSetupRequest,
+  SaveSetupRequest,
+  ValidateYamlRequest,
+  SaveYamlRequest,
+  ValidateGuidedFormRequest,
+  SaveGuidedFormRequest,
+  InteractionResponseBody,
+  ListDirectoryParams,
+  FsEntry,
 } from "./generated/models";
 import { customFetch } from "./fetch-client";
 
 /**
- * The generated orval hooks wrap responses in { data, status, headers }.
- * Since customFetch throws on non-2xx, the data is always the success type.
- * These wrappers use `select` to unwrap `.data` and cast to the success type
- * so that consumers get the domain type directly.
+ * Query key constants (replaces generated orval keys that were removed in v8.16.0).
  */
+const STATE_QUERY_KEY = ["/api/v1/state"] as const;
+const CONFIG_QUERY_KEY = ["getConfig"] as const;
+const LIST_OPEN_INTERACTIONS_KEY = ["listOpenInteractions"] as const;
+
+function issueDetailQueryKey(identifier: string) {
+  return ["getIssueDetail", identifier] as const;
+}
+
+function interactionByIdQueryKey(id: string) {
+  return ["getInteractionById", id] as const;
+}
 
 export function useStateQuery() {
-  return useGetState<RuntimeSnapshot>({
-    query: {
-      refetchInterval: 3000,
-      select: (resp) => resp.data as RuntimeSnapshot,
-    },
+  return useQuery({
+    queryKey: STATE_QUERY_KEY,
+    refetchInterval: 3000,
+    queryFn: () => getState(),
+    select: (resp) => resp.data as RuntimeSnapshot,
   });
 }
 
@@ -91,11 +106,13 @@ export function useNextPollCountdown(
 }
 
 export function useIssueDetailQuery(identifier: string) {
-  return useGetIssueDetail<IssueDetailSnapshot>(identifier, {
-    query: {
-      refetchInterval: 2000,
-      enabled: identifier.length > 0,
-      select: (resp) => resp.data as IssueDetailSnapshot,
+  return useQuery({
+    queryKey: issueDetailQueryKey(identifier),
+    refetchInterval: 2000,
+    enabled: identifier.length > 0,
+    queryFn: async (): Promise<IssueDetailSnapshot> => {
+      const resp = await getIssueDetail(identifier);
+      return resp.data as IssueDetailSnapshot;
     },
   });
 }
@@ -162,162 +179,177 @@ export function useStepDetailQuery(identifier: string, stepName: string) {
 }
 
 export function useInteractionsQuery() {
-  return useListOpenInteractions<InteractionRequest[]>({
-    query: {
-      refetchInterval: 3000,
-      select: (resp) => resp.data as InteractionRequest[],
+  return useQuery({
+    queryKey: LIST_OPEN_INTERACTIONS_KEY,
+    refetchInterval: 3000,
+    queryFn: async (): Promise<InteractionRequest[]> => {
+      const resp = await listOpenInteractions();
+      return resp.data as InteractionRequest[];
     },
   });
 }
 
 export function useInteractionDetailQuery(id: string) {
-  return useGetInteractionById<InteractionDetail>(id, {
-    query: {
-      enabled: id.length > 0,
-      select: (resp) => resp.data as InteractionDetail,
+  return useQuery({
+    queryKey: interactionByIdQueryKey(id),
+    enabled: id.length > 0,
+    queryFn: async (): Promise<InteractionDetail> => {
+      const resp = await getInteractionById(id);
+      return resp.data as InteractionDetail;
     },
   });
 }
 
 export function useConversationQuery(identifier: string, cursor?: string) {
-  return useGetConversation<ConversationResponse>(identifier, {
+  const params: GetConversationParams = {
     cursor: cursor ? Number(cursor) : undefined,
     limit: 50,
-  }, {
-    query: {
-      enabled: identifier.length > 0,
-      select: (resp) => resp.data as ConversationResponse,
+  };
+
+  return useQuery({
+    queryKey: ["getConversation", identifier, cursor],
+    enabled: identifier.length > 0,
+    queryFn: async (): Promise<ConversationResponse> => {
+      const resp = await getConversation(identifier, params);
+      return resp.data as ConversationResponse;
     },
   });
 }
 
 export function useHistoryQuery(params: GetHistoryParams) {
-  return useGetHistory<HistoryResponse>(params, {
-    query: {
-      select: (resp) => resp.data as HistoryResponse,
+  return useQuery({
+    queryKey: ["getHistory", params],
+    queryFn: async (): Promise<HistoryResponse> => {
+      const resp = await getHistory(params);
+      return resp.data as HistoryResponse;
     },
   });
 }
 
 export function useConfigStateQuery() {
-  return useGetConfig<ConfigStateResponse>({
-    query: {
-      staleTime: 60_000,
-      select: (resp) => resp.data as ConfigStateResponse,
+  return useQuery({
+    queryKey: CONFIG_QUERY_KEY,
+    staleTime: 60_000,
+    queryFn: async (): Promise<ConfigStateResponse> => {
+      const resp = await getConfig();
+      return resp.data as ConfigStateResponse;
     },
   });
 }
 
+export function useSetupDefaultsQuery() {
+  return useQuery({
+    queryKey: ["getSetupDefaults"],
+    queryFn: () => getSetupDefaults(),
+  });
+}
+
 export function useValidateYamlDraftMutation() {
-  return useValidateYaml();
+  return useMutation({
+    mutationFn: (params: { data: ValidateYamlRequest }) => validateYaml(params.data),
+  });
 }
 
 export function useSaveYamlDraftMutation() {
   const queryClient = useQueryClient();
-  return useSaveYaml({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
-      },
+  return useMutation({
+    mutationFn: (params: { data: SaveYamlRequest }) => saveYaml(params.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONFIG_QUERY_KEY });
     },
   });
 }
 
 export function useValidateSetupMutation() {
-  return useValidateSetup();
+  return useMutation({
+    mutationFn: (params: { data: ValidateSetupRequest }) => validateSetup(params.data),
+  });
 }
 
 export function useSaveSetupMutation() {
   const queryClient = useQueryClient();
-  return useSaveSetup({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
-      },
+  return useMutation({
+    mutationFn: (params: { data: SaveSetupRequest }) => saveSetup(params.data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONFIG_QUERY_KEY });
     },
   });
 }
 
 export function useRefreshMutation() {
   const queryClient = useQueryClient();
-  return usePostRefresh({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-      },
+  return useMutation({
+    mutationFn: () => postRefresh(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
     },
   });
 }
 
 export function useStopMutation() {
   const queryClient = useQueryClient();
-  return usePostStop({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-      },
+  return useMutation({
+    mutationFn: (params: { identifier: string }) => postStop(params.identifier),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
     },
   });
 }
 
 export function useRetryMutation() {
   const queryClient = useQueryClient();
-  return usePostRetry({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-      },
+  return useMutation({
+    mutationFn: (params: { identifier: string }) => postRetry(params.identifier),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
     },
   });
 }
 
 export function useRespondToInteractionMutation(identifier?: string) {
   const queryClient = useQueryClient();
-  return useRespondToInteraction({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-        queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
-        if (identifier) {
-          queryClient.invalidateQueries({
-            queryKey: getGetIssueDetailQueryKey(identifier),
-          });
-        }
-      },
+  return useMutation({
+    mutationFn: (params: { id: string } & InteractionResponseBody) => respondToInteraction(params.id, params),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
+      if (identifier) {
+        queryClient.invalidateQueries({
+          queryKey: issueDetailQueryKey(identifier),
+        });
+      }
     },
   });
 }
 
 export function useCancelInteractionMutation(identifier?: string) {
   const queryClient = useQueryClient();
-  return useCancelInteraction({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-        queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
-        if (identifier) {
-          queryClient.invalidateQueries({
-            queryKey: getGetIssueDetailQueryKey(identifier),
-          });
-        }
-      },
+  return useMutation({
+    mutationFn: (params: { id: string }) => cancelInteraction(params.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
+      if (identifier) {
+        queryClient.invalidateQueries({
+          queryKey: issueDetailQueryKey(identifier),
+        });
+      }
     },
   });
 }
 
 export function useResumeIssueMutation(identifier?: string) {
   const queryClient = useQueryClient();
-  return usePostResumeIssue({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-        queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
-        if (identifier) {
-          queryClient.invalidateQueries({
-            queryKey: getGetIssueDetailQueryKey(identifier),
-          });
-        }
-      },
+  return useMutation({
+    mutationFn: (params: { identifier: string }) => postResumeIssue(params.identifier),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
+      if (identifier) {
+        queryClient.invalidateQueries({
+          queryKey: issueDetailQueryKey(identifier),
+        });
+      }
     },
   });
 }
@@ -338,16 +370,16 @@ export function useIssueInputMutation(identifier?: string, interactionId?: strin
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: getGetStateQueryKey() });
-      queryClient.invalidateQueries({ queryKey: getListOpenInteractionsQueryKey() });
+      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
+      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
       if (identifier) {
         queryClient.invalidateQueries({
-          queryKey: getGetIssueDetailQueryKey(identifier),
+          queryKey: issueDetailQueryKey(identifier),
         });
       }
       if (interactionId) {
         queryClient.invalidateQueries({
-          queryKey: getGetInteractionByIdQueryKey(interactionId),
+          queryKey: interactionByIdQueryKey(interactionId),
         });
       }
     },
@@ -355,43 +387,40 @@ export function useIssueInputMutation(identifier?: string, interactionId?: strin
 }
 
 export function useValidateGuidedFormMutation() {
-  const generatedMutation = useValidateGuidedForm();
-  
-  return {
-    mutateAsync: async (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
-      return generatedMutation.mutateAsync({
-        data: {
-          base_raw_yaml: params.baseRawYaml,
-          form: params.form,
-        },
-      });
+  return useMutation({
+    mutationFn: (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
+      const request: ValidateGuidedFormRequest = {
+        base_raw_yaml: params.baseRawYaml,
+        form: params.form,
+      };
+      return validateGuidedForm(request);
     },
-    isPending: generatedMutation.isPending,
-  };
+  });
 }
 
 export function useSaveGuidedFormMutation() {
   const queryClient = useQueryClient();
-  const generatedMutation = useSaveGuidedForm({
-    mutation: {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: getGetConfigQueryKey() });
-      },
+  return useMutation({
+    mutationFn: (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
+      const request: SaveGuidedFormRequest = {
+        base_raw_yaml: params.baseRawYaml,
+        form: params.form,
+      };
+      return saveGuidedForm(request);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: CONFIG_QUERY_KEY });
     },
   });
-  
-  return {
-    mutateAsync: async (params: { baseRawYaml: string; form: GuidedConfigForm }) => {
-      return generatedMutation.mutateAsync({
-        data: {
-          base_raw_yaml: params.baseRawYaml,
-          form: params.form,
-        },
-      });
-    },
-    isPending: generatedMutation.isPending,
-  };
 }
 
-// Re-export filesystem hook for convenience
-export { useListDirectory };
+export function useListDirectoryQuery(params: ListDirectoryParams) {
+  return useQuery({
+    queryKey: ["listDirectory", params.path],
+    enabled: !!params.path,
+    queryFn: async () => {
+      const resp = await listDirectory(params);
+      return resp.data as unknown as FsEntry[];
+    },
+  });
+}
