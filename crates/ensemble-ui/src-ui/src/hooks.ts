@@ -46,7 +46,7 @@ import type {
   SaveGuidedFormRequest,
   InteractionResponseBody,
   ListDirectoryParams,
-  FsEntry,
+  ListResponse,
 } from "./generated/models";
 import { customFetch } from "./fetch-client";
 
@@ -420,7 +420,7 @@ export function useListDirectoryQuery(params: ListDirectoryParams) {
     enabled: !!params.path,
     queryFn: async () => {
       const resp = await listDirectory(params);
-      return resp.data as unknown as FsEntry[];
+      return (resp.data as ListResponse).entries;
     },
   });
 }
