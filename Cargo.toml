@@ -35,7 +35,7 @@ inquire = "0.7"
 utoipa = { version = "5.3", features = ["axum_extras", "chrono"] }
 rust-embed = { version = "8", features = ["axum"] }
 dirs = "6"
-dotenvy = "0.15"
+dotenvy = "0.15.7"
 shellexpand = "3"
 mime_guess = "2"
 opener = "0.7"
