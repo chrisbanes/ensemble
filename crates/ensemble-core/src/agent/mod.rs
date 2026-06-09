@@ -6,6 +6,9 @@ pub mod events;
 pub mod protocol;
 pub mod runtime;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -603,11 +606,11 @@ impl AcpAgentRunner {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::{Mutex, OnceLock};
 
     use super::*;
     use crate::agent::events::AgentEvent;
+    use crate::agent::test_support::write_mock_acpx_script;
     use crate::config::ensemble::parse_config;
     use crate::interaction::{InteractionKind, InteractionResponse};
     use tokio_util::sync::CancellationToken;
@@ -766,19 +769,6 @@ on_failure: Todo
         )
     }
 
-    fn write_mock_acpx_script(dir: &tempfile::TempDir, script_content: &str) -> String {
-        let script_path = dir.path().join("mock_acpx.sh");
-        let mut file = std::fs::File::create(&script_path).unwrap();
-        let script_content = script_content.replacen("#!/usr/bin/env bash", "#!/bin/bash", 1);
-        file.write_all(script_content.as_bytes()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        script_path.display().to_string()
-    }
-
     fn collect_event_names(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<String> {
         let mut names = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -867,7 +857,7 @@ on_failure: Todo
 
         let workspace = tempfile::TempDir::new().unwrap();
         let script = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             r#"#!/usr/bin/env bash
 case "$*" in
   *"sessions ensure"*)
@@ -931,7 +921,7 @@ exit 1
 
         let workspace = tempfile::TempDir::new().unwrap();
         let script = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             r#"#!/bin/bash
 case "$*" in
   *"prompt --session"*)
