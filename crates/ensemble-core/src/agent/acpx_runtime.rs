@@ -348,7 +348,6 @@ async fn close_session(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::Arc;
 
     use tokio_util::sync::CancellationToken;
@@ -356,6 +355,7 @@ mod tests {
     use super::*;
     use crate::agent::acpx_cli::AcpxCli;
     use crate::agent::events::RuntimeStream;
+    use crate::agent::test_support::write_mock_acpx_script;
     use crate::config::ensemble::parse_config;
     use crate::tracker::model::test_helpers::test_issue;
 
@@ -382,24 +382,11 @@ on_failure: Failed
         )
     }
 
-    fn write_mock_acpx_script(dir: &tempfile::TempDir, script_content: &str) -> String {
-        let script_path = dir.path().join("mock_acpx.sh");
-        let mut file = std::fs::File::create(&script_path).unwrap();
-        let script_content = script_content.replacen("#!/usr/bin/env bash", "#!/bin/bash", 1);
-        file.write_all(script_content.as_bytes()).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        script_path.display().to_string()
-    }
-
     #[tokio::test]
     async fn acpx_runtime_emits_runtime_events_and_success() {
         let workspace = tempfile::TempDir::new().unwrap();
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             r#"#!/usr/bin/env bash
 case "$*" in
   *" sessions ensure --name "*)
@@ -464,7 +451,7 @@ exit 1
     async fn acpx_runtime_tolerates_close_session_failure() {
         let workspace = tempfile::TempDir::new().unwrap();
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             r#"#!/usr/bin/env bash
 case "$*" in
   *" sessions ensure --name "*)
@@ -515,7 +502,7 @@ exit 1
         let workspace = tempfile::TempDir::new().unwrap();
         let args_path = workspace.path().join("args.txt");
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             &format!(
                 r#"#!/usr/bin/env bash
 printf '%s\n' "$*" >> "{}"
@@ -568,7 +555,7 @@ exit 1
         let workspace = tempfile::TempDir::new().unwrap();
         let args_path = workspace.path().join("args.txt");
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             &format!(
                 r#"#!/usr/bin/env bash
 printf '%s\n' "$*" >> "{}"
@@ -617,7 +604,7 @@ exit 1
     async fn acpx_runtime_cancels_prompt_when_token_is_cancelled() {
         let workspace = tempfile::TempDir::new().unwrap();
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             &format!(
                 r#"#!/usr/bin/env bash
 case "$*" in
@@ -727,7 +714,7 @@ exit 1
         let workspace = tempfile::TempDir::new().unwrap();
         let args_path = workspace.path().join("args.txt");
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             &format!(
                 r#"#!/usr/bin/env bash
 printf '%s\n' "$*" >> "{}"
@@ -796,7 +783,7 @@ exit 1
         let workspace = tempfile::TempDir::new().unwrap();
         let args_path = workspace.path().join("args.txt");
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             &format!(
                 r#"#!/usr/bin/env bash
 printf '%s\n' "$*" >> "{}"
@@ -853,7 +840,7 @@ exit 1
         let workspace = tempfile::TempDir::new().unwrap();
         let args_path = workspace.path().join("args.txt");
         let script_path = write_mock_acpx_script(
-            &workspace,
+            workspace.path(),
             &format!(
                 r#"#!/usr/bin/env bash
 printf '%s\n' "$*" >> "{}"

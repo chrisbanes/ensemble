@@ -368,24 +368,13 @@ fn map_stop_reason(stop_reason: StopReason, usage: Option<TokenUsage>) -> AgentE
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use crate::agent::events::{AgentEvent, TokenUsage};
+    use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
     use super::AcpxCli;
-
-    fn write_mock_acpx_script(dir: &Path, script_content: &str) -> String {
-        let script_path = dir.join("mock_acpx.sh");
-        std::fs::write(&script_path, script_content).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        script_path.display().to_string()
-    }
 
     #[tokio::test]
     async fn ensure_session_uses_sessions_ensure_command() {
