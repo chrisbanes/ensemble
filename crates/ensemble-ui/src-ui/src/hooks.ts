@@ -420,7 +420,7 @@ export function useListDirectoryQuery(params: ListDirectoryParams) {
     enabled: !!params.path,
     queryFn: async () => {
       const resp = await listDirectory(params);
-      return resp.data as unknown as FsEntry[];
+      return resp.data.entries;
     },
   });
 }
