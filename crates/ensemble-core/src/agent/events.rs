@@ -61,8 +61,10 @@ impl StopReason {
 /// Internal event types emitted by the ACP client to the orchestrator.
 #[derive(Debug, Clone, Serialize)]
 pub enum AgentEvent {
-    /// Runtime session established. `agent_pid` is retained for direct ACP workers so the
-    /// orchestrator/API can still expose process metadata and support stop/cancel controls.
+    /// Runtime session established. `agent_pid` is `None` for both runtimes.
+    /// The direct path uses `AcpAgent` from the SDK (which owns the child), and
+    /// the `acpx` runtime manages its own process lifecycle. Process control
+    /// (kill on cancel, kill on shutdown) is handled inside each runtime.
     SessionStarted {
         session_id: String,
         agent_pid: Option<String>,
