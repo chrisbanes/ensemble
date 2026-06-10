@@ -282,11 +282,18 @@ Agent judgment returned after a pipeline step completes:
   - `"reject"` — step failed quality/review check.
   - null/absent — treated as `"approve"` (backwards compatible for non-review agents).
 - `summary` (string or null) — human-readable explanation of the verdict.
+- `output` (JSON value or null) — arbitrary structured data produced by a step for downstream
+  prompt templates.
 
 Verdict sources (checked in priority order):
 
 1. ACP protocol: `verdict` field in the final `session/update` status event.
 2. File-based fallback: `.ensemble/verdict.json` in the workspace directory.
+
+Prompt templates for downstream steps receive:
+
+- `steps` — map of completed step name to `{ step, verdict, summary, output }`.
+- `dependency_outputs` — ordered list of direct dependency outputs for the step being dispatched.
 
 #### 4.1.8 Run Attempt
 
@@ -772,6 +779,12 @@ Template input variables:
 - `attempt` (integer or null)
   - `null`/absent on first attempt.
   - Integer on retry or continuation run.
+- `steps` (map of string to object, optional)
+  - Present when upstream steps have completed. Each entry contains `step`, `verdict`, `summary`,
+    and `output` fields.
+- `dependency_outputs` (list of objects, optional)
+  - Ordered list of outputs from the step's direct dependencies. Each entry has the same shape as
+    `steps` entries: `{ step, verdict, summary, output }`.
 
 Fallback prompt behavior:
 

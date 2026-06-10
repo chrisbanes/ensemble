@@ -24,6 +24,13 @@ pub fn render_prompt_with_interaction_response(
     render_prompt_with_context(template_str, issue, attempt, interaction_response, None)
 }
 
+/// Render a Liquid prompt template with full context: issue, attempt, interaction response,
+/// and step outputs.
+///
+/// This is the core rendering entry point used by [`render_prompt`] and
+/// [`render_prompt_with_interaction_response`]. When `step_outputs` is provided, each key from the
+/// serialized map is inserted directly into the Liquid globals so templates can reference fields
+/// like `steps["review-a"].summary` or `dependency_outputs[0].verdict`.
 pub fn render_prompt_with_context(
     template_str: &str,
     issue: &Issue,
@@ -108,6 +115,10 @@ pub fn render_prompt_with_context(
             for (key, value) in object {
                 globals.insert(key, value);
             }
+        } else {
+            return Err(ConfigError::TemplateRenderError {
+                reason: "step_outputs did not serialize to a Liquid object".to_string(),
+            });
         }
     }
 

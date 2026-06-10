@@ -69,9 +69,7 @@ pub async fn read_verdict_file(workspace: &Path) -> Result<Option<Verdict>, std:
         .map(|value| value.map(|output| output.verdict))
 }
 
-pub async fn read_step_output_file(
-    workspace: &Path,
-) -> Result<Option<StepOutput>, std::io::Error> {
+pub async fn read_step_output_file(workspace: &Path) -> Result<Option<StepOutput>, std::io::Error> {
     let path = workspace.join(".ensemble").join("verdict.json");
     match tokio::fs::read_to_string(&path).await {
         Ok(contents) => {
@@ -124,12 +122,13 @@ pub async fn resolve_verdict_with_source(
         Ok(None) => {} // file doesn't exist — fall through to default
         Err(e) => {
             // Malformed verdict file — treat as rejection, not silent approval.
+            let msg = format!("failed to parse .ensemble/verdict.json: {e}");
             let reject = Verdict::Reject {
-                summary: format!("failed to parse .ensemble/verdict.json: {e}"),
+                summary: msg.clone(),
             };
             let output = StepOutput {
                 verdict: reject.clone(),
-                summary: Some(format!("failed to parse .ensemble/verdict.json: {e}")),
+                summary: Some(msg),
                 output: None,
             };
             return ResolvedVerdict {

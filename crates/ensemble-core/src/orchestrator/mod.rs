@@ -43,7 +43,9 @@ use crate::observability::events_contract::{
     TRACKER_TRANSITION_SUCCEEDED,
 };
 use crate::pipeline::dag::build_dag;
-use crate::pipeline::engine::{DispatchRequest, PipelineAction, PipelineRun, StepOutputTemplateContext, StepState};
+use crate::pipeline::engine::{
+    DispatchRequest, PipelineAction, PipelineRun, StepOutputTemplateContext, StepState,
+};
 use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::Issue;
@@ -1016,7 +1018,11 @@ impl Orchestrator {
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Collect output contexts while state lock is still held
-                            let dispatch_contexts: Vec<(DispatchRequest, StepOutputTemplateContext)> = {                                let run = state.get_pipeline_run(issue_id);
+                            let dispatch_contexts: Vec<(
+                                DispatchRequest,
+                                StepOutputTemplateContext,
+                            )> = {
+                                let run = state.get_pipeline_run(issue_id);
                                 requests
                                     .into_iter()
                                     .map(|req| {
@@ -3151,9 +3157,8 @@ impl Orchestrator {
                             requests
                                 .iter()
                                 .map(|req| {
-                                    let step_outputs = run
-                                        .output_context_for(&req.step_name)
-                                        .unwrap_or_default();
+                                    let step_outputs =
+                                        run.output_context_for(&req.step_name).unwrap_or_default();
                                     (req.clone(), step_outputs)
                                 })
                                 .collect()
