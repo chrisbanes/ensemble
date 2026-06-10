@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use agent_client_protocol::schema::{
 };
 use agent_client_protocol::{AcpAgent, Client, Dispatch, SessionMessage};
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use crate::config::ensemble::{DiscoveredCapabilities, ModeDefinition, ModelDefinition};
@@ -19,21 +20,30 @@ use crate::error::AgentError;
 use super::events::{AgentEvent, RuntimeStream, TokenUsage, WorkerEvent};
 use super::ResolvedCommand;
 
-/// Build an `AcpAgent` from a structured `ResolvedCommand`, eliminating shell
-/// wrapping entirely. The SDK's `McpServerStdio` constructs an
-/// `async_process::Command::new().args()` under the hood — no bash, no
-/// escaping, no PID-extraction hack. The SDK owns the child process for
-/// its full lifetime (the `AcpAgent` value's `ChildGuard` reaps and kills
-/// the child on drop).
-fn build_acp_agent(cmd: &ResolvedCommand) -> AcpAgent {
+/// Build an `AcpAgent` from a structured `ResolvedCommand`. The SDK's
+/// `McpServerStdio` spawns the child via `async_process::Command`.
+/// Because `McpServerStdio` has no working-directory field, we wrap the
+/// command with `sh -c 'cd "$1" && shift 2 && exec "$@"'` and pass the
+/// workspace path as `$1` — the child process starts with the correct CWD
+/// while all agent args arrive as separate `argv` entries (no shell escaping
+/// needed for either the path or the args).
+fn build_acp_agent(cmd: &ResolvedCommand, workspace_path: &Path) -> AcpAgent {
     let name = cmd
         .program
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "agent".to_string());
+    let mut args = vec![
+        "-c".to_string(),
+        r#"cd "$1" && shift && exec "$@""#.to_string(),
+        name.clone(),
+        workspace_path.to_string_lossy().to_string(),
+        cmd.program.to_string_lossy().to_string(),
+    ];
+    args.extend(cmd.args.iter().cloned());
     AcpAgent::new(McpServer::Stdio(
-        McpServerStdio::new(name, cmd.program.clone())
-            .args(cmd.args.clone())
+        McpServerStdio::new(name, PathBuf::from("sh"))
+            .args(args)
             .env(
                 cmd.env
                     .iter()
@@ -51,6 +61,7 @@ pub struct AcpSessionConfig {
     pub permission_request_policy: String,
     pub read_timeout_ms: u64,
     pub turn_timeout_ms: u64,
+    pub cancel_token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -301,7 +312,7 @@ pub fn discover_capabilities_from_options(
 pub async fn discover_capabilities(
     config: AcpCapabilityDiscoveryConfig,
 ) -> Result<DiscoveredCapabilities, AgentError> {
-    let agent = build_acp_agent(&config.command);
+    let agent = build_acp_agent(&config.command, &config.workspace_path);
     let read_timeout_ms = config.read_timeout_ms;
     let workspace_path = config.workspace_path.clone();
     let discovered = Arc::new(Mutex::new(DiscoveredCapabilities::default()));
@@ -387,7 +398,7 @@ pub async fn run_acp_session(
     ),
     AgentError,
 > {
-    let agent = build_acp_agent(&config.command);
+    let agent = build_acp_agent(&config.command, &config.workspace_path);
     let permission_policy = config.permission_request_policy.clone();
     let issue_id_owned = issue_id.to_string();
     let step_name_owned = step_name.to_string();
@@ -403,6 +414,7 @@ pub async fn run_acp_session(
     let read_timeout_ms = config.read_timeout_ms;
     let turn_timeout_ms = config.turn_timeout_ms;
     let workspace_path = config.workspace_path.clone();
+    let cancel_token = config.cancel_token.clone();
 
     let turn_results_inner = turn_results.clone();
     let final_verdict_inner = final_verdict.clone();
@@ -577,6 +589,19 @@ pub async fn run_acp_session(
             }
 
             for (i, prompt) in prompts.iter().enumerate() {
+                if cancel_token.is_cancelled() {
+                    emit_event(
+                        event_tx,
+                        issue_id,
+                        step_name,
+                        AgentEvent::Cancelled { reason: None },
+                    )
+                    .await;
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some("cancelled by user".to_string());
+                    return Ok(());
+                }
+
                 emit_event(event_tx, issue_id, step_name, AgentEvent::PromptStarted).await;
 
                 if let Err(e) = session.send_prompt(prompt) {
@@ -629,57 +654,74 @@ pub async fn run_acp_session(
                     }
                 };
 
-                let turn_result =
-                    tokio::time::timeout(Duration::from_millis(turn_timeout_ms), turn_future).await;
-
-                let turn_result = match turn_result {
-                    Ok(Ok((stop_reason, usage, verdict))) => match stop_reason {
-                        super::events::StopReason::EndTurn
-                        | super::events::StopReason::MaxTokens => {
-                            emit_event(
-                                event_tx,
-                                issue_id,
-                                step_name,
-                                AgentEvent::RunCompleted {
-                                    usage: usage.clone(),
-                                },
-                            )
-                            .await;
-                            TurnResult::Completed {
-                                usage,
-                                runtime_verdict: verdict,
-                            }
-                        }
-                        _ => {
-                            let reason = format!("stop reason: {:?}", stop_reason);
-                            emit_event(
-                                event_tx,
-                                issue_id,
-                                step_name,
-                                AgentEvent::RunFailed {
-                                    reason: reason.clone(),
-                                    usage: usage.clone(),
-                                },
-                            )
-                            .await;
-                            TurnResult::Failed {
-                                reason,
-                                usage,
-                                runtime_verdict: verdict,
-                            }
-                        }
-                    },
-                    Ok(Err(e)) => {
+                let cancel = cancel_token.clone();
+                let turn_result: TurnResult = tokio::select! {
+                    _ = cancel.cancelled() => {
+                        emit_event(
+                            event_tx,
+                            issue_id,
+                            step_name,
+                            AgentEvent::Cancelled { reason: None },
+                        )
+                        .await;
                         let mut err = session_error_inner.lock().await;
-                        *err = Some(e);
+                        *err = Some("cancelled by user".to_string());
                         return Ok(());
                     }
-                    Err(_) => {
-                        timed_out = true;
-                        TurnResult::Failed {
-                            reason: format!("turn timeout after {turn_timeout_ms}ms"),
-                            usage: None,
-                            runtime_verdict: None,
+                    result = tokio::time::timeout(
+                        Duration::from_millis(turn_timeout_ms),
+                        turn_future,
+                    ) => {
+                        match result {
+                            Ok(Ok((stop_reason, usage, verdict))) => match stop_reason {
+                                super::events::StopReason::EndTurn
+                                | super::events::StopReason::MaxTokens => {
+                                    emit_event(
+                                        event_tx,
+                                        issue_id,
+                                        step_name,
+                                        AgentEvent::RunCompleted {
+                                            usage: usage.clone(),
+                                        },
+                                    )
+                                    .await;
+                                    TurnResult::Completed {
+                                        usage,
+                                        runtime_verdict: verdict,
+                                    }
+                                }
+                                _ => {
+                                    let reason = format!("stop reason: {:?}", stop_reason);
+                                    emit_event(
+                                        event_tx,
+                                        issue_id,
+                                        step_name,
+                                        AgentEvent::RunFailed {
+                                            reason: reason.clone(),
+                                            usage: usage.clone(),
+                                        },
+                                    )
+                                    .await;
+                                    TurnResult::Failed {
+                                        reason,
+                                        usage,
+                                        runtime_verdict: verdict,
+                                    }
+                                }
+                            },
+                            Ok(Err(e)) => {
+                                let mut err = session_error_inner.lock().await;
+                                *err = Some(e);
+                                return Ok(());
+                            }
+                            Err(_) => {
+                                timed_out = true;
+                                TurnResult::Failed {
+                                    reason: format!("turn timeout after {turn_timeout_ms}ms"),
+                                    usage: None,
+                                    runtime_verdict: None,
+                                }
+                            }
                         }
                     }
                 };
@@ -757,6 +799,8 @@ pub async fn run_acp_session(
             });
         } else if error_msg.contains("initialize") || error_msg.contains("session") {
             return Err(AgentError::SessionStartupFailed { reason: error_msg });
+        } else if error_msg.contains("cancelled") {
+            return Err(AgentError::TurnCancelled);
         } else {
             return Err(AgentError::IoError { reason: error_msg });
         }
@@ -848,6 +892,7 @@ mod tests {
             permission_request_policy: "auto_approve_all".to_string(),
             read_timeout_ms: 50,
             turn_timeout_ms: 10_000,
+            cancel_token: CancellationToken::new(),
         };
         let (tx, _rx) = mpsc::channel(10);
 

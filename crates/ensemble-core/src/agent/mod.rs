@@ -695,6 +695,7 @@ impl AcpAgentRunner {
             permission_request_policy: config.agent.permission_request_policy.clone(),
             read_timeout_ms: config.agent.read_timeout_ms,
             turn_timeout_ms: config.agent.turn_timeout_ms,
+            cancel_token: request.cancel_token.clone(),
         };
 
         let max_turns = config.agent.max_turns.max(1);
