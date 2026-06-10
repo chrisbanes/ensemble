@@ -39,9 +39,9 @@ use acpx_runtime::AcpxRuntime;
 ///
 /// Built by [`resolve_agent_command`] / [`resolve_acpx_acp_command`] from a
 /// combination of `config.yaml` settings and per-agent overrides. The
-/// `acp_client` module spawns the child from this struct directly via
-/// `tokio::process::Command`, then hands the stdio streams to the
-/// `agent-client-protocol` SDK's protocol plumbing. No shell, no escaping.
+/// `acp_client` module hands these fields to the `agent-client-protocol`
+/// SDK's `McpServerStdio`, which spawns the child, owns its lifecycle, and
+/// pipes stdio into the protocol plumbing. No shell, no escaping.
 #[derive(Debug, Clone)]
 pub struct ResolvedCommand {
     pub program: PathBuf,
@@ -99,7 +99,8 @@ pub struct AgentRunRequest<'a> {
     /// Token for cooperative cancellation of the agent run.
     /// Used by `AcpxRuntime` to abort the acpx prompt via `tokio::select!`.
     /// The direct ACP path (`AcpAgentRunner::run_direct_step`) ignores this
-    /// token — cancellation there relies on SIGTERM sent to `agent_pid`.
+    /// token — the `agent-client-protocol` SDK owns the child process for the
+    /// direct path, so cancellation is handled by dropping the `AcpAgent`.
     pub cancel_token: CancellationToken,
 }
 

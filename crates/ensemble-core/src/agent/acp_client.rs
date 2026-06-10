@@ -20,9 +20,11 @@ use super::events::{AgentEvent, RuntimeStream, TokenUsage, WorkerEvent};
 use super::ResolvedCommand;
 
 /// Build an `AcpAgent` from a structured `ResolvedCommand`, eliminating shell
-/// wrapping entirely. The agent binary is spawned via
-/// `McpServerStdio` → `async_process::Command::new().args()` — no bash, no
-/// escaping, no PID-extraction hack.
+/// wrapping entirely. The SDK's `McpServerStdio` constructs an
+/// `async_process::Command::new().args()` under the hood — no bash, no
+/// escaping, no PID-extraction hack. The SDK owns the child process for
+/// its full lifetime (the `AcpAgent` value's `ChildGuard` reaps and kills
+/// the child on drop).
 fn build_acp_agent(cmd: &ResolvedCommand) -> AcpAgent {
     let name = cmd
         .program
