@@ -770,7 +770,6 @@ pub async fn run_acp_session(
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
     use std::time::Duration;
 
     use agent_client_protocol::schema::{
