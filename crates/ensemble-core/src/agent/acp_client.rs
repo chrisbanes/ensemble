@@ -1,13 +1,13 @@
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PermissionOption, PermissionOptionKind,
-    ProtocolVersion, RequestPermissionRequest, RequestPermissionResponse, SessionConfigKind,
-    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason as SdkStopReason,
+    ContentBlock, EnvVariable, InitializeRequest, McpServer, McpServerStdio, NewSessionRequest,
+    PermissionOption, PermissionOptionKind, ProtocolVersion, RequestPermissionRequest,
+    RequestPermissionResponse, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    StopReason as SdkStopReason,
 };
 use agent_client_protocol::{AcpAgent, Client, Dispatch, SessionMessage};
 use tokio::sync::{mpsc, Mutex};
@@ -17,10 +17,33 @@ use crate::config::ensemble::{DiscoveredCapabilities, ModeDefinition, ModelDefin
 use crate::error::AgentError;
 
 use super::events::{AgentEvent, RuntimeStream, TokenUsage, WorkerEvent};
+use super::ResolvedCommand;
+
+/// Build an `AcpAgent` from a structured `ResolvedCommand`, eliminating shell
+/// wrapping entirely. The agent binary is spawned via
+/// `McpServerStdio` → `async_process::Command::new().args()` — no bash, no
+/// escaping, no PID-extraction hack.
+fn build_acp_agent(cmd: &ResolvedCommand) -> AcpAgent {
+    let name = cmd
+        .program
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "agent".to_string());
+    AcpAgent::new(McpServer::Stdio(
+        McpServerStdio::new(name, cmd.program.clone())
+            .args(cmd.args.clone())
+            .env(
+                cmd.env
+                    .iter()
+                    .map(|(k, v)| EnvVariable::new(k.clone(), v.clone()))
+                    .collect(),
+            ),
+    ))
+}
 
 #[derive(Debug)]
 pub struct AcpSessionConfig {
-    pub command: String,
+    pub command: ResolvedCommand,
     pub workspace_path: PathBuf,
     pub session_mode: Option<String>,
     pub permission_request_policy: String,
@@ -30,7 +53,7 @@ pub struct AcpSessionConfig {
 
 #[derive(Debug)]
 pub struct AcpCapabilityDiscoveryConfig {
-    pub command: String,
+    pub command: ResolvedCommand,
     pub workspace_path: PathBuf,
     pub read_timeout_ms: u64,
 }
@@ -101,26 +124,6 @@ fn select_permission_option<'a>(
                 .iter()
                 .find(|option| matches!(option.kind, PermissionOptionKind::AllowAlways))
         })
-}
-
-fn shell_escape(arg: &str) -> String {
-    let mut escaped = String::with_capacity(arg.len() + 2);
-    escaped.push('\'');
-    for ch in arg.chars() {
-        if ch == '\'' {
-            escaped.push_str("'\\''");
-        } else {
-            escaped.push(ch);
-        }
-    }
-    escaped.push('\'');
-    escaped
-}
-
-fn sdk_transport_command(command: &str, workspace_path: &Path) -> String {
-    let cwd = workspace_path.to_string_lossy();
-    let script = format!("echo $$ >&2; cd {}; exec {}", shell_escape(&cwd), command);
-    format!("bash -lc {}", shell_escape(&script))
 }
 
 fn token_usage_from_value(value: serde_json::Value) -> Option<TokenUsage> {
@@ -296,10 +299,7 @@ pub fn discover_capabilities_from_options(
 pub async fn discover_capabilities(
     config: AcpCapabilityDiscoveryConfig,
 ) -> Result<DiscoveredCapabilities, AgentError> {
-    let transport_command = sdk_transport_command(&config.command, &config.workspace_path);
-    let agent = AcpAgent::from_str(&transport_command).map_err(|e| AgentError::AgentNotFound {
-        command: format!("{}: {}", config.command, e),
-    })?;
+    let agent = build_acp_agent(&config.command);
     let read_timeout_ms = config.read_timeout_ms;
     let workspace_path = config.workspace_path.clone();
     let discovered = Arc::new(Mutex::new(DiscoveredCapabilities::default()));
@@ -385,24 +385,7 @@ pub async fn run_acp_session(
     ),
     AgentError,
 > {
-    let transport_command = sdk_transport_command(&config.command, &config.workspace_path);
-    let agent_pid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let agent_pid_for_debug = agent_pid.clone();
-    let agent = AcpAgent::from_str(&transport_command).map_err(|e| AgentError::AgentNotFound {
-        command: format!("{}: {}", config.command, e),
-    })?;
-    let agent = agent.with_debug(move |line, direction| {
-        if matches!(direction, agent_client_protocol::LineDirection::Stderr)
-            && line.chars().all(|c| c.is_ascii_digit())
-        {
-            if let Ok(mut guard) = agent_pid_for_debug.try_lock() {
-                if guard.is_none() {
-                    *guard = Some(line.to_string());
-                }
-            }
-        }
-    });
-
+    let agent = build_acp_agent(&config.command);
     let permission_policy = config.permission_request_policy.clone();
     let issue_id_owned = issue_id.to_string();
     let step_name_owned = step_name.to_string();
@@ -538,7 +521,7 @@ pub async fn run_acp_session(
                 step_name,
                 AgentEvent::SessionStarted {
                     session_id: session_id.clone(),
-                    agent_pid: agent_pid.lock().await.clone(),
+                    agent_pid: None,
                 },
             )
             .await;
@@ -797,18 +780,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sdk_transport_command_runs_original_command_from_workspace_and_prints_pid() {
-        let command = "acpx --agent 'builder'";
-        let wrapped = sdk_transport_command(command, Path::new("/tmp/work space"));
-
-        assert!(wrapped.starts_with("bash -lc "));
-        assert!(wrapped.contains("echo $$ >&2"));
-        assert!(wrapped.contains("/tmp/work space"));
-        assert!(wrapped.contains("exec acpx --agent"));
-        assert!(wrapped.contains("builder"));
-    }
-
-    #[test]
     fn select_permission_option_prefers_allow_once_over_first_option() {
         let options = vec![
             PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
@@ -866,7 +837,11 @@ mod tests {
     async fn startup_initialize_uses_configured_read_timeout() {
         let workspace = TempDir::new().unwrap();
         let config = AcpSessionConfig {
-            command: "bash -lc 'while IFS= read -r _line; do sleep 60; done'".to_string(),
+            command: ResolvedCommand {
+                program: PathBuf::from("sleep"),
+                args: vec!["60".to_string()],
+                env: Vec::new(),
+            },
             workspace_path: workspace.path().to_path_buf(),
             session_mode: None,
             permission_request_policy: "auto_approve_all".to_string(),
@@ -995,7 +970,11 @@ mod tests {
     async fn discover_capabilities_times_out_when_agent_does_not_initialize() {
         let workspace = TempDir::new().unwrap();
         let config = AcpCapabilityDiscoveryConfig {
-            command: "bash -lc 'while IFS= read -r _line; do sleep 60; done'".to_string(),
+            command: ResolvedCommand {
+                program: PathBuf::from("sleep"),
+                args: vec!["60".to_string()],
+                env: Vec::new(),
+            },
             workspace_path: workspace.path().to_path_buf(),
             read_timeout_ms: 50,
         };

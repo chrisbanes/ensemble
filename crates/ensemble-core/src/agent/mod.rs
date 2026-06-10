@@ -43,8 +43,7 @@ use acpx_runtime::AcpxRuntime;
 /// `tokio::process::Command`, then hands the stdio streams to the
 /// `agent-client-protocol` SDK's protocol plumbing. No shell, no escaping.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub(crate) struct ResolvedCommand {
+pub struct ResolvedCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -197,16 +196,7 @@ impl AcpAgentRunner {
         if agent_config.acpx_agent.is_none() {
             return Ok(());
         }
-        let resolved = resolve_acpx_acp_command(agent_config)?;
-        // TODO(issue-43/task-8): remove this bridge when AcpSessionConfig.command
-        // and AcpCapabilityDiscoveryConfig.command are changed to ResolvedCommand
-        // (Task 8 of the issue-43 plan). Direct structured spawn eliminates the
-        // need to round-trip through a shell-string.
-        let mut command = format!("{}", resolved.program.display());
-        for arg in &resolved.args {
-            command.push(' ');
-            command.push_str(arg);
-        }
+        let command = resolve_acpx_acp_command(agent_config)?;
 
         let capabilities = discover_capabilities(AcpCapabilityDiscoveryConfig {
             command,
@@ -689,16 +679,7 @@ impl AcpAgentRunner {
     ) -> Result<WorkerResult, AgentError> {
         let config = &request.config;
         let agent_config = config.agents.get(request.agent_name);
-        let resolved = resolve_agent_command(agent_config, &config.agent.command)?;
-        // TODO(issue-43/task-8): remove this bridge when AcpSessionConfig.command
-        // and AcpCapabilityDiscoveryConfig.command are changed to ResolvedCommand
-        // (Task 8 of the issue-43 plan). Direct structured spawn eliminates the
-        // need to round-trip through a shell-string.
-        let mut command = format!("{}", resolved.program.display());
-        for arg in &resolved.args {
-            command.push(' ');
-            command.push_str(arg);
-        }
+        let command = resolve_agent_command(agent_config, &config.agent.command)?;
 
         let session_mode = if config.agent.session_mode.is_empty() {
             None
