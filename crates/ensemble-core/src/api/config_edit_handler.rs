@@ -156,12 +156,20 @@ impl ConfigStateResponse {
             ConfigStateKind::Parsed => "parsed",
         };
 
-        // Extract guided form if we have valid YAML
-        let guided_form = state
-            .raw_yaml
-            .as_ref()
-            .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok())
-            .map(redact_guided_form_secrets);
+        // Prefer the in-memory `active_config` snapshot when available so the
+        // guided form reflects runtime-discovered state (e.g. ACP
+        // `available_models`/`available_modes`) that the user has not yet
+        // written back to YAML. Fall back to the parsed YAML view when no
+        // active snapshot exists.
+        let guided_form = if let Some(ref config) = state.active_config {
+            Some(crate::config::form::guided_form_from_config(config))
+        } else {
+            state
+                .raw_yaml
+                .as_ref()
+                .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok())
+        }
+        .map(redact_guided_form_secrets);
 
         Self {
             state: state_str.to_string(),
@@ -993,6 +1001,75 @@ on_failure: Failed
         assert_eq!(guided_form.tracker.project_number, Some(9));
         assert_eq!(guided_form.tracker.api_key.as_deref(), Some("[REDACTED]"));
         assert!(response.raw_yaml.unwrap().contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_config_state_response_prefers_active_config_capabilities_over_yaml() {
+        // The YAML has no `available_models`/`available_modes`, but the
+        // in-memory active_config has been mutated by capability discovery.
+        // The guided form response should surface the discovered capabilities
+        // so the UI can show them before the user writes them back to YAML.
+        let config_path = PathBuf::from("/tmp/config.yaml");
+        let mut state = parse_raw_yaml(
+            config_path,
+            r#"
+tracker:
+  kind: todo_file
+  active_states:
+    - Todo
+  terminal_states:
+    - Done
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#
+            .to_string(),
+        );
+        assert!(
+            state.active_config.is_some(),
+            "parse_raw_yaml should populate active_config"
+        );
+
+        // Simulate discovery mutating the in-memory config.
+        {
+            let mut active = state.active_config.as_mut().unwrap();
+            let agent = active.agents.get_mut("builder").unwrap();
+            agent.available_models = vec![crate::config::ensemble::ModelDefinition {
+                id: "gpt-5".to_string(),
+                name: "GPT-5".to_string(),
+                description: Some("flagship".to_string()),
+            }];
+            agent.available_modes = vec![crate::config::ensemble::ModeDefinition {
+                id: "code".to_string(),
+                name: "Code".to_string(),
+                description: None,
+            }];
+        }
+
+        let response = ConfigStateResponse::from_state(&state);
+        let guided_form = response.guided_form.expect("guided form should be built");
+        let builder = guided_form
+            .agents
+            .iter()
+            .find(|a| a.name == "builder")
+            .expect("builder agent present");
+
+        let models = builder
+            .available_models
+            .as_ref()
+            .expect("discovered models should surface in guided form");
+        assert_eq!(models[0].id, "gpt-5");
+        let modes = builder
+            .available_modes
+            .as_ref()
+            .expect("discovered modes should surface in guided form");
+        assert_eq!(modes[0].id, "code");
     }
 
     #[tokio::test]

@@ -136,8 +136,24 @@ pub struct GuidedTransitionForm {
 /// guided form representation. If parsing fails, returns a ConfigError.
 pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigError> {
     let config = crate::config::ensemble::parse_config(raw_yaml)?;
+    Ok(config_to_guided_form(&config))
+}
 
-    Ok(GuidedConfigForm {
+/// Build a `GuidedConfigForm` from a typed `EnsembleConfig` snapshot.
+///
+/// This is used by the API layer so that the in-memory config — which may
+/// include capabilities discovered at runtime (e.g. `available_models`,
+/// `available_modes`) that the user has not yet written to YAML — is
+/// surfaced in the guided form response. Equivalent to `extract_guided_form`
+/// after parsing, but accepts a typed config directly.
+pub fn guided_form_from_config(
+    config: &crate::config::ensemble::EnsembleConfig,
+) -> GuidedConfigForm {
+    config_to_guided_form(config)
+}
+
+fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> GuidedConfigForm {
+    GuidedConfigForm {
         tracker: GuidedTrackerForm {
             kind: config.tracker.kind.clone(),
             path: config
@@ -228,7 +244,7 @@ pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigErr
             on_success: config.on_success.clone(),
             on_failure: config.on_failure.clone(),
         },
-    })
+    }
 }
 
 /// Apply a guided form back to the base YAML, preserving unknown fields.

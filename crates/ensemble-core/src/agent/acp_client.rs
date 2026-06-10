@@ -205,8 +205,10 @@ fn map_sdk_stop_reason(stop: &SdkStopReason) -> super::events::StopReason {
     }
 }
 
-fn option_description(option: &SessionConfigOption) -> Option<String> {
-    option.description.clone().filter(|value| !value.is_empty())
+fn select_value_description(
+    value: &agent_client_protocol::schema::SessionConfigSelectOption,
+) -> Option<String> {
+    value.description.clone().filter(|text| !text.is_empty())
 }
 
 fn model_definitions_from_option(option: &SessionConfigOption) -> Vec<ModelDefinition> {
@@ -217,7 +219,7 @@ fn model_definitions_from_option(option: &SessionConfigOption) -> Vec<ModelDefin
                 .map(|value| ModelDefinition {
                     id: value.value.to_string(),
                     name: value.name.clone(),
-                    description: option_description(option),
+                    description: select_value_description(value),
                 })
                 .collect(),
             SessionConfigSelectOptions::Grouped(groups) => groups
@@ -226,7 +228,7 @@ fn model_definitions_from_option(option: &SessionConfigOption) -> Vec<ModelDefin
                 .map(|value| ModelDefinition {
                     id: value.value.to_string(),
                     name: value.name.clone(),
-                    description: option_description(option),
+                    description: select_value_description(value),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -243,7 +245,7 @@ fn mode_definitions_from_option(option: &SessionConfigOption) -> Vec<ModeDefinit
                 .map(|value| ModeDefinition {
                     id: value.value.to_string(),
                     name: value.name.clone(),
-                    description: option_description(option),
+                    description: select_value_description(value),
                 })
                 .collect(),
             SessionConfigSelectOptions::Grouped(groups) => groups
@@ -252,7 +254,7 @@ fn mode_definitions_from_option(option: &SessionConfigOption) -> Vec<ModeDefinit
                 .map(|value| ModeDefinition {
                     id: value.value.to_string(),
                     name: value.name.clone(),
-                    description: option_description(option),
+                    description: select_value_description(value),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -955,14 +957,17 @@ mod tests {
                     "openai",
                     "OpenAI",
                     vec![
-                        SessionConfigSelectOption::new("gpt-5", "GPT-5"),
-                        SessionConfigSelectOption::new("gpt-5-mini", "GPT-5 mini"),
+                        SessionConfigSelectOption::new("gpt-5", "GPT-5")
+                            .description("flagship OpenAI model"),
+                        SessionConfigSelectOption::new("gpt-5-mini", "GPT-5 mini")
+                            .description("small OpenAI model"),
                     ],
                 ),
                 SessionConfigSelectGroup::new(
                     "anthropic",
                     "Anthropic",
-                    vec![SessionConfigSelectOption::new("sonnet", "Sonnet")],
+                    vec![SessionConfigSelectOption::new("sonnet", "Sonnet")
+                        .description("Anthropic Sonnet")],
                 ),
             ],
         )
@@ -979,9 +984,9 @@ mod tests {
                 .map(|m| (m.id.as_str(), m.description.as_deref()))
                 .collect::<Vec<_>>(),
             vec![
-                ("gpt-5", Some("Available model")),
-                ("gpt-5-mini", Some("Available model")),
-                ("sonnet", Some("Available model")),
+                ("gpt-5", Some("flagship OpenAI model")),
+                ("gpt-5-mini", Some("small OpenAI model")),
+                ("sonnet", Some("Anthropic Sonnet")),
             ]
         );
     }
