@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
+use serde::Serialize;
+
 use crate::pipeline::dag::StepDag;
-use crate::pipeline::verdict::Verdict;
+use crate::pipeline::verdict::{StepOutput, Verdict};
 
 /// The execution state of a single pipeline step.
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +85,20 @@ pub enum ApprovalGateCheck {
     UnconfiguredButRequested,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct StepOutputTemplateEntry {
+    pub step: String,
+    pub verdict: String,
+    pub summary: Option<String>,
+    pub output: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct StepOutputTemplateContext {
+    pub steps: HashMap<String, StepOutputTemplateEntry>,
+    pub dependency_outputs: Vec<StepOutputTemplateEntry>,
+}
+
 /// Per-issue pipeline execution state machine.
 ///
 /// Tracks step states, drives step dispatch when dependencies are met, and
@@ -95,6 +111,8 @@ pub struct PipelineRun {
     pub cycle: u32,
     /// Current state of each step, keyed by step name.
     pub step_states: HashMap<String, StepState>,
+    /// Stored outputs from completed steps.
+    pub step_outputs: HashMap<String, StepOutput>,
     /// The resolved, validated step DAG.
     dag: StepDag,
 }
@@ -112,6 +130,7 @@ impl PipelineRun {
             issue_id,
             cycle,
             step_states,
+            step_outputs: HashMap::new(),
             dag,
         }
     }
@@ -140,9 +159,11 @@ impl PipelineRun {
     pub fn step_completed(
         &mut self,
         step_name: &str,
-        verdict: Verdict,
+        output: StepOutput,
         approval_requested: bool,
     ) -> PipelineAction {
+        let verdict = output.verdict.clone();
+        self.step_outputs.insert(step_name.to_string(), output);
         match verdict {
             Verdict::Approve => match self.gate_check(step_name, approval_requested) {
                 ApprovalGateCheck::EligibleGating => {
@@ -351,6 +372,29 @@ impl PipelineRun {
             .and_then(|approval| approval.state.clone())
     }
 
+    pub fn output_context_for(&self, step_name: &str) -> Option<StepOutputTemplateContext> {
+        let step = self.dag.steps.iter().find(|step| step.name == step_name)?;
+        let steps = self
+            .step_outputs
+            .iter()
+            .map(|(name, output)| (name.clone(), template_entry(name, output)))
+            .collect();
+        let dependency_outputs = step
+            .depends
+            .iter()
+            .filter_map(|dep| {
+                self.step_outputs
+                    .get(dep)
+                    .map(|output| template_entry(dep, output))
+            })
+            .collect();
+
+        Some(StepOutputTemplateContext {
+            steps,
+            dependency_outputs,
+        })
+    }
+
     /// Find all steps that are [`StepState::Pending`] and whose dependencies
     /// are all [`StepState::Passed`].
     ///
@@ -388,11 +432,25 @@ impl PipelineRun {
     }
 }
 
+fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
+    StepOutputTemplateEntry {
+        step: step.to_string(),
+        verdict: match &output.verdict {
+            Verdict::Approve => "approve".to_string(),
+            Verdict::Reject { .. } => "reject".to_string(),
+        },
+        summary: output.summary.clone(),
+        output: output.output.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ensemble::{StepApprovalConfig, StepApprovalMode, StepConfig};
     use crate::pipeline::dag::build_dag;
+    use crate::pipeline::verdict::StepOutput;
+    use serde_json::json;
 
     fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         let deps = if depends.is_empty() {
@@ -459,6 +517,24 @@ mod tests {
         PipelineRun::new("issue-1".to_string(), 1, dag)
     }
 
+    fn approve_output() -> StepOutput {
+        StepOutput {
+            verdict: Verdict::Approve,
+            summary: None,
+            output: None,
+        }
+    }
+
+    fn reject_output(summary: &str) -> StepOutput {
+        StepOutput {
+            verdict: Verdict::Reject {
+                summary: summary.to_string(),
+            },
+            summary: Some(summary.to_string()),
+            output: None,
+        }
+    }
+
     // -------------------------------------------------------------------------
     // test_sequential_pipeline
     // -------------------------------------------------------------------------
@@ -489,7 +565,7 @@ mod tests {
         );
 
         // build completes with approve → should dispatch test next.
-        let action = run.step_completed("build", Verdict::Approve, false);
+        let action = run.step_completed("build", approve_output(), false);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "test"),
             "expected Dispatch([test]), got {action:?}"
@@ -498,7 +574,7 @@ mod tests {
         run.mark_running("test", "session-2".to_string());
 
         // test completes with approve → all done.
-        let action = run.step_completed("test", Verdict::Approve, false);
+        let action = run.step_completed("test", approve_output(), false);
         assert_eq!(action, PipelineAction::Succeeded);
     }
 
@@ -524,7 +600,7 @@ mod tests {
         );
 
         run.mark_running("build", "session-build".to_string());
-        let action = run.step_completed("build", Verdict::Approve, false);
+        let action = run.step_completed("build", approve_output(), false);
 
         // After build passes, both review steps should be dispatched together.
         match action {
@@ -540,9 +616,9 @@ mod tests {
         // Both reviews pass → Succeeded.
         run.mark_running("review-a", "session-ra".to_string());
         run.mark_running("review-b", "session-rb".to_string());
-        let _ = run.step_completed("review-a", Verdict::Approve, false);
+        let _ = run.step_completed("review-a", approve_output(), false);
         // After review-a passes, review-b is still running → Waiting.
-        let _action = run.step_completed("review-a", Verdict::Approve, false);
+        let _action = run.step_completed("review-a", approve_output(), false);
         // review-a was already set to Passed; a second approve on it should
         // still produce Waiting (review-b still pending/running).
         // Restart properly: create a fresh run and walk through fully.
@@ -553,12 +629,12 @@ mod tests {
         ];
         let mut run2 = make_run(&steps2);
         run2.mark_running("build", "s-b".to_string());
-        run2.step_completed("build", Verdict::Approve, false);
+        run2.step_completed("build", approve_output(), false);
         run2.mark_running("review-a", "s-ra".to_string());
         run2.mark_running("review-b", "s-rb".to_string());
 
         // review-a passes first; review-b is still Running → Waiting.
-        let action = run2.step_completed("review-a", Verdict::Approve, false);
+        let action = run2.step_completed("review-a", approve_output(), false);
         assert_eq!(
             action,
             PipelineAction::Waiting,
@@ -566,7 +642,7 @@ mod tests {
         );
 
         // Now review-b also passes → Succeeded.
-        let action = run2.step_completed("review-b", Verdict::Approve, false);
+        let action = run2.step_completed("review-b", approve_output(), false);
         assert_eq!(action, PipelineAction::Succeeded);
     }
 
@@ -585,14 +661,14 @@ mod tests {
         let mut run = make_run(&steps);
 
         run.mark_running("build", "session-build".to_string());
-        let action = run.step_completed("build", Verdict::Approve, false);
+        let action = run.step_completed("build", approve_output(), false);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "implement"),
             "expected implement to dispatch after build, got {action:?}"
         );
 
         run.mark_running("implement", "session-implement".to_string());
-        let action = run.step_completed("implement", Verdict::Approve, false);
+        let action = run.step_completed("implement", approve_output(), false);
         assert!(
             matches!(
                 &action,
@@ -628,12 +704,12 @@ mod tests {
 
         run.mark_running("build", "session-build".to_string());
         assert!(matches!(
-            run.step_completed("build", Verdict::Approve, false),
+            run.step_completed("build", approve_output(), false),
             PipelineAction::Dispatch(_)
         ));
 
         run.mark_running("implement", "session-implement".to_string());
-        let action = run.step_completed("implement", Verdict::Approve, false);
+        let action = run.step_completed("implement", approve_output(), false);
         assert!(matches!(action, PipelineAction::AwaitingApproval { .. }));
 
         let action = run.bind_approval_interaction("implement", "approval-123".to_string());
@@ -669,12 +745,12 @@ mod tests {
 
         run.mark_running("build", "session-build".to_string());
         assert!(matches!(
-            run.step_completed("build", Verdict::Approve, false),
+            run.step_completed("build", approve_output(), false),
             PipelineAction::Dispatch(_)
         ));
 
         run.mark_running("implement", "session-implement".to_string());
-        let action = run.step_completed("implement", Verdict::Approve, false);
+        let action = run.step_completed("implement", approve_output(), false);
         assert!(
             matches!(&action, PipelineAction::Succeeded),
             "expected approve without request to complete the pipeline, got {action:?}"
@@ -693,9 +769,9 @@ mod tests {
         ];
         let mut run = make_run(&steps);
         run.mark_running("build", "session-build".to_string());
-        let _ = run.step_completed("build", Verdict::Approve, false);
+        let _ = run.step_completed("build", approve_output(), false);
         run.mark_running("implement", "session-implement".to_string());
-        let action = run.step_completed("implement", Verdict::Approve, true);
+        let action = run.step_completed("implement", approve_output(), true);
         assert!(
             matches!(
                 &action,
@@ -724,9 +800,9 @@ mod tests {
         let mut run = make_run(&steps);
 
         run.mark_running("build", "session-build".to_string());
-        let _ = run.step_completed("build", Verdict::Approve, false);
+        let _ = run.step_completed("build", approve_output(), false);
         run.mark_running("implement", "session-implement".to_string());
-        let action = run.step_completed("implement", Verdict::Approve, false);
+        let action = run.step_completed("implement", approve_output(), false);
         assert!(matches!(action, PipelineAction::AwaitingApproval { .. }));
 
         let action = run.bind_approval_interaction("implement", "approval-456".to_string());
@@ -759,16 +835,10 @@ mod tests {
         let mut run = make_run(&steps);
 
         run.mark_running("build", "s-b".to_string());
-        run.step_completed("build", Verdict::Approve, false);
+        run.step_completed("build", approve_output(), false);
         run.mark_running("review", "s-r".to_string());
 
-        let action = run.step_completed(
-            "review",
-            Verdict::Reject {
-                summary: "code quality is too low".to_string(),
-            },
-            false,
-        );
+        let action = run.step_completed("review", reject_output("code quality is too low"), false);
 
         assert!(
             matches!(
@@ -839,7 +909,7 @@ mod tests {
 
         // After build passes, review is dispatched with its tracker_state.
         run.mark_running("build", "s-b".to_string());
-        let action = run.step_completed("build", Verdict::Approve, false);
+        let action = run.step_completed("build", approve_output(), false);
         match &action {
             PipelineAction::Dispatch(reqs) => {
                 assert_eq!(reqs.len(), 1);
@@ -908,7 +978,7 @@ mod tests {
         )];
         let mut run = make_run(&steps);
 
-        let action = run.step_completed("review", Verdict::Approve, false);
+        let action = run.step_completed("review", approve_output(), false);
         assert!(matches!(action, PipelineAction::AwaitingApproval { .. }));
 
         let action = run.bind_approval_interaction("review", "approval-789".to_string());
@@ -996,7 +1066,7 @@ mod tests {
         let mut run = make_run(&steps);
 
         run.mark_running("build", "session-build".to_string());
-        let action = run.step_completed("build", Verdict::Approve, false);
+        let action = run.step_completed("build", approve_output(), false);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
             "expected Dispatch([review]), got {action:?}"
@@ -1016,12 +1086,58 @@ mod tests {
     }
 
     #[test]
+    fn downstream_context_contains_direct_dependency_outputs() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review-a", "reviewer", &["build"]),
+            make_step("review-b", "reviewer", &["build"]),
+            make_step("synth", "synthesizer", &["review-a", "review-b"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.step_completed(
+            "build",
+            StepOutput {
+                verdict: Verdict::Approve,
+                summary: Some("built".to_string()),
+                output: Some(json!({"artifact":"branch"})),
+            },
+            false,
+        );
+        run.step_completed(
+            "review-a",
+            StepOutput {
+                verdict: Verdict::Approve,
+                summary: Some("a ok".to_string()),
+                output: Some(json!({"risk":"low"})),
+            },
+            false,
+        );
+        run.step_completed(
+            "review-b",
+            StepOutput {
+                verdict: Verdict::Approve,
+                summary: Some("b ok".to_string()),
+                output: Some(json!({"risk":"medium"})),
+            },
+            false,
+        );
+
+        let context = run.output_context_for("synth").unwrap();
+
+        assert_eq!(context.dependency_outputs.len(), 2);
+        assert_eq!(context.dependency_outputs[0].step, "review-a");
+        assert_eq!(context.dependency_outputs[1].step, "review-b");
+        assert_eq!(context.steps["review-a"].summary.as_deref(), Some("a ok"));
+    }
+
+    #[test]
     fn step_completed_fails_when_worker_requests_approval_but_step_has_no_approval_config() {
         let steps = vec![make_step("build", "builder", &[])];
         let mut run = make_run(&steps);
 
         run.mark_running("build", "session-build".to_string());
-        let action = run.step_completed("build", Verdict::Approve, true);
+        let action = run.step_completed("build", approve_output(), true);
 
         assert!(
             matches!(

@@ -1000,7 +1000,7 @@ impl Orchestrator {
                 // Drive the pipeline
                 let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                     Some((
-                        run.step_completed(step_name, resolved.verdict, approval_request.is_some()),
+                        run.step_completed(step_name, resolved.output, approval_request.is_some()),
                         state.get_pipeline_config(issue_id).cloned(),
                     ))
                 } else {
@@ -3703,7 +3703,7 @@ mod tests {
         InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
         InteractionStore,
     };
-    use crate::pipeline::verdict::Verdict;
+    use crate::pipeline::verdict::{StepOutput, Verdict};
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
 
@@ -6077,7 +6077,15 @@ agent:
             let dag = build_dag(&cfg.steps).unwrap();
             let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
-            pipeline_run.step_completed("build", Verdict::Approve, false);
+            pipeline_run.step_completed(
+                "build",
+                StepOutput {
+                    verdict: Verdict::Approve,
+                    summary: None,
+                    output: None,
+                },
+                false,
+            );
             pipeline_run.step_blocked_on_human("review", "interaction-1".to_string());
             pipeline_run.mark_running("docs", "session-docs".to_string());
 
