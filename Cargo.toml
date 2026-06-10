@@ -42,3 +42,4 @@ opener = "0.8.4"
 rusqlite = { version = "0.40.1", features = ["bundled", "fallible_uint"] }
 agent-client-protocol = "0.14.0"
 notify = "8.2.0"
+pulldown-cmark = "0.13.0"
