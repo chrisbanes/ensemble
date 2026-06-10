@@ -1899,6 +1899,149 @@ on_failure: Failed
     }
 
     #[test]
+    fn test_resolve_agent_command_includes_approve_all_flag() {
+        let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: Some("approve_all".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+            ..Default::default()
+        };
+
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--approve-all".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_command_includes_approve_reads_flag() {
+        let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: Some("approve_reads".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+            ..Default::default()
+        };
+
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--approve-reads".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_command_includes_deny_all_flag() {
+        let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: Some("deny_all".to_string()),
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+            ..Default::default()
+        };
+
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--deny-all".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_command_no_model() {
+        let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
+            acpx_agent: Some("claude".to_string()),
+            model: None,
+            executor: None,
+            permission_mode: None,
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+            ..Default::default()
+        };
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec!["--agent".to_string(), "claude".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_command_omits_permission_flag_when_unset() {
+        let config = crate::config::ensemble::AgentConfig {
+            runtime: None,
+            acpx_agent: Some("claude".to_string()),
+            model: Some("sonnet".to_string()),
+            executor: None,
+            permission_mode: None,
+            prompt: None,
+            prompt_template: None,
+            reasoning_level: None,
+            ..Default::default()
+        };
+
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_resolve_agent_command_falls_back_to_default() {
+        let resolved = resolve_agent_command(None, "default-cmd").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("default-cmd"));
+        assert!(resolved.args.is_empty());
+    }
+
+    #[test]
     fn tokenize_command_string_splits_simple_program_and_args() {
         let resolved = tokenize_command_string("acpx --agent builder").unwrap();
         assert_eq!(resolved.program, PathBuf::from("acpx"));
