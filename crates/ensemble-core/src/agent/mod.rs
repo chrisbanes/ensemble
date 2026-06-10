@@ -198,6 +198,10 @@ impl AcpAgentRunner {
             return Ok(());
         }
         let resolved = resolve_acpx_acp_command(agent_config)?;
+        // TODO(issue-43/task-8): remove this bridge when AcpSessionConfig.command
+        // and AcpCapabilityDiscoveryConfig.command are changed to ResolvedCommand
+        // (Task 8 of the issue-43 plan). Direct structured spawn eliminates the
+        // need to round-trip through a shell-string.
         let mut command = format!("{}", resolved.program.display());
         for arg in &resolved.args {
             command.push(' ');
@@ -612,13 +616,14 @@ fn resolve_agent_command(
 fn resolve_acpx_acp_command(
     agent_config: &crate::config::ensemble::AgentConfig,
 ) -> Result<ResolvedCommand, AgentError> {
-    let acpx_name = agent_config
-        .acpx_agent
-        .as_ref()
-        .ok_or_else(|| AgentError::InvalidAgentCommand {
-            command: "<acpx capability discovery>".to_string(),
-            reason: "agent is missing acpx_agent".to_string(),
-        })?;
+    let acpx_name =
+        agent_config
+            .acpx_agent
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidAgentCommand {
+                command: "<acpx capability discovery>".to_string(),
+                reason: "agent is missing acpx_agent".to_string(),
+            })?;
     let mut args = vec!["--agent".to_string(), acpx_name.clone()];
     if let Some(ref model) = agent_config.model {
         args.push("--model".to_string());
@@ -721,6 +726,10 @@ impl AcpAgentRunner {
         let config = &request.config;
         let agent_config = config.agents.get(request.agent_name);
         let resolved = resolve_agent_command(agent_config, &config.agent.command)?;
+        // TODO(issue-43/task-8): remove this bridge when AcpSessionConfig.command
+        // and AcpCapabilityDiscoveryConfig.command are changed to ResolvedCommand
+        // (Task 8 of the issue-43 plan). Direct structured spawn eliminates the
+        // need to round-trip through a shell-string.
         let mut command = format!("{}", resolved.program.display());
         for arg in &resolved.args {
             command.push(' ');
@@ -1862,8 +1871,17 @@ on_failure: Todo
             reasoning_level: None,
             ..Default::default()
         };
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
-        assert_eq!(cmd, "acpx --agent 'claude' --model 'sonnet'");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1880,9 +1898,19 @@ on_failure: Todo
             ..Default::default()
         };
 
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
 
-        assert_eq!(cmd, "acpx --approve-all --agent 'claude' --model 'sonnet'");
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--approve-all".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1899,11 +1927,18 @@ on_failure: Todo
             ..Default::default()
         };
 
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
 
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
         assert_eq!(
-            cmd,
-            "acpx --approve-reads --agent 'claude' --model 'sonnet'"
+            resolved.args,
+            vec![
+                "--approve-reads".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
         );
     }
 
@@ -1921,9 +1956,19 @@ on_failure: Todo
             ..Default::default()
         };
 
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
 
-        assert_eq!(cmd, "acpx --deny-all --agent 'claude' --model 'sonnet'");
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--deny-all".to_string(),
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1939,8 +1984,12 @@ on_failure: Todo
             reasoning_level: None,
             ..Default::default()
         };
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
-        assert_eq!(cmd, "acpx --agent 'claude'");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec!["--agent".to_string(), "claude".to_string()]
+        );
     }
 
     #[test]
@@ -1957,15 +2006,25 @@ on_failure: Todo
             ..Default::default()
         };
 
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
 
-        assert_eq!(cmd, "acpx --agent 'claude' --model 'sonnet'");
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--agent".to_string(),
+                "claude".to_string(),
+                "--model".to_string(),
+                "sonnet".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn test_resolve_agent_command_falls_back_to_default() {
-        let cmd = resolve_agent_command(None, "default-cmd");
-        assert_eq!(cmd, "'default-cmd'");
+        let resolved = resolve_agent_command(None, "default-cmd").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("default-cmd"));
+        assert!(resolved.args.is_empty());
     }
 
     #[test]
@@ -1981,8 +2040,17 @@ on_failure: Todo
             reasoning_level: None,
             ..Default::default()
         };
-        let cmd = resolve_agent_command(Some(&config), "default-cmd");
-        assert_eq!(cmd, "'codex' '--profile' 'prod;' 'touch' '/tmp/pwned'");
+        let resolved = resolve_agent_command(Some(&config), "default-cmd").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("codex"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--profile".to_string(),
+                "prod;".to_string(),
+                "touch".to_string(),
+                "/tmp/pwned".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2050,7 +2118,7 @@ on_failure: Failed
 
     #[test]
     fn resolve_acpx_acp_command_includes_agent_and_model() {
-        let command = resolve_acpx_acp_command(&crate::config::ensemble::AgentConfig {
+        let resolved = resolve_acpx_acp_command(&crate::config::ensemble::AgentConfig {
             runtime: Some("acpx".to_string()),
             executor: None,
             model: Some("gpt-5".to_string()),
@@ -2061,11 +2129,18 @@ on_failure: Failed
             reasoning_level: None,
             available_models: Vec::new(),
             available_modes: Vec::new(),
-        });
+        })
+        .unwrap();
 
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
         assert_eq!(
-            command.as_deref(),
-            Some("acpx --agent 'codex' --model 'gpt-5'")
+            resolved.args,
+            vec![
+                "--agent".to_string(),
+                "codex".to_string(),
+                "--model".to_string(),
+                "gpt-5".to_string(),
+            ]
         );
     }
 
