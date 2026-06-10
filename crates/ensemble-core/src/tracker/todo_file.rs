@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::path::PathBuf;
+use tempfile::NamedTempFile;
 use tracing::warn;
 
 use super::model::{InteractionThreadRoot, Issue, TrackerComment};
@@ -78,78 +80,90 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
     let mut current_state: Option<String> = None;
     let mut position_in_state: i32 = 0;
 
-    // Track current issue being built (for multi-line descriptions)
-    let mut current_issue: Option<ParsedIssue> = None;
-    let mut current_desc_lines: Vec<String> = Vec::new();
+    let mut in_list_item = false;
+    let mut in_h2 = false;
+    let mut heading_parts: Vec<String> = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
+    // Track list-item depth so nested list items under a description are folded
+    // into the outer item's description instead of being treated as new issues.
+    let mut list_item_depth: u32 = 0;
 
-    for line in content.lines() {
-        // Check for heading
-        if let Some(heading) = line.strip_prefix("## ") {
-            // Flush current issue if any
-            if let Some(mut issue) = current_issue.take() {
-                if !current_desc_lines.is_empty() {
-                    issue.description = Some(current_desc_lines.join("\n").trim().to_string());
-                    current_desc_lines.clear();
-                }
-                issues.push(issue);
+    for (event, _range) in Parser::new_ext(content, Options::empty()).into_offset_iter() {
+        match &event {
+            Event::Start(Tag::Heading { level, .. }) if *level == HeadingLevel::H2 => {
+                current_state = None;
+                in_h2 = true;
+                heading_parts.clear();
             }
-
-            let heading = heading.trim();
-            if !heading.is_empty() {
-                current_state = Some(heading.to_string());
-                position_in_state = 0;
-            }
-            continue;
-        }
-
-        // Check for list item
-        if let Some(rest) = line.strip_prefix("- ") {
-            // Flush current issue if any
-            if let Some(mut issue) = current_issue.take() {
-                if !current_desc_lines.is_empty() {
-                    issue.description = Some(current_desc_lines.join("\n").trim().to_string());
-                    current_desc_lines.clear();
-                }
-                issues.push(issue);
-            }
-
-            if let Some(state) = &current_state {
-                let rest = rest.trim();
-                let (identifier, title) =
-                    extract_identifier_and_title(rest, state, position_in_state);
-
-                current_issue = Some(ParsedIssue {
-                    identifier,
-                    title,
-                    description: None,
-                    state: state.clone(),
-                    priority: position_in_state,
-                });
-                position_in_state += 1;
-            }
-            continue;
-        }
-
-        // Check for description continuation (indented line under current issue)
-        if current_issue.is_some() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && (line.starts_with("  ") || line.starts_with('\t')) {
-                current_desc_lines.push(trimmed.to_string());
-            } else if trimmed.is_empty() {
-                // Blank line within description — preserve it if we already have desc lines
-                if !current_desc_lines.is_empty() {
-                    current_desc_lines.push(String::new());
+            Event::Start(Tag::Item) => {
+                list_item_depth += 1;
+                in_list_item = true;
+                if list_item_depth == 1 {
+                    // Outer list item — start a fresh issue.
+                    text_parts.clear();
+                } else {
+                    // Nested list item — fold its text into the outer item's
+                    // description as a continuation line, preserving the `- ` marker.
+                    text_parts.push("- ".to_string());
                 }
             }
-        }
-    }
+            Event::Text(text) | Event::Code(text) => {
+                if in_h2 {
+                    heading_parts.push(text.to_string());
+                } else if in_list_item {
+                    if let Some(last) = text_parts.last_mut() {
+                        last.push_str(text);
+                    } else {
+                        text_parts.push(text.to_string());
+                    }
+                }
+            }
+            Event::SoftBreak | Event::HardBreak if in_list_item => {
+                text_parts.push(String::new());
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if in_h2 && !heading_parts.is_empty() {
+                    let joined = heading_parts.join("");
+                    let trimmed = joined.trim().to_string();
+                    if !trimmed.is_empty() {
+                        current_state = Some(trimmed);
+                        position_in_state = 0;
+                    }
+                }
+                in_h2 = false;
+                heading_parts.clear();
+            }
+            Event::End(TagEnd::Item) => {
+                list_item_depth = list_item_depth.saturating_sub(1);
+                if list_item_depth == 0 {
+                    if in_list_item && !text_parts.is_empty() {
+                        if let Some(state) = &current_state {
+                            let title_line = text_parts.remove(0).trim().to_string();
+                            let (identifier, title) =
+                                extract_identifier_and_title(&title_line, state, position_in_state);
 
-    // Flush final issue
-    if let Some(mut issue) = current_issue.take() {
-        if !current_desc_lines.is_empty() {
-            issue.description = Some(current_desc_lines.join("\n").trim().to_string());
+                            let description = if text_parts.is_empty() {
+                                None
+                            } else {
+                                Some(text_parts.join("\n"))
+                            };
+
+                            issues.push(ParsedIssue {
+                                identifier,
+                                title,
+                                description,
+                                state: state.clone(),
+                                priority: position_in_state,
+                            });
+                            position_in_state += 1;
+                        }
+                    }
+                    in_list_item = false;
+                    text_parts.clear();
+                }
+            }
+            _ => {}
         }
-        issues.push(issue);
     }
 
     issues
@@ -226,6 +240,26 @@ fn to_issue(parsed: &ParsedIssue) -> Issue {
 /// Check if a state matches any in a list (case-insensitive).
 fn state_matches(state: &str, states: &[String]) -> bool {
     states.iter().any(|s| s.eq_ignore_ascii_case(state))
+}
+
+/// Normalize and validate a target state heading value.
+///
+/// Trims surrounding whitespace and rejects any embedded newlines or empty input,
+/// so the value can be safely interpolated into a `## <state>` heading without
+/// allowing markdown injection.
+fn normalize_target_state(target_state: &str) -> Result<String, TrackerError> {
+    let trimmed = target_state.trim();
+    if trimmed.is_empty() {
+        return Err(TrackerError::IoError {
+            reason: "target state must not be empty".to_string(),
+        });
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(TrackerError::IoError {
+            reason: "target state must not contain newlines".to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
 }
 
 fn collect_issue_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
@@ -361,6 +395,8 @@ impl IssueTracker for TodoFileTracker {
     /// current section, and inserts it under the `## {target_state}` heading.
     /// If the heading does not exist, it is appended at the end of the file.
     async fn set_issue_state(&self, id: &str, target_state: &str) -> Result<(), TrackerError> {
+        let target_state = normalize_target_state(target_state)?;
+
         let content =
             tokio::fs::read_to_string(&self.path)
                 .await
@@ -434,29 +470,23 @@ impl IssueTracker for TodoFileTracker {
             output.push('\n');
         }
 
-        // Atomic write: write to a unique temp file in the same directory, then rename.
-        let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
-        let unique_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp_path = parent.join(format!(
-            ".ensemble-tmp-{}-{}",
-            std::process::id(),
-            unique_id
-        ));
-        tokio::fs::write(&tmp_path, &output)
+        // Atomic write: write through NamedTempFile in the same directory, then persist (rename).
+        let parent = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let tmp = NamedTempFile::new_in(parent).map_err(|e| TrackerError::IoError {
+            reason: format!("failed to create temp file in {}: {}", parent.display(), e),
+        })?;
+        tokio::fs::write(tmp.path(), &output)
             .await
             .map_err(|e| TrackerError::IoError {
-                reason: format!("failed to write temp file {}: {}", tmp_path.display(), e),
+                reason: format!("failed to write temp file: {e}"),
             })?;
-        if let Err(e) = tokio::fs::rename(&tmp_path, &self.path).await {
-            // Clean up temp file on rename failure
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+        if let Err(e) = tmp.persist(&self.path) {
             return Err(TrackerError::IoError {
                 reason: format!(
-                    "failed to rename {} -> {}: {}",
-                    tmp_path.display(),
+                    "failed to persist temp file to {}: {}",
                     self.path.display(),
                     e
                 ),
@@ -1039,5 +1069,77 @@ mod tests {
 
         let written = tokio::fs::read_to_string(path).await.unwrap();
         assert!(written.contains("- [todo-0]"));
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_rejects_newline_in_target_state() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- [PROJ-1] First task
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        let malicious = "Done\n- [PROJ-9] injected";
+        let result = tracker.set_issue_state("PROJ-1", malicious).await;
+        assert!(matches!(result, Err(TrackerError::IoError { .. })));
+
+        // The file must be unchanged.
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(written, content);
+        assert!(!written.contains("PROJ-9"));
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_rejects_empty_target_state() {
+        let dir = TempDir::new().unwrap();
+        let content = "## Todo\n- [PROJ-1] First task\n";
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        let result = tracker.set_issue_state("PROJ-1", "   ").await;
+        assert!(matches!(result, Err(TrackerError::IoError { .. })));
+
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(written, content);
+    }
+
+    // --- nested list regression tests (Codex review) ---
+
+    #[test]
+    fn test_parse_nested_bullet_in_description() {
+        let content = r#"## Todo
+- [PROJ-1] Parent task
+  - verify auth
+  - run migration
+- [PROJ-2] Sibling
+"#;
+        let issues = parse_todo_content(content);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].identifier, "PROJ-1");
+        assert_eq!(issues[0].title, "Parent task");
+        assert_eq!(
+            issues[0].description.as_deref(),
+            Some("- verify auth\n- run migration")
+        );
+        assert_eq!(issues[1].identifier, "PROJ-2");
+        assert_eq!(issues[1].title, "Sibling");
+    }
+
+    #[test]
+    fn test_parse_nested_bullet_under_no_bracket_item() {
+        let content = r#"## Todo
+- Refactor auth
+  - extract helper
+  - add tests
+"#;
+        let issues = parse_todo_content(content);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].identifier, "todo-0");
+        assert_eq!(issues[0].title, "Refactor auth");
+        assert_eq!(
+            issues[0].description.as_deref(),
+            Some("- extract helper\n- add tests")
+        );
     }
 }
