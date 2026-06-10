@@ -17,7 +17,7 @@ use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{
     DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode,
 };
-use crate::config::template::render_prompt_with_interaction_response;
+use crate::config::template::render_prompt_with_context;
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
@@ -102,6 +102,7 @@ pub struct AgentRunRequest<'a> {
     /// token — the `agent-client-protocol` SDK owns the child process for the
     /// direct path, so cancellation is handled by dropping the `AcpAgent`.
     pub cancel_token: CancellationToken,
+    pub step_outputs: crate::pipeline::engine::StepOutputTemplateContext,
 }
 
 /// Trait for running an agent session against an issue.
@@ -125,6 +126,7 @@ struct BuildPromptRequest<'a> {
     attempt: Option<u32>,
     workspace_path: &'a Path,
     turn_number: u32,
+    step_outputs: &'a crate::pipeline::engine::StepOutputTemplateContext,
 }
 
 fn update_agent_capabilities(
@@ -226,6 +228,7 @@ impl AcpAgentRunner {
             attempt,
             workspace_path,
             turn_number,
+            step_outputs,
         } = request;
         if turn_number == 1 {
             let agent_config =
@@ -258,13 +261,14 @@ impl AcpAgentRunner {
 
             let interaction_response = load_interaction_response(workspace_path).await?;
 
-            let rendered = render_prompt_with_interaction_response(
+            let rendered = render_prompt_with_context(
                 &template_str,
                 issue,
                 attempt,
                 interaction_response
                     .as_ref()
                     .map(|response| &response.response),
+                Some(step_outputs),
             )
             .map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
@@ -649,6 +653,7 @@ impl AgentRunner for AcpAgentRunner {
                             attempt: request.attempt,
                             workspace_path,
                             turn_number: 1,
+                            step_outputs: &request.step_outputs,
                         },
                     )
                     .await?;
@@ -711,6 +716,7 @@ impl AcpAgentRunner {
                         attempt: request.attempt,
                         workspace_path: request.workspace_path,
                         turn_number: turn,
+                        step_outputs: &request.step_outputs,
                     },
                 )
                 .await?;
@@ -751,6 +757,7 @@ mod tests {
     use crate::config::draft::parse_raw_yaml;
     use crate::config::ensemble::{parse_config, ModeDefinition, ModelDefinition};
     use crate::interaction::{InteractionKind, InteractionResponse};
+    use crate::pipeline::engine::StepOutputTemplateContext;
     use tokio_util::sync::CancellationToken;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1042,6 +1049,7 @@ on_failure: Todo
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await;
 
@@ -1087,6 +1095,7 @@ on_failure: Todo
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await;
 
@@ -1138,6 +1147,7 @@ exit 1
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await
             .unwrap();
@@ -1197,6 +1207,7 @@ exit 0
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await
             .unwrap();
@@ -1511,6 +1522,7 @@ agent:
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
+                    step_outputs: &StepOutputTemplateContext::default(),
                 },
             )
             .await
@@ -1695,6 +1707,7 @@ on_failure: Todo
                     attempt: Some(2),
                     workspace_path: workspace.path(),
                     turn_number: 1,
+                    step_outputs: &StepOutputTemplateContext::default(),
                 },
             )
             .await
@@ -1758,6 +1771,7 @@ on_failure: Todo
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
+                    step_outputs: &StepOutputTemplateContext::default(),
                 },
             )
             .await
@@ -2082,5 +2096,63 @@ on_failure: Failed
             resolved.args,
             vec!["--agent", "builder", "--model", "gpt-5"]
         );
+    }
+
+    #[tokio::test]
+    async fn build_prompt_includes_step_outputs() {
+        use crate::pipeline::engine::StepOutputTemplateEntry;
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let runner = test_runner();
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  synth:
+    prompt: 'Risk: {{ steps["review-a"].output.risk }}'
+steps:
+  - name: synth
+    agent: synth
+on_success: Done
+on_failure: Todo
+"#,
+        )
+        .unwrap();
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "review-a".to_string(),
+            StepOutputTemplateEntry {
+                step: "review-a".to_string(),
+                verdict: "approve".to_string(),
+                summary: None,
+                output: Some(json!({"risk":"low"})),
+            },
+        );
+        let context = StepOutputTemplateContext {
+            steps,
+            dependency_outputs: vec![],
+        };
+        let workspace = tempfile::TempDir::new().unwrap();
+
+        let rendered = runner
+            .build_prompt(
+                &config,
+                BuildPromptRequest {
+                    issue: &test_issue(),
+                    agent_name: "synth",
+                    step_name: "synth",
+                    attempt: None,
+                    workspace_path: workspace.path(),
+                    turn_number: 1,
+                    step_outputs: &context,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(rendered.contains("Risk: low"));
     }
 }

@@ -357,6 +357,7 @@ mod tests {
     use crate::agent::events::RuntimeStream;
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::config::ensemble::parse_config;
+    use crate::pipeline::engine::StepOutputTemplateContext;
     use crate::tracker::model::test_helpers::test_issue;
 
     fn test_config() -> Arc<crate::config::ensemble::EnsembleConfig> {
@@ -421,6 +422,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
@@ -484,6 +486,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let result = runner.run_step(&request, "finish the task").await.unwrap();
@@ -538,6 +541,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let error = runner
@@ -592,6 +596,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
@@ -648,6 +653,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: cancel_token.clone(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let canceller = tokio::spawn({
@@ -753,6 +759,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
@@ -820,6 +827,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();
@@ -878,6 +886,7 @@ exit 1
             workspace_path: workspace.path(),
             event_tx: tx,
             cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
         };
 
         let _ = runner.run_step(&request, "finish the task").await.unwrap();

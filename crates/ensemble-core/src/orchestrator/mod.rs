@@ -797,6 +797,7 @@ impl Orchestrator {
                     workspace_path: &workspace_path,
                     event_tx: event_tx.clone(),
                     cancel_token,
+                    step_outputs: crate::pipeline::engine::StepOutputTemplateContext::default(),
                 }),
                 &issue_clone.id,
                 &step_name_owned,
