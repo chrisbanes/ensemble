@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -78,78 +79,76 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
     let mut current_state: Option<String> = None;
     let mut position_in_state: i32 = 0;
 
-    // Track current issue being built (for multi-line descriptions)
-    let mut current_issue: Option<ParsedIssue> = None;
-    let mut current_desc_lines: Vec<String> = Vec::new();
+    let mut in_list_item = false;
+    let mut in_h2 = false;
+    let mut heading_parts: Vec<String> = Vec::new();
+    let mut text_parts: Vec<String> = Vec::new();
 
-    for line in content.lines() {
-        // Check for heading
-        if let Some(heading) = line.strip_prefix("## ") {
-            // Flush current issue if any
-            if let Some(mut issue) = current_issue.take() {
-                if !current_desc_lines.is_empty() {
-                    issue.description = Some(current_desc_lines.join("\n").trim().to_string());
-                    current_desc_lines.clear();
-                }
-                issues.push(issue);
+    for (event, _range) in Parser::new_ext(content, Options::empty()).into_offset_iter() {
+        match &event {
+            Event::Start(Tag::Heading { level, .. }) if *level == HeadingLevel::H2 => {
+                current_state = None;
+                in_h2 = true;
+                heading_parts.clear();
             }
-
-            let heading = heading.trim();
-            if !heading.is_empty() {
-                current_state = Some(heading.to_string());
-                position_in_state = 0;
+            Event::Start(Tag::Item) => {
+                in_list_item = true;
+                text_parts.clear();
             }
-            continue;
-        }
-
-        // Check for list item
-        if let Some(rest) = line.strip_prefix("- ") {
-            // Flush current issue if any
-            if let Some(mut issue) = current_issue.take() {
-                if !current_desc_lines.is_empty() {
-                    issue.description = Some(current_desc_lines.join("\n").trim().to_string());
-                    current_desc_lines.clear();
-                }
-                issues.push(issue);
-            }
-
-            if let Some(state) = &current_state {
-                let rest = rest.trim();
-                let (identifier, title) =
-                    extract_identifier_and_title(rest, state, position_in_state);
-
-                current_issue = Some(ParsedIssue {
-                    identifier,
-                    title,
-                    description: None,
-                    state: state.clone(),
-                    priority: position_in_state,
-                });
-                position_in_state += 1;
-            }
-            continue;
-        }
-
-        // Check for description continuation (indented line under current issue)
-        if current_issue.is_some() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() && (line.starts_with("  ") || line.starts_with('\t')) {
-                current_desc_lines.push(trimmed.to_string());
-            } else if trimmed.is_empty() {
-                // Blank line within description — preserve it if we already have desc lines
-                if !current_desc_lines.is_empty() {
-                    current_desc_lines.push(String::new());
+            Event::Text(text) | Event::Code(text) => {
+                if in_h2 {
+                    heading_parts.push(text.to_string());
+                } else if in_list_item {
+                    if let Some(last) = text_parts.last_mut() {
+                        last.push_str(text);
+                    } else {
+                        text_parts.push(text.to_string());
+                    }
                 }
             }
-        }
-    }
+            Event::SoftBreak | Event::HardBreak if in_list_item => {
+                text_parts.push(String::new());
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if in_h2 && !heading_parts.is_empty() {
+                    let joined = heading_parts.join("");
+                    let trimmed = joined.trim().to_string();
+                    if !trimmed.is_empty() {
+                        current_state = Some(trimmed);
+                        position_in_state = 0;
+                    }
+                }
+                in_h2 = false;
+                heading_parts.clear();
+            }
+            Event::End(TagEnd::Item) => {
+                if in_list_item && !text_parts.is_empty() {
+                    if let Some(state) = &current_state {
+                        let title_line = text_parts.remove(0).trim().to_string();
+                        let (identifier, title) =
+                            extract_identifier_and_title(&title_line, state, position_in_state);
 
-    // Flush final issue
-    if let Some(mut issue) = current_issue.take() {
-        if !current_desc_lines.is_empty() {
-            issue.description = Some(current_desc_lines.join("\n").trim().to_string());
+                        let description = if text_parts.is_empty() {
+                            None
+                        } else {
+                            Some(text_parts.join("\n"))
+                        };
+
+                        issues.push(ParsedIssue {
+                            identifier,
+                            title,
+                            description,
+                            state: state.clone(),
+                            priority: position_in_state,
+                        });
+                        position_in_state += 1;
+                    }
+                }
+                in_list_item = false;
+                text_parts.clear();
+            }
+            _ => {}
         }
-        issues.push(issue);
     }
 
     issues
