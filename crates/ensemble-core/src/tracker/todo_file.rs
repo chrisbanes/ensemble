@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::path::PathBuf;
+use tempfile::NamedTempFile;
 use tracing::warn;
 
 use super::model::{InteractionThreadRoot, Issue, TrackerComment};
@@ -433,29 +434,23 @@ impl IssueTracker for TodoFileTracker {
             output.push('\n');
         }
 
-        // Atomic write: write to a unique temp file in the same directory, then rename.
-        let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
-        let unique_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let tmp_path = parent.join(format!(
-            ".ensemble-tmp-{}-{}",
-            std::process::id(),
-            unique_id
-        ));
-        tokio::fs::write(&tmp_path, &output)
+        // Atomic write: write through NamedTempFile in the same directory, then persist (rename).
+        let parent = self
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let tmp = NamedTempFile::new_in(parent).map_err(|e| TrackerError::IoError {
+            reason: format!("failed to create temp file in {}: {}", parent.display(), e),
+        })?;
+        tokio::fs::write(tmp.path(), &output)
             .await
             .map_err(|e| TrackerError::IoError {
-                reason: format!("failed to write temp file {}: {}", tmp_path.display(), e),
+                reason: format!("failed to write temp file: {e}"),
             })?;
-        if let Err(e) = tokio::fs::rename(&tmp_path, &self.path).await {
-            // Clean up temp file on rename failure
-            let _ = tokio::fs::remove_file(&tmp_path).await;
+        if let Err(e) = tmp.persist(&self.path) {
             return Err(TrackerError::IoError {
                 reason: format!(
-                    "failed to rename {} -> {}: {}",
-                    tmp_path.display(),
+                    "failed to persist temp file to {}: {}",
                     self.path.display(),
                     e
                 ),

@@ -34,8 +34,8 @@ rusqlite = { workspace = true }
 agent-client-protocol = { workspace = true }
 notify = { workspace = true }
 pulldown-cmark = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
