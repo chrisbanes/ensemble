@@ -84,6 +84,9 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
     let mut in_h2 = false;
     let mut heading_parts: Vec<String> = Vec::new();
     let mut text_parts: Vec<String> = Vec::new();
+    // Track list-item depth so nested list items under a description are folded
+    // into the outer item's description instead of being treated as new issues.
+    let mut list_item_depth: u32 = 0;
 
     for (event, _range) in Parser::new_ext(content, Options::empty()).into_offset_iter() {
         match &event {
@@ -93,8 +96,16 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
                 heading_parts.clear();
             }
             Event::Start(Tag::Item) => {
+                list_item_depth += 1;
                 in_list_item = true;
-                text_parts.clear();
+                if list_item_depth == 1 {
+                    // Outer list item — start a fresh issue.
+                    text_parts.clear();
+                } else {
+                    // Nested list item — fold its text into the outer item's
+                    // description as a continuation line, preserving the `- ` marker.
+                    text_parts.push("- ".to_string());
+                }
             }
             Event::Text(text) | Event::Code(text) => {
                 if in_h2 {
@@ -123,30 +134,33 @@ fn parse_todo_content(content: &str) -> Vec<ParsedIssue> {
                 heading_parts.clear();
             }
             Event::End(TagEnd::Item) => {
-                if in_list_item && !text_parts.is_empty() {
-                    if let Some(state) = &current_state {
-                        let title_line = text_parts.remove(0).trim().to_string();
-                        let (identifier, title) =
-                            extract_identifier_and_title(&title_line, state, position_in_state);
+                list_item_depth = list_item_depth.saturating_sub(1);
+                if list_item_depth == 0 {
+                    if in_list_item && !text_parts.is_empty() {
+                        if let Some(state) = &current_state {
+                            let title_line = text_parts.remove(0).trim().to_string();
+                            let (identifier, title) =
+                                extract_identifier_and_title(&title_line, state, position_in_state);
 
-                        let description = if text_parts.is_empty() {
-                            None
-                        } else {
-                            Some(text_parts.join("\n"))
-                        };
+                            let description = if text_parts.is_empty() {
+                                None
+                            } else {
+                                Some(text_parts.join("\n"))
+                            };
 
-                        issues.push(ParsedIssue {
-                            identifier,
-                            title,
-                            description,
-                            state: state.clone(),
-                            priority: position_in_state,
-                        });
-                        position_in_state += 1;
+                            issues.push(ParsedIssue {
+                                identifier,
+                                title,
+                                description,
+                                state: state.clone(),
+                                priority: position_in_state,
+                            });
+                            position_in_state += 1;
+                        }
                     }
+                    in_list_item = false;
+                    text_parts.clear();
                 }
-                in_list_item = false;
-                text_parts.clear();
             }
             _ => {}
         }
@@ -1088,5 +1102,44 @@ mod tests {
 
         let written = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(written, content);
+    }
+
+    // --- nested list regression tests (Codex review) ---
+
+    #[test]
+    fn test_parse_nested_bullet_in_description() {
+        let content = r#"## Todo
+- [PROJ-1] Parent task
+  - verify auth
+  - run migration
+- [PROJ-2] Sibling
+"#;
+        let issues = parse_todo_content(content);
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].identifier, "PROJ-1");
+        assert_eq!(issues[0].title, "Parent task");
+        assert_eq!(
+            issues[0].description.as_deref(),
+            Some("- verify auth\n- run migration")
+        );
+        assert_eq!(issues[1].identifier, "PROJ-2");
+        assert_eq!(issues[1].title, "Sibling");
+    }
+
+    #[test]
+    fn test_parse_nested_bullet_under_no_bracket_item() {
+        let content = r#"## Todo
+- Refactor auth
+  - extract helper
+  - add tests
+"#;
+        let issues = parse_todo_content(content);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].identifier, "todo-0");
+        assert_eq!(issues[0].title, "Refactor auth");
+        assert_eq!(
+            issues[0].description.as_deref(),
+            Some("- extract helper\n- add tests")
+        );
     }
 }
