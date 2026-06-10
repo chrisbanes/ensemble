@@ -108,7 +108,8 @@ Important boundary:
 7. `Agent Runner`
    - Creates workspace.
    - Builds prompt from issue + agent-specific template.
-   - Launches the coding agent via ACP over stdio.
+   - Launches the coding agent via ACP over stdio from a structured command; implementations should
+     avoid shell interpolation for agent command arguments.
    - Streams agent updates back to the orchestrator.
    - Collects verdict (ACP protocol field or `.ensemble/verdict.json` fallback).
 
@@ -484,12 +485,16 @@ Parsing rules:
 
 - Level-2 headings (`## <State>`) define state sections.
 - List items under a heading are issues. The first line is the title.
+- Nested list items under an issue are description content, not additional issues.
 - If the title starts with `[<identifier>]`, that bracketed value is the issue identifier.
 - Otherwise, the implementation generates a stable identifier from state + position
   (for example `todo-0`).
 - Items without bracketed IDs are supported for dispatch and state transitions. When moved to a
   new state, implementations may normalize the list line to bracket form
   (`- [generated-id] Title`) so future transitions remain stable.
+- State-transition writes must reject empty target states and target states containing newlines.
+  Writes should be atomic: write a temporary file in the same directory, then rename/persist it over
+  the todo file.
 - Indented lines after the title line (before the next list item) are the description.
 - The file is re-read on each poll tick. Implementations may also watch for file changes.
 - Issues are returned in document order within each state section.
@@ -728,9 +733,13 @@ Fields:
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
-- `command` (string shell command)
+- `command` (string command)
   - Default: implementation-defined.
-  - The runtime launches this command via `bash -lc` in the workspace directory.
+  - Used by the direct ACP runtime when a step agent does not provide `executor`.
+  - The command string is tokenized into program + args using shell-style quoting rules; empty or
+    malformed command strings are invalid.
+  - The runtime launches the command in the workspace directory via the ACP transport without shell
+    interpolation of program arguments.
   - The launched process must speak the Agent Client Protocol (ACP) over stdio.
 - `session_mode` (string, optional)
   - ACP session mode sent via `session/set_mode` after session creation.

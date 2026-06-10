@@ -203,9 +203,11 @@ Todo file issue format:
 
 - `- [ID] Title` (explicit ID) or `- Title` (ID auto-generated) are both valid.
 - Indented lines under an item are treated as description text.
+- Nested bullets under an item are kept in that issue's description, not parsed as separate issues.
 - Auto-generated IDs follow a stable `state-position` format (for example `todo-0`).
 - When a no-ID item is moved between states, Ensemble may rewrite it to bracket form
   (`- [generated-id] Title`) to stabilize future state transitions.
+- Target states written by the tracker must be non-empty and must not contain newlines.
 
 **Notion fields** (when `kind: notion`):
 
@@ -281,6 +283,7 @@ This section configures per-agent launch settings. Runtime ACP callback handling
 - `runtime: acpx` requires `acpx_agent`.
 - `runtime: acpx` expects JSON-RPC protocol output on stdout; non-JSON-RPC stdout lines are treated as runtime errors.
 - `runtime: direct` requires `executor` and `model`.
+- Direct runtime command strings are parsed with shell-style quoting into program arguments, then launched without shell interpolation.
 - Provide either `prompt` (inline) or `prompt_template` (file), not both.
 
 ### steps
