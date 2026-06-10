@@ -1255,7 +1255,6 @@ dependencies = [
  "serde_yaml",
  "shell-words",
  "shellexpand",
- "shlex",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
