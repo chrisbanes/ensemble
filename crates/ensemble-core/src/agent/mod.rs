@@ -56,7 +56,6 @@ pub(crate) struct ResolvedCommand {
 ///
 /// Returns `AgentError::InvalidAgentCommand` if the string is empty or
 /// contains an unterminated quote.
-#[allow(dead_code)]
 pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, AgentError> {
     let parts = shell_words::split(command).map_err(|e| AgentError::InvalidAgentCommand {
         command: command.to_string(),
@@ -195,9 +194,15 @@ impl AcpAgentRunner {
         let Some(agent_config) = request.config.agents.get(request.agent_name) else {
             return Ok(());
         };
-        let Some(command) = resolve_acpx_acp_command(agent_config) else {
+        if agent_config.acpx_agent.is_none() {
             return Ok(());
-        };
+        }
+        let resolved = resolve_acpx_acp_command(agent_config)?;
+        let mut command = format!("{}", resolved.program.display());
+        for arg in &resolved.args {
+            command.push(' ');
+            command.push_str(arg);
+        }
 
         let capabilities = discover_capabilities(AcpCapabilityDiscoveryConfig {
             command,
@@ -562,38 +567,41 @@ fn shell_escape(arg: &str) -> String {
 ///
 /// When `acpx_agent` is set, uses `acpx --agent <name>` with optional
 /// launch-time flags derived from per-agent `permission_mode` and `model`.
-/// Arguments are shell-escaped because the command is executed via `bash -lc`.
 /// `agent.permission_request_policy` is handled later when ACP permission
 /// callbacks arrive; it does not change the spawn command. Falls back to
 /// `executor` if set, then to the global default.
-#[allow(dead_code)]
 fn resolve_agent_command(
     agent_config: Option<&crate::config::ensemble::AgentConfig>,
     default_command: &str,
-) -> String {
+) -> Result<ResolvedCommand, AgentError> {
     if let Some(ac) = agent_config {
         if let Some(ref acpx_name) = ac.acpx_agent {
-            let mut cmd = String::from("acpx");
+            let mut args: Vec<String> = Vec::new();
             if let Some(permission_flag) = ac
                 .permission_mode
                 .as_deref()
                 .and_then(PermissionMode::parse)
                 .map(PermissionMode::acpx_flag)
             {
-                cmd.push(' ');
-                cmd.push_str(permission_flag);
+                args.push(permission_flag.to_string());
             }
-            cmd.push_str(&format!(" --agent {}", shell_escape(acpx_name)));
+            args.push("--agent".to_string());
+            args.push(acpx_name.clone());
             if let Some(ref model) = ac.model {
-                cmd.push_str(&format!(" --model {}", shell_escape(model)));
+                args.push("--model".to_string());
+                args.push(model.clone());
             }
-            return cmd;
+            return Ok(ResolvedCommand {
+                program: PathBuf::from("acpx"),
+                args,
+                env: Vec::new(),
+            });
         }
         if let Some(ref executor) = ac.executor {
-            return shell_escape_command(executor);
+            return tokenize_command_string(executor);
         }
     }
-    shell_escape_command(default_command)
+    tokenize_command_string(default_command)
 }
 
 /// Build the ACP spawn command used for the discovery handshake.
@@ -601,14 +609,26 @@ fn resolve_agent_command(
 /// Deliberately omits the `permission_mode` flag — discovery only needs the
 /// agent process to start and report `configOptions`; the real run will
 /// re-invoke the agent with the full command built by `resolve_agent_command`.
-fn resolve_acpx_acp_command(agent_config: &crate::config::ensemble::AgentConfig) -> Option<String> {
-    let acpx_name = agent_config.acpx_agent.as_ref()?;
-    let mut cmd = String::from("acpx");
-    cmd.push_str(&format!(" --agent {}", shell_escape(acpx_name)));
+fn resolve_acpx_acp_command(
+    agent_config: &crate::config::ensemble::AgentConfig,
+) -> Result<ResolvedCommand, AgentError> {
+    let acpx_name = agent_config
+        .acpx_agent
+        .as_ref()
+        .ok_or_else(|| AgentError::InvalidAgentCommand {
+            command: "<acpx capability discovery>".to_string(),
+            reason: "agent is missing acpx_agent".to_string(),
+        })?;
+    let mut args = vec!["--agent".to_string(), acpx_name.clone()];
     if let Some(ref model) = agent_config.model {
-        cmd.push_str(&format!(" --model {}", shell_escape(model)));
+        args.push("--model".to_string());
+        args.push(model.clone());
     }
-    Some(cmd)
+    Ok(ResolvedCommand {
+        program: PathBuf::from("acpx"),
+        args,
+        env: Vec::new(),
+    })
 }
 
 #[allow(dead_code)]
@@ -700,7 +720,12 @@ impl AcpAgentRunner {
     ) -> Result<WorkerResult, AgentError> {
         let config = &request.config;
         let agent_config = config.agents.get(request.agent_name);
-        let command = resolve_agent_command(agent_config, &config.agent.command);
+        let resolved = resolve_agent_command(agent_config, &config.agent.command)?;
+        let mut command = format!("{}", resolved.program.display());
+        for arg in &resolved.args {
+            command.push(' ');
+            command.push_str(arg);
+        }
 
         let session_mode = if config.agent.session_mode.is_empty() {
             None
