@@ -970,6 +970,11 @@ impl Orchestrator {
                     Some(wp) => resolve_verdict_with_source(runtime_verdict.as_ref(), &wp).await,
                     None => crate::pipeline::verdict::ResolvedVerdict {
                         verdict: Verdict::Approve,
+                        output: crate::pipeline::verdict::StepOutput {
+                            verdict: Verdict::Approve,
+                            summary: None,
+                            output: None,
+                        },
                         source: VerdictSource::Default,
                     },
                 };
