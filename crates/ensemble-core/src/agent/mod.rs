@@ -10,6 +10,7 @@ pub mod runtime;
 pub(crate) mod test_support;
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::config::draft::ConfigDocumentState;
@@ -33,6 +34,49 @@ use acp_client::{
     TurnResult,
 };
 use acpx_runtime::AcpxRuntime;
+
+/// Fully-resolved description of how to spawn an agent subprocess.
+///
+/// Built by [`resolve_agent_command`] / [`resolve_acpx_acp_command`] from a
+/// combination of `config.yaml` settings and per-agent overrides. The
+/// `acp_client` module spawns the child from this struct directly via
+/// `tokio::process::Command`, then hands the stdio streams to the
+/// `agent-client-protocol` SDK's protocol plumbing. No shell, no escaping.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) struct ResolvedCommand {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// Tokenize a user-supplied command string (e.g. from `config.yaml`) into a
+/// `ResolvedCommand`. Uses `shell_words::split`, the same tokenizer the ACP
+/// SDK uses in `AcpAgent::from_str`, so user expectations are preserved.
+///
+/// Returns `AgentError::InvalidAgentCommand` if the string is empty or
+/// contains an unterminated quote.
+#[allow(dead_code)]
+pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, AgentError> {
+    let parts = shell_words::split(command).map_err(|e| AgentError::InvalidAgentCommand {
+        command: command.to_string(),
+        reason: e.to_string(),
+    })?;
+    if parts.is_empty() {
+        return Err(AgentError::InvalidAgentCommand {
+            command: command.to_string(),
+            reason: "command string is empty".to_string(),
+        });
+    }
+    let mut iter = parts.into_iter();
+    let program = PathBuf::from(iter.next().expect("non-empty checked above"));
+    let args: Vec<String> = iter.collect();
+    Ok(ResolvedCommand {
+        program,
+        args,
+        env: Vec::new(),
+    })
+}
 
 const VERDICT_FALLBACK_INSTRUCTION: &str = "\
 If you cannot return a structured runtime verdict, write .ensemble/verdict.json with:\n\

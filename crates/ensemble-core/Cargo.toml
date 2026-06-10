@@ -35,6 +35,7 @@ agent-client-protocol = { workspace = true }
 notify = { workspace = true }
 pulldown-cmark = { workspace = true }
 tempfile = { workspace = true }
+shell-words = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
