@@ -228,6 +228,26 @@ fn state_matches(state: &str, states: &[String]) -> bool {
     states.iter().any(|s| s.eq_ignore_ascii_case(state))
 }
 
+/// Normalize and validate a target state heading value.
+///
+/// Trims surrounding whitespace and rejects any embedded newlines or empty input,
+/// so the value can be safely interpolated into a `## <state>` heading without
+/// allowing markdown injection.
+fn normalize_target_state(target_state: &str) -> Result<String, TrackerError> {
+    let trimmed = target_state.trim();
+    if trimmed.is_empty() {
+        return Err(TrackerError::IoError {
+            reason: "target state must not be empty".to_string(),
+        });
+    }
+    if trimmed.contains('\n') || trimmed.contains('\r') {
+        return Err(TrackerError::IoError {
+            reason: "target state must not contain newlines".to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
 fn collect_issue_block(lines: &[&str], start_idx: usize) -> (Vec<String>, usize) {
     let mut issue_block: Vec<String> = vec![lines[start_idx].to_string()];
     let mut end_idx = start_idx + 1;
@@ -361,6 +381,8 @@ impl IssueTracker for TodoFileTracker {
     /// current section, and inserts it under the `## {target_state}` heading.
     /// If the heading does not exist, it is appended at the end of the file.
     async fn set_issue_state(&self, id: &str, target_state: &str) -> Result<(), TrackerError> {
+        let target_state = normalize_target_state(target_state)?;
+
         let content =
             tokio::fs::read_to_string(&self.path)
                 .await
@@ -1033,5 +1055,38 @@ mod tests {
 
         let written = tokio::fs::read_to_string(path).await.unwrap();
         assert!(written.contains("- [todo-0]"));
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_rejects_newline_in_target_state() {
+        let dir = TempDir::new().unwrap();
+        let content = r#"## Todo
+- [PROJ-1] First task
+"#;
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        let malicious = "Done\n- [PROJ-9] injected";
+        let result = tracker.set_issue_state("PROJ-1", malicious).await;
+        assert!(matches!(result, Err(TrackerError::IoError { .. })));
+
+        // The file must be unchanged.
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(written, content);
+        assert!(!written.contains("PROJ-9"));
+    }
+
+    #[tokio::test]
+    async fn test_set_issue_state_rejects_empty_target_state() {
+        let dir = TempDir::new().unwrap();
+        let content = "## Todo\n- [PROJ-1] First task\n";
+        let path = write_todo(dir.path(), content);
+        let tracker = TodoFileTracker::new(path.clone(), active_states());
+
+        let result = tracker.set_issue_state("PROJ-1", "   ").await;
+        assert!(matches!(result, Err(TrackerError::IoError { .. })));
+
+        let written = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(written, content);
     }
 }
