@@ -1038,7 +1038,7 @@ on_failure: Failed
 
         // Simulate discovery mutating the in-memory config.
         {
-            let mut active = state.active_config.as_mut().unwrap();
+            let active = state.active_config.as_mut().unwrap();
             let agent = active.agents.get_mut("builder").unwrap();
             agent.available_models = vec![crate::config::ensemble::ModelDefinition {
                 id: "gpt-5".to_string(),
