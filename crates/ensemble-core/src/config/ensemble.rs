@@ -273,8 +273,39 @@ impl TrackerConfig {
     }
 }
 
+/// A selectable model discovered from an ACP session configuration option.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ModelDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// A selectable session mode discovered from an ACP session configuration option.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct ModeDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Runtime-discovered ACP capabilities for an agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct DiscoveredCapabilities {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<ModelDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub modes: Vec<ModeDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_mode: Option<String>,
+}
+
 /// Per-agent definition: which executor to use and what prompt to send.
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -293,6 +324,10 @@ pub struct AgentConfig {
     pub prompt_template: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_models: Vec<ModelDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_modes: Vec<ModeDefinition>,
 }
 
 /// Approval gate metadata for a pipeline step.

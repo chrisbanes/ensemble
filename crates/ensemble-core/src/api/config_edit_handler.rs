@@ -375,6 +375,10 @@ pub struct DiscoveredAgentInfo {
     pub name: String,
     pub label: String,
     pub version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_models: Vec<crate::config::ensemble::ModelDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_modes: Vec<crate::config::ensemble::ModeDefinition>,
 }
 
 /// GET /api/v1/config/setup/agents
@@ -401,6 +405,8 @@ pub async fn get_setup_agents(
                     name: a.name.clone(),
                     label: a.label,
                     version: a.version,
+                    available_models: Vec::new(),
+                    available_modes: Vec::new(),
                 })
                 .collect();
 
@@ -447,6 +453,8 @@ pub async fn get_setup_agents_stream() -> impl axum::response::IntoResponse {
                         name,
                         label,
                         version,
+                        available_models: Vec::new(),
+                        available_modes: Vec::new(),
                     })
             });
         }
@@ -1428,6 +1436,8 @@ on_failure: Failed
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
+                available_models: None,
+                available_modes: None,
             }],
             steps: vec![crate::config::form::GuidedStepForm {
                 name: "build".to_string(),
@@ -1593,6 +1603,8 @@ on_failure: Failed
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
+                available_models: None,
+                available_modes: None,
             }],
             steps: vec![crate::config::form::GuidedStepForm {
                 name: "build".to_string(),
@@ -1745,6 +1757,8 @@ on_failure: Failed
                 prompt: Some("Build it.".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
+                available_models: None,
+                available_modes: None,
             }],
             steps: vec![crate::config::form::GuidedStepForm {
                 name: "build".to_string(),

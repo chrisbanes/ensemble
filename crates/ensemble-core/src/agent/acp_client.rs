@@ -4,14 +4,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::{
-    ContentBlock, InitializeRequest, PermissionOption, PermissionOptionKind, ProtocolVersion,
-    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
-    SetSessionModeRequest, StopReason as SdkStopReason,
+    ContentBlock, InitializeRequest, NewSessionRequest, PermissionOption, PermissionOptionKind,
+    ProtocolVersion, RequestPermissionRequest, RequestPermissionResponse, SessionConfigKind,
+    SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason as SdkStopReason,
 };
 use agent_client_protocol::{AcpAgent, Client, Dispatch, SessionMessage};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info, warn};
 
+use crate::config::ensemble::{DiscoveredCapabilities, ModeDefinition, ModelDefinition};
 use crate::error::AgentError;
 
 use super::events::{AgentEvent, RuntimeStream, TokenUsage, WorkerEvent};
@@ -24,6 +26,13 @@ pub struct AcpSessionConfig {
     pub permission_request_policy: String,
     pub read_timeout_ms: u64,
     pub turn_timeout_ms: u64,
+}
+
+#[derive(Debug)]
+pub struct AcpCapabilityDiscoveryConfig {
+    pub command: String,
+    pub workspace_path: PathBuf,
+    pub read_timeout_ms: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -196,13 +205,184 @@ fn map_sdk_stop_reason(stop: &SdkStopReason) -> super::events::StopReason {
     }
 }
 
+fn option_description(option: &SessionConfigOption) -> Option<String> {
+    option.description.clone().filter(|value| !value.is_empty())
+}
+
+fn model_definitions_from_option(option: &SessionConfigOption) -> Vec<ModelDefinition> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => match &select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => options
+                .iter()
+                .map(|value| ModelDefinition {
+                    id: value.value.to_string(),
+                    name: value.name.clone(),
+                    description: option_description(option),
+                })
+                .collect(),
+            SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .map(|value| ModelDefinition {
+                    id: value.value.to_string(),
+                    name: value.name.clone(),
+                    description: option_description(option),
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+fn mode_definitions_from_option(option: &SessionConfigOption) -> Vec<ModeDefinition> {
+    match &option.kind {
+        SessionConfigKind::Select(select) => match &select.options {
+            SessionConfigSelectOptions::Ungrouped(options) => options
+                .iter()
+                .map(|value| ModeDefinition {
+                    id: value.value.to_string(),
+                    name: value.name.clone(),
+                    description: option_description(option),
+                })
+                .collect(),
+            SessionConfigSelectOptions::Grouped(groups) => groups
+                .iter()
+                .flat_map(|group| group.options.iter())
+                .map(|value| ModeDefinition {
+                    id: value.value.to_string(),
+                    name: value.name.clone(),
+                    description: option_description(option),
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
+pub fn discover_capabilities_from_options(
+    options: Option<&[SessionConfigOption]>,
+) -> DiscoveredCapabilities {
+    let mut capabilities = DiscoveredCapabilities::default();
+
+    for option in options.unwrap_or(&[]) {
+        match option.category.as_ref() {
+            Some(SessionConfigOptionCategory::Model) => {
+                if let SessionConfigKind::Select(select) = &option.kind {
+                    capabilities.current_model = Some(select.current_value.to_string());
+                }
+                capabilities
+                    .models
+                    .extend(model_definitions_from_option(option));
+            }
+            Some(SessionConfigOptionCategory::Mode) => {
+                if let SessionConfigKind::Select(select) = &option.kind {
+                    capabilities.current_mode = Some(select.current_value.to_string());
+                }
+                capabilities
+                    .modes
+                    .extend(mode_definitions_from_option(option));
+            }
+            _ => {}
+        }
+    }
+
+    capabilities
+}
+
+pub async fn discover_capabilities(
+    config: AcpCapabilityDiscoveryConfig,
+) -> Result<DiscoveredCapabilities, AgentError> {
+    let transport_command = sdk_transport_command(&config.command, &config.workspace_path);
+    let agent = AcpAgent::from_str(&transport_command).map_err(|e| AgentError::AgentNotFound {
+        command: format!("{}: {}", config.command, e),
+    })?;
+    let read_timeout_ms = config.read_timeout_ms;
+    let workspace_path = config.workspace_path.clone();
+    let discovered = Arc::new(Mutex::new(DiscoveredCapabilities::default()));
+    let discovered_inner = discovered.clone();
+    let session_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let session_error_inner = session_error.clone();
+
+    Client
+        .builder()
+        .name("ensemble-capability-discovery")
+        .connect_with(agent, async move |cx| {
+            match tokio::time::timeout(
+                Duration::from_millis(read_timeout_ms),
+                cx.send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task(),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    *session_error_inner.lock().await = Some(format!("initialize failed: {e}"));
+                    return Ok(());
+                }
+                Err(_) => {
+                    *session_error_inner.lock().await =
+                        Some(format!("response timeout after {read_timeout_ms}ms"));
+                    return Ok(());
+                }
+            }
+
+            let session_response = match tokio::time::timeout(
+                Duration::from_millis(read_timeout_ms),
+                cx.send_request(NewSessionRequest::new(&workspace_path))
+                    .block_task(),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(e)) => {
+                    *session_error_inner.lock().await = Some(format!("session error: {e}"));
+                    return Ok(());
+                }
+                Err(_) => {
+                    *session_error_inner.lock().await =
+                        Some(format!("response timeout after {read_timeout_ms}ms"));
+                    return Ok(());
+                }
+            };
+
+            *discovered_inner.lock().await =
+                discover_capabilities_from_options(session_response.config_options.as_deref());
+            Ok(())
+        })
+        .await
+        .map_err(|e| AgentError::IoError {
+            reason: e.to_string(),
+        })?;
+
+    if let Some(error_msg) = session_error.lock().await.clone() {
+        if error_msg.contains("response timeout") {
+            return Err(AgentError::ResponseTimeout {
+                timeout_ms: read_timeout_ms,
+            });
+        }
+        return Err(AgentError::SessionStartupFailed { reason: error_msg });
+    }
+
+    let capabilities = discovered.lock().await.clone();
+    Ok(capabilities)
+}
+
 pub async fn run_acp_session(
     config: AcpSessionConfig,
     prompts: Vec<String>,
     issue_id: &str,
     step_name: &str,
     event_tx: &mpsc::Sender<WorkerEvent>,
-) -> Result<(Option<serde_json::Value>, Vec<TurnResult>), AgentError> {
+) -> Result<
+    (
+        Option<serde_json::Value>,
+        Vec<TurnResult>,
+        DiscoveredCapabilities,
+    ),
+    AgentError,
+> {
     let transport_command = sdk_transport_command(&config.command, &config.workspace_path);
     let agent_pid: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let agent_pid_for_debug = agent_pid.clone();
@@ -229,6 +409,8 @@ pub async fn run_acp_session(
     let turn_results: Arc<Mutex<Vec<TurnResult>>> = Arc::new(Mutex::new(Vec::new()));
     let final_verdict: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
     let session_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let discovered_capabilities: Arc<Mutex<DiscoveredCapabilities>> =
+        Arc::new(Mutex::new(DiscoveredCapabilities::default()));
     let prompts = Arc::new(prompts);
     let session_mode = config.session_mode.clone();
     let read_timeout_ms = config.read_timeout_ms;
@@ -239,6 +421,7 @@ pub async fn run_acp_session(
     let final_verdict_inner = final_verdict.clone();
     let session_error_inner = session_error.clone();
     let session_error_outer = session_error.clone();
+    let discovered_capabilities_inner = discovered_capabilities.clone();
 
     let builder = Client.builder().name("ensemble").on_receive_request(
         async move |request: RequestPermissionRequest,
@@ -312,14 +495,14 @@ pub async fn run_acp_session(
                 }
             }
 
-            let session_builder = cx.build_session(&workspace_path);
-            let mut session = match tokio::time::timeout(
+            let session_response = match tokio::time::timeout(
                 Duration::from_millis(read_timeout_ms),
-                session_builder.block_task().start_session(),
+                cx.send_request(NewSessionRequest::new(&workspace_path))
+                    .block_task(),
             )
             .await
             {
-                Ok(Ok(session)) => session,
+                Ok(Ok(response)) => response,
                 Ok(Err(e)) => {
                     let mut err = session_error_inner.lock().await;
                     *err = Some(format!("session error: {e}"));
@@ -328,6 +511,19 @@ pub async fn run_acp_session(
                 Err(_) => {
                     let mut err = session_error_inner.lock().await;
                     *err = Some(format!("response timeout after {read_timeout_ms}ms"));
+                    return Ok(());
+                }
+            };
+
+            let capabilities =
+                discover_capabilities_from_options(session_response.config_options.as_deref());
+            *discovered_capabilities_inner.lock().await = capabilities;
+
+            let mut session = match cx.attach_session(session_response, Vec::new()) {
+                Ok(session) => session,
+                Err(e) => {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(format!("session attach failed: {e}"));
                     return Ok(());
                 }
             };
@@ -347,6 +543,24 @@ pub async fn run_acp_session(
 
             if let Some(ref mode) = session_mode {
                 if !mode.is_empty() {
+                    let discovered = discovered_capabilities_inner.lock().await;
+                    if !discovered.modes.is_empty()
+                        && !discovered.modes.iter().any(|candidate| candidate.id == *mode)
+                    {
+                        let mut err = session_error_inner.lock().await;
+                        *err = Some(format!(
+                            "configured session_mode '{}' is not supported by agent; available modes: {}",
+                            mode,
+                            discovered
+                                .modes
+                                .iter()
+                                .map(|m| m.id.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                        return Ok(());
+                    }
+                    drop(discovered);
                     match tokio::time::timeout(
                         Duration::from_millis(read_timeout_ms),
                         session
@@ -563,7 +777,8 @@ pub async fn run_acp_session(
 
     let verdict = final_verdict.lock().await.take();
     let results = turn_results.lock().await.clone();
-    Ok((verdict, results))
+    let capabilities = discovered_capabilities.lock().await.clone();
+    Ok((verdict, results, capabilities))
 }
 
 #[cfg(test)]
@@ -670,6 +885,125 @@ mod tests {
                 Ok(Err(AgentError::ResponseTimeout { timeout_ms: 50 }))
             ),
             "startup should return the configured response timeout, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn discover_capabilities_from_options_extracts_models_and_modes() {
+        use agent_client_protocol::schema::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "gpt-5",
+                vec![
+                    SessionConfigSelectOption::new("gpt-5", "GPT-5"),
+                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "code",
+                vec![
+                    SessionConfigSelectOption::new("code", "Code"),
+                    SessionConfigSelectOption::new("review", "Review"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+        ];
+
+        let capabilities = discover_capabilities_from_options(Some(&options));
+
+        assert_eq!(capabilities.current_model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            capabilities
+                .models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["gpt-5", "sonnet"]
+        );
+        assert_eq!(capabilities.current_mode.as_deref(), Some("code"));
+        assert_eq!(
+            capabilities
+                .modes
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["code", "review"]
+        );
+    }
+
+    #[test]
+    fn discover_capabilities_from_options_flattens_grouped_options_with_descriptions() {
+        use agent_client_protocol::schema::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
+            SessionConfigSelectOption,
+        };
+
+        let options = vec![SessionConfigOption::select(
+            "model",
+            "Model",
+            "gpt-5",
+            vec![
+                SessionConfigSelectGroup::new(
+                    "openai",
+                    "OpenAI",
+                    vec![
+                        SessionConfigSelectOption::new("gpt-5", "GPT-5"),
+                        SessionConfigSelectOption::new("gpt-5-mini", "GPT-5 mini"),
+                    ],
+                ),
+                SessionConfigSelectGroup::new(
+                    "anthropic",
+                    "Anthropic",
+                    vec![SessionConfigSelectOption::new("sonnet", "Sonnet")],
+                ),
+            ],
+        )
+        .description("Available model")
+        .category(SessionConfigOptionCategory::Model)];
+
+        let capabilities = discover_capabilities_from_options(Some(&options));
+
+        assert_eq!(capabilities.current_model.as_deref(), Some("gpt-5"));
+        assert_eq!(
+            capabilities
+                .models
+                .iter()
+                .map(|m| (m.id.as_str(), m.description.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("gpt-5", Some("Available model")),
+                ("gpt-5-mini", Some("Available model")),
+                ("sonnet", Some("Available model")),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn discover_capabilities_times_out_when_agent_does_not_initialize() {
+        let workspace = TempDir::new().unwrap();
+        let config = AcpCapabilityDiscoveryConfig {
+            command: "bash -lc 'while IFS= read -r _line; do sleep 60; done'".to_string(),
+            workspace_path: workspace.path().to_path_buf(),
+            read_timeout_ms: 50,
+        };
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(500), discover_capabilities(config)).await;
+
+        assert!(
+            matches!(
+                result,
+                Ok(Err(AgentError::ResponseTimeout { timeout_ms: 50 }))
+            ),
+            "discovery should return the configured response timeout, got {result:?}"
         );
     }
 }
