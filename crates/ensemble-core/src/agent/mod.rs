@@ -2043,4 +2043,46 @@ on_failure: Failed
             Some("acpx --agent 'codex' --model 'gpt-5'")
         );
     }
+
+    #[test]
+    fn tokenize_command_string_splits_simple_program_and_args() {
+        let resolved = tokenize_command_string("acpx --agent builder").unwrap();
+        assert_eq!(resolved.program, PathBuf::from("acpx"));
+        assert_eq!(resolved.args, vec!["--agent", "builder"]);
+        assert!(resolved.env.is_empty());
+    }
+
+    #[test]
+    fn tokenize_command_string_preserves_args_with_spaces() {
+        let resolved = tokenize_command_string(r#"my-agent --name "My Agent" --verbose"#).unwrap();
+        assert_eq!(resolved.program, PathBuf::from("my-agent"));
+        assert_eq!(resolved.args, vec!["--name", "My Agent", "--verbose"]);
+    }
+
+    #[test]
+    fn tokenize_command_string_rejects_empty_string() {
+        let err = tokenize_command_string("").unwrap_err();
+        assert!(
+            matches!(err, AgentError::InvalidAgentCommand { .. }),
+            "expected InvalidAgentCommand, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn tokenize_command_string_rejects_whitespace_only_string() {
+        let err = tokenize_command_string("   ").unwrap_err();
+        assert!(
+            matches!(err, AgentError::InvalidAgentCommand { .. }),
+            "expected InvalidAgentCommand, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn tokenize_command_string_rejects_unterminated_quote() {
+        let err = tokenize_command_string(r#"foo "bar"#).unwrap_err();
+        assert!(
+            matches!(err, AgentError::InvalidAgentCommand { .. }),
+            "expected InvalidAgentCommand, got {err:?}"
+        );
+    }
 }
