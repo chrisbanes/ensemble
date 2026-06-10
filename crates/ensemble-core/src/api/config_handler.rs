@@ -111,10 +111,28 @@ on_failure: Failed
         .unwrap();
         let state = build_app_state(config);
         let (_status, Json(response)) = get_config(State(state)).await;
-        // api_key has skip_serializing, so it must not appear in JSON output.
+        // The literal secret must never appear in the JSON output. The
+        // `api_key` field may appear in the guided form (which is now
+        // derived from the in-memory active_config snapshot) with its
+        // value replaced by the `[REDACTED]` marker, but it must not
+        // contain the original token.
         let json = serde_json::to_string(&response).unwrap();
-        assert!(!json.contains("ghp_secret_token_12345"));
-        assert!(!json.contains("api_key"));
+        assert!(
+            !json.contains("ghp_secret_token_12345"),
+            "secret token leaked into JSON: {json}"
+        );
+        if let Some(idx) = json.find("\"api_key\"") {
+            let after = &json[idx..];
+            let value_start = after.find(':').unwrap() + 1;
+            let value_end_rel = after[value_start..]
+                .find(|c: char| c == ',' || c == '}')
+                .unwrap_or(after.len() - value_start);
+            let value = after[value_start..value_start + value_end_rel].trim();
+            assert!(
+                value == "\"[REDACTED]\"",
+                "api_key value should be the redaction marker, got {value:?}"
+            );
+        }
     }
 
     #[tokio::test]

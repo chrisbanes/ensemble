@@ -5,6 +5,7 @@
 //! The key constraint: unknown YAML fields are preserved during the
 //! round-trip to support custom user extensions.
 
+use crate::config::ensemble::{ModeDefinition, ModelDefinition};
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +60,10 @@ pub struct GuidedAgentForm {
     pub prompt: Option<String>,
     pub prompt_template: Option<String>,
     pub reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_models: Option<Vec<ModelDefinition>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub available_modes: Option<Vec<ModeDefinition>>,
 }
 
 /// Step section in guided form.
@@ -131,8 +136,24 @@ pub struct GuidedTransitionForm {
 /// guided form representation. If parsing fails, returns a ConfigError.
 pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigError> {
     let config = crate::config::ensemble::parse_config(raw_yaml)?;
+    Ok(config_to_guided_form(&config))
+}
 
-    Ok(GuidedConfigForm {
+/// Build a `GuidedConfigForm` from a typed `EnsembleConfig` snapshot.
+///
+/// This is used by the API layer so that the in-memory config — which may
+/// include capabilities discovered at runtime (e.g. `available_models`,
+/// `available_modes`) that the user has not yet written to YAML — is
+/// surfaced in the guided form response. Equivalent to `extract_guided_form`
+/// after parsing, but accepts a typed config directly.
+pub fn guided_form_from_config(
+    config: &crate::config::ensemble::EnsembleConfig,
+) -> GuidedConfigForm {
+    config_to_guided_form(config)
+}
+
+fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> GuidedConfigForm {
+    GuidedConfigForm {
         tracker: GuidedTrackerForm {
             kind: config.tracker.kind.clone(),
             path: config
@@ -173,6 +194,10 @@ pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigErr
                     .as_ref()
                     .map(|p| p.to_string_lossy().to_string()),
                 reasoning_level: agent.reasoning_level.clone(),
+                available_models: (!agent.available_models.is_empty())
+                    .then(|| agent.available_models.clone()),
+                available_modes: (!agent.available_modes.is_empty())
+                    .then(|| agent.available_modes.clone()),
             })
             .collect(),
         steps: config
@@ -219,7 +244,7 @@ pub fn extract_guided_form(raw_yaml: &str) -> Result<GuidedConfigForm, ConfigErr
             on_success: config.on_success.clone(),
             on_failure: config.on_failure.clone(),
         },
-    })
+    }
 }
 
 /// Apply a guided form back to the base YAML, preserving unknown fields.
@@ -372,6 +397,34 @@ pub fn apply_guided_form(
                     am.insert("reasoning_level".into(), v);
                 } else {
                     am.remove("reasoning_level");
+                }
+                if let Some(ref available_models) = a.available_models {
+                    if available_models.is_empty() {
+                        am.remove("available_models");
+                    } else {
+                        am.insert(
+                            "available_models".into(),
+                            serde_yaml::to_value(available_models).map_err(|e| {
+                                ConfigError::ConfigParseError {
+                                    reason: e.to_string(),
+                                }
+                            })?,
+                        );
+                    }
+                }
+                if let Some(ref available_modes) = a.available_modes {
+                    if available_modes.is_empty() {
+                        am.remove("available_modes");
+                    } else {
+                        am.insert(
+                            "available_modes".into(),
+                            serde_yaml::to_value(available_modes).map_err(|e| {
+                                ConfigError::ConfigParseError {
+                                    reason: e.to_string(),
+                                }
+                            })?,
+                        );
+                    }
                 }
             }
         }
@@ -599,6 +652,8 @@ mod tests {
                 prompt: Some("hello".to_string()),
                 prompt_template: None,
                 reasoning_level: None,
+                available_models: None,
+                available_modes: None,
             }],
             steps: vec![GuidedStepForm {
                 name: "implement".to_string(),
@@ -690,6 +745,48 @@ on_failure: Failed
         assert!(merged.contains("custom_tracker_field: keep me"));
         assert!(merged.contains("custom_agent_field: 42"));
         assert!(merged.contains("custom_concurrency_field: true"));
+    }
+
+    #[test]
+    fn apply_guided_form_preserves_capabilities_when_omitted() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: hello
+    available_models:
+      - id: gpt-5
+        name: GPT-5
+    available_modes:
+      - id: code
+        name: Code
+steps:
+  - name: implement
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let merged = apply_guided_form(raw, &guided_form_with_workspace_root("/tmp/ws")).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let builder = val
+            .get("agents")
+            .unwrap()
+            .get("builder")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+
+        assert!(
+            builder.contains_key("available_models"),
+            "omitted form field should preserve existing available_models"
+        );
+        assert!(
+            builder.contains_key("available_modes"),
+            "omitted form field should preserve existing available_modes"
+        );
     }
 
     #[test]
@@ -832,5 +929,34 @@ on_failure: Failed
             !builder.contains_key("permission_request_policy"),
             "per-agent section should not receive runtime permission_request_policy"
         );
+    }
+
+    #[test]
+    fn extract_guided_form_includes_agent_capabilities() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: Build it.
+    available_models:
+      - id: gpt-5
+        name: GPT-5
+    available_modes:
+      - id: code
+        name: Code
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = extract_guided_form(raw).unwrap();
+        let agent = form.agents.iter().find(|a| a.name == "builder").unwrap();
+
+        assert_eq!(agent.available_models.as_ref().unwrap()[0].id, "gpt-5");
+        assert_eq!(agent.available_modes.as_ref().unwrap()[0].id, "code");
     }
 }

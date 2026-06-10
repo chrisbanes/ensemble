@@ -12,7 +12,10 @@ pub(crate) mod test_support;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::ensemble::{EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode};
+use crate::config::draft::ConfigDocumentState;
+use crate::config::ensemble::{
+    DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode,
+};
 use crate::config::template::render_prompt_with_interaction_response;
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
@@ -25,7 +28,10 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use acp_client::{run_acp_session, AcpSessionConfig, TurnResult};
+use acp_client::{
+    discover_capabilities, run_acp_session, AcpCapabilityDiscoveryConfig, AcpSessionConfig,
+    TurnResult,
+};
 use acpx_runtime::AcpxRuntime;
 
 const VERDICT_FALLBACK_INSTRUCTION: &str = "\
@@ -64,7 +70,10 @@ pub trait AgentRunner: Send + Sync {
 }
 
 /// Real ACP agent runner that implements the full worker loop from SPEC.md Section 16.5.
-pub struct AcpAgentRunner;
+pub struct AcpAgentRunner {
+    config: Arc<RwLock<EnsembleConfig>>,
+    document_state: Option<Arc<RwLock<ConfigDocumentState>>>,
+}
 
 struct BuildPromptRequest<'a> {
     issue: &'a Issue,
@@ -75,9 +84,87 @@ struct BuildPromptRequest<'a> {
     turn_number: u32,
 }
 
+fn update_agent_capabilities(
+    config: &mut EnsembleConfig,
+    agent_name: &str,
+    capabilities: &DiscoveredCapabilities,
+) {
+    if let Some(agent) = config.agents.get_mut(agent_name) {
+        agent.available_models = capabilities.models.clone();
+        agent.available_modes = capabilities.modes.clone();
+    }
+}
+
 impl AcpAgentRunner {
-    pub fn new(_config: Arc<RwLock<EnsembleConfig>>) -> Self {
-        Self
+    pub fn new(config: Arc<RwLock<EnsembleConfig>>) -> Self {
+        Self {
+            config,
+            document_state: None,
+        }
+    }
+
+    pub fn new_with_document_state(
+        config: Arc<RwLock<EnsembleConfig>>,
+        document_state: Arc<RwLock<ConfigDocumentState>>,
+    ) -> Self {
+        Self {
+            config,
+            document_state: Some(document_state),
+        }
+    }
+
+    /// Persist discovered ACP capabilities back into the shared in-memory
+    /// `AgentConfig` snapshots. No-op if the discovery returned no models and
+    /// no modes so that a transient empty discovery does not wipe
+    /// previously-stored data.
+    async fn store_agent_capabilities(
+        &self,
+        agent_name: &str,
+        capabilities: DiscoveredCapabilities,
+    ) {
+        if capabilities.models.is_empty() && capabilities.modes.is_empty() {
+            return;
+        }
+
+        {
+            let mut shared_config = self.config.write().await;
+            update_agent_capabilities(&mut shared_config, agent_name, &capabilities);
+        }
+
+        if let Some(document_state) = &self.document_state {
+            let mut document_state = document_state.write().await;
+            if let Some(active_config) = document_state.active_config.as_mut() {
+                update_agent_capabilities(active_config, agent_name, &capabilities);
+            }
+        }
+    }
+
+    /// Run the ACP handshake-only discovery against the `acpx` runtime for
+    /// the agent referenced by `request` and store the result in shared
+    /// config. Returns `Ok(())` if the agent has no `acpx_agent` configured
+    /// (e.g. direct runtime) — only the `acpx_agent` path advertises models
+    /// and modes via ACP `configOptions`.
+    async fn discover_acpx_capabilities_for_request(
+        &self,
+        request: &AgentRunRequest<'_>,
+    ) -> Result<(), AgentError> {
+        let Some(agent_config) = request.config.agents.get(request.agent_name) else {
+            return Ok(());
+        };
+        let Some(command) = resolve_acpx_acp_command(agent_config) else {
+            return Ok(());
+        };
+
+        let capabilities = discover_capabilities(AcpCapabilityDiscoveryConfig {
+            command,
+            workspace_path: request.workspace_path.to_path_buf(),
+            read_timeout_ms: request.config.agent.read_timeout_ms,
+        })
+        .await?;
+
+        self.store_agent_capabilities(request.agent_name, capabilities)
+            .await;
+        Ok(())
     }
 
     /// Build the prompt for a given turn.
@@ -465,6 +552,21 @@ fn resolve_agent_command(
     shell_escape_command(default_command)
 }
 
+/// Build the ACP spawn command used for the discovery handshake.
+///
+/// Deliberately omits the `permission_mode` flag — discovery only needs the
+/// agent process to start and report `configOptions`; the real run will
+/// re-invoke the agent with the full command built by `resolve_agent_command`.
+fn resolve_acpx_acp_command(agent_config: &crate::config::ensemble::AgentConfig) -> Option<String> {
+    let acpx_name = agent_config.acpx_agent.as_ref()?;
+    let mut cmd = String::from("acpx");
+    cmd.push_str(&format!(" --agent {}", shell_escape(acpx_name)));
+    if let Some(ref model) = agent_config.model {
+        cmd.push_str(&format!(" --model {}", shell_escape(model)));
+    }
+    Some(cmd)
+}
+
 #[allow(dead_code)]
 fn shell_escape_command(command: &str) -> String {
     let parts = shlex::split(command)
@@ -526,6 +628,13 @@ impl AgentRunner for AcpAgentRunner {
                         },
                     )
                     .await?;
+                if let Err(error) = self.discover_acpx_capabilities_for_request(&request).await {
+                    tracing::debug!(
+                        agent_name = request.agent_name,
+                        error = %error,
+                        "ACP capability discovery failed for acpx runtime; continuing without discovered capabilities"
+                    );
+                }
                 AcpxRuntime::new().run_step(&request, &prompt).await
             }
             runtime::RuntimeKind::Direct => self.run_direct_step(request).await,
@@ -583,7 +692,7 @@ impl AcpAgentRunner {
             prompts.push(prompt);
         }
 
-        let (final_verdict, turn_results) = run_acp_session(
+        let (final_verdict, turn_results, capabilities) = run_acp_session(
             session_config,
             prompts,
             &request.issue.id,
@@ -591,6 +700,9 @@ impl AcpAgentRunner {
             &request.event_tx,
         )
         .await?;
+
+        self.store_agent_capabilities(request.agent_name, capabilities)
+            .await;
 
         for (i, result) in turn_results.iter().enumerate() {
             if let TurnResult::Failed { reason, .. } = result {
@@ -611,7 +723,8 @@ mod tests {
     use super::*;
     use crate::agent::events::AgentEvent;
     use crate::agent::test_support::write_mock_acpx_script;
-    use crate::config::ensemble::parse_config;
+    use crate::config::draft::parse_raw_yaml;
+    use crate::config::ensemble::{parse_config, ModeDefinition, ModelDefinition};
     use crate::interaction::{InteractionKind, InteractionResponse};
     use tokio_util::sync::CancellationToken;
 
@@ -767,6 +880,111 @@ on_failure: Todo
             )
             .unwrap(),
         )
+    }
+
+    fn test_runner() -> AcpAgentRunner {
+        AcpAgentRunner::new(Arc::new(RwLock::new(test_config().as_ref().clone())))
+    }
+
+    #[tokio::test]
+    async fn store_agent_capabilities_updates_runtime_and_document_state() {
+        let config_path = std::path::PathBuf::from("/tmp/config.yaml");
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo"]
+  terminal_states: ["Done"]
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+on_success: Done
+on_failure: Todo
+"#;
+        let document_state = Arc::new(RwLock::new(parse_raw_yaml(config_path, yaml.to_string())));
+        let runtime_config = Arc::new(RwLock::new(
+            document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .clone(),
+        ));
+        let runner = AcpAgentRunner::new_with_document_state(
+            Arc::clone(&runtime_config),
+            Arc::clone(&document_state),
+        );
+
+        runner
+            .store_agent_capabilities(
+                "builder",
+                DiscoveredCapabilities {
+                    models: vec![ModelDefinition {
+                        id: "gpt-5".to_string(),
+                        name: "GPT-5".to_string(),
+                        description: Some("primary model".to_string()),
+                    }],
+                    modes: vec![ModeDefinition {
+                        id: "code".to_string(),
+                        name: "Code".to_string(),
+                        description: None,
+                    }],
+                    current_model: Some("gpt-5".to_string()),
+                    current_mode: Some("code".to_string()),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            runtime_config
+                .read()
+                .await
+                .agents
+                .get("builder")
+                .unwrap()
+                .available_models[0]
+                .id,
+            "gpt-5"
+        );
+        assert_eq!(
+            document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .agents
+                .get("builder")
+                .unwrap()
+                .available_modes[0]
+                .id,
+            "code"
+        );
+
+        runner
+            .store_agent_capabilities("builder", DiscoveredCapabilities::default())
+            .await;
+
+        assert_eq!(
+            document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .agents
+                .get("builder")
+                .unwrap()
+                .available_models[0]
+                .id,
+            "gpt-5"
+        );
     }
 
     fn collect_event_names(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<String> {
@@ -1258,7 +1476,7 @@ agent:
             .await
             .unwrap();
 
-        AcpAgentRunner
+        test_runner()
             .build_prompt(
                 test_config().as_ref(),
                 BuildPromptRequest {
@@ -1299,7 +1517,7 @@ agent:
             resolved_at: chrono::Utc::now(),
         };
 
-        AcpAgentRunner
+        test_runner()
             .prepare_workspace(workspace.path(), Some(&response))
             .await
             .unwrap();
@@ -1328,7 +1546,7 @@ agent:
         .await
         .unwrap();
 
-        AcpAgentRunner
+        test_runner()
             .prepare_workspace(workspace.path(), None)
             .await
             .unwrap();
@@ -1353,7 +1571,7 @@ agent:
         )
         .await;
 
-        AcpAgentRunner
+        test_runner()
             .prepare_workspace(workspace.path(), None)
             .await
             .unwrap();
@@ -1383,7 +1601,7 @@ agent:
         )
         .await;
 
-        AcpAgentRunner
+        test_runner()
             .prepare_workspace(workspace.path(), None)
             .await
             .unwrap();
@@ -1442,7 +1660,7 @@ on_failure: Todo
         .await
         .unwrap();
 
-        let prompt = AcpAgentRunner
+        let prompt = test_runner()
             .build_prompt(
                 config.as_ref(),
                 BuildPromptRequest {
@@ -1505,7 +1723,7 @@ on_failure: Todo
         .await
         .unwrap();
 
-        let prompt = AcpAgentRunner
+        let prompt = test_runner()
             .build_prompt(
                 test_config().as_ref(),
                 BuildPromptRequest {
@@ -1536,7 +1754,7 @@ on_failure: Todo
         .await
         .unwrap();
 
-        AcpAgentRunner
+        test_runner()
             .prepare_workspace(workspace.path(), None)
             .await
             .unwrap();
@@ -1573,6 +1791,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
         assert_eq!(cmd, "acpx --agent 'claude' --model 'sonnet'");
@@ -1589,6 +1808,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
 
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
@@ -1607,6 +1827,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
 
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
@@ -1628,6 +1849,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
 
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
@@ -1646,6 +1868,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
         assert_eq!(cmd, "acpx --agent 'claude'");
@@ -1662,6 +1885,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
 
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
@@ -1686,6 +1910,7 @@ on_failure: Todo
             prompt: None,
             prompt_template: None,
             reasoning_level: None,
+            ..Default::default()
         };
         let cmd = resolve_agent_command(Some(&config), "default-cmd");
         assert_eq!(cmd, "'codex' '--profile' 'prod;' 'touch' '/tmp/pwned'");
@@ -1752,5 +1977,26 @@ on_failure: Failed
         };
         assert_eq!(event.event_name(), "output_chunk");
         assert_eq!(event.message_for_state().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn resolve_acpx_acp_command_includes_agent_and_model() {
+        let command = resolve_acpx_acp_command(&crate::config::ensemble::AgentConfig {
+            runtime: Some("acpx".to_string()),
+            executor: None,
+            model: Some("gpt-5".to_string()),
+            acpx_agent: Some("codex".to_string()),
+            permission_mode: None,
+            prompt: Some("Build it.".to_string()),
+            prompt_template: None,
+            reasoning_level: None,
+            available_models: Vec::new(),
+            available_modes: Vec::new(),
+        });
+
+        assert_eq!(
+            command.as_deref(),
+            Some("acpx --agent 'codex' --model 'gpt-5'")
+        );
     }
 }

@@ -1,3 +1,4 @@
+use crate::config::ensemble::ModelDefinition;
 use crate::config::ensemble::{resolve_relative_to_base, StepConfig};
 use crate::error::ConfigError;
 use crate::pipeline::dag::build_dag;
@@ -86,7 +87,15 @@ pub struct DiscoveredAgent {
 /// Capabilities discovered by probing an acpx agent session.
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AgentCapabilities {
+    /// Flat list of model identifiers, used by the setup wizard UI.
     pub available_models: Vec<String>,
+    /// Typed model definitions populated from the same probe when available.
+    /// Empty when the probe only returned string identifiers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_models: Vec<crate::config::ensemble::ModelDefinition>,
+    /// Typed mode definitions populated from the same probe when available.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_modes: Vec<crate::config::ensemble::ModeDefinition>,
 }
 
 /// Result of a setup validation check.
@@ -118,6 +127,15 @@ impl AgentCapabilities {
             caps.available_models = models
                 .iter()
                 .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect();
+            caps.typed_models = caps
+                .available_models
+                .iter()
+                .map(|model| ModelDefinition {
+                    id: model.clone(),
+                    name: model.clone(),
+                    description: None,
+                })
                 .collect();
         }
 
@@ -1832,6 +1850,25 @@ on_failure: Failed
         });
         let caps = AgentCapabilities::from_session_json(&json);
         assert_eq!(caps.available_models, vec!["default", "sonnet", "opus"]);
+    }
+
+    #[test]
+    fn agent_capabilities_from_session_json_populates_typed_models() {
+        let json = serde_json::json!({
+            "acpx": {
+                "available_models": ["default", "sonnet"]
+            }
+        });
+
+        let caps = AgentCapabilities::from_session_json(&json);
+
+        assert_eq!(
+            caps.typed_models
+                .iter()
+                .map(|model| (model.id.as_str(), model.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("default", "default"), ("sonnet", "sonnet")]
+        );
     }
 
     #[test]
