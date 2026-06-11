@@ -332,6 +332,11 @@ impl PipelineRun {
         }
     }
 
+    /// Return runtime DAG metadata for a step, including synthetic steps.
+    pub fn step(&self, step_name: &str) -> Option<&DagStep> {
+        self.dag.steps.iter().find(|step| step.name == step_name)
+    }
+
     /// Reset `step_name` and every step that transitively depends on it back
     /// to pending, clearing any stored outputs for those steps.
     pub fn retry_from_step(&mut self, step_name: &str) -> HashSet<String> {
@@ -388,7 +393,7 @@ impl PipelineRun {
                         kind: StepKind::Agent,
                         tracker_state: None,
                         approval: None,
-                        on_failure: OnFailure::RetryStep,
+                        on_failure: OnFailure::Halt,
                         fixup_agent: None,
                         depends: original_deps,
                     },

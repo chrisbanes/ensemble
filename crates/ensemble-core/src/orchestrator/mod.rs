@@ -1329,8 +1329,16 @@ impl Orchestrator {
                             let mut completed_identifier = None;
                             let mut rejection_comment = None;
                             let mut history_run_id = None;
+                            let runtime_step = state
+                                .get_pipeline_run(issue_id)
+                                .and_then(|run| run.step(&step))
+                                .cloned();
                             let step_config = config.steps.iter().find(|s| s.name == step);
-                            let on_failure = step_config.map(|s| s.on_failure).unwrap_or_default();
+                            let on_failure = runtime_step
+                                .as_ref()
+                                .map(|s| s.on_failure)
+                                .or_else(|| step_config.map(|s| s.on_failure))
+                                .unwrap_or_default();
                             match on_failure {
                                 OnFailure::RetryStep => {
                                     if let Some(run) = state.get_pipeline_run_mut(issue_id) {
@@ -1385,9 +1393,13 @@ impl Orchestrator {
                                     }
                                 }
                                 OnFailure::Fixup => {
-                                    let Some(fixup_agent) =
-                                        step_config.and_then(|s| s.fixup_agent.as_deref())
-                                    else {
+                                    let fixup_agent = runtime_step
+                                        .as_ref()
+                                        .and_then(|s| s.fixup_agent.as_deref())
+                                        .or_else(|| {
+                                            step_config.and_then(|s| s.fixup_agent.as_deref())
+                                        });
+                                    let Some(fixup_agent) = fixup_agent else {
                                         error!(
                                             issue_id = %issue_id,
                                             step = %step,
@@ -1460,8 +1472,10 @@ impl Orchestrator {
                                     );
                                     if let Some(entry) = state.remove_running(issue_id) {
                                         state.add_runtime_seconds(&entry);
-                                        let agent_name = step_config
+                                        let agent_name = runtime_step
+                                            .as_ref()
                                             .map(|s| s.agent.clone())
+                                            .or_else(|| step_config.map(|s| s.agent.clone()))
                                             .unwrap_or_default();
                                         state.add_waiting_on_human(WaitingOnHumanEntry {
                                             issue_id: issue_id.to_string(),
@@ -4472,6 +4486,50 @@ agent:
         parse_config(yaml).unwrap()
     }
 
+    fn make_fixup_config() -> EnsembleConfig {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo", "In Progress"]
+  terminal_states: ["Done", "Closed"]
+agents:
+  builder:
+    executor: claude
+    model: opus
+    prompt: "Work on {{ issue.identifier }}."
+  fixer:
+    executor: claude
+    model: opus
+    prompt: "Fix {{ issue.identifier }}."
+steps:
+  - name: build
+    agent: builder
+  - name: review
+    agent: builder
+    on_failure: fixup
+    fixup_agent: fixer
+max_cycles: 10
+on_success: Done
+on_failure: Todo
+concurrency:
+  max_concurrent_agents: 5
+polling:
+  interval_ms: 100
+workspace:
+  root: /tmp/ensemble-test
+agent:
+  max_turns: 3
+  command: "echo test"
+  session_mode: code
+  permission_request_policy: auto_approve_all
+  turn_timeout_ms: 30000
+  read_timeout_ms: 5000
+  max_retry_backoff_ms: 300000
+  stall_timeout_ms: 300000
+"#;
+        parse_config(yaml).unwrap()
+    }
+
     fn make_halt_config() -> EnsembleConfig {
         let yaml = r#"
 tracker:
@@ -4881,6 +4939,79 @@ agent:
             run.step_states.get("test"),
             Some(StepState::Pending)
         ));
+    }
+
+    #[tokio::test]
+    async fn synthetic_fixup_failure_halts_for_manual_intervention() {
+        let config = Arc::new(RwLock::new(make_fixup_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.step_completed(
+                "build",
+                StepOutput {
+                    result: StepResult::Succeeded,
+                    summary: None,
+                    output: None,
+                },
+                false,
+            );
+            pipeline_run.retry_from_step_with_fixup("review", "fixer");
+            pipeline_run.mark_running("fixup-review", "session-fixup".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), Some(2));
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "fixup-review",
+                WorkerResult::Success {
+                    runtime_verdict: Some(serde_json::json!({
+                        "result": "failed",
+                        "summary": "fixup could not repair"
+                    })),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.get_pipeline_run("1").is_some());
+        assert!(!state.retry_attempts.contains_key("1"));
+        assert!(!state.running.contains_key("1"));
+        assert!(state.waiting_on_human.contains_key("1"));
+        assert!(state.is_claimed("1"));
+
+        let waiting = state.waiting_on_human.get("1").unwrap();
+        assert_eq!(waiting.step_name, "fixup-review");
+        assert_eq!(waiting.agent_name, "fixer");
+        assert_eq!(waiting.prompt, "fixup could not repair");
+        assert!(matches!(waiting.kind, InteractionKind::Handoff));
     }
 
     #[tokio::test]
