@@ -69,6 +69,8 @@ pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, 
     let mut iter = parts.into_iter();
     let program = PathBuf::from(iter.next().expect("non-empty checked above"));
     let args: Vec<String> = iter.collect();
+    // `AgentConfig` has no env field; all command paths return empty env.
+    // If per-agent env support is added, propagate it here.
     Ok(ResolvedCommand {
         program,
         args,
