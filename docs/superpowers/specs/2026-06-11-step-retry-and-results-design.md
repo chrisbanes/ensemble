@@ -108,7 +108,7 @@ steps:
 | `fixup` | Step-level retry with an injected fixup agent. The fixup step runs before the retried step. |
 | `halt` | Stop the pipeline. Do not retry. Wait for manual intervention via API/UI. |
 
-`halt` stops the pipeline entirely — no retry is scheduled. The issue remains claimed and the PipelineRun stays in memory. The user must explicitly retry (via API) or stop the issue. **Limitation:** PipelineRun state is in-memory only. An orchestrator restart loses the halted state — the issue unclaims on next poll and can be re-dispatched fresh. This matches existing wait-on-human behavior.
+`halt` stops the pipeline entirely — no retry is scheduled. The issue remains claimed and the PipelineRun stays in memory. The user must explicitly retry (via API) or stop the issue. **Limitation:** PipelineRun state is in-memory only. An orchestrator restart loses the halted state — the issue unclaims on next poll and can be re-dispatched fresh. This matches existing wait-on-human behavior. Tracked in [#195](https://github.com/chrisbanes/ensemble/issues/195).
 
 ### 4. Fixup retry
 
