@@ -44,7 +44,7 @@ use crate::observability::events_contract::{
     TRACKER_TRANSITION_SUCCEEDED,
 };
 use crate::orchestrator::pipeline_journal::{
-    PipelineRunJournal, PipelineTransitionKind, PipelineTransitionRecord,
+    PipelineRunJournal, PipelineTransitionInput, PipelineTransitionKind, PipelineTransitionRecord,
 };
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
@@ -53,7 +53,7 @@ use crate::pipeline::engine::{
 };
 use crate::pipeline::verdict::{resolve_verdict_with_source, StepResult, VerdictSource};
 use crate::timeline::persistence::TimelinePersistence;
-use crate::tracker::model::Issue;
+use crate::tracker::model::{Issue, RetryEntry};
 use crate::tracker::IssueTracker;
 use crate::workspace::finalize::FinalizeMode;
 use crate::workspace::manager::WorkspaceManager;
@@ -579,7 +579,16 @@ impl Orchestrator {
                 )
             };
 
-            if eligible.is_none() {
+            let restored_pipeline_ready = {
+                let state = self.state.read().await;
+                state.get_pipeline_run(&issue.id).is_some()
+                    && state.is_claimed(&issue.id)
+                    && !state.is_running(&issue.id)
+                    && !state.is_waiting_on_human(&issue.id)
+                    && !state.retry_attempts.contains_key(&issue.id)
+            };
+
+            if eligible.is_none() || restored_pipeline_ready {
                 self.dispatch_issue(issue, None).await;
             }
         }
@@ -730,10 +739,22 @@ impl Orchestrator {
             "dispatching issue with pipeline"
         );
 
-        {
+        let run_started_transition = {
             let mut state = self.state.write().await;
             state.add_running(issue, attempt);
             state.insert_pipeline_run(&issue.id, pipeline_run, Arc::clone(&config_snapshot));
+            Self::transition_input_for_run(
+                &state,
+                &issue.id,
+                &issue.identifier,
+                PipelineTransitionKind::RunStarted,
+                None,
+                None,
+                None,
+            )
+        };
+        if let Some(input) = run_started_transition {
+            self.append_pipeline_transition(input).await;
         }
 
         // Process initial dispatch requests
@@ -881,7 +902,7 @@ impl Orchestrator {
         }
 
         // Mark step as running in pipeline
-        let (run_id, sequence, attempt_num) = {
+        let (run_id, sequence, attempt_num, step_running_transition) = {
             let mut state = self.state.write().await;
             let run_context = Self::run_context_for_issue(&mut state, &issue.id);
             {
@@ -895,8 +916,21 @@ impl Orchestrator {
                     );
                 }
             }
-            run_context
+            let transition = Self::transition_input_for_run(
+                &state,
+                &issue.id,
+                &issue.identifier,
+                PipelineTransitionKind::StepRunning,
+                Some(dispatch.step_name.to_string()),
+                None,
+                None,
+            );
+            (run_context.0, run_context.1, run_context.2, transition)
         };
+
+        if let Some(input) = step_running_transition {
+            self.append_pipeline_transition(input).await;
+        }
 
         self.publish_pipeline_event(
             run_id,
@@ -1154,6 +1188,18 @@ impl Orchestrator {
                 };
 
                 if let Some((action, config_snapshot)) = pipeline_action {
+                    let step_transition = Self::transition_input_for_run(
+                        &state,
+                        issue_id,
+                        issue_snapshot
+                            .as_ref()
+                            .map(|issue| issue.identifier.as_str())
+                            .unwrap_or(issue_id),
+                        Self::transition_kind_for_action(&action),
+                        Some(step_name.to_string()),
+                        Some(verdict_value.to_string()),
+                        None,
+                    );
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Collect output contexts while state lock is still held
@@ -1174,6 +1220,9 @@ impl Orchestrator {
                             };
                             // Need to drop state lock before dispatching
                             drop(state);
+                            if let Some(input) = step_transition {
+                                self.append_pipeline_transition(input).await;
+                            }
                             if let Some(ref issue) = issue_snapshot {
                                 let Some(config_snapshot) = config_snapshot else {
                                     warn!(issue_id = %issue_id, "no config snapshot found for pipeline dispatch");
@@ -1301,7 +1350,22 @@ impl Orchestrator {
                                 let history_run_id = running_entry
                                     .as_ref()
                                     .and_then(|entry| entry.run_id.clone());
+                                let release_identifier = running_entry
+                                    .as_ref()
+                                    .map(|entry| entry.identifier.clone())
+                                    .unwrap_or_else(|| issue_identifier.clone());
+                                let release_run_id = history_run_id.clone();
                                 drop(state);
+                                if let Some(input) = step_transition {
+                                    self.append_pipeline_transition(input).await;
+                                }
+                                self.append_pipeline_release(
+                                    issue_id,
+                                    &release_identifier,
+                                    release_run_id,
+                                    "completed",
+                                )
+                                .await;
                                 if let Some(record) = history_record {
                                     self.append_history_record(history_run_id.as_deref(), record)
                                         .await;
@@ -1588,6 +1652,9 @@ impl Orchestrator {
                             approval_state,
                         } => {
                             drop(state);
+                            if let Some(input) = step_transition {
+                                self.append_pipeline_transition(input).await;
+                            }
                             if let Err(error) = self
                                 .handle_post_step_approval(
                                     issue_id,
@@ -1641,6 +1708,10 @@ impl Orchestrator {
                             }
 
                             debug!(issue_id = %issue_id, "pipeline waiting for other steps");
+                            drop(state);
+                            if let Some(input) = step_transition {
+                                self.append_pipeline_transition(input).await;
+                            }
                         }
                     }
                 }
@@ -2620,6 +2691,82 @@ impl Orchestrator {
         }
 
         Ok(())
+    }
+
+    async fn append_pipeline_transition(&self, input: PipelineTransitionInput) {
+        if let Err(error) = self.pipeline_journal.append(input).await {
+            warn!(
+                error = %error,
+                "failed to append pipeline transition journal record"
+            );
+        }
+    }
+
+    async fn append_pipeline_release(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        run_id: Option<String>,
+        reason: &str,
+    ) {
+        if let Err(error) = self
+            .pipeline_journal
+            .append_released(issue_id, identifier, run_id, reason)
+            .await
+        {
+            warn!(
+                issue_id = %issue_id,
+                error = %error,
+                "failed to append pipeline release journal record"
+            );
+        }
+    }
+
+    fn transition_input_for_run(
+        state: &OrchestratorState,
+        issue_id: &str,
+        identifier: &str,
+        kind: PipelineTransitionKind,
+        step: Option<String>,
+        reason: Option<String>,
+        retry: Option<RetryEntry>,
+    ) -> Option<PipelineTransitionInput> {
+        let run = state.get_pipeline_run(issue_id)?;
+        let run_id = state
+            .running
+            .get(issue_id)
+            .and_then(|entry| entry.run_id.clone())
+            .or_else(|| {
+                state
+                    .waiting_on_human
+                    .get(issue_id)
+                    .and_then(|entry| entry.run_id.clone())
+            })
+            .or_else(|| state.issue_run_ids.get(issue_id).cloned());
+
+        Some(PipelineTransitionInput {
+            kind,
+            issue_id: issue_id.to_string(),
+            identifier: identifier.to_string(),
+            run_id,
+            cycle: run.cycle,
+            step,
+            reason,
+            retry,
+            snapshot: Some(run.to_snapshot()),
+        })
+    }
+
+    fn transition_kind_for_action(action: &PipelineAction) -> PipelineTransitionKind {
+        match action {
+            PipelineAction::Dispatch(_) | PipelineAction::Succeeded => {
+                PipelineTransitionKind::StepCompleted
+            }
+            PipelineAction::Failed { .. } => PipelineTransitionKind::StepFailed,
+            PipelineAction::BlockedOnHuman { .. } => PipelineTransitionKind::StepBlockedOnHuman,
+            PipelineAction::AwaitingApproval { .. } => PipelineTransitionKind::StepAwaitingApproval,
+            PipelineAction::Waiting => PipelineTransitionKind::StepCompleted,
+        }
     }
 
     async fn cancel_open_interaction(&self, interaction_request_id: Option<String>) {
@@ -4796,6 +4943,125 @@ agent:
                 .and_then(|entry| entry.retry_from_step.as_deref()),
             Some("build")
         );
+    }
+
+    #[tokio::test]
+    async fn restored_live_pipeline_run_dispatches_on_next_tick() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let run = PipelineRun::new(issue.id.clone(), 1, dag);
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::RunStarted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        assert!(state.read().await.is_claimed(&issue.id));
+
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(lock.is_running(&issue.id));
+        assert!(matches!(
+            lock.get_pipeline_run(&issue.id)
+                .and_then(|run| run.step_states.get("build")),
+            Some(StepState::Running { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_issue_writes_run_started_and_step_running_transitions() {
+        let temp = tempfile::tempdir().unwrap();
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let cfg = make_config();
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let mut orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state,
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        orchestrator.handle_tick().await;
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::RunStarted));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::StepRunning));
     }
 
     fn make_fixup_config() -> EnsembleConfig {
