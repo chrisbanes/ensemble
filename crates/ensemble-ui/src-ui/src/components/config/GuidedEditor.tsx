@@ -43,6 +43,7 @@ export interface GuidedForm {
   }>;
   steps: Array<{
     name: string;
+    kind?: "agent" | "synthesis";
     agent: string;
     depends: string[];
     tracker_state?: string | null;
@@ -373,6 +374,7 @@ export default function GuidedEditor({
             value={{
               steps: form.steps.map((s) => ({
                 name: s.name,
+                kind: s.kind,
                 agent: s.agent,
                 depends: s.depends,
                 tracker_state: s.tracker_state,
@@ -383,6 +385,7 @@ export default function GuidedEditor({
               handleFormChange({
                 steps: draft.steps.map((s) => ({
                   name: s.name,
+                  kind: s.kind,
                   agent: s.agent,
                   depends: s.depends,
                   tracker_state: s.tracker_state,

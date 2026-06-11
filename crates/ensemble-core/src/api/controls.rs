@@ -671,7 +671,7 @@ mod tests {
     use crate::agent::cancellation::register_issue_cancellation;
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
-    use crate::config::ensemble::{ConcurrencyConfig, StepConfig};
+    use crate::config::ensemble::{ConcurrencyConfig, StepConfig, StepKind};
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
     };
@@ -766,6 +766,7 @@ mod tests {
     fn test_pipeline_run() -> PipelineRun {
         let dag = build_dag(&[StepConfig {
             name: "build".to_string(),
+            kind: StepKind::Agent,
             agent: "build".to_string(),
             depends: None,
             tracker_state: None,

@@ -189,6 +189,7 @@ async fn build_issue_snapshot_from_history(
             .map(|(idx, name)| WorkflowStepInfo {
                 name: name.clone(),
                 agent: "unknown".to_string(),
+                kind: "agent".to_string(),
                 dependencies: vec![],
                 state: if record.outcome == "failed" && idx == last_idx {
                     "failed".to_string()
@@ -303,6 +304,7 @@ pub async fn get_step_detail(
         step_name,
         status: detail_state.status,
         agent: detail_state.agent,
+        kind: detail_state.kind,
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
         verdict: detail_state.verdict,

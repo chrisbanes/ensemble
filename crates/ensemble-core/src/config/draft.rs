@@ -381,6 +381,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
                 }
             }
         }
+        PipelineError::InvalidSynthesisStep { step, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid synthesis step '{}': {}", step, reason),
+            section: "workflow".to_string(),
+            field: Some("kind".to_string()),
+            path: Some(format!("steps.{}", step)),
+        },
     }
 }
 

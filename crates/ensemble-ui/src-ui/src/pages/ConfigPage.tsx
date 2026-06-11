@@ -32,6 +32,7 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
     })),
     steps: form.steps.map((step) => ({
       ...step,
+      kind: step.kind ?? "agent",
       tracker_state: step.tracker_state ?? undefined,
     })),
     runtime: {
@@ -73,7 +74,14 @@ export default function ConfigPage() {
   };
 
   const handleSaveGuided = async (form: GuidedForm, baseRawYaml: string) => {
-    await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    const normalizedForm = {
+      ...form,
+      steps: form.steps.map((step) => ({
+        ...step,
+        kind: step.kind && step.kind !== "agent" ? step.kind : undefined,
+      })),
+    };
+    await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form: normalizedForm });
     setDisplayedIssues([]);
     await refetch();
   };

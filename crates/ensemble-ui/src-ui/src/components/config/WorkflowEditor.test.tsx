@@ -6,8 +6,8 @@ import WorkflowEditor from "./WorkflowEditor";
 describe("WorkflowEditor", () => {
   const mockDraft = {
     steps: [
-      { name: "build", agent: "builder", depends: [], tracker_state: undefined },
-      { name: "test", agent: "tester", depends: ["build"], tracker_state: undefined },
+      { name: "build", kind: "agent", agent: "builder", depends: [], tracker_state: undefined },
+      { name: "test", kind: "agent", agent: "tester", depends: ["build"], tracker_state: undefined },
     ],
     agents: [{ name: "builder", label: "Builder" }, { name: "tester", label: "Tester" }],
   };
@@ -78,5 +78,17 @@ describe("WorkflowEditor", () => {
     // The second step (test) should show "build" as a dependency option
     // but the first step (build) should have no dependencies available
     expect(screen.getByText("build")).toBeInTheDocument();
+  });
+
+  it("allows marking a step as synthesis", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<WorkflowEditor value={mockDraft} onChange={mockOnChange} />);
+
+    await user.click(screen.getByLabelText("Step kind test"));
+    await user.click(screen.getByRole("option", { name: "Synthesis" }));
+
+    expect(mockOnChange).toHaveBeenCalled();
+    const lastCall = mockOnChange.mock.calls[mockOnChange.mock.calls.length - 1]!;
+    expect(lastCall[0].steps[1].kind).toBe("synthesis");
   });
 });

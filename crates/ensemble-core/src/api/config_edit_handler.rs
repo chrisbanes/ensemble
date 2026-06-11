@@ -679,6 +679,10 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
             serde_json::json!({
                 "name": step.name,
                 "agent_role": step.agent,
+                "kind": match step.kind {
+                    crate::config::ensemble::StepKind::Agent => "agent",
+                    crate::config::ensemble::StepKind::Synthesis => "synthesis",
+                },
                 "depends": step.depends.clone().unwrap_or_default(),
                 "tracker_state": step.tracker_state,
                 "approval": step.approval.as_ref().map(|approval| serde_json::json!({
@@ -1094,6 +1098,7 @@ on_failure: Failed
                 steps: vec![crate::config::setup::SetupStep {
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
+                    kind: None,
                     depends: vec![],
                     tracker_state: None,
                 }],
@@ -1418,6 +1423,7 @@ custom_root:
                 steps: vec![crate::config::setup::SetupStep {
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
+                    kind: None,
                     depends: vec![],
                     tracker_state: Some("In Progress".to_string()),
                 }],
@@ -1518,6 +1524,7 @@ on_failure: Failed
             }],
             steps: vec![crate::config::form::GuidedStepForm {
                 name: "build".to_string(),
+                kind: None,
                 agent: "builder".to_string(),
                 depends: vec![],
                 tracker_state: None,
@@ -1685,6 +1692,7 @@ on_failure: Failed
             }],
             steps: vec![crate::config::form::GuidedStepForm {
                 name: "build".to_string(),
+                kind: None,
                 agent: "missing".to_string(),
                 depends: vec![],
                 tracker_state: None,
@@ -1839,6 +1847,7 @@ on_failure: Failed
             }],
             steps: vec![crate::config::form::GuidedStepForm {
                 name: "build".to_string(),
+                kind: None,
                 agent: "missing".to_string(),
                 depends: vec![],
                 tracker_state: None,
@@ -1945,6 +1954,7 @@ on_failure: Failed
                 steps: vec![crate::config::setup::SetupStep {
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
+                    kind: None,
                     depends: vec![],
                     tracker_state: Some("In Progress".to_string()),
                 }],

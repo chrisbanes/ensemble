@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
+use crate::config::ensemble::StepKind;
 use crate::pipeline::dag::StepDag;
 use crate::pipeline::verdict::{StepOutput, Verdict};
 
@@ -45,6 +46,8 @@ pub struct DispatchRequest {
     pub step_name: String,
     /// The name of the agent that should execute this step.
     pub agent_name: String,
+    /// The kind of the step (agent or synthesis).
+    pub step_kind: StepKind,
     /// Optional tracker state to set while the step is running.
     pub tracker_state: Option<String>,
 }
@@ -420,6 +423,7 @@ impl PipelineRun {
             .map(|s| DispatchRequest {
                 step_name: s.name.clone(),
                 agent_name: s.agent.clone(),
+                step_kind: s.kind,
                 tracker_state: s.tracker_state.clone(),
             })
             .collect();
@@ -447,7 +451,7 @@ fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::{StepApprovalConfig, StepApprovalMode, StepConfig};
+    use crate::config::ensemble::{StepApprovalConfig, StepApprovalMode, StepConfig, StepKind};
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::verdict::StepOutput;
     use serde_json::json;
@@ -460,6 +464,7 @@ mod tests {
         };
         StepConfig {
             name: name.to_string(),
+            kind: StepKind::Agent,
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
@@ -480,6 +485,7 @@ mod tests {
         };
         StepConfig {
             name: name.to_string(),
+            kind: StepKind::Agent,
             agent: agent.to_string(),
             depends: deps,
             tracker_state: Some(tracker_state.to_string()),
@@ -501,6 +507,7 @@ mod tests {
         };
         StepConfig {
             name: name.to_string(),
+            kind: StepKind::Agent,
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
@@ -1129,6 +1136,41 @@ mod tests {
         assert_eq!(context.dependency_outputs[0].step, "review-a");
         assert_eq!(context.dependency_outputs[1].step, "review-b");
         assert_eq!(context.steps["review-a"].summary.as_deref(), Some("a ok"));
+    }
+
+    #[test]
+    fn dispatch_request_carries_synthesis_kind() {
+        let steps = vec![
+            StepConfig {
+                name: "review-a".to_string(),
+                kind: StepKind::Agent,
+                agent: "reviewer".to_string(),
+                depends: Some(vec![]),
+                tracker_state: None,
+                approval: None,
+            },
+            StepConfig {
+                name: "synthesize".to_string(),
+                kind: StepKind::Synthesis,
+                agent: "synth".to_string(),
+                depends: Some(vec!["review-a".to_string()]),
+                tracker_state: None,
+                approval: None,
+            },
+        ];
+        let mut run = make_run(&steps);
+
+        assert!(matches!(run.start(), PipelineAction::Dispatch(_)));
+        let action = run.step_completed("review-a", approve_output(), false);
+
+        match action {
+            PipelineAction::Dispatch(requests) => {
+                assert_eq!(requests.len(), 1);
+                assert_eq!(requests[0].step_name, "synthesize");
+                assert_eq!(requests[0].step_kind, StepKind::Synthesis);
+            }
+            other => panic!("expected synthesis dispatch, got {other:?}"),
+        }
     }
 
     #[test]

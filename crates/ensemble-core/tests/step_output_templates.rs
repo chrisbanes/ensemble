@@ -1,4 +1,4 @@
-use ensemble_core::config::ensemble::StepConfig;
+use ensemble_core::config::ensemble::{StepConfig, StepKind};
 use ensemble_core::config::template::render_prompt_with_context;
 use ensemble_core::pipeline::dag::build_dag;
 use ensemble_core::pipeline::engine::PipelineRun;
@@ -26,6 +26,7 @@ fn sample_issue() -> Issue {
 fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
     StepConfig {
         name: name.to_string(),
+        kind: StepKind::Agent,
         agent: agent.to_string(),
         depends: if depends.is_empty() {
             None

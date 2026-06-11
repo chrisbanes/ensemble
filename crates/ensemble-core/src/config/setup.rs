@@ -1,5 +1,5 @@
 use crate::config::ensemble::ModelDefinition;
-use crate::config::ensemble::{resolve_relative_to_base, StepConfig};
+use crate::config::ensemble::{resolve_relative_to_base, StepConfig, StepKind};
 use crate::error::ConfigError;
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,8 @@ pub struct SetupAgent {
 pub struct SetupStep {
     pub name: String,
     pub agent_role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub depends: Vec<String>,
     pub tracker_state: Option<String>,
 }
@@ -722,6 +724,11 @@ fn generate_yaml(request: &SetupRequest) -> String {
                 "agent".into(),
                 serde_yaml::Value::String(step.agent_role.clone()),
             );
+            if let Some(ref kind) = step.kind {
+                if kind != "agent" {
+                    step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
+                }
+            }
             if !step.depends.is_empty() {
                 step_map.insert(
                     "depends".into(),
@@ -813,6 +820,14 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
         .iter()
         .map(|step| StepConfig {
             name: step.name.clone(),
+            kind: step
+                .kind
+                .as_deref()
+                .map(|k| match k {
+                    "synthesis" => StepKind::Synthesis,
+                    _ => StepKind::Agent,
+                })
+                .unwrap_or_default(),
             agent: step.agent_role.clone(),
             // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
             depends: Some(step.depends.clone()),
@@ -1072,9 +1087,11 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                         .get("tracker_state")
                         .and_then(|s| s.as_str())
                         .map(String::from);
+                    let kind = item.get("kind").and_then(|k| k.as_str()).map(String::from);
                     Some(SetupStep {
                         name: name.to_string(),
                         agent_role: agent_role.to_string(),
+                        kind,
                         depends,
                         tracker_state,
                     })
@@ -1218,7 +1235,7 @@ fn update_yaml_from_request(
                     (name == s.name).then(|| map.clone())
                 })
                 .unwrap_or_default();
-            for key in ["name", "agent", "depends", "tracker_state"] {
+            for key in ["name", "agent", "kind", "depends", "tracker_state"] {
                 step_map.remove(serde_yaml::Value::String(key.to_string()));
             }
             step_map.insert("name".into(), serde_yaml::Value::String(s.name.clone()));
@@ -1226,6 +1243,11 @@ fn update_yaml_from_request(
                 "agent".into(),
                 serde_yaml::Value::String(s.agent_role.clone()),
             );
+            if let Some(ref kind) = s.kind {
+                if kind != "agent" {
+                    step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
+                }
+            }
             if !s.depends.is_empty() {
                 let deps: Vec<serde_yaml::Value> = s
                     .depends
@@ -1374,6 +1396,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -1412,6 +1435,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1452,6 +1476,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1518,6 +1543,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1555,6 +1581,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1591,6 +1618,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1625,6 +1653,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1764,6 +1793,7 @@ custom_section:
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -1822,6 +1852,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -1888,12 +1919,14 @@ on_failure: Failed
             SetupStep {
                 name: "a".to_string(),
                 agent_role: "agent".to_string(),
+                kind: None,
                 depends: vec!["b".to_string()],
                 tracker_state: None,
             },
             SetupStep {
                 name: "b".to_string(),
                 agent_role: "agent".to_string(),
+                kind: None,
                 depends: vec!["a".to_string()],
                 tracker_state: None,
             },
@@ -1909,18 +1942,21 @@ on_failure: Failed
             SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             },
             SetupStep {
                 name: "test".to_string(),
                 agent_role: "tester".to_string(),
+                kind: None,
                 depends: vec!["build".to_string()],
                 tracker_state: None,
             },
             SetupStep {
                 name: "deploy".to_string(),
                 agent_role: "deployer".to_string(),
+                kind: None,
                 depends: vec!["test".to_string()],
                 tracker_state: None,
             },
@@ -1939,6 +1975,7 @@ on_failure: Failed
         let steps = vec![SetupStep {
             name: "build".into(),
             agent_role: "builder".into(),
+            kind: None,
             depends: vec!["missing".into()],
             tracker_state: None,
         }];
@@ -1953,18 +1990,21 @@ on_failure: Failed
             SetupStep {
                 name: "lint".into(),
                 agent_role: "linter".into(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             },
             SetupStep {
                 name: "build".into(),
                 agent_role: "builder".into(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             },
             SetupStep {
                 name: "test".into(),
                 agent_role: "tester".into(),
+                kind: None,
                 depends: vec!["lint".into(), "build".into()],
                 tracker_state: None,
             },
@@ -1995,6 +2035,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2054,6 +2095,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2085,6 +2127,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2118,6 +2161,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2206,6 +2250,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2437,6 +2482,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2494,6 +2540,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -2560,6 +2607,7 @@ on_failure: Done
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
