@@ -6,8 +6,8 @@ import WorkflowEditor from "./WorkflowEditor";
 describe("WorkflowEditor", () => {
   const mockDraft = {
     steps: [
-      { name: "build", kind: "agent", agent: "builder", depends: [], tracker_state: undefined },
-      { name: "test", kind: "agent", agent: "tester", depends: ["build"], tracker_state: undefined },
+      { name: "build", kind: "agent" as const, agent: "builder", depends: [], tracker_state: undefined },
+      { name: "test", kind: "agent" as const, agent: "tester", depends: ["build"], tracker_state: undefined },
     ],
     agents: [{ name: "builder", label: "Builder" }, { name: "tester", label: "Tester" }],
   };

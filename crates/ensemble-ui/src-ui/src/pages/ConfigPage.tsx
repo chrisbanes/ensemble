@@ -32,7 +32,7 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
     })),
     steps: form.steps.map((step) => ({
       ...step,
-      kind: step.kind ?? "agent",
+      kind: (step.kind ?? "agent") as "agent" | "synthesis",
       tracker_state: step.tracker_state ?? undefined,
     })),
     runtime: {
