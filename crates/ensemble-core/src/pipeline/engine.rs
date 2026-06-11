@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
-use crate::config::ensemble::StepKind;
-use crate::pipeline::dag::StepDag;
-use crate::pipeline::verdict::{StepOutput, Verdict};
+use crate::config::ensemble::{OnFailure, StepKind};
+use crate::pipeline::dag::{DagStep, StepDag};
+use crate::pipeline::verdict::{StepOutput, StepResult};
 
 /// The execution state of a single pipeline step.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,10 +22,10 @@ pub enum StepState {
     },
     /// Step completed and was approved.
     Passed,
-    /// Step completed but was rejected by a review agent.
-    Rejected { summary: String },
+    /// Step completed with a failed result.
+    Failed { summary: String },
     /// Step failed due to an agent crash or runtime error.
-    Failed { error: String },
+    Errored { error: String },
 }
 
 impl StepState {
@@ -34,7 +34,7 @@ impl StepState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Passed | Self::Rejected { .. } | Self::Failed { .. }
+            Self::Passed | Self::Failed { .. } | Self::Errored { .. }
         )
     }
 }
@@ -70,7 +70,7 @@ pub enum PipelineAction {
     },
     /// All steps have passed — pipeline completed successfully.
     Succeeded,
-    /// A step failed or was rejected — pipeline halted.
+    /// A step failed or errored — pipeline halted.
     Failed { step: String, reason: String },
     /// No steps are ready right now; waiting for running steps to finish.
     Waiting,
@@ -91,7 +91,7 @@ pub enum ApprovalGateCheck {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StepOutputTemplateEntry {
     pub step: String,
-    pub verdict: String,
+    pub result: String,
     pub summary: Option<String>,
     pub output: Option<serde_json::Value>,
 }
@@ -118,6 +118,8 @@ pub struct PipelineRun {
     pub step_outputs: HashMap<String, StepOutput>,
     /// The resolved, validated step DAG.
     dag: StepDag,
+    /// Synthetic fixup steps generated for step-level retries.
+    synthetic_fixup_steps: HashSet<String>,
 }
 
 impl PipelineRun {
@@ -135,6 +137,7 @@ impl PipelineRun {
             step_states,
             step_outputs: HashMap::new(),
             dag,
+            synthetic_fixup_steps: HashSet::new(),
         }
     }
 
@@ -151,13 +154,13 @@ impl PipelineRun {
             .insert(step_name.to_string(), StepState::Running { session_id });
     }
 
-    /// Handle a completed step verdict.
+    /// Handle a completed step result.
     ///
-    /// - [`Verdict::Approve`] → either transitions to
+    /// - [`StepResult::Succeeded`] → either transitions to
     ///   [`PipelineAction::AwaitingApproval`] for approval-gated steps, or
     ///   marks the step as [`StepState::Passed`] and checks whether all steps
     ///   are done or if new steps can be dispatched.
-    /// - [`Verdict::Reject`] → marks the step as [`StepState::Rejected`] and
+    /// - [`StepResult::Failed`] → marks the step as [`StepState::Failed`] and
     ///   returns [`PipelineAction::Failed`].
     pub fn step_completed(
         &mut self,
@@ -165,10 +168,10 @@ impl PipelineRun {
         output: StepOutput,
         approval_requested: bool,
     ) -> PipelineAction {
-        let verdict = output.verdict.clone();
+        let result = output.result.clone();
         self.step_outputs.insert(step_name.to_string(), output);
-        match verdict {
-            Verdict::Approve => match self.gate_check(step_name, approval_requested) {
+        match result {
+            StepResult::Succeeded => match self.gate_check(step_name, approval_requested) {
                 ApprovalGateCheck::EligibleGating => {
                     let approval_state = self.approval_state_for(step_name);
                     self.step_states.insert(
@@ -184,19 +187,19 @@ impl PipelineRun {
                 }
                 ApprovalGateCheck::UnconfiguredButRequested => {
                     self.step_states.insert(
-                            step_name.to_string(),
-                            StepState::Failed {
-                                error: format!(
-                                    "worker requested approval for step '{step_name}' but it has no approval configuration"
-                                ),
-                            },
-                        );
-                    PipelineAction::Failed {
-                            step: step_name.to_string(),
-                            reason: format!(
-                                "step '{step_name}' has no approval configuration but the worker requested one"
+                        step_name.to_string(),
+                        StepState::Errored {
+                            error: format!(
+                                "worker requested approval for step '{step_name}' but it has no approval configuration"
                             ),
-                        }
+                        },
+                    );
+                    PipelineAction::Failed {
+                        step: step_name.to_string(),
+                        reason: format!(
+                            "step '{step_name}' has no approval configuration but the worker requested one"
+                        ),
+                    }
                 }
                 ApprovalGateCheck::NotRequested => {
                     self.step_states
@@ -208,10 +211,23 @@ impl PipelineRun {
                     }
                 }
             },
-            Verdict::Reject { summary } => {
+            StepResult::Concern { .. } => {
+                // Concern is a non-terminal-review signal for humans and
+                // downstream steps. It intentionally continues like success
+                // without applying approval gates or unconfigured approval
+                // request errors.
+                self.step_states
+                    .insert(step_name.to_string(), StepState::Passed);
+                if self.all_passed() {
+                    PipelineAction::Succeeded
+                } else {
+                    self.find_dispatchable()
+                }
+            }
+            StepResult::Failed { summary } => {
                 self.step_states.insert(
                     step_name.to_string(),
-                    StepState::Rejected {
+                    StepState::Failed {
                         summary: summary.clone(),
                     },
                 );
@@ -260,7 +276,7 @@ impl PipelineRun {
         }
     }
 
-    /// Mark an approval gate as rejected, halting the pipeline.
+    /// Mark an approval gate as failed, halting the pipeline.
     pub fn reject_gate(&mut self, step_name: &str, reason: String) -> PipelineAction {
         if !matches!(
             self.step_states.get(step_name),
@@ -271,7 +287,7 @@ impl PipelineRun {
 
         self.step_states.insert(
             step_name.to_string(),
-            StepState::Rejected {
+            StepState::Failed {
                 summary: reason.clone(),
             },
         );
@@ -301,12 +317,12 @@ impl PipelineRun {
 
     /// Handle a step that failed due to a runtime error.
     ///
-    /// Marks the step as [`StepState::Failed`] and returns
+    /// Marks the step as [`StepState::Errored`] and returns
     /// [`PipelineAction::Failed`].
     pub fn step_failed(&mut self, step_name: &str, error: String) -> PipelineAction {
         self.step_states.insert(
             step_name.to_string(),
-            StepState::Failed {
+            StepState::Errored {
                 error: error.clone(),
             },
         );
@@ -314,6 +330,110 @@ impl PipelineRun {
             step: step_name.to_string(),
             reason: error,
         }
+    }
+
+    /// Return runtime DAG metadata for a step, including synthetic steps.
+    pub fn step(&self, step_name: &str) -> Option<&DagStep> {
+        self.dag.steps.iter().find(|step| step.name == step_name)
+    }
+
+    /// Reset `step_name` and every step that transitively depends on it back
+    /// to pending, clearing any stored outputs for those steps.
+    pub fn retry_from_step(&mut self, step_name: &str) -> HashSet<String> {
+        let reset_steps = self.dag.downstream_steps(step_name);
+        for step in &reset_steps {
+            self.step_states.insert(step.clone(), StepState::Pending);
+            self.step_outputs.remove(step);
+        }
+        reset_steps
+    }
+
+    /// Reset from `step_name` and insert a synthetic fixup step immediately
+    /// before it, rewiring the failed step to depend on the fixup.
+    pub fn retry_from_step_with_fixup(
+        &mut self,
+        step_name: &str,
+        fixup_agent: &str,
+    ) -> HashSet<String> {
+        let Some(step_index) = self
+            .dag
+            .steps
+            .iter()
+            .position(|step| step.name == step_name)
+        else {
+            return HashSet::new();
+        };
+        let current_deps = self.dag.steps[step_index].depends.clone();
+        let original_deps =
+            if current_deps.len() == 1 && self.synthetic_fixup_steps.contains(&current_deps[0]) {
+                self.dag
+                    .steps
+                    .iter()
+                    .find(|step| step.name == current_deps[0])
+                    .map(|step| step.depends.clone())
+                    .unwrap_or_default()
+            } else {
+                current_deps
+            };
+        let reset_steps = self.retry_from_step(step_name);
+        let fixup_name = self.fixup_step_name_for(step_name);
+
+        if !self.synthetic_fixup_steps.contains(&fixup_name) {
+            if let Some(step_index) = self
+                .dag
+                .steps
+                .iter()
+                .position(|step| step.name == step_name)
+            {
+                self.dag.steps.insert(
+                    step_index,
+                    DagStep {
+                        name: fixup_name.clone(),
+                        agent: fixup_agent.to_string(),
+                        kind: StepKind::Agent,
+                        tracker_state: None,
+                        approval: None,
+                        on_failure: OnFailure::Halt,
+                        fixup_agent: None,
+                        depends: original_deps,
+                    },
+                );
+                self.synthetic_fixup_steps.insert(fixup_name.clone());
+            }
+        }
+
+        if let Some(step) = self
+            .dag
+            .steps
+            .iter_mut()
+            .find(|step| step.name == step_name)
+        {
+            step.depends = vec![fixup_name.clone()];
+        }
+        self.step_states
+            .insert(fixup_name.clone(), StepState::Pending);
+        self.step_outputs.remove(&fixup_name);
+
+        reset_steps
+    }
+
+    fn fixup_step_name_for(&self, step_name: &str) -> String {
+        let base_name = format!("fixup-{step_name}");
+        if !self.dag.steps.iter().any(|step| step.name == base_name)
+            || self.synthetic_fixup_steps.contains(&base_name)
+        {
+            return base_name;
+        }
+
+        for suffix in 1.. {
+            let candidate = format!("{base_name}-{suffix}");
+            if !self.dag.steps.iter().any(|step| step.name == candidate)
+                || self.synthetic_fixup_steps.contains(&candidate)
+            {
+                return candidate;
+            }
+        }
+        unreachable!("unbounded suffix search should always find a fixup step name")
     }
 
     /// Step names in configured DAG order, excluding steps that never started.
@@ -439,9 +559,10 @@ impl PipelineRun {
 fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
     StepOutputTemplateEntry {
         step: step.to_string(),
-        verdict: match &output.verdict {
-            Verdict::Approve => "approve".to_string(),
-            Verdict::Reject { .. } => "reject".to_string(),
+        result: match &output.result {
+            StepResult::Succeeded => "succeeded".to_string(),
+            StepResult::Concern { .. } => "concern".to_string(),
+            StepResult::Failed { .. } => "failed".to_string(),
         },
         summary: output.summary.clone(),
         output: output.output.clone(),
@@ -451,7 +572,9 @@ fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::{StepApprovalConfig, StepApprovalMode, StepConfig, StepKind};
+    use crate::config::ensemble::{
+        OnFailure, StepApprovalConfig, StepApprovalMode, StepConfig, StepKind,
+    };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::verdict::StepOutput;
     use serde_json::json;
@@ -469,6 +592,8 @@ mod tests {
             depends: deps,
             tracker_state: None,
             approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }
     }
 
@@ -490,6 +615,8 @@ mod tests {
             depends: deps,
             tracker_state: Some(tracker_state.to_string()),
             approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }
     }
 
@@ -515,6 +642,8 @@ mod tests {
                 mode,
                 state: state.map(|value| value.to_string()),
             }),
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }
     }
 
@@ -526,15 +655,23 @@ mod tests {
 
     fn approve_output() -> StepOutput {
         StepOutput {
-            verdict: Verdict::Approve,
+            result: StepResult::Succeeded,
             summary: None,
             output: None,
         }
     }
 
-    fn reject_output(summary: &str) -> StepOutput {
+    fn approve_output_with_summary(summary: &str) -> StepOutput {
         StepOutput {
-            verdict: Verdict::Reject {
+            result: StepResult::Succeeded,
+            summary: Some(summary.to_string()),
+            output: None,
+        }
+    }
+
+    fn failed_output(summary: &str) -> StepOutput {
+        StepOutput {
+            result: StepResult::Failed {
                 summary: summary.to_string(),
             },
             summary: Some(summary.to_string()),
@@ -829,12 +966,8 @@ mod tests {
         assert_eq!(run.step_states["implement"], StepState::Passed);
     }
 
-    // -------------------------------------------------------------------------
-    // test_rejection_halts_pipeline
-    // -------------------------------------------------------------------------
-
     #[test]
-    fn test_rejection_halts_pipeline() {
+    fn failed_result_halts_pipeline() {
         let steps = vec![
             make_step("build", "builder", &[]),
             make_step("review", "reviewer", &[]),
@@ -845,7 +978,7 @@ mod tests {
         run.step_completed("build", approve_output(), false);
         run.mark_running("review", "s-r".to_string());
 
-        let action = run.step_completed("review", reject_output("code quality is too low"), false);
+        let action = run.step_completed("review", failed_output("code quality is too low"), false);
 
         assert!(
             matches!(
@@ -853,13 +986,13 @@ mod tests {
                 PipelineAction::Failed { step, reason }
                     if step == "review" && reason == "code quality is too low"
             ),
-            "expected Failed for rejected review, got {action:?}"
+            "expected Failed for failed review result, got {action:?}"
         );
 
-        // Step state should reflect rejection.
+        // Step state should reflect failed result.
         assert!(matches!(
             &run.step_states["review"],
-            StepState::Rejected { summary } if summary == "code quality is too low"
+            StepState::Failed { summary } if summary == "code quality is too low"
         ));
     }
 
@@ -887,7 +1020,7 @@ mod tests {
 
         assert!(matches!(
             &run.step_states["build"],
-            StepState::Failed { error } if error == "agent crashed with exit code 1"
+            StepState::Errored { error } if error == "agent crashed with exit code 1"
         ));
     }
 
@@ -947,11 +1080,11 @@ mod tests {
         }
         .is_terminal());
         assert!(StepState::Passed.is_terminal());
-        assert!(StepState::Rejected {
+        assert!(StepState::Failed {
             summary: "nope".to_string()
         }
         .is_terminal());
-        assert!(StepState::Failed {
+        assert!(StepState::Errored {
             error: "boom".to_string()
         }
         .is_terminal());
@@ -975,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn reject_gate_rejects_and_halts_from_approval_state() {
+    fn reject_gate_marks_step_failed_and_halts_from_approval_state() {
         let steps = vec![make_step_with_approval(
             "review",
             "reviewer",
@@ -1001,7 +1134,7 @@ mod tests {
         );
         assert_eq!(
             run.step_states["review"],
-            StepState::Rejected {
+            StepState::Failed {
                 summary: "needs more work".to_string()
             }
         );
@@ -1105,7 +1238,7 @@ mod tests {
         run.step_completed(
             "build",
             StepOutput {
-                verdict: Verdict::Approve,
+                result: StepResult::Succeeded,
                 summary: Some("built".to_string()),
                 output: Some(json!({"artifact":"branch"})),
             },
@@ -1114,7 +1247,7 @@ mod tests {
         run.step_completed(
             "review-a",
             StepOutput {
-                verdict: Verdict::Approve,
+                result: StepResult::Succeeded,
                 summary: Some("a ok".to_string()),
                 output: Some(json!({"risk":"low"})),
             },
@@ -1123,7 +1256,7 @@ mod tests {
         run.step_completed(
             "review-b",
             StepOutput {
-                verdict: Verdict::Approve,
+                result: StepResult::Succeeded,
                 summary: Some("b ok".to_string()),
                 output: Some(json!({"risk":"medium"})),
             },
@@ -1139,6 +1272,110 @@ mod tests {
     }
 
     #[test]
+    fn concern_with_unconfigured_approval_request_continues_and_enters_context() {
+        let steps = vec![
+            make_step("review", "reviewer", &[]),
+            make_step("synth", "synthesizer", &["review"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("review", "session-review".to_string());
+        let action = run.step_completed(
+            "review",
+            StepOutput {
+                result: StepResult::Concern {
+                    summary: "minor issue found".to_string(),
+                },
+                summary: Some("minor issue found".to_string()),
+                output: Some(json!({"risk":"medium"})),
+            },
+            true,
+        );
+
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "synth"),
+            "expected concern to continue and dispatch synth, got {action:?}"
+        );
+        assert_eq!(run.step_states["review"], StepState::Passed);
+
+        let context = run.output_context_for("synth").unwrap();
+        assert_eq!(context.dependency_outputs.len(), 1);
+        assert_eq!(context.dependency_outputs[0].step, "review");
+        assert_eq!(context.dependency_outputs[0].result, "concern");
+        assert_eq!(
+            context.dependency_outputs[0].summary.as_deref(),
+            Some("minor issue found")
+        );
+        assert_eq!(context.steps["review"].result, "concern");
+    }
+
+    #[test]
+    fn concern_result_on_always_approval_step_bypasses_gate_and_dispatches_downstream() {
+        let steps = vec![
+            make_step_with_approval(
+                "review",
+                "reviewer",
+                &[],
+                StepApprovalMode::Always,
+                Some("Review gate"),
+            ),
+            make_step("synth", "synthesizer", &["review"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("review", "session-review".to_string());
+        let action = run.step_completed(
+            "review",
+            StepOutput {
+                result: StepResult::Concern {
+                    summary: "minor issue found".to_string(),
+                },
+                summary: Some("minor issue found".to_string()),
+                output: None,
+            },
+            false,
+        );
+
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "synth"),
+            "expected concern on approval-gated step to dispatch synth without gating, got {action:?}"
+        );
+        assert_eq!(run.step_states["review"], StepState::Passed);
+        assert!(!matches!(
+            run.step_states["review"],
+            StepState::AwaitingApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn concern_result_on_terminal_always_approval_step_bypasses_gate_and_succeeds() {
+        let steps = vec![make_step_with_approval(
+            "review",
+            "reviewer",
+            &[],
+            StepApprovalMode::Always,
+            Some("Review gate"),
+        )];
+        let mut run = make_run(&steps);
+
+        run.mark_running("review", "session-review".to_string());
+        let action = run.step_completed(
+            "review",
+            StepOutput {
+                result: StepResult::Concern {
+                    summary: "minor issue found".to_string(),
+                },
+                summary: Some("minor issue found".to_string()),
+                output: None,
+            },
+            false,
+        );
+
+        assert_eq!(action, PipelineAction::Succeeded);
+        assert_eq!(run.step_states["review"], StepState::Passed);
+    }
+
+    #[test]
     fn dispatch_request_carries_synthesis_kind() {
         let steps = vec![
             StepConfig {
@@ -1148,6 +1385,8 @@ mod tests {
                 depends: Some(vec![]),
                 tracker_state: None,
                 approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -1156,6 +1395,8 @@ mod tests {
                 depends: Some(vec!["review-a".to_string()]),
                 tracker_state: None,
                 approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
             },
         ];
         let mut run = make_run(&steps);
@@ -1191,7 +1432,243 @@ mod tests {
         );
         assert!(matches!(
             &run.step_states["build"],
-            StepState::Failed { error } if error.contains("no approval configuration")
+            StepState::Errored { error } if error.contains("no approval configuration")
         ));
+    }
+
+    #[test]
+    fn retry_from_mid_dag_resets_failed_step_and_downstream_only() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("test", "tester", &["build"]),
+            make_step("docs", "writer", &["build"]),
+            make_step("deploy", "deployer", &["test"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.step_completed("build", approve_output(), false);
+        run.step_completed("docs", approve_output(), false);
+        run.step_completed("deploy", approve_output(), false);
+        run.step_completed("test", failed_output("tests failed"), false);
+
+        let reset = run.retry_from_step("test");
+
+        assert_eq!(
+            reset,
+            HashSet::from(["test".to_string(), "deploy".to_string()])
+        );
+        assert_eq!(run.step_states["build"], StepState::Passed);
+        assert_eq!(run.step_states["docs"], StepState::Passed);
+        assert_eq!(run.step_states["test"], StepState::Pending);
+        assert_eq!(run.step_states["deploy"], StepState::Pending);
+        assert!(run.step_outputs.contains_key("build"));
+        assert!(run.step_outputs.contains_key("docs"));
+        assert!(!run.step_outputs.contains_key("test"));
+        assert!(!run.step_outputs.contains_key("deploy"));
+    }
+
+    #[test]
+    fn retry_from_leaf_resets_only_leaf() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("test", "tester", &["build"]),
+            make_step("deploy", "deployer", &["test"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.step_completed("build", approve_output(), false);
+        run.step_completed("test", approve_output(), false);
+        run.step_completed("deploy", failed_output("deploy failed"), false);
+
+        let reset = run.retry_from_step("deploy");
+
+        assert_eq!(reset, HashSet::from(["deploy".to_string()]));
+        assert_eq!(run.step_states["build"], StepState::Passed);
+        assert_eq!(run.step_states["test"], StepState::Passed);
+        assert_eq!(run.step_states["deploy"], StepState::Pending);
+        assert!(run.step_outputs.contains_key("build"));
+        assert!(run.step_outputs.contains_key("test"));
+        assert!(!run.step_outputs.contains_key("deploy"));
+    }
+
+    #[test]
+    fn retry_from_root_resets_all_downstream_steps() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("test", "tester", &["build"]),
+            make_step("docs", "writer", &["build"]),
+            make_step("deploy", "deployer", &["test", "docs"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.step_completed("build", approve_output(), false);
+        run.step_completed("test", approve_output(), false);
+        run.step_completed("docs", approve_output(), false);
+        run.step_completed("deploy", approve_output(), false);
+
+        let reset = run.retry_from_step("build");
+
+        assert_eq!(
+            reset,
+            HashSet::from([
+                "build".to_string(),
+                "test".to_string(),
+                "docs".to_string(),
+                "deploy".to_string()
+            ])
+        );
+        assert!(reset
+            .iter()
+            .all(|step| run.step_states[step] == StepState::Pending));
+        assert!(reset
+            .iter()
+            .all(|step| !run.step_outputs.contains_key(step)));
+    }
+
+    #[test]
+    fn retry_from_step_with_fixup_injects_fixup_before_failed_step() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+            make_step("deploy", "deployer", &["review"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.step_completed("build", approve_output(), false);
+        run.step_completed("review", failed_output("needs fixes"), false);
+
+        let reset = run.retry_from_step_with_fixup("review", "fixer");
+
+        assert_eq!(
+            reset,
+            HashSet::from(["review".to_string(), "deploy".to_string()])
+        );
+        let fixup = run
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == "fixup-review")
+            .unwrap();
+        assert_eq!(fixup.agent, "fixer");
+        assert_eq!(fixup.kind, StepKind::Agent);
+        assert_eq!(fixup.tracker_state, None);
+        assert_eq!(fixup.approval, None);
+        assert_eq!(fixup.depends, vec!["build".to_string()]);
+
+        let review = run
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == "review")
+            .unwrap();
+        assert_eq!(review.depends, vec!["fixup-review".to_string()]);
+        assert_eq!(run.step_states["fixup-review"], StepState::Pending);
+        assert_eq!(run.step_states["review"], StepState::Pending);
+    }
+
+    #[test]
+    fn repeated_fixup_retry_does_not_duplicate_fixup_step() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.retry_from_step_with_fixup("review", "fixer");
+        run.retry_from_step_with_fixup("review", "fixer");
+
+        let fixup_count = run
+            .dag
+            .steps
+            .iter()
+            .filter(|step| step.name == "fixup-review")
+            .count();
+        assert_eq!(fixup_count, 1);
+        let review = run
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == "review")
+            .unwrap();
+        assert_eq!(review.depends, vec!["fixup-review".to_string()]);
+    }
+
+    #[test]
+    fn repeated_fixup_retry_clears_stale_fixup_output() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.retry_from_step_with_fixup("review", "fixer");
+        run.step_completed(
+            "fixup-review",
+            approve_output_with_summary("old fixup output"),
+            false,
+        );
+
+        run.retry_from_step_with_fixup("review", "fixer");
+
+        assert_eq!(run.step_states["fixup-review"], StepState::Pending);
+        assert!(!run.step_outputs.contains_key("fixup-review"));
+        let context = run.output_context_for("review").unwrap();
+        assert!(context.dependency_outputs.is_empty());
+    }
+
+    #[test]
+    fn configured_fixup_name_collision_uses_unique_synthetic_fixup_name() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("fixup-review", "configured-fixer", &["build"]),
+            make_step("review", "reviewer", &["build"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.retry_from_step_with_fixup("review", "synthetic-fixer");
+
+        let configured_fixup = run
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == "fixup-review")
+            .unwrap();
+        assert_eq!(configured_fixup.agent, "configured-fixer");
+        assert_eq!(configured_fixup.depends, vec!["build".to_string()]);
+
+        let synthetic_fixup = run
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == "fixup-review-1")
+            .unwrap();
+        assert_eq!(synthetic_fixup.agent, "synthetic-fixer");
+        assert_eq!(synthetic_fixup.depends, vec!["build".to_string()]);
+
+        let review = run
+            .dag
+            .steps
+            .iter()
+            .find(|step| step.name == "review")
+            .unwrap();
+        assert_eq!(review.depends, vec!["fixup-review-1".to_string()]);
+    }
+
+    #[test]
+    fn retry_from_step_with_fixup_for_unknown_step_is_no_op() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+        ];
+        let mut run = make_run(&steps);
+        let original_steps = run.dag.steps.clone();
+        let original_states = run.step_states.clone();
+
+        let reset = run.retry_from_step_with_fixup("unknown", "fixer");
+
+        assert!(reset.is_empty());
+        assert_eq!(run.dag.steps, original_steps);
+        assert_eq!(run.step_states, original_states);
+        assert!(!run.step_states.contains_key("fixup-unknown"));
     }
 }

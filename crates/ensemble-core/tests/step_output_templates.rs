@@ -1,8 +1,8 @@
-use ensemble_core::config::ensemble::{StepConfig, StepKind};
+use ensemble_core::config::ensemble::{OnFailure, StepConfig, StepKind};
 use ensemble_core::config::template::render_prompt_with_context;
 use ensemble_core::pipeline::dag::build_dag;
 use ensemble_core::pipeline::engine::PipelineRun;
-use ensemble_core::pipeline::verdict::{StepOutput, Verdict};
+use ensemble_core::pipeline::verdict::{StepOutput, StepResult};
 use ensemble_core::tracker::model::Issue;
 use serde_json::json;
 
@@ -35,6 +35,8 @@ fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         },
         tracker_state: None,
         approval: None,
+        on_failure: OnFailure::RetryIssue,
+        fixup_agent: None,
     }
 }
 
@@ -54,7 +56,7 @@ fn render_prompt_with_dependency_outputs() {
     run.step_completed(
         "build",
         StepOutput {
-            verdict: Verdict::Approve,
+            result: StepResult::Succeeded,
             summary: Some("built ok".to_string()),
             output: Some(json!({"artifact": "branch"})),
         },
@@ -65,7 +67,7 @@ fn render_prompt_with_dependency_outputs() {
     run.step_completed(
         "review-a",
         StepOutput {
-            verdict: Verdict::Approve,
+            result: StepResult::Succeeded,
             summary: Some("review a passed".to_string()),
             output: Some(json!({"risk": "low", "findings": ["minor nit"]})),
         },
@@ -76,7 +78,7 @@ fn render_prompt_with_dependency_outputs() {
     run.step_completed(
         "review-b",
         StepOutput {
-            verdict: Verdict::Approve,
+            result: StepResult::Succeeded,
             summary: Some("review b passed".to_string()),
             output: Some(json!({"risk": "medium", "findings": ["missing tests"]})),
         },
@@ -167,7 +169,7 @@ fn dependency_outputs_only_include_direct_deps() {
     run.step_completed(
         "a",
         StepOutput {
-            verdict: Verdict::Approve,
+            result: StepResult::Succeeded,
             summary: Some("a done".to_string()),
             output: Some(json!({"step": "a"})),
         },
@@ -176,7 +178,7 @@ fn dependency_outputs_only_include_direct_deps() {
     run.step_completed(
         "b",
         StepOutput {
-            verdict: Verdict::Approve,
+            result: StepResult::Succeeded,
             summary: Some("b done".to_string()),
             output: Some(json!({"step": "b"})),
         },

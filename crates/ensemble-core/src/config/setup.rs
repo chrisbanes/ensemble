@@ -1,5 +1,5 @@
 use crate::config::ensemble::ModelDefinition;
-use crate::config::ensemble::{resolve_relative_to_base, StepConfig, StepKind};
+use crate::config::ensemble::{resolve_relative_to_base, OnFailure, StepConfig, StepKind};
 use crate::error::ConfigError;
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
@@ -840,6 +840,8 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 depends: Some(step.depends.clone()),
                 tracker_state: step.tracker_state.clone(),
                 approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;

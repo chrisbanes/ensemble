@@ -279,6 +279,26 @@ impl OrchestratorState {
         self.running.contains_key(issue_id)
     }
 
+    /// Find the issue ID for a tracker identifier across active control states.
+    pub fn find_issue_id_by_identifier(&self, identifier: &str) -> Option<String> {
+        for (id, entry) in &self.running {
+            if entry.identifier == identifier {
+                return Some(id.clone());
+            }
+        }
+        for (id, entry) in &self.retry_attempts {
+            if entry.identifier == identifier {
+                return Some(id.clone());
+            }
+        }
+        for (id, entry) in &self.waiting_on_human {
+            if entry.identifier == identifier {
+                return Some(id.clone());
+            }
+        }
+        None
+    }
+
     /// Add a retry entry.
     pub fn add_retry(&mut self, entry: RetryEntry) {
         self.claimed.insert(entry.issue_id.clone());
@@ -657,7 +677,7 @@ fn completed_step_state(step: &StepConfig, run: Option<&PipelineRun>) -> String 
             crate::pipeline::engine::StepState::Failed { .. } => "failed",
             crate::pipeline::engine::StepState::BlockedOnHuman { .. } => "waiting",
             crate::pipeline::engine::StepState::AwaitingApproval { .. } => "waiting",
-            crate::pipeline::engine::StepState::Rejected { .. } => "rejected",
+            crate::pipeline::engine::StepState::Errored { .. } => "failed",
         })
         .unwrap_or("pending")
         .to_string()
@@ -735,6 +755,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 5000,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         };
 
         state.add_retry(retry);
@@ -753,6 +775,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 5000,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         };
 
         state.add_retry(retry);
@@ -786,6 +810,52 @@ mod tests {
 
         assert!(state.is_claimed("1"));
         assert!(state.is_waiting_on_human("1"));
+    }
+
+    #[test]
+    fn test_find_issue_id_by_identifier_checks_active_control_states() {
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        state.add_running(&test_issue("running", "Todo"), None);
+        state.add_retry(RetryEntry {
+            issue_id: "retrying".to_string(),
+            identifier: "repo#retrying".to_string(),
+            attempt: 1,
+            due_at_ms: 5000,
+            error: None,
+            retry_from_step: None,
+            with_fixup: false,
+        });
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: "waiting".to_string(),
+            identifier: "repo#waiting".to_string(),
+            interaction_request_id: "interaction-1".to_string(),
+            step_name: "build".to_string(),
+            kind: InteractionKind::Question,
+            prompt: "Need input".to_string(),
+            agent_name: "builder".to_string(),
+            retry_attempt: None,
+            started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            run_id: None,
+            issue: None,
+        });
+
+        assert_eq!(
+            state.find_issue_id_by_identifier("repo#running"),
+            Some("running".to_string())
+        );
+        assert_eq!(
+            state.find_issue_id_by_identifier("repo#retrying"),
+            Some("retrying".to_string())
+        );
+        assert_eq!(
+            state.find_issue_id_by_identifier("repo#waiting"),
+            Some("waiting".to_string())
+        );
+        assert_eq!(state.find_issue_id_by_identifier("repo#missing"), None);
     }
 
     #[test]
@@ -926,6 +996,8 @@ mod tests {
             attempt: 2,
             due_at_ms: 5000,
             error: Some("previous error".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
         };
         state.add_retry(retry);
         assert!(state.retry_attempts.contains_key("1"));
@@ -955,6 +1027,8 @@ mod tests {
             attempt: 2,
             due_at_ms: 5000,
             error: Some("retry".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
         });
         state.add_running(&issue, Some(2));
 

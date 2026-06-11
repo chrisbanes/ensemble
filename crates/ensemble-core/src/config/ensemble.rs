@@ -370,6 +370,22 @@ impl std::fmt::Display for StepKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OnFailure {
+    #[default]
+    RetryIssue,
+    RetryStep,
+    Fixup,
+    Halt,
+}
+
+impl OnFailure {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::RetryIssue)
+    }
+}
+
 /// A single step in the pipeline DAG.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct StepConfig {
@@ -383,6 +399,10 @@ pub struct StepConfig {
     pub tracker_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<StepApprovalConfig>,
+    #[serde(default, skip_serializing_if = "OnFailure::is_default")]
+    pub on_failure: OnFailure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixup_agent: Option<String>,
 }
 
 /// Concurrency limits for the pipeline orchestrator.
@@ -945,6 +965,19 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 name: step.agent.clone(),
             });
         }
+        if step.on_failure == OnFailure::Fixup {
+            let Some(fixup_agent) = step.fixup_agent.as_deref() else {
+                return Err(PipelineError::InvalidStepConfig {
+                    step: step.name.clone(),
+                    reason: "on_failure: fixup requires fixup_agent".to_string(),
+                });
+            };
+            if !config.agents.contains_key(fixup_agent) {
+                return Err(PipelineError::UnknownAgent {
+                    name: fixup_agent.to_string(),
+                });
+            }
+        }
     }
     // Synthesis steps must have explicit non-empty dependencies
     for step in &config.steps {
@@ -1441,6 +1474,63 @@ on_failure: Failed
     }
 
     #[test]
+    fn validate_fixup_on_failure_requires_fixup_agent() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+    on_failure: fixup
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+
+        assert!(
+            matches!(
+                result,
+                Err(PipelineError::InvalidStepConfig { ref step, ref reason })
+                    if step == "build" && reason == "on_failure: fixup requires fixup_agent"
+            ),
+            "expected InvalidStepConfig, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_fixup_on_failure_rejects_unknown_fixup_agent() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: build
+    on_failure: fixup
+    fixup_agent: fixer
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let result = validate_config(&config);
+
+        assert!(
+            matches!(result, Err(PipelineError::UnknownAgent { ref name }) if name == "fixer"),
+            "expected UnknownAgent, got {result:?}"
+        );
+    }
+
+    #[test]
     fn test_defaults_applied() {
         let config = parse_config(minimal_yaml()).unwrap();
 
@@ -1500,6 +1590,61 @@ on_failure: Failed
         assert_eq!(
             config.human_interaction.default_resume_mode,
             HumanResumeMode::Manual
+        );
+    }
+
+    #[test]
+    fn step_config_defaults_on_failure_to_retry_issue() {
+        let config = parse_config(minimal_yaml()).unwrap();
+        let step = config.steps.first().unwrap();
+
+        assert_eq!(step.on_failure, OnFailure::RetryIssue);
+        assert_eq!(step.fixup_agent, None);
+    }
+
+    #[test]
+    fn parses_on_failure_values_from_snake_case_yaml() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing."
+  fix:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Fix the thing."
+steps:
+  - name: retry-issue
+    agent: build
+    on_failure: retry_issue
+  - name: retry-step
+    agent: build
+    on_failure: retry_step
+  - name: fixup
+    agent: build
+    on_failure: fixup
+    fixup_agent: fix
+  - name: halt
+    agent: build
+    on_failure: halt
+on_success: Done
+on_failure: Failed
+"#;
+        let config = parse_config(yaml).unwrap();
+        let values: Vec<OnFailure> = config.steps.iter().map(|step| step.on_failure).collect();
+
+        assert_eq!(
+            values,
+            vec![
+                OnFailure::RetryIssue,
+                OnFailure::RetryStep,
+                OnFailure::Fixup,
+                OnFailure::Halt
+            ]
         );
     }
 

@@ -30,7 +30,7 @@ pub fn render_prompt_with_interaction_response(
 /// This is the core rendering entry point used by [`render_prompt`] and
 /// [`render_prompt_with_interaction_response`]. When `step_outputs` is provided, each key from the
 /// serialized map is inserted directly into the Liquid globals so templates can reference fields
-/// like `steps["review-a"].summary` or `dependency_outputs[0].verdict`.
+/// like `steps["review-a"].summary` or `dependency_outputs[0].result`.
 pub fn render_prompt_with_context(
     template_str: &str,
     issue: &Issue,
@@ -245,7 +245,7 @@ mod tests {
             "review-a".to_string(),
             StepOutputTemplateEntry {
                 step: "review-a".to_string(),
-                verdict: "approve".to_string(),
+                result: "succeeded".to_string(),
                 summary: Some("looks good".to_string()),
                 output: Some(json!({"risk":"low"})),
             },

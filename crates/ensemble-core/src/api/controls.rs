@@ -2,13 +2,14 @@ use crate::agent::cancellation::{cancel_issue, clear_issue_cancellation};
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::orchestrator::retry::{next_attempt, schedule_failure_retry, FailureRetryRequest};
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::Json;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePresence {
@@ -112,6 +113,12 @@ pub struct RetryResponse {
     pub retried: bool,
     pub issue_identifier: String,
     pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetryQuery {
+    #[serde(default)]
+    pub step: Option<String>,
 }
 
 /// Response for a successful resume operation.
@@ -268,7 +275,10 @@ pub async fn post_stop(
     post,
     path = "/api/v1/{identifier}/retry",
     operation_id = "postRetry",
-    params(("identifier" = String, Path, description = "Issue identifier")),
+    params(
+        ("identifier" = String, Path, description = "Issue identifier"),
+        ("step" = Option<String>, Query, description = "Step name for step-level retry")
+    ),
     responses(
         (status = 200, description = "Retry queued", body = RetryResponse),
         (status = 404, description = "Not found", body = ApiError),
@@ -279,7 +289,24 @@ pub async fn post_stop(
 pub async fn post_retry(
     State(state): State<AppState>,
     Path(identifier): Path<String>,
+    Query(query): Query<RetryQuery>,
 ) -> impl IntoResponse {
+    let retry_settings = if query.step.is_some() {
+        let document_state = state.config_runtime.document_state.read().await;
+        match document_state.active_config.as_ref() {
+            Some(config) => Some((config.agent.max_retry_backoff_ms, config.max_cycles)),
+            None => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "no_active_config",
+                    "cannot schedule step-level retry without an active config",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     let mut lock = state.orchestrator_state.write().await;
 
     let issue_id = match find_issue_presence(&lock, &identifier) {
@@ -301,21 +328,86 @@ pub async fn post_retry(
                 format!("issue '{}' is finalizing, not retrying", identifier),
             );
         }
-        IssuePresence::Missing => {
+        IssuePresence::Missing => match lock.find_issue_id_by_identifier(&identifier) {
+            Some(id) => id,
+            None => {
+                return issue_error_response(
+                    StatusCode::NOT_FOUND,
+                    "issue_not_found",
+                    format!(
+                        "no running, retrying, waiting, or finalizing issue with identifier '{}'",
+                        identifier
+                    ),
+                );
+            }
+        },
+    };
+
+    if let Some(step_name) = query.step.as_ref() {
+        let Some(run) = lock.get_pipeline_run_mut(&issue_id) else {
+            return issue_error_response(
+                StatusCode::CONFLICT,
+                "no_pipeline_run",
+                format!("issue '{}' has no resumable pipeline run", identifier),
+            );
+        };
+        if !run.step_states.contains_key(step_name) {
             return issue_error_response(
                 StatusCode::NOT_FOUND,
-                "issue_not_found",
+                "step_not_found",
                 format!(
-                    "no running, retrying, or finalizing issue with identifier '{}'",
-                    identifier
+                    "issue '{}' has no pipeline step '{}'",
+                    identifier, step_name
                 ),
             );
         }
-    };
+        run.retry_from_step(step_name);
 
-    // Remove from retry queue and release claim (allows next poll to re-pick it up)
-    lock.remove_retry(&issue_id);
-    lock.remove_claimed(&issue_id);
+        let identifier_copy = lock
+            .retry_attempts
+            .get(&issue_id)
+            .map(|entry| entry.identifier.clone())
+            .or_else(|| {
+                lock.waiting_on_human
+                    .get(&issue_id)
+                    .map(|entry| entry.identifier.clone())
+            })
+            .unwrap_or_else(|| identifier.clone());
+        let attempt = lock
+            .retry_attempts
+            .get(&issue_id)
+            .map(|entry| entry.attempt + 1)
+            .or_else(|| {
+                lock.waiting_on_human
+                    .get(&issue_id)
+                    .map(|entry| next_attempt(entry.retry_attempt))
+            })
+            .unwrap_or(1);
+        let (max_backoff_ms, max_cycles) =
+            retry_settings.expect("retry settings loaded for step-level retry");
+
+        lock.remove_retry(&issue_id);
+        lock.remove_waiting_on_human(&issue_id);
+        schedule_failure_retry(
+            &mut lock,
+            FailureRetryRequest {
+                issue_id: &issue_id,
+                identifier: &identifier_copy,
+                attempt,
+                max_backoff_ms,
+                max_cycles,
+                error: "manual step-level retry",
+                retry_from_step: Some(step_name.clone()),
+                with_fixup: false,
+            },
+        );
+    } else {
+        // Whole-issue retry: release the claim so the next poll can pick it up fresh.
+        lock.remove_retry(&issue_id);
+        lock.remove_waiting_on_human(&issue_id);
+        lock.remove_claimed(&issue_id);
+        lock.remove_pipeline_run(&issue_id);
+    }
     drop(lock);
 
     // Signal the orchestrator to poll immediately so it picks up the now-unclaimed issue
@@ -326,7 +418,11 @@ pub async fn post_retry(
         Json(RetryResponse {
             retried: true,
             issue_identifier: identifier,
-            message: "removed from retry queue, will be re-dispatched on next poll".to_string(),
+            message: if query.step.is_some() {
+                "step-level retry queued".to_string()
+            } else {
+                "removed from retry queue, will be re-dispatched on next poll".to_string()
+            },
         }),
     )
         .into_response()
@@ -671,9 +767,11 @@ mod tests {
     use crate::agent::cancellation::register_issue_cancellation;
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
-    use crate::config::ensemble::{ConcurrencyConfig, StepConfig, StepKind};
+    use crate::config::ensemble::{ConcurrencyConfig, OnFailure, StepConfig, StepKind};
+    use crate::interaction::model::InteractionKind;
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
+        WaitingOnHumanEntry,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
@@ -693,6 +791,8 @@ mod tests {
             attempt: 2,
             due_at_ms: 999999,
             error: Some("timeout".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
         });
 
         match find_issue_presence(&state, "my-repo#42") {
@@ -771,6 +871,8 @@ mod tests {
             depends: None,
             tracker_state: None,
             approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }])
         .unwrap();
 
@@ -805,6 +907,8 @@ mod tests {
             attempt: 2,
             due_at_ms: 999999,
             error: Some("timeout".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
         });
 
         let mut app_state = app_state_with_document_state(parsed_document_state());
@@ -830,6 +934,36 @@ mod tests {
         );
 
         let mut app_state = app_state_with_document_state(parsed_document_state());
+        app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state
+    }
+
+    fn build_app_state_with_waiting_pipeline() -> AppState {
+        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        let issue = test_issue();
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            interaction_request_id: "halted:NODE_123:build".to_string(),
+            step_name: "build".to_string(),
+            kind: InteractionKind::Handoff,
+            prompt: "manual repair needed".to_string(),
+            agent_name: "build".to_string(),
+            retry_attempt: Some(1),
+            started_at: Some(chrono::Utc::now()),
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: chrono::Utc::now(),
+            run_id: Some("run-1".to_string()),
+            issue: Some(issue.clone()),
+        });
+
+        let document_state = parsed_document_state();
+        let active_config = document_state.active_config.clone().unwrap();
+        state.insert_pipeline_run("NODE_123", test_pipeline_run(), Arc::new(active_config));
+
+        let mut app_state = app_state_with_document_state(document_state);
         app_state.orchestrator_state = Arc::new(RwLock::new(state));
         app_state
     }
@@ -1023,7 +1157,12 @@ mod tests {
     #[tokio::test]
     async fn test_retry_retrying_issue() {
         let state = build_app_state_with_retry();
-        let response = post_retry(State(state.clone()), Path("my-repo#99".to_string())).await;
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#99".to_string()),
+            Query(RetryQuery { step: None }),
+        )
+        .await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
@@ -1034,9 +1173,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_retry_waiting_issue_with_step_queues_step_retry() {
+        let state = build_app_state_with_waiting_pipeline();
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("build".to_string()),
+            }),
+        )
+        .await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await;
+        assert_eq!(body["message"], "step-level retry queued");
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(!lock.waiting_on_human.contains_key("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_some());
+        let retry = lock
+            .retry_attempts
+            .get("NODE_123")
+            .expect("step retry should be queued");
+        assert_eq!(retry.retry_from_step.as_deref(), Some("build"));
+        assert!(!retry.with_fixup);
+        assert_eq!(retry.attempt, 2);
+        assert!(lock.is_claimed("NODE_123"));
+    }
+
+    #[tokio::test]
     async fn test_retry_not_found() {
         let state = build_app_state_with_retry();
-        let response = post_retry(State(state), Path("nonexistent#999".to_string())).await;
+        let response = post_retry(
+            State(state),
+            Path("nonexistent#999".to_string()),
+            Query(RetryQuery { step: None }),
+        )
+        .await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
@@ -1044,7 +1218,12 @@ mod tests {
     #[tokio::test]
     async fn test_retry_running_issue_returns_conflict() {
         let state = build_app_state_with_running();
-        let response = post_retry(State(state), Path("my-repo#42".to_string())).await;
+        let response = post_retry(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery { step: None }),
+        )
+        .await;
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::CONFLICT);
     }

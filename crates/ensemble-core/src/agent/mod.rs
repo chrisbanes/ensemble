@@ -2192,7 +2192,7 @@ on_failure: Todo
             "review-a".to_string(),
             StepOutputTemplateEntry {
                 step: "review-a".to_string(),
-                verdict: "approve".to_string(),
+                result: "succeeded".to_string(),
                 summary: None,
                 output: Some(json!({"risk":"low"})),
             },
@@ -2256,14 +2256,14 @@ on_failure: Todo
                 "review-a".to_string(),
                 StepOutputTemplateEntry {
                     step: "review-a".to_string(),
-                    verdict: "approve".to_string(),
+                    result: "succeeded".to_string(),
                     summary: Some("risk is low".to_string()),
                     output: Some(serde_json::json!({"risk": "low"})),
                 },
             )]),
             dependency_outputs: vec![StepOutputTemplateEntry {
                 step: "review-a".to_string(),
-                verdict: "approve".to_string(),
+                result: "succeeded".to_string(),
                 summary: Some("risk is low".to_string()),
                 output: Some(serde_json::json!({"risk": "low"})),
             }],

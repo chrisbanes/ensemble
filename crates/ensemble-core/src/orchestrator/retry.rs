@@ -11,6 +11,17 @@ pub const CONTINUATION_RETRY_DELAY_MS: u64 = 1000;
 /// Base delay for failure-driven exponential backoff.
 pub const FAILURE_BASE_DELAY_MS: u64 = 10000;
 
+pub struct FailureRetryRequest<'a> {
+    pub issue_id: &'a str,
+    pub identifier: &'a str,
+    pub attempt: u32,
+    pub max_backoff_ms: u64,
+    pub max_cycles: u32,
+    pub error: &'a str,
+    pub retry_from_step: Option<String>,
+    pub with_fixup: bool,
+}
+
 /// Calculate exponential backoff delay for a failure retry.
 /// Formula: min(10000 * 2^(attempt - 1), max_backoff_ms)
 pub fn calculate_backoff(attempt: u32, max_backoff_ms: u64) -> u64 {
@@ -37,6 +48,8 @@ pub fn schedule_continuation_retry(
         attempt: 1,
         due_at_ms,
         error: None,
+        retry_from_step: None,
+        with_fixup: false,
     };
 
     info!(
@@ -57,13 +70,19 @@ pub fn schedule_continuation_retry(
 /// has been reached and the issue should not be retried.
 pub fn schedule_failure_retry(
     state: &mut OrchestratorState,
-    issue_id: &str,
-    identifier: &str,
-    attempt: u32,
-    max_backoff_ms: u64,
-    max_cycles: u32,
-    error: &str,
+    request: FailureRetryRequest<'_>,
 ) -> Option<u64> {
+    let FailureRetryRequest {
+        issue_id,
+        identifier,
+        attempt,
+        max_backoff_ms,
+        max_cycles,
+        error,
+        retry_from_step,
+        with_fixup,
+    } = request;
+
     if attempt >= max_cycles {
         warn!(
             event = ISSUE_RETRY_CANCELLED,
@@ -86,6 +105,8 @@ pub fn schedule_failure_retry(
         attempt,
         due_at_ms,
         error: Some(error.to_string()),
+        retry_from_step,
+        with_fixup,
     };
 
     info!(
@@ -223,12 +244,16 @@ mod tests {
 
         let due = schedule_failure_retry(
             &mut state,
-            "issue-1",
-            "repo#1",
-            2,
-            300_000,
-            5,
-            "agent crashed",
+            FailureRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+                attempt: 2,
+                max_backoff_ms: 300_000,
+                max_cycles: 5,
+                error: "agent crashed",
+                retry_from_step: None,
+                with_fixup: false,
+            },
         );
 
         assert!(due.is_some());
@@ -237,6 +262,8 @@ mod tests {
         let entry = state.retry_attempts.get("issue-1").unwrap();
         assert_eq!(entry.attempt, 2);
         assert_eq!(entry.error.as_deref(), Some("agent crashed"));
+        assert_eq!(entry.retry_from_step, None);
+        assert!(!entry.with_fixup);
     }
 
     #[test]
@@ -246,12 +273,16 @@ mod tests {
         // attempt 3, max_cycles 3 → should NOT schedule
         let due = schedule_failure_retry(
             &mut state,
-            "issue-1",
-            "repo#1",
-            3,
-            300_000,
-            3,
-            "agent crashed",
+            FailureRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+                attempt: 3,
+                max_backoff_ms: 300_000,
+                max_cycles: 3,
+                error: "agent crashed",
+                retry_from_step: None,
+                with_fixup: false,
+            },
         );
         assert!(due.is_none());
         assert!(!state.retry_attempts.contains_key("issue-1"));
@@ -259,12 +290,16 @@ mod tests {
         // attempt 2, max_cycles 3 → should schedule
         let due = schedule_failure_retry(
             &mut state,
-            "issue-2",
-            "repo#2",
-            2,
-            300_000,
-            3,
-            "agent crashed",
+            FailureRetryRequest {
+                issue_id: "issue-2",
+                identifier: "repo#2",
+                attempt: 2,
+                max_backoff_ms: 300_000,
+                max_cycles: 3,
+                error: "agent crashed",
+                retry_from_step: None,
+                with_fixup: false,
+            },
         );
         assert!(due.is_some());
         assert!(state.retry_attempts.contains_key("issue-2"));
@@ -285,6 +320,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 0, // in the past
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         };
         assert!(is_retry_due(&past_entry));
 
@@ -294,6 +331,8 @@ mod tests {
             attempt: 1,
             due_at_ms: current_time_ms() + 999_999_999,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         };
         assert!(!is_retry_due(&future_entry));
     }
@@ -309,6 +348,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 0,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         });
 
         // One future retry
@@ -318,6 +359,8 @@ mod tests {
             attempt: 1,
             due_at_ms: current_time_ms() + 999_999_999,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         });
 
         let due = get_due_retries(&state);
@@ -336,6 +379,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 5000,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         });
         state.add_retry(RetryEntry {
             issue_id: "2".to_string(),
@@ -343,6 +388,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 3000,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         });
 
         assert_eq!(next_retry_time(&state), Some(3000));
