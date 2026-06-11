@@ -943,7 +943,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
-- `agent.command`: shell command string, default implementation-defined
+- `agent.command`: command string (tokenized into program + args, no shell interpolation), default implementation-defined
 - `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
 - `agent.permission_request_policy`: string, default implementation-defined; only applies to direct runtime paths
 - `agent.turn_timeout_ms`: integer, default `3600000`
@@ -1288,7 +1288,9 @@ Compatibility profile:
 Subprocess launch parameters:
 
 - Command: `agent.command`
-- Invocation: `bash -lc <agent.command>`
+- Invocation: the command string is tokenized into program + args using shell-style quoting rules;
+  the runtime launches the resulting program directly (without shell interpolation) in the workspace
+  directory via the ACP transport.
 - Working directory: workspace path
 - Stdout/stderr: separate streams
 - Framing: line-delimited JSON-RPC 2.0 messages on stdout
@@ -2483,7 +2485,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
-- `agent.command` is preserved as a shell command string
+- `agent.command` is preserved as a command string (tokenized, not shell-interpolated)
 - Per-state concurrency override map normalizes state names and ignores invalid values
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
@@ -2537,7 +2539,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.5 ACP Agent Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <agent.command>`
+- Launch command uses workspace cwd; the command string is tokenized into program + args and
+  launched directly without shell interpolation
 - Startup handshake sends `initialize`, `session/new`, `session/prompt`
 - `initialize` includes `protocolVersion`, `clientCapabilities`, and `clientInfo` per ACP spec
 - `session/new` returns `sessionId` and implementation emits `session_started`
