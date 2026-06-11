@@ -15,7 +15,10 @@ const MINIMAL_CONFIG: &str = "tracker:\n  kind: todo_file\nagents:\n  build:\n  
 
 pub(crate) fn parsed_document_state() -> ConfigDocumentState {
     ConfigDocumentState {
-        path: PathBuf::from("ensemble.yaml"),
+        path: std::env::temp_dir().join(format!(
+            "ensemble-api-test-{}-config.yaml",
+            std::process::id()
+        )),
         kind: ConfigStateKind::Parsed,
         raw_yaml: None,
         document: None,
