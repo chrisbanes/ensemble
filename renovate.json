@@ -79,6 +79,11 @@
       "groupSlug": "codemirror"
     },
     {
+      "description": "Auto-merge lockfile maintenance",
+      "matchUpdateTypes": ["lockFileMaintenance"],
+      "automerge": true
+    },
+    {
       "description": "Auto-merge safe patch updates for Rust",
       "matchManagers": ["cargo"],
       "matchUpdateTypes": ["patch"],
