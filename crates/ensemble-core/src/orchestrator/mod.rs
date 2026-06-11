@@ -43,7 +43,9 @@ use crate::observability::events_contract::{
     TRACKER_TRANSITION_SUCCEEDED,
 };
 use crate::pipeline::dag::build_dag;
-use crate::pipeline::engine::{PipelineAction, PipelineRun, StepState};
+use crate::pipeline::engine::{
+    DispatchRequest, PipelineAction, PipelineRun, StepOutputTemplateContext, StepState,
+};
 use crate::pipeline::verdict::{resolve_verdict_with_source, Verdict, VerdictSource};
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::Issue;
@@ -68,6 +70,7 @@ struct StepDispatchContext<'a> {
     attempt: Option<u32>,
     interaction_response: Option<InteractionResponseEnvelope>,
     workspace_path: std::path::PathBuf,
+    step_outputs: StepOutputTemplateContext,
 }
 
 struct InteractionRequestContext {
@@ -648,6 +651,7 @@ impl Orchestrator {
                             attempt,
                             interaction_response: None,
                             workspace_path,
+                            step_outputs: StepOutputTemplateContext::default(),
                         },
                     )
                     .await;
@@ -782,6 +786,7 @@ impl Orchestrator {
         let event_tx = self.worker_tx.clone();
         let workspace_path = dispatch.workspace_path.clone();
         let attempt = dispatch.attempt;
+        let step_outputs = dispatch.step_outputs.clone();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         register_issue_cancellation(&self.cancellation_registry, &issue.id, cancel_token.clone());
         let cancellation_registry = Arc::clone(&self.cancellation_registry);
@@ -797,6 +802,7 @@ impl Orchestrator {
                     workspace_path: &workspace_path,
                     event_tx: event_tx.clone(),
                     cancel_token,
+                    step_outputs,
                 }),
                 &issue_clone.id,
                 &step_name_owned,
@@ -967,9 +973,16 @@ impl Orchestrator {
                         .unwrap_or(issue_id),
                 );
                 let resolved = match workspace_path {
-                    Some(wp) => resolve_verdict_with_source(runtime_verdict.as_ref(), &wp).await,
+                    Some(wp) => {
+                        resolve_verdict_with_source(runtime_verdict.as_ref(), &wp, step_name).await
+                    }
                     None => crate::pipeline::verdict::ResolvedVerdict {
                         verdict: Verdict::Approve,
+                        output: crate::pipeline::verdict::StepOutput {
+                            verdict: Verdict::Approve,
+                            summary: None,
+                            output: None,
+                        },
                         source: VerdictSource::Default,
                     },
                 };
@@ -995,7 +1008,7 @@ impl Orchestrator {
                 // Drive the pipeline
                 let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                     Some((
-                        run.step_completed(step_name, resolved.verdict, approval_request.is_some()),
+                        run.step_completed(step_name, resolved.output, approval_request.is_some()),
                         state.get_pipeline_config(issue_id).cloned(),
                     ))
                 } else {
@@ -1006,6 +1019,22 @@ impl Orchestrator {
                 if let Some((action, config_snapshot)) = pipeline_action {
                     match action {
                         PipelineAction::Dispatch(requests) => {
+                            // Collect output contexts while state lock is still held
+                            let dispatch_contexts: Vec<(
+                                DispatchRequest,
+                                StepOutputTemplateContext,
+                            )> = {
+                                let run = state.get_pipeline_run(issue_id);
+                                requests
+                                    .into_iter()
+                                    .map(|req| {
+                                        let step_outputs = run
+                                            .and_then(|r| r.output_context_for(&req.step_name))
+                                            .unwrap_or_default();
+                                        (req, step_outputs)
+                                    })
+                                    .collect()
+                            };
                             // Need to drop state lock before dispatching
                             drop(state);
                             if let Some(ref issue) = issue_snapshot {
@@ -1013,7 +1042,7 @@ impl Orchestrator {
                                     warn!(issue_id = %issue_id, "no config snapshot found for pipeline dispatch");
                                     return;
                                 };
-                                for req in requests {
+                                for (req, step_outputs) in dispatch_contexts {
                                     let workspace_path = match self
                                         .prepare_step_workspace(issue, &config_snapshot)
                                         .await
@@ -1060,6 +1089,7 @@ impl Orchestrator {
                                                 attempt: None,
                                                 interaction_response: None,
                                                 workspace_path,
+                                                step_outputs,
                                             },
                                         )
                                         .await;
@@ -3028,14 +3058,18 @@ impl Orchestrator {
                     resolved_at,
                 );
 
-                let attempt = {
+                let (attempt, step_outputs) = {
                     let mut state = self.state.write().await;
                     let attempt = state
                         .get_pipeline_run(&issue.id)
                         .map(|run| run.cycle)
                         .unwrap_or(interaction.pipeline_cycle.max(1));
+                    let step_outputs = state
+                        .get_pipeline_run(&issue.id)
+                        .and_then(|run| run.output_context_for(&current_step.name))
+                        .unwrap_or_default();
                     state.add_running(issue, Some(attempt));
-                    attempt
+                    (attempt, step_outputs)
                 };
 
                 let workspace_path = match self.prepare_step_workspace(issue, &current_config).await
@@ -3061,6 +3095,7 @@ impl Orchestrator {
                         attempt: Some(attempt),
                         interaction_response: Some(interaction_response),
                         workspace_path,
+                        step_outputs,
                     },
                 )
                 .await?;
@@ -3077,7 +3112,7 @@ impl Orchestrator {
                             ),
                         })?;
 
-                let action = {
+                let (action, dispatch_contexts) = {
                     let mut state = self.state.write().await;
                     let run = state.get_pipeline_run_mut(&issue.id).ok_or_else(|| {
                         AgentError::PromptError {
@@ -3088,7 +3123,7 @@ impl Orchestrator {
                         }
                     })?;
 
-                    match response {
+                    let action = match response {
                         InteractionResponse::Approval {
                             approved, reason, ..
                         } => {
@@ -3115,11 +3150,29 @@ impl Orchestrator {
                             }
                             .into())
                         }
-                    }
+                    };
+
+                    // Collect output contexts while the run is still accessible
+                    let dispatch_contexts: Vec<(DispatchRequest, StepOutputTemplateContext)> =
+                        if let PipelineAction::Dispatch(ref requests) = action {
+                            let run = state.get_pipeline_run(&issue.id).unwrap();
+                            requests
+                                .iter()
+                                .map(|req| {
+                                    let step_outputs =
+                                        run.output_context_for(&req.step_name).unwrap_or_default();
+                                    (req.clone(), step_outputs)
+                                })
+                                .collect()
+                        } else {
+                            vec![]
+                        };
+
+                    (action, dispatch_contexts)
                 };
 
                 match action {
-                    PipelineAction::Dispatch(requests) => {
+                    PipelineAction::Dispatch(_requests) => {
                         let attempt = {
                             let mut state = self.state.write().await;
                             let attempt = state
@@ -3130,7 +3183,7 @@ impl Orchestrator {
                             attempt
                         };
 
-                        for req in requests {
+                        for (req, step_outputs) in dispatch_contexts {
                             let workspace_path =
                                 match self.prepare_step_workspace(issue, &current_config).await {
                                     Ok(path) => path,
@@ -3156,6 +3209,7 @@ impl Orchestrator {
                                     attempt: Some(attempt),
                                     interaction_response: None,
                                     workspace_path,
+                                    step_outputs,
                                 },
                             )
                             .await?;
@@ -3698,7 +3752,7 @@ mod tests {
         InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
         InteractionStore,
     };
-    use crate::pipeline::verdict::Verdict;
+    use crate::pipeline::verdict::{StepOutput, Verdict};
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
 
@@ -4400,7 +4454,7 @@ agent:
             .await
             .unwrap();
         tokio::fs::write(
-            workspace.join(".ensemble").join("verdict.json"),
+            workspace.join(".ensemble").join("verdict-build.json"),
             r#"{"verdict":"reject","summary":"broken"}"#,
         )
         .await
@@ -4464,7 +4518,7 @@ agent:
             .await
             .unwrap();
         tokio::fs::write(
-            workspace.join(".ensemble").join("verdict.json"),
+            workspace.join(".ensemble").join("verdict-build.json"),
             r#"{"verdict":"reject","summary":"broken"}"#,
         )
         .await
@@ -4534,7 +4588,7 @@ agent:
                 .await
                 .unwrap();
             tokio::fs::write(
-                workspace.join(".ensemble").join("verdict.json"),
+                workspace.join(".ensemble").join("verdict-build.json"),
                 r#"{"verdict":"reject","summary":"tests failed"}"#,
             )
             .await
@@ -6072,7 +6126,15 @@ agent:
             let dag = build_dag(&cfg.steps).unwrap();
             let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
-            pipeline_run.step_completed("build", Verdict::Approve, false);
+            pipeline_run.step_completed(
+                "build",
+                StepOutput {
+                    verdict: Verdict::Approve,
+                    summary: None,
+                    output: None,
+                },
+                false,
+            );
             pipeline_run.step_blocked_on_human("review", "interaction-1".to_string());
             pipeline_run.mark_running("docs", "session-docs".to_string());
 

@@ -189,3 +189,55 @@ What happens:
 4. Builder approves → runs the `review` step — reviewer agent checks the work
 5. Reviewer approves → issue moves to "Done"
 6. If reviewer rejects → issue moves to "Needs Rework", retries from step 1 on next cycle
+
+## Accessing dependency outputs
+
+Downstream steps can access outputs from their direct dependencies via the `dependency_outputs` and
+`steps` template variables. This is useful for synthesis steps that merge results from parallel
+branches.
+
+```yaml
+steps:
+  - name: implement
+    agent: implementer
+  - name: review-a
+    agent: reviewer
+    depends: [implement]
+  - name: review-b
+    agent: reviewer
+    depends: [implement]
+  - name: synthesize
+    agent: synthesizer
+    depends: [review-a, review-b]
+```
+
+A synthesizer prompt can iterate over `dependency_outputs`:
+
+```liquid
+{% for review in dependency_outputs %}
+## {{ review.step }}
+{{ review.summary }}
+Risk: {{ review.output.risk }}
+{% endfor %}
+```
+
+Or access a specific step by name via the `steps` map:
+
+```liquid
+Review A risk: {{ steps["review-a"].output.risk }}
+Review B risk: {{ steps["review-b"].output.risk }}
+```
+
+Steps can produce structured `output` data alongside their verdict. Set the `output` field in
+`.ensemble/verdict.json` or in the ACP runtime verdict:
+
+```json
+{
+  "verdict": "approve",
+  "summary": "Looks good, low risk",
+  "output": {
+    "risk": "low",
+    "findings": ["minor style nit on line 42"]
+  }
+}
+```

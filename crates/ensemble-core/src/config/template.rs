@@ -1,5 +1,6 @@
 use crate::error::ConfigError;
 use crate::interaction::InteractionResponse;
+use crate::pipeline::engine::StepOutputTemplateContext;
 use crate::tracker::model::Issue;
 use liquid::ParserBuilder;
 
@@ -11,7 +12,7 @@ pub fn render_prompt(
     issue: &Issue,
     attempt: Option<u32>,
 ) -> Result<String, ConfigError> {
-    render_prompt_with_interaction_response(template_str, issue, attempt, None)
+    render_prompt_with_context(template_str, issue, attempt, None, None)
 }
 
 pub fn render_prompt_with_interaction_response(
@@ -19,6 +20,23 @@ pub fn render_prompt_with_interaction_response(
     issue: &Issue,
     attempt: Option<u32>,
     interaction_response: Option<&InteractionResponse>,
+) -> Result<String, ConfigError> {
+    render_prompt_with_context(template_str, issue, attempt, interaction_response, None)
+}
+
+/// Render a Liquid prompt template with full context: issue, attempt, interaction response,
+/// and step outputs.
+///
+/// This is the core rendering entry point used by [`render_prompt`] and
+/// [`render_prompt_with_interaction_response`]. When `step_outputs` is provided, each key from the
+/// serialized map is inserted directly into the Liquid globals so templates can reference fields
+/// like `steps["review-a"].summary` or `dependency_outputs[0].verdict`.
+pub fn render_prompt_with_context(
+    template_str: &str,
+    issue: &Issue,
+    attempt: Option<u32>,
+    interaction_response: Option<&InteractionResponse>,
+    step_outputs: Option<&StepOutputTemplateContext>,
 ) -> Result<String, ConfigError> {
     let parser =
         ParserBuilder::with_stdlib()
@@ -85,6 +103,23 @@ pub fn render_prompt_with_interaction_response(
                 reason: e.to_string(),
             })?,
         );
+    }
+
+    if let Some(step_outputs) = step_outputs {
+        let value = liquid::model::to_value(step_outputs).map_err(|e| {
+            ConfigError::TemplateRenderError {
+                reason: e.to_string(),
+            }
+        })?;
+        if let liquid::model::Value::Object(object) = value {
+            for (key, value) in object {
+                globals.insert(key, value);
+            }
+        } else {
+            return Err(ConfigError::TemplateRenderError {
+                reason: "step_outputs did not serialize to a Liquid object".to_string(),
+            });
+        }
     }
 
     template
@@ -197,5 +232,38 @@ mod tests {
                 .unwrap();
 
         assert_eq!(result, "question: Use staging / staging");
+    }
+
+    #[test]
+    fn test_render_with_step_outputs() {
+        use crate::pipeline::engine::{StepOutputTemplateContext, StepOutputTemplateEntry};
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "review-a".to_string(),
+            StepOutputTemplateEntry {
+                step: "review-a".to_string(),
+                verdict: "approve".to_string(),
+                summary: Some("looks good".to_string()),
+                output: Some(json!({"risk":"low"})),
+            },
+        );
+        let context = StepOutputTemplateContext {
+            steps: steps.clone(),
+            dependency_outputs: vec![steps["review-a"].clone()],
+        };
+
+        let rendered = render_prompt_with_context(
+            "{{ steps[\"review-a\"].summary }} / {{ dependency_outputs[0].output.risk }}",
+            &test_issue(),
+            None,
+            None,
+            Some(&context),
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "looks good / low");
     }
 }

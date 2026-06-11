@@ -23,7 +23,7 @@ use super::ResolvedCommand;
 /// Build an `AcpAgent` from a structured `ResolvedCommand`. The SDK's
 /// `McpServerStdio` spawns the child via `async_process::Command`.
 /// Because `McpServerStdio` has no working-directory field, we wrap the
-/// command with `sh -c 'cd "$1" && shift 2 && exec "$@"'` and pass the
+/// command with `sh -c 'cd "$1" && shift && exec "$@"'` and pass the
 /// workspace path as `$1` — the child process starts with the correct CWD
 /// while all agent args arrive as separate `argv` entries (no shell escaping
 /// needed for either the path or the args).

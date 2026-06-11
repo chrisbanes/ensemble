@@ -17,7 +17,7 @@ use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{
     DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode,
 };
-use crate::config::template::render_prompt_with_interaction_response;
+use crate::config::template::render_prompt_with_context;
 use crate::error::AgentError;
 use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
@@ -69,6 +69,8 @@ pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, 
     let mut iter = parts.into_iter();
     let program = PathBuf::from(iter.next().expect("non-empty checked above"));
     let args: Vec<String> = iter.collect();
+    // `AgentConfig` has no env field; all command paths return empty env.
+    // If per-agent env support is added, propagate it here.
     Ok(ResolvedCommand {
         program,
         args,
@@ -76,11 +78,14 @@ pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, 
     })
 }
 
-const VERDICT_FALLBACK_INSTRUCTION: &str = "\
-If you cannot return a structured runtime verdict, write .ensemble/verdict.json with:\n\
-{\"verdict\":\"approve\"}\n\
-or\n\
-{\"verdict\":\"reject\",\"summary\":\"<reason>\"}";
+fn verdict_fallback_instruction(step_name: &str) -> String {
+    format!(
+        "If you cannot return a structured runtime verdict, write .ensemble/verdict-{step_name}.json with:\n\
+         {{\"verdict\":\"approve\"}}\n\
+         or\n\
+         {{\"verdict\":\"reject\",\"summary\":\"<reason>\"}}"
+    )
+}
 
 const DEFAULT_INTERACTION_POLICY_INSTRUCTION: &str = "\
 When you need human input, prefer batching related questions into a single interaction request instead of asking one-by-one.\n\
@@ -102,6 +107,7 @@ pub struct AgentRunRequest<'a> {
     /// token — the `agent-client-protocol` SDK owns the child process for the
     /// direct path, so cancellation is handled by dropping the `AcpAgent`.
     pub cancel_token: CancellationToken,
+    pub step_outputs: crate::pipeline::engine::StepOutputTemplateContext,
 }
 
 /// Trait for running an agent session against an issue.
@@ -125,6 +131,7 @@ struct BuildPromptRequest<'a> {
     attempt: Option<u32>,
     workspace_path: &'a Path,
     turn_number: u32,
+    step_outputs: &'a crate::pipeline::engine::StepOutputTemplateContext,
 }
 
 fn update_agent_capabilities(
@@ -226,6 +233,7 @@ impl AcpAgentRunner {
             attempt,
             workspace_path,
             turn_number,
+            step_outputs,
         } = request;
         if turn_number == 1 {
             let agent_config =
@@ -258,13 +266,14 @@ impl AcpAgentRunner {
 
             let interaction_response = load_interaction_response(workspace_path).await?;
 
-            let rendered = render_prompt_with_interaction_response(
+            let rendered = render_prompt_with_context(
                 &template_str,
                 issue,
                 attempt,
                 interaction_response
                     .as_ref()
                     .map(|response| &response.response),
+                Some(step_outputs),
             )
             .map_err(|e| AgentError::PromptError {
                 reason: e.to_string(),
@@ -277,6 +286,7 @@ impl AcpAgentRunner {
             Ok(maybe_append_verdict_fallback_instruction(
                 rendered,
                 config.agent.inject_verdict_fallback_instructions,
+                step_name,
             ))
         } else {
             // Continuation turns: send guidance, not the full original prompt
@@ -293,10 +303,12 @@ impl AcpAgentRunner {
         &self,
         workspace_path: &Path,
         interaction_response: Option<&InteractionResponseEnvelope>,
+        step_name: &str,
     ) -> Result<(), AgentError> {
         // Ensure stale verdict and request artifacts from previous attempts
         // cannot influence the current run's resolution path.
-        remove_ensemble_file(workspace_path, "verdict.json").await?;
+        let verdict_filename = format!("verdict-{step_name}.json");
+        remove_ensemble_file(workspace_path, &verdict_filename).await?;
         remove_ensemble_file(workspace_path, "interaction-request.json").await?;
         remove_ensemble_file(workspace_path, "approval-request.json").await?;
 
@@ -310,16 +322,21 @@ impl AcpAgentRunner {
     }
 }
 
-fn maybe_append_verdict_fallback_instruction(prompt: String, enabled: bool) -> String {
-    if !enabled || prompt.contains(VERDICT_FALLBACK_INSTRUCTION) {
+fn maybe_append_verdict_fallback_instruction(
+    prompt: String,
+    enabled: bool,
+    step_name: &str,
+) -> String {
+    let instruction = verdict_fallback_instruction(step_name);
+    if !enabled || prompt.contains(&instruction) {
         return prompt;
     }
 
     let trimmed = prompt.trim_end();
     if trimmed.is_empty() {
-        VERDICT_FALLBACK_INSTRUCTION.to_string()
+        instruction
     } else {
-        format!("{trimmed}\n\n{VERDICT_FALLBACK_INSTRUCTION}")
+        format!("{trimmed}\n\n{instruction}")
     }
 }
 
@@ -436,6 +453,7 @@ async fn load_interaction_response(
 async fn detect_worker_result_with_runtime_verdict(
     workspace_path: &Path,
     runtime_verdict: Option<serde_json::Value>,
+    step_name: &str,
 ) -> WorkerResult {
     let interaction_path = workspace_path
         .join(".ensemble")
@@ -478,8 +496,16 @@ async fn detect_worker_result_with_runtime_verdict(
         }
     };
 
-    let verdict_path = workspace_path.join(".ensemble").join("verdict.json");
-    let verdict_exists = tokio::fs::try_exists(&verdict_path).await.unwrap_or(false);
+    let step_verdict_path = workspace_path
+        .join(".ensemble")
+        .join(format!("verdict-{step_name}.json"));
+    let legacy_verdict_path = workspace_path.join(".ensemble").join("verdict.json");
+    let verdict_exists = tokio::fs::try_exists(&step_verdict_path)
+        .await
+        .unwrap_or(false)
+        || tokio::fs::try_exists(&legacy_verdict_path)
+            .await
+            .unwrap_or(false);
 
     match interaction_request {
         Some(_) if approval_request.is_some() => WorkerResult::Failed {
@@ -500,8 +526,8 @@ async fn detect_worker_result_with_runtime_verdict(
 }
 
 #[cfg(test)]
-async fn detect_worker_result(workspace_path: &Path) -> WorkerResult {
-    detect_worker_result_with_runtime_verdict(workspace_path, None).await
+async fn detect_worker_result(workspace_path: &Path, step_name: &str) -> WorkerResult {
+    detect_worker_result_with_runtime_verdict(workspace_path, None, step_name).await
 }
 
 async fn write_interaction_response_file(
@@ -613,8 +639,12 @@ impl AgentRunner for AcpAgentRunner {
         let config = Arc::clone(&request.config);
         let workspace_path = request.workspace_path;
 
-        self.prepare_workspace(workspace_path, request.interaction_response.as_ref())
-            .await?;
+        self.prepare_workspace(
+            workspace_path,
+            request.interaction_response.as_ref(),
+            request.step_name,
+        )
+        .await?;
 
         if let Some(ref script) = config.hooks.before_run {
             run_hook(
@@ -649,6 +679,7 @@ impl AgentRunner for AcpAgentRunner {
                             attempt: request.attempt,
                             workspace_path,
                             turn_number: 1,
+                            step_outputs: &request.step_outputs,
                         },
                     )
                     .await?;
@@ -711,6 +742,7 @@ impl AcpAgentRunner {
                         attempt: request.attempt,
                         workspace_path: request.workspace_path,
                         turn_number: turn,
+                        step_outputs: &request.step_outputs,
                     },
                 )
                 .await?;
@@ -737,7 +769,12 @@ impl AcpAgentRunner {
             }
         }
 
-        Ok(detect_worker_result_with_runtime_verdict(request.workspace_path, final_verdict).await)
+        Ok(detect_worker_result_with_runtime_verdict(
+            request.workspace_path,
+            final_verdict,
+            request.step_name,
+        )
+        .await)
     }
 }
 
@@ -751,6 +788,7 @@ mod tests {
     use crate::config::draft::parse_raw_yaml;
     use crate::config::ensemble::{parse_config, ModeDefinition, ModelDefinition};
     use crate::interaction::{InteractionKind, InteractionResponse};
+    use crate::pipeline::engine::StepOutputTemplateContext;
     use tokio_util::sync::CancellationToken;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -1042,6 +1080,7 @@ on_failure: Todo
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await;
 
@@ -1087,6 +1126,7 @@ on_failure: Todo
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await;
 
@@ -1138,6 +1178,7 @@ exit 1
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await
             .unwrap();
@@ -1197,6 +1238,7 @@ exit 0
                 workspace_path: workspace.path(),
                 event_tx: tx,
                 cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
             })
             .await
             .unwrap();
@@ -1223,23 +1265,29 @@ exit 0
     #[test]
     fn injects_verdict_block_when_enabled() {
         let prompt = "Do the work.".to_string();
-        let rendered = maybe_append_verdict_fallback_instruction(prompt, true);
-        assert!(rendered.contains("write .ensemble/verdict.json"));
+        let rendered = maybe_append_verdict_fallback_instruction(prompt, true, "build");
+        assert!(rendered.contains("write .ensemble/verdict-build.json"));
     }
 
     #[test]
     fn does_not_inject_verdict_block_when_disabled() {
         let prompt = "Do the work.".to_string();
-        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), false);
+        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), false, "build");
         assert_eq!(rendered, prompt);
     }
 
     #[test]
     fn does_not_duplicate_verdict_block_when_present() {
-        let prompt = format!("Do work.\n\n{VERDICT_FALLBACK_INSTRUCTION}");
-        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), true);
+        let instruction = verdict_fallback_instruction("build");
+        let prompt = format!("Do work.\n\n{instruction}");
+        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), true, "build");
         assert_eq!(rendered, prompt);
-        assert_eq!(rendered.matches("write .ensemble/verdict.json").count(), 1);
+        assert_eq!(
+            rendered
+                .matches("write .ensemble/verdict-build.json")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -1331,7 +1379,7 @@ agent:
         )
         .await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         match result {
             WorkerResult::BlockedOnHuman { request } => {
@@ -1357,9 +1405,9 @@ agent:
 }"#,
         )
         .await;
-        write_workspace_file(&workspace, "verdict.json", r#"{"verdict":"approve"}"#).await;
+        write_workspace_file(&workspace, "verdict-build.json", r#"{"verdict":"approve"}"#).await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         assert!(matches!(
             result,
@@ -1384,7 +1432,7 @@ agent:
         )
         .await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         assert!(matches!(
             result,
@@ -1422,7 +1470,7 @@ agent:
         )
         .await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         assert!(matches!(result, WorkerResult::Failed { .. }));
     }
@@ -1432,7 +1480,7 @@ agent:
         let workspace = tempfile::TempDir::new().unwrap();
         write_workspace_file(&workspace, "approval-request.json", "not json").await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         assert!(matches!(
             result,
@@ -1446,7 +1494,7 @@ agent:
         let workspace = tempfile::TempDir::new().unwrap();
         write_workspace_file(&workspace, "interaction-request.json", "not json").await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         assert!(matches!(
             result,
@@ -1470,9 +1518,9 @@ agent:
 }"#,
         )
         .await;
-        write_workspace_file(&workspace, "verdict.json", "not valid json").await;
+        write_workspace_file(&workspace, "verdict-build.json", "not valid json").await;
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
 
         assert!(matches!(
             result,
@@ -1511,6 +1559,7 @@ agent:
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
+                    step_outputs: &StepOutputTemplateContext::default(),
                 },
             )
             .await
@@ -1543,7 +1592,7 @@ agent:
         };
 
         test_runner()
-            .prepare_workspace(workspace.path(), Some(&response))
+            .prepare_workspace(workspace.path(), Some(&response), "build")
             .await
             .unwrap();
 
@@ -1572,7 +1621,7 @@ agent:
         .unwrap();
 
         test_runner()
-            .prepare_workspace(workspace.path(), None)
+            .prepare_workspace(workspace.path(), None, "build")
             .await
             .unwrap();
 
@@ -1597,11 +1646,11 @@ agent:
         .await;
 
         test_runner()
-            .prepare_workspace(workspace.path(), None)
+            .prepare_workspace(workspace.path(), None, "build")
             .await
             .unwrap();
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
         assert!(matches!(
             result,
             WorkerResult::Success {
@@ -1627,11 +1676,11 @@ agent:
         .await;
 
         test_runner()
-            .prepare_workspace(workspace.path(), None)
+            .prepare_workspace(workspace.path(), None, "build")
             .await
             .unwrap();
 
-        let result = detect_worker_result(workspace.path()).await;
+        let result = detect_worker_result(workspace.path(), "build").await;
         assert!(matches!(
             result,
             WorkerResult::Success {
@@ -1695,13 +1744,14 @@ on_failure: Todo
                     attempt: Some(2),
                     workspace_path: workspace.path(),
                     turn_number: 1,
+                    step_outputs: &StepOutputTemplateContext::default(),
                 },
             )
             .await
             .unwrap();
 
         assert!(prompt.starts_with("question: Use staging"));
-        assert!(prompt.contains("write .ensemble/verdict.json"));
+        assert!(prompt.contains("write .ensemble/verdict-build.json"));
     }
 
     #[tokio::test]
@@ -1758,13 +1808,14 @@ on_failure: Todo
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
+                    step_outputs: &StepOutputTemplateContext::default(),
                 },
             )
             .await
             .unwrap();
 
         assert!(prompt.starts_with("hi"));
-        assert!(prompt.contains("write .ensemble/verdict.json"));
+        assert!(prompt.contains("write .ensemble/verdict-build.json"));
     }
 
     #[tokio::test]
@@ -1773,21 +1824,24 @@ on_failure: Todo
         let ensemble_dir = workspace.path().join(".ensemble");
         tokio::fs::create_dir_all(&ensemble_dir).await.unwrap();
         tokio::fs::write(
-            ensemble_dir.join("verdict.json"),
+            ensemble_dir.join("verdict-build.json"),
             r#"{"verdict":"reject","summary":"stale"}"#,
         )
         .await
         .unwrap();
 
         test_runner()
-            .prepare_workspace(workspace.path(), None)
+            .prepare_workspace(workspace.path(), None, "build")
             .await
             .unwrap();
 
-        let exists = tokio::fs::try_exists(ensemble_dir.join("verdict.json"))
+        let exists = tokio::fs::try_exists(ensemble_dir.join("verdict-build.json"))
             .await
             .unwrap();
-        assert!(!exists, "stale verdict.json should be removed before run");
+        assert!(
+            !exists,
+            "stale verdict-build.json should be removed before run"
+        );
     }
 
     #[test]
@@ -2082,5 +2136,63 @@ on_failure: Failed
             resolved.args,
             vec!["--agent", "builder", "--model", "gpt-5"]
         );
+    }
+
+    #[tokio::test]
+    async fn build_prompt_includes_step_outputs() {
+        use crate::pipeline::engine::StepOutputTemplateEntry;
+        use serde_json::json;
+        use std::collections::HashMap;
+
+        let runner = test_runner();
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  synth:
+    prompt: 'Risk: {{ steps["review-a"].output.risk }}'
+steps:
+  - name: synth
+    agent: synth
+on_success: Done
+on_failure: Todo
+"#,
+        )
+        .unwrap();
+
+        let mut steps = HashMap::new();
+        steps.insert(
+            "review-a".to_string(),
+            StepOutputTemplateEntry {
+                step: "review-a".to_string(),
+                verdict: "approve".to_string(),
+                summary: None,
+                output: Some(json!({"risk":"low"})),
+            },
+        );
+        let context = StepOutputTemplateContext {
+            steps,
+            dependency_outputs: vec![],
+        };
+        let workspace = tempfile::TempDir::new().unwrap();
+
+        let rendered = runner
+            .build_prompt(
+                &config,
+                BuildPromptRequest {
+                    issue: &test_issue(),
+                    agent_name: "synth",
+                    step_name: "synth",
+                    attempt: None,
+                    workspace_path: workspace.path(),
+                    turn_number: 1,
+                    step_outputs: &context,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(rendered.contains("Risk: low"));
     }
 }
