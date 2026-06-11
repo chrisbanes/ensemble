@@ -5313,7 +5313,7 @@ agent:
             cfg.polling.interval_ms,
             &cfg.concurrency,
         )));
-        let mut orchestrator = Orchestrator::new_with_state(
+        let orchestrator = Orchestrator::new_with_state(
             OrchestratorRuntimeParts {
                 state,
                 config,
