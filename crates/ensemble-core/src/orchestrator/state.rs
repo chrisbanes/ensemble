@@ -69,6 +69,7 @@ pub struct CompletedEntry {
 pub struct CompletedWorkflowStep {
     pub name: String,
     pub agent: String,
+    pub kind: String,
     pub dependencies: Vec<String>,
     pub state: String,
     pub can_navigate: bool,
@@ -637,6 +638,7 @@ fn completed_workflow_steps(
         .map(|step| CompletedWorkflowStep {
             name: step.name.clone(),
             agent: step.agent.clone(),
+            kind: step.kind.to_string(),
             dependencies: step.depends.clone().unwrap_or_default(),
             state: completed_step_state(step, run),
             can_navigate: run

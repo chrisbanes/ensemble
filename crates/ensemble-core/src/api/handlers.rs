@@ -1,4 +1,6 @@
 use crate::api::router::AppState;
+use crate::config::draft::ConfigDocumentState;
+use crate::config::ensemble::{EnsembleConfig, StepKind};
 use crate::history::model::HistoryRecord;
 use crate::interaction::store::InteractionStore;
 use crate::observability::snapshot::{
@@ -14,8 +16,11 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::Utc;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path as FsPath;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 /// Standard JSON error envelope matching SPEC.md Section 13.7.2 error format.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -113,6 +118,7 @@ pub async fn get_issue_detail(
         &state.history_path,
         &state.workspace_root,
         &identifier,
+        step_kind_lookup(&state.config_runtime.document_state).await,
     )
     .await
     {
@@ -141,10 +147,32 @@ pub async fn get_issue_detail(
     }
 }
 
+/// Build a name → step kind map from the active config so that
+/// history-recovered snapshots can show the right step kind even though
+/// `HistoryRecord.steps_traversed` only carries step names. Missing steps
+/// default to `StepKind::Agent` at the call site.
+async fn step_kind_lookup(
+    document_state: &Arc<RwLock<ConfigDocumentState>>,
+) -> HashMap<String, StepKind> {
+    let guard = document_state.read().await;
+    step_kinds_from_config(guard.active_config.as_ref())
+}
+
+fn step_kinds_from_config(config: Option<&EnsembleConfig>) -> HashMap<String, StepKind> {
+    let mut map = HashMap::new();
+    if let Some(config) = config {
+        for step in &config.steps {
+            map.insert(step.name.clone(), step.kind);
+        }
+    }
+    map
+}
+
 async fn build_issue_snapshot_from_history(
     history_path: &FsPath,
     workspace_root: &str,
     identifier: &str,
+    step_kinds: HashMap<String, StepKind>,
 ) -> Result<Option<IssueDetailSnapshot>, std::io::Error> {
     let contents = match tokio::fs::read_to_string(history_path).await {
         Ok(contents) => contents,
@@ -189,6 +217,11 @@ async fn build_issue_snapshot_from_history(
             .map(|(idx, name)| WorkflowStepInfo {
                 name: name.clone(),
                 agent: "unknown".to_string(),
+                kind: step_kinds
+                    .get(name)
+                    .copied()
+                    .unwrap_or(StepKind::Agent)
+                    .to_string(),
                 dependencies: vec![],
                 state: if record.outcome == "failed" && idx == last_idx {
                     "failed".to_string()
@@ -303,6 +336,7 @@ pub async fn get_step_detail(
         step_name,
         status: detail_state.status,
         agent: detail_state.agent,
+        kind: detail_state.kind,
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
         verdict: detail_state.verdict,
@@ -369,7 +403,6 @@ mod tests {
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::Utc;
-    use std::sync::Arc;
     use tempfile::NamedTempFile;
 
     fn test_issue() -> Issue {
@@ -647,6 +680,110 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_get_issue_detail_history_fallback_recovers_step_kind_from_active_config() {
+        use crate::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
+        use crate::config::ensemble::parse_config;
+        use std::path::PathBuf;
+
+        let config_yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    executor: test
+    model: test
+    prompt: build
+  synth:
+    executor: test
+    model: test
+    prompt: merge
+steps:
+  - name: build
+    agent: build
+  - name: review-a
+    agent: build
+    depends: [build]
+  - name: review-b
+    agent: build
+    depends: [build]
+  - name: synthesize
+    kind: synthesis
+    agent: synth
+    depends: [review-a, review-b]
+on_success: Done
+on_failure: Failed
+"#;
+        let document_state = ConfigDocumentState {
+            path: PathBuf::from("ensemble.yaml"),
+            kind: ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(parse_config(config_yaml).unwrap()),
+            validation: DraftValidationReport::default(),
+        };
+        let mut app_state = app_state_with_document_state(document_state);
+
+        let tmp = NamedTempFile::new().unwrap();
+        let history_path = tmp.path().to_path_buf();
+        std::fs::remove_file(&history_path).ok();
+        app_state.history_path = history_path.clone();
+
+        let writer = HistoryWriter::new(history_path);
+        writer
+            .append(&HistoryRecord {
+                issue_identifier: "synth-1".to_string(),
+                issue_id: "synth-1".to_string(),
+                outcome: "succeeded".to_string(),
+                steps_traversed: vec![
+                    "build".to_string(),
+                    "review-a".to_string(),
+                    "review-b".to_string(),
+                    "synthesize".to_string(),
+                ],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    total_tokens: 15,
+                },
+                duration_seconds: 42,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: None,
+                verdict: Some("approved".to_string()),
+                workspace_path: "/tmp/workspaces/synth-1".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let response = get_issue_detail(State(app_state), Path("synth-1".to_string()))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let steps = json["workflow_steps"].as_array().expect("workflow_steps");
+        let kinds: HashMap<String, String> = steps
+            .iter()
+            .map(|step| {
+                (
+                    step["name"].as_str().unwrap().to_string(),
+                    step["kind"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(kinds.get("build").map(String::as_str), Some("agent"));
+        assert_eq!(kinds.get("review-a").map(String::as_str), Some("agent"));
+        assert_eq!(
+            kinds.get("synthesize").map(String::as_str),
+            Some("synthesis")
+        );
     }
 
     #[tokio::test]

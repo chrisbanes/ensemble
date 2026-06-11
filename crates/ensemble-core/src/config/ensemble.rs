@@ -346,10 +346,36 @@ pub enum StepApprovalMode {
     WhenRequestedByAgent,
 }
 
+/// Kind of pipeline step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    #[default]
+    Agent,
+    Synthesis,
+}
+
+impl StepKind {
+    pub fn is_agent(&self) -> bool {
+        matches!(self, Self::Agent)
+    }
+}
+
+impl std::fmt::Display for StepKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Agent => write!(f, "agent"),
+            Self::Synthesis => write!(f, "synthesis"),
+        }
+    }
+}
+
 /// A single step in the pipeline DAG.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct StepConfig {
     pub name: String,
+    #[serde(default, skip_serializing_if = "StepKind::is_agent")]
+    pub kind: StepKind,
     pub agent: String,
     /// Explicit dependencies. `None` means "use implicit sequential rule" (depend on
     /// previous step). `Some(vec![])` means "no dependencies" (explicit root).
@@ -917,6 +943,15 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         if !config.agents.contains_key(&step.agent) {
             return Err(PipelineError::UnknownAgent {
                 name: step.agent.clone(),
+            });
+        }
+    }
+    // Synthesis steps must have explicit non-empty dependencies
+    for step in &config.steps {
+        if step.kind == StepKind::Synthesis && step.depends.as_ref().map_or(true, Vec::is_empty) {
+            return Err(PipelineError::InvalidSynthesisStep {
+                step: step.name.clone(),
+                reason: "synthesis steps require explicit non-empty depends".to_string(),
             });
         }
     }
@@ -2636,5 +2671,85 @@ on_failure: Failed
             crate::workspace::finalize::FinalizeMode::PushAndPr
         );
         assert!(finalize.approval_required);
+    }
+
+    #[test]
+    fn test_step_kind_defaults_to_agent() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.steps[0].kind, StepKind::Agent);
+    }
+
+    #[test]
+    fn test_parse_synthesis_step_kind() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+  synthesizer:
+    acpx_agent: claude
+    prompt: "Merge dependency outputs."
+steps:
+  - name: build
+    agent: builder
+  - name: synthesize
+    kind: synthesis
+    agent: synthesizer
+    depends: [build]
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.steps[1].kind, StepKind::Synthesis);
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_synthesis_step_requires_explicit_dependencies() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  synth:
+    acpx_agent: claude
+    prompt: "Merge dependency outputs."
+steps:
+  - name: synthesize
+    kind: synthesis
+    agent: synth
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let err = validate_config(&config).unwrap_err();
+        assert!(matches!(
+            err,
+            PipelineError::InvalidSynthesisStep { step, reason }
+                if step == "synthesize" && reason.contains("explicit non-empty depends")
+        ));
     }
 }

@@ -140,4 +140,6 @@ pub enum PipelineError {
     InvalidPermissionMode { agent: String, reason: String },
     #[error("invalid runtime config for agent {agent}: {reason}")]
     InvalidRuntimeConfig { agent: String, reason: String },
+    #[error("invalid synthesis step {step}: {reason}")]
+    InvalidSynthesisStep { step: String, reason: String },
 }

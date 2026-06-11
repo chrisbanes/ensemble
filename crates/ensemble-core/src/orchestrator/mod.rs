@@ -24,7 +24,7 @@ use crate::agent::events::{
     AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
 };
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
-use crate::config::ensemble::EnsembleConfig;
+use crate::config::ensemble::{EnsembleConfig, StepKind};
 use crate::error::{AgentError, EnsembleError};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
@@ -66,6 +66,7 @@ use state::{
 struct StepDispatchContext<'a> {
     step_name: &'a str,
     agent_name: &'a str,
+    step_kind: StepKind,
     tracker_state: Option<&'a str>,
     attempt: Option<u32>,
     interaction_response: Option<InteractionResponseEnvelope>,
@@ -647,6 +648,7 @@ impl Orchestrator {
                         StepDispatchContext {
                             step_name: &req.step_name,
                             agent_name: &req.agent_name,
+                            step_kind: req.step_kind,
                             tracker_state: req.tracker_state.as_deref(),
                             attempt,
                             interaction_response: None,
@@ -797,6 +799,7 @@ impl Orchestrator {
                     issue: &issue_clone,
                     agent_name: &agent_name_owned,
                     step_name: &step_name_owned,
+                    step_kind: dispatch.step_kind,
                     attempt,
                     interaction_response: interaction_response.clone(),
                     workspace_path: &workspace_path,
@@ -1085,6 +1088,7 @@ impl Orchestrator {
                                             StepDispatchContext {
                                                 step_name: &req.step_name,
                                                 agent_name: &req.agent_name,
+                                                step_kind: req.step_kind,
                                                 tracker_state: req.tracker_state.as_deref(),
                                                 attempt: None,
                                                 interaction_response: None,
@@ -3091,6 +3095,7 @@ impl Orchestrator {
                     StepDispatchContext {
                         step_name: &current_step.name,
                         agent_name: &current_step.agent,
+                        step_kind: current_step.kind,
                         tracker_state: current_step.tracker_state.as_deref(),
                         attempt: Some(attempt),
                         interaction_response: Some(interaction_response),
@@ -3205,6 +3210,7 @@ impl Orchestrator {
                                 StepDispatchContext {
                                     step_name: &req.step_name,
                                     agent_name: &req.agent_name,
+                                    step_kind: req.step_kind,
                                     tracker_state: req.tracker_state.as_deref(),
                                     attempt: Some(attempt),
                                     interaction_response: None,

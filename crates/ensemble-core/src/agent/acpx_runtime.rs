@@ -358,6 +358,7 @@ mod tests {
     use crate::agent::events::RuntimeStream;
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::config::ensemble::parse_config;
+    use crate::config::ensemble::StepKind;
     use crate::pipeline::engine::StepOutputTemplateContext;
     use crate::tracker::model::test_helpers::test_issue;
 
@@ -418,6 +419,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: "build",
+            step_kind: StepKind::Agent,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -482,6 +484,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: "build",
+            step_kind: StepKind::Agent,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -537,6 +540,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: "build",
+            step_kind: StepKind::Agent,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -592,6 +596,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: "build/review",
+            step_kind: StepKind::Agent,
             attempt: Some(2),
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -649,6 +654,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: "build",
+            step_kind: StepKind::Agent,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -755,6 +761,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: &long_step,
+            step_kind: StepKind::Agent,
             attempt: Some(99),
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -823,6 +830,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: "$%^",
+            step_kind: StepKind::Agent,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -882,6 +890,7 @@ exit 1
             issue: &issue,
             agent_name: "builder",
             step_name: &bad_chars,
+            step_kind: StepKind::Agent,
             attempt: Some(1),
             interaction_response: None,
             workspace_path: workspace.path(),

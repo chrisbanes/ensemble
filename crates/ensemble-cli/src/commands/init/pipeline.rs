@@ -5,6 +5,7 @@ use ensemble_core::config::ensemble::EnsembleConfig;
 pub struct PipelineStep {
     pub name: String,
     pub agent_role: String,
+    pub kind: Option<String>,
     pub depends: Vec<String>,
     pub tracker_state: Option<String>,
 }
@@ -35,6 +36,7 @@ pub fn ask_pipeline(
         return Ok(vec![PipelineStep {
             name: step_name.to_string(),
             agent_role: role_names[0].to_string(),
+            kind: None,
             depends: vec![],
             tracker_state: Some(tracker_state.to_string()),
         }]);
@@ -66,6 +68,7 @@ pub fn ask_pipeline(
                 .map(|s| PipelineStep {
                     name: s.name.clone(),
                     agent_role: s.agent.clone(),
+                    kind: None,
                     depends: s.depends.clone().unwrap_or_default(),
                     tracker_state: s.tracker_state.clone(),
                 })
@@ -94,6 +97,7 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
     let mut steps = vec![PipelineStep {
         name: "implement".to_string(),
         agent_role: role_names[0].to_string(),
+        kind: None,
         depends: vec![],
         tracker_state: Some("In Progress".to_string()),
     }];
@@ -102,6 +106,7 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
         steps.push(PipelineStep {
             name: "review".to_string(),
             agent_role: role_names[1].to_string(),
+            kind: None,
             depends: vec!["implement".to_string()],
             tracker_state: Some("Review".to_string()),
         });
@@ -138,6 +143,7 @@ fn custom_pipeline(role_names: &[&str]) -> Result<Vec<PipelineStep>, inquire::In
         steps.push(PipelineStep {
             name,
             agent_role,
+            kind: None,
             depends,
             tracker_state: None,
         });

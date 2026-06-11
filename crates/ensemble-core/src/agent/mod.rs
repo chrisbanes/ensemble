@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{
-    DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode,
+    DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode, StepKind,
 };
 use crate::config::template::render_prompt_with_context;
 use crate::error::AgentError;
@@ -97,6 +97,7 @@ pub struct AgentRunRequest<'a> {
     pub issue: &'a Issue,
     pub agent_name: &'a str,
     pub step_name: &'a str,
+    pub step_kind: StepKind,
     pub attempt: Option<u32>,
     pub(crate) interaction_response: Option<InteractionResponseEnvelope>,
     pub workspace_path: &'a Path,
@@ -128,6 +129,7 @@ struct BuildPromptRequest<'a> {
     issue: &'a Issue,
     agent_name: &'a str,
     step_name: &'a str,
+    step_kind: StepKind,
     attempt: Option<u32>,
     workspace_path: &'a Path,
     turn_number: u32,
@@ -230,6 +232,7 @@ impl AcpAgentRunner {
             issue,
             agent_name,
             step_name,
+            step_kind,
             attempt,
             workspace_path,
             turn_number,
@@ -279,6 +282,7 @@ impl AcpAgentRunner {
                 reason: e.to_string(),
             })?;
 
+            let rendered = maybe_append_synthesis_instruction(rendered, step_kind);
             let rendered = maybe_append_interaction_policy_instruction(
                 rendered,
                 resolve_interaction_policy_instruction(config, agent_name, step_name).as_deref(),
@@ -320,6 +324,19 @@ impl AcpAgentRunner {
 
         Ok(())
     }
+}
+
+fn maybe_append_synthesis_instruction(rendered: String, step_kind: StepKind) -> String {
+    if step_kind != StepKind::Synthesis {
+        return rendered;
+    }
+
+    format!(
+        "{rendered}\n\n\
+         This is a synthesis step. Use the `dependency_outputs` Liquid data already rendered above as the authoritative set of direct predecessor results. \
+         Merge, compare, or adjudicate those final structured outputs. Do not assume intermediate tool calls or hidden reasoning are available unless the prompt included them explicitly. \
+         Return a normal Ensemble verdict with a concise `summary` and, when useful, a structured `output` JSON value describing the merged result."
+    )
 }
 
 fn maybe_append_verdict_fallback_instruction(
@@ -676,6 +693,7 @@ impl AgentRunner for AcpAgentRunner {
                             issue: request.issue,
                             agent_name: request.agent_name,
                             step_name: request.step_name,
+                            step_kind: request.step_kind,
                             attempt: request.attempt,
                             workspace_path,
                             turn_number: 1,
@@ -739,6 +757,7 @@ impl AcpAgentRunner {
                         issue: request.issue,
                         agent_name: request.agent_name,
                         step_name: request.step_name,
+                        step_kind: request.step_kind,
                         attempt: request.attempt,
                         workspace_path: request.workspace_path,
                         turn_number: turn,
@@ -1075,6 +1094,7 @@ on_failure: Todo
                 issue: &test_issue(),
                 agent_name: "builder",
                 step_name: "build",
+                step_kind: StepKind::Agent,
                 attempt: None,
                 interaction_response: None,
                 workspace_path: workspace.path(),
@@ -1121,6 +1141,7 @@ on_failure: Todo
                 issue: &test_issue(),
                 agent_name: "builder",
                 step_name: "build",
+                step_kind: StepKind::Agent,
                 attempt: None,
                 interaction_response: None,
                 workspace_path: workspace.path(),
@@ -1173,6 +1194,7 @@ exit 1
                 issue: &test_issue(),
                 agent_name: "builder",
                 step_name: "build",
+                step_kind: StepKind::Agent,
                 attempt: None,
                 interaction_response: None,
                 workspace_path: workspace.path(),
@@ -1233,6 +1255,7 @@ exit 0
                 issue: &test_issue(),
                 agent_name: "builder",
                 step_name: "build",
+                step_kind: StepKind::Agent,
                 attempt: None,
                 interaction_response: None,
                 workspace_path: workspace.path(),
@@ -1556,6 +1579,7 @@ agent:
                     issue: &issue,
                     agent_name: "builder",
                     step_name: "build",
+                    step_kind: StepKind::Agent,
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
@@ -1741,6 +1765,7 @@ on_failure: Todo
                     issue: &issue,
                     agent_name: "builder",
                     step_name: "build",
+                    step_kind: StepKind::Agent,
                     attempt: Some(2),
                     workspace_path: workspace.path(),
                     turn_number: 1,
@@ -1805,6 +1830,7 @@ on_failure: Todo
                     issue: &issue,
                     agent_name: "builder",
                     step_name: "build",
+                    step_kind: StepKind::Agent,
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
@@ -2184,6 +2210,7 @@ on_failure: Todo
                     issue: &test_issue(),
                     agent_name: "synth",
                     step_name: "synth",
+                    step_kind: StepKind::Agent,
                     attempt: None,
                     workspace_path: workspace.path(),
                     turn_number: 1,
@@ -2194,5 +2221,73 @@ on_failure: Todo
             .unwrap();
 
         assert!(rendered.contains("Risk: low"));
+    }
+
+    #[tokio::test]
+    async fn build_prompt_adds_synthesis_guidance_for_synthesis_step() {
+        use crate::config::ensemble::StepKind;
+        use crate::pipeline::engine::{StepOutputTemplateContext, StepOutputTemplateEntry};
+        use std::collections::HashMap;
+
+        let runner = test_runner();
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  synth:
+    prompt: 'Merge: {% for dep in dependency_outputs %}{{ dep.step }} {{ dep.summary }}{% endfor %}'
+steps:
+  - name: review-a
+    agent: synth
+    depends: []
+  - name: synthesize
+    kind: synthesis
+    agent: synth
+    depends: [review-a]
+on_success: Done
+on_failure: Todo
+"#,
+        )
+        .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let context = StepOutputTemplateContext {
+            steps: HashMap::from([(
+                "review-a".to_string(),
+                StepOutputTemplateEntry {
+                    step: "review-a".to_string(),
+                    verdict: "approve".to_string(),
+                    summary: Some("risk is low".to_string()),
+                    output: Some(serde_json::json!({"risk": "low"})),
+                },
+            )]),
+            dependency_outputs: vec![StepOutputTemplateEntry {
+                step: "review-a".to_string(),
+                verdict: "approve".to_string(),
+                summary: Some("risk is low".to_string()),
+                output: Some(serde_json::json!({"risk": "low"})),
+            }],
+        };
+
+        let prompt = runner
+            .build_prompt(
+                &config,
+                BuildPromptRequest {
+                    issue: &test_issue(),
+                    agent_name: "synth",
+                    step_name: "synthesize",
+                    step_kind: StepKind::Synthesis,
+                    attempt: None,
+                    workspace_path: tmp.path(),
+                    turn_number: 1,
+                    step_outputs: &context,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(prompt.contains("This is a synthesis step."));
+        assert!(prompt.contains("dependency_outputs"));
+        assert!(prompt.contains("risk is low"));
     }
 }

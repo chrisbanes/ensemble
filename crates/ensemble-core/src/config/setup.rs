@@ -1,5 +1,5 @@
 use crate::config::ensemble::ModelDefinition;
-use crate::config::ensemble::{resolve_relative_to_base, StepConfig};
+use crate::config::ensemble::{resolve_relative_to_base, StepConfig, StepKind};
 use crate::error::ConfigError;
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,8 @@ pub struct SetupAgent {
 pub struct SetupStep {
     pub name: String,
     pub agent_role: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub depends: Vec<String>,
     pub tracker_state: Option<String>,
 }
@@ -722,6 +724,11 @@ fn generate_yaml(request: &SetupRequest) -> String {
                 "agent".into(),
                 serde_yaml::Value::String(step.agent_role.clone()),
             );
+            if let Some(ref kind) = step.kind {
+                if kind != "agent" {
+                    step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
+                }
+            }
             if !step.depends.is_empty() {
                 step_map.insert(
                     "depends".into(),
@@ -811,15 +818,31 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
 
     let step_configs: Vec<StepConfig> = steps
         .iter()
-        .map(|step| StepConfig {
-            name: step.name.clone(),
-            agent: step.agent_role.clone(),
-            // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
-            depends: Some(step.depends.clone()),
-            tracker_state: step.tracker_state.clone(),
-            approval: None,
+        .map(|step| {
+            let kind = match step.kind.as_deref() {
+                None => StepKind::default(),
+                Some("agent") => StepKind::Agent,
+                Some("synthesis") => StepKind::Synthesis,
+                Some(other) => {
+                    return Err(ConfigError::ConfigParseError {
+                        reason: format!(
+                            "unknown step kind '{}' for step '{}' (expected 'agent' or 'synthesis')",
+                            other, step.name
+                        ),
+                    });
+                }
+            };
+            Ok(StepConfig {
+                name: step.name.clone(),
+                kind,
+                agent: step.agent_role.clone(),
+                // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
+                depends: Some(step.depends.clone()),
+                tracker_state: step.tracker_state.clone(),
+                approval: None,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     build_dag(&step_configs).map_err(|error| ConfigError::ConfigParseError {
         reason: error.to_string(),
@@ -1072,9 +1095,11 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                         .get("tracker_state")
                         .and_then(|s| s.as_str())
                         .map(String::from);
+                    let kind = item.get("kind").and_then(|k| k.as_str()).map(String::from);
                     Some(SetupStep {
                         name: name.to_string(),
                         agent_role: agent_role.to_string(),
+                        kind,
                         depends,
                         tracker_state,
                     })
@@ -1218,7 +1243,7 @@ fn update_yaml_from_request(
                     (name == s.name).then(|| map.clone())
                 })
                 .unwrap_or_default();
-            for key in ["name", "agent", "depends", "tracker_state"] {
+            for key in ["name", "agent", "kind", "depends", "tracker_state"] {
                 step_map.remove(serde_yaml::Value::String(key.to_string()));
             }
             step_map.insert("name".into(), serde_yaml::Value::String(s.name.clone()));
@@ -1226,6 +1251,11 @@ fn update_yaml_from_request(
                 "agent".into(),
                 serde_yaml::Value::String(s.agent_role.clone()),
             );
+            if let Some(ref kind) = s.kind {
+                if kind != "agent" {
+                    step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
+                }
+            }
             if !s.depends.is_empty() {
                 let deps: Vec<serde_yaml::Value> = s
                     .depends
@@ -1374,6 +1404,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -1412,6 +1443,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1452,6 +1484,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1518,6 +1551,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1555,6 +1589,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1591,6 +1626,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1625,6 +1661,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -1764,6 +1801,7 @@ custom_section:
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -1822,6 +1860,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -1888,12 +1927,14 @@ on_failure: Failed
             SetupStep {
                 name: "a".to_string(),
                 agent_role: "agent".to_string(),
+                kind: None,
                 depends: vec!["b".to_string()],
                 tracker_state: None,
             },
             SetupStep {
                 name: "b".to_string(),
                 agent_role: "agent".to_string(),
+                kind: None,
                 depends: vec!["a".to_string()],
                 tracker_state: None,
             },
@@ -1909,18 +1950,21 @@ on_failure: Failed
             SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             },
             SetupStep {
                 name: "test".to_string(),
                 agent_role: "tester".to_string(),
+                kind: None,
                 depends: vec!["build".to_string()],
                 tracker_state: None,
             },
             SetupStep {
                 name: "deploy".to_string(),
                 agent_role: "deployer".to_string(),
+                kind: None,
                 depends: vec!["test".to_string()],
                 tracker_state: None,
             },
@@ -1939,6 +1983,7 @@ on_failure: Failed
         let steps = vec![SetupStep {
             name: "build".into(),
             agent_role: "builder".into(),
+            kind: None,
             depends: vec!["missing".into()],
             tracker_state: None,
         }];
@@ -1953,18 +1998,21 @@ on_failure: Failed
             SetupStep {
                 name: "lint".into(),
                 agent_role: "linter".into(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             },
             SetupStep {
                 name: "build".into(),
                 agent_role: "builder".into(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             },
             SetupStep {
                 name: "test".into(),
                 agent_role: "tester".into(),
+                kind: None,
                 depends: vec!["lint".into(), "build".into()],
                 tracker_state: None,
             },
@@ -1983,6 +2031,23 @@ on_failure: Failed
     }
 
     #[test]
+    fn build_setup_dag_rejects_unknown_step_kind() {
+        let steps = vec![SetupStep {
+            name: "build".into(),
+            agent_role: "builder".into(),
+            kind: Some("synthsis".into()),
+            depends: vec![],
+            tracker_state: None,
+        }];
+
+        let error = build_setup_dag(&steps).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown step kind"),
+            "expected 'unknown step kind' in error, got: {error}"
+        );
+    }
+
+    #[test]
     fn write_setup_artifacts_creates_files() {
         let tmpdir = tempfile::tempdir().unwrap();
         let todo_path = tmpdir.path().join("TODO.md");
@@ -1995,6 +2060,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2054,6 +2120,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2085,6 +2152,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2118,6 +2186,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2206,6 +2275,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2437,6 +2507,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -2494,6 +2565,7 @@ on_failure: Failed
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             }],
@@ -2560,6 +2632,7 @@ on_failure: Done
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],

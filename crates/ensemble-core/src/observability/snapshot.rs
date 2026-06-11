@@ -150,6 +150,7 @@ pub struct RepoFinalizeSnapshot {
 pub struct WorkflowStepInfo {
     pub name: String,
     pub agent: String,
+    pub kind: String,
     pub dependencies: Vec<String>,
     pub state: String,
     pub can_navigate: bool,
@@ -172,6 +173,7 @@ pub struct StepDetailSnapshot {
     pub step_name: String,
     pub status: String,
     pub agent: String,
+    pub kind: String,
     pub dependencies: Vec<String>,
     pub can_navigate: bool,
     pub verdict: Option<String>,
@@ -297,6 +299,7 @@ pub struct StepDetailState {
     pub status: String,
     pub verdict: Option<String>,
     pub agent: String,
+    pub kind: String,
     pub dependencies: Vec<String>,
     pub can_navigate: bool,
     pub run_id: Option<String>,
@@ -376,6 +379,7 @@ pub fn extract_step_detail_state(
                     status,
                     verdict,
                     agent: step_config.agent.clone(),
+                    kind: step_config.kind.to_string(),
                     dependencies: step_config.depends.clone().unwrap_or_default(),
                     can_navigate: pipeline_run
                         .map(|r| r.step_states.contains_key(step_name))
@@ -413,6 +417,7 @@ pub fn extract_step_detail_state(
                         None
                     },
                     agent: step.agent.clone(),
+                    kind: step.kind.clone(),
                     dependencies: step.dependencies.clone(),
                     can_navigate: step.can_navigate,
                     run_id: completed.run_id.clone(),
@@ -470,6 +475,7 @@ pub fn build_step_detail_snapshot(
         step_name: step_name.to_string(),
         status: detail_state.status,
         agent: detail_state.agent,
+        kind: detail_state.kind,
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
         verdict: detail_state.verdict,
@@ -650,6 +656,7 @@ pub async fn build_issue_snapshot(
                 WorkflowStepInfo {
                     name: step.name.clone(),
                     agent: step.agent.clone(),
+                    kind: step.kind.to_string(),
                     dependencies: step.depends.clone().unwrap_or_default(),
                     state: state_str.to_string(),
                     can_navigate: pipeline_run
@@ -665,6 +672,7 @@ pub async fn build_issue_snapshot(
             .map(|step| WorkflowStepInfo {
                 name: step.name.clone(),
                 agent: step.agent.clone(),
+                kind: step.kind.clone(),
                 dependencies: step.dependencies.clone(),
                 state: step.state.clone(),
                 can_navigate: step.can_navigate,
@@ -858,7 +866,9 @@ fn pending_input_from_current(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig, TrackerConfig};
+    use crate::config::ensemble::{
+        ConcurrencyConfig, EnsembleConfig, StepConfig, StepKind, TrackerConfig,
+    };
     use crate::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
     use crate::pipeline::engine::{PipelineRun, StepState};
     use crate::timeline::model::TimelineEventRecord;
@@ -971,6 +981,7 @@ mod tests {
             steps: vec![
                 StepConfig {
                     name: "build".to_string(),
+                    kind: StepKind::Agent,
                     agent: "builder".to_string(),
                     depends: None,
                     tracker_state: None,
@@ -978,6 +989,7 @@ mod tests {
                 },
                 StepConfig {
                     name: "review".to_string(),
+                    kind: StepKind::Agent,
                     agent: "reviewer".to_string(),
                     depends: Some(vec!["build".to_string()]),
                     tracker_state: None,

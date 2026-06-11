@@ -11,6 +11,7 @@ import { X, Plus, GripVertical } from "lucide-react";
 
 export interface WorkflowStep {
   name: string;
+  kind?: "agent" | "synthesis";
   agent: string;
   depends: string[];
   tracker_state?: string | null;
@@ -44,6 +45,7 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
   const addStep = () => {
     const newStep: WorkflowStep = {
       name: `step-${steps.length + 1}`,
+      kind: "agent",
       agent: agents[0]?.name || "",
       depends: [],
       tracker_state: null,
@@ -198,6 +200,24 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
                       </SelectContent>
                     </Select>
                   </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium" htmlFor={`step-kind-${index}`}>Step Kind</label>
+                  <Select
+                    value={step.kind ?? "agent"}
+                    onValueChange={(val) =>
+                      updateStep(index, { kind: val as "agent" | "synthesis" })
+                    }
+                  >
+                    <SelectTrigger aria-label={`Step kind ${step.name}`} id={`step-kind-${index}`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="agent">Agent</SelectItem>
+                      <SelectItem value="synthesis">Synthesis</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
 
                 {availableDeps.length > 0 && (

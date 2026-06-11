@@ -119,6 +119,9 @@ export default function ConfigStatus() {
                     <Badge variant="secondary" className="px-3 py-1.5">
                       <span className="font-medium">{step.name}</span>
                       <span className="ml-1 opacity-70">({step.agent})</span>
+                      {(step.kind ?? "agent") === "synthesis" && (
+                        <span className="ml-1 opacity-70">synthesis</span>
+                      )}
                       {step.depends && step.depends.length > 0 && (
                         <span className="ml-1 opacity-60">after {step.depends.join(", ")}</span>
                       )}

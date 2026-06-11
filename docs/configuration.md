@@ -294,6 +294,7 @@ Pipeline step definitions. Each step invokes one agent.
 |-------|------|---------|-------------|
 | `name` | string | *required* | Unique step identifier |
 | `agent` | string | *required* | Name of an agent defined in `agents` |
+| `kind` | string | `agent` | Step kind. Use `agent` for normal steps and `synthesis` for steps that merge direct dependency outputs. |
 | `depends` | list of strings | — | Steps this depends on. Omit for sequential order. Use `[]` for no dependencies (root step). |
 | `tracker_state` | string | — | Tracker state to write when this step starts |
 | `approval.mode` | string | — | Optional post-step approval policy: `always` or `when_requested_by_agent` |
@@ -318,6 +319,24 @@ steps:
     approval:
       mode: when_requested_by_agent
       state: Plan Review
+```
+
+**Example with synthesis:**
+
+```yaml
+steps:
+  - name: implement
+    agent: builder
+  - name: review-a
+    agent: reviewer
+    depends: [implement]
+  - name: review-b
+    agent: reviewer
+    depends: [implement]
+  - name: synthesize
+    kind: synthesis
+    agent: synthesizer
+    depends: [review-a, review-b]
 ```
 
 ### on_success / on_failure

@@ -225,6 +225,10 @@ Pipeline step definition:
 
 - `name` (string) — unique step identifier.
 - `agent` (string) — references a named agent from `agents`.
+- `kind` (string, optional, default `"agent"`)
+  - `"agent"` — normal agent-backed step.
+  - `"synthesis"` — agent-backed step intended to merge or adjudicate direct dependency outputs.
+  Synthesis steps must declare `depends` explicitly.
 - `depends` (list of strings, optional) — step names this step depends on. If omitted, the step
   implicitly depends on the step directly before it in the list. The first step has no implicit
   dependency. Explicit `depends` overrides the implicit rule.
@@ -648,6 +652,10 @@ Pipeline step definitions forming a DAG. Each step is an object:
   - Required. Unique step identifier.
 - `agent` (string)
   - Required. References a named agent from `agents`.
+- `kind` (string, optional)
+  - Default: `"agent"`.
+  - Step kind: `"agent"` for normal steps or `"synthesis"` for steps that merge/adjudicate direct
+    dependency outputs. Synthesis steps must declare `depends` explicitly.
 - `depends` (list of strings, optional)
   - Step names this step depends on. Steps with the same dependencies run in parallel.
   - If omitted: the first step in the list has no implicit dependency (it is a root). Each
@@ -795,6 +803,10 @@ Template input variables:
   - Ordered list of outputs from the step's direct dependencies. Each entry has the same shape as
     `steps` entries: `{ step, verdict, summary, output }`.
 
+Synthesis steps receive the same `steps` and `dependency_outputs` variables as normal steps. The
+runtime appends synthesis-specific guidance to the first turn prompt, instructing the agent to
+merge or adjudicate the outputs collected from its direct dependencies.
+
 Fallback prompt behavior:
 
 - Each agent must have exactly one of `prompt` or `prompt_template`. If neither is set, fail
@@ -936,6 +948,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier
 - `steps[].agent`: string, required; references a key in `agents`
+- `steps[].kind`: string, optional, default `"agent"`; `"agent"` or `"synthesis"`
 - `steps[].depends`: list of strings, optional; step dependencies for DAG
 - `steps[].tracker_state`: string, optional; tracker state to write on step entry
 - `on_success`: string, required; terminal tracker state on pipeline success

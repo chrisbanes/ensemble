@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::config::ensemble::{StepApprovalConfig, StepConfig};
+use crate::config::ensemble::{StepApprovalConfig, StepConfig, StepKind};
 use crate::error::PipelineError;
 
 /// A single step in the resolved DAG, with its explicit dependency list.
@@ -8,6 +8,7 @@ use crate::error::PipelineError;
 pub struct DagStep {
     pub name: String,
     pub agent: String,
+    pub kind: StepKind,
     pub tracker_state: Option<String>,
     pub approval: Option<StepApprovalConfig>,
     pub depends: Vec<String>,
@@ -71,6 +72,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
         resolved.push(DagStep {
             name: step.name.clone(),
             agent: step.agent.clone(),
+            kind: step.kind,
             tracker_state: step.tracker_state.clone(),
             approval: step.approval.clone(),
             depends: deps,
@@ -148,6 +150,7 @@ pub fn ready_steps<'a>(dag: &'a StepDag, completed: &HashSet<String>) -> Vec<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::StepKind;
 
     fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         let deps = if depends.is_empty() {
@@ -157,6 +160,7 @@ mod tests {
         };
         StepConfig {
             name: name.to_string(),
+            kind: StepKind::Agent,
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
@@ -167,6 +171,7 @@ mod tests {
     fn make_root_step(name: &str, agent: &str) -> StepConfig {
         StepConfig {
             name: name.to_string(),
+            kind: StepKind::Agent,
             agent: agent.to_string(),
             depends: Some(vec![]), // explicit root
             tracker_state: None,
@@ -314,9 +319,41 @@ mod tests {
     }
 
     #[test]
+    fn test_dag_preserves_synthesis_kind() {
+        let steps = vec![
+            StepConfig {
+                name: "review-a".to_string(),
+                kind: StepKind::Agent,
+                agent: "reviewer".to_string(),
+                depends: Some(vec![]),
+                tracker_state: None,
+                approval: None,
+            },
+            StepConfig {
+                name: "synthesize".to_string(),
+                kind: StepKind::Synthesis,
+                agent: "synth".to_string(),
+                depends: Some(vec!["review-a".to_string()]),
+                tracker_state: None,
+                approval: None,
+            },
+        ];
+
+        let dag = build_dag(&steps).unwrap();
+        let synth = dag
+            .steps
+            .iter()
+            .find(|step| step.name == "synthesize")
+            .unwrap();
+
+        assert_eq!(synth.kind, StepKind::Synthesis);
+    }
+
+    #[test]
     fn preserves_step_approval_metadata() {
         let steps = vec![StepConfig {
             name: "plan".to_string(),
+            kind: StepKind::Agent,
             agent: "planner".to_string(),
             depends: None,
             tracker_state: Some("Planning".to_string()),

@@ -5,7 +5,7 @@
 //! The key constraint: unknown YAML fields are preserved during the
 //! round-trip to support custom user extensions.
 
-use crate::config::ensemble::{ModeDefinition, ModelDefinition};
+use crate::config::ensemble::{ModeDefinition, ModelDefinition, StepKind};
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -70,6 +70,8 @@ pub struct GuidedAgentForm {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GuidedStepForm {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub agent: String,
     pub depends: Vec<String>,
     pub tracker_state: Option<String>,
@@ -205,6 +207,7 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
             .iter()
             .map(|s| GuidedStepForm {
                 name: s.name.clone(),
+                kind: (s.kind != StepKind::Agent).then(|| s.kind.to_string()),
                 agent: s.agent.clone(),
                 depends: s.depends.clone().unwrap_or_default(),
                 tracker_state: s.tracker_state.clone(),
@@ -444,6 +447,12 @@ pub fn apply_guided_form(
                     ("agent", s.agent.clone().into()),
                 ],
             );
+            step_mapping.remove("kind");
+            if let Some(ref kind) = s.kind {
+                if kind != "agent" {
+                    step_mapping.insert("kind".into(), kind.clone().into());
+                }
+            }
             step_mapping.remove("depends");
             if !s.depends.is_empty() {
                 step_mapping.insert("depends".into(), s.depends.clone().into());
@@ -657,6 +666,7 @@ mod tests {
             }],
             steps: vec![GuidedStepForm {
                 name: "implement".to_string(),
+                kind: None,
                 agent: "builder".to_string(),
                 depends: vec![],
                 tracker_state: None,
@@ -958,5 +968,53 @@ on_failure: Failed
 
         assert_eq!(agent.available_models.as_ref().unwrap()[0].id, "gpt-5");
         assert_eq!(agent.available_modes.as_ref().unwrap()[0].id, "code");
+    }
+
+    #[test]
+    fn extract_guided_form_includes_step_kind() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  synth:
+    acpx_agent: claude
+    prompt: Merge.
+steps:
+  - name: synthesize
+    kind: synthesis
+    agent: synth
+    depends: [review-a]
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = extract_guided_form(raw).unwrap();
+
+        assert_eq!(form.steps[0].kind.as_deref(), Some("synthesis"));
+    }
+
+    #[test]
+    fn apply_guided_form_writes_step_kind() {
+        let base = r#"
+tracker:
+  kind: todo_file
+agents:
+  synth:
+    acpx_agent: claude
+    prompt: Merge.
+steps:
+  - name: synthesize
+    agent: synth
+on_success: Done
+on_failure: Failed
+"#;
+        let mut form = extract_guided_form(base).unwrap();
+        form.steps[0].kind = Some("synthesis".to_string());
+        form.steps[0].depends = vec!["review-a".to_string()];
+
+        let merged = apply_guided_form(base, &form).unwrap();
+
+        assert!(merged.contains("kind: synthesis"));
+        assert!(merged.contains("depends:"));
     }
 }

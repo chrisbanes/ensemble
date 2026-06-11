@@ -190,11 +190,12 @@ What happens:
 5. Reviewer approves → issue moves to "Done"
 6. If reviewer rejects → issue moves to "Needs Rework", retries from step 1 on next cycle
 
-## Accessing dependency outputs
+## Synthesis steps
 
-Downstream steps can access outputs from their direct dependencies via the `dependency_outputs` and
-`steps` template variables. This is useful for synthesis steps that merge results from parallel
-branches.
+Synthesis steps merge or adjudicate outputs from parallel branches. Set `kind: synthesis` on a step to
+mark it as a synthesis step. Synthesis steps must declare `depends` explicitly. Ensemble passes only
+final dependency outputs into the prompt context; intermediate tool calls and hidden reasoning are not
+injected.
 
 ```yaml
 steps:
@@ -207,9 +208,15 @@ steps:
     agent: reviewer
     depends: [implement]
   - name: synthesize
+    kind: synthesis
     agent: synthesizer
     depends: [review-a, review-b]
 ```
+
+## Accessing dependency outputs
+
+Downstream steps can access outputs from their direct dependencies via the `dependency_outputs` and
+`steps` template variables.
 
 A synthesizer prompt can iterate over `dependency_outputs`:
 
