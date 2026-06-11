@@ -1,3 +1,4 @@
+pub mod pipeline_journal;
 pub mod reconciler;
 pub mod retry;
 pub mod scheduler;
