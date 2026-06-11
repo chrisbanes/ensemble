@@ -82,13 +82,16 @@ pub struct ResolvedResult {
 }
 ```
 
-- [ ] **Step 4: Update verdict_from_payload to parse concern**
+- [ ] **Step 4: Update VerdictPayload and verdict_from_payload to parse result/concern**
 
-In `step_output_from_payload` (lines 181-195), add `"concern"` parsing:
+Add a `result: Option<String>` field to `VerdictPayload`, keeping `verdict` as the legacy alias. In `step_output_from_payload` (lines 181-195), prefer `result`, fall back to `verdict`, and add `"concern"` parsing:
 
 ```rust
 fn step_output_from_payload(payload: &VerdictPayload) -> Option<StepOutput> {
-    let result = match payload.verdict.as_deref() {
+    // Prefer the new `result` field, but keep `verdict` as a legacy alias
+    // for existing ACP/file payloads.
+    let raw_result = payload.result.as_deref().or(payload.verdict.as_deref());
+    let result = match raw_result {
         Some(v) if v.eq_ignore_ascii_case("approve") => StepResult::Succeeded,
         Some(v) if v.eq_ignore_ascii_case("succeeded") => StepResult::Succeeded,
         Some(v) if v.eq_ignore_ascii_case("concern") => StepResult::Concern {
@@ -217,6 +220,18 @@ fn test_parse_legacy_approve_reject() {
     );
     assert_eq!(
         parse_verdict_from_value(&json!({ "verdict": "reject", "summary": "nope" })),
+        Some(StepResult::Failed { summary: "nope".to_string() })
+    );
+}
+```
+
+Add a forward-format test for the new `result` field:
+
+```rust
+#[test]
+fn test_parse_result_field() {
+    assert_eq!(
+        parse_verdict_from_value(&json!({ "result": "failed", "summary": "nope" })),
         Some(StepResult::Failed { summary: "nope".to_string() })
     );
 }
@@ -417,15 +432,15 @@ pub fn step_failed(&mut self, step_name: &str, error: String) -> PipelineAction 
 }
 ```
 
-- [ ] **Step 7: Update template_entry to use StepResult**
+- [ ] **Step 7: Update template_entry to use StepResult and result terminology**
 
-Lines 439-449: `Verdict::Approve` → `StepResult::Succeeded`, `Verdict::Reject` → `StepResult::Failed`:
+Rename `StepOutputTemplateEntry.verdict` to `result`. Lines 439-449: `Verdict::Approve` → `StepResult::Succeeded`, `Verdict::Reject` → `StepResult::Failed`, and emit result values:
 
 ```rust
 fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
     StepOutputTemplateEntry {
         step: step.to_string(),
-        verdict: match &output.result {
+        result: match &output.result {
             StepResult::Succeeded => "succeeded".to_string(),
             StepResult::Concern { .. } => "concern".to_string(),
             StepResult::Failed { .. } => "failed".to_string(),
@@ -664,12 +679,12 @@ git add crates/ensemble-core/src/pipeline/dag.rs
 git commit -m "feat: add StepDag::downstream_steps for transitive dependency computation"
 ```
 
-### Task 5: Add PipelineRun::retry_from_step
+### Task 5: Add PipelineRun step-level retry primitives
 
 **Files:**
 - Modify: `crates/ensemble-core/src/pipeline/engine.rs`
 
-- [ ] **Step 1: Write failing test**
+- [ ] **Step 1: Write failing tests**
 
 Add to `mod tests` in engine.rs (before the closing `}` of mod tests):
 
@@ -749,14 +764,35 @@ fn test_retry_from_step_root_resets_all() {
     assert_eq!(run.step_states["build"], StepState::Pending);
     assert_eq!(run.step_states["review"], StepState::Pending);
 }
+
+#[test]
+fn test_retry_from_step_with_fixup_injects_fixup_before_failed_step() {
+    let steps = vec![
+        make_step("build", "builder", &[]),
+        make_step("synth", "synth", &["build"]),
+    ];
+    let mut run = make_run(&steps);
+    run.step_states.insert("build".to_string(), StepState::Passed);
+    run.step_states.insert("synth".to_string(), StepState::Failed {
+        summary: "synthesis conflict".to_string(),
+    });
+    let reset = run.retry_from_step_with_fixup("synth", "fixer");
+    assert!(reset.contains("synth"));
+    assert!(run.step_states.contains_key("fixup-synth"));
+    assert_eq!(run.step_states["fixup-synth"], StepState::Pending);
+    let synth = run.dag.steps.iter().find(|s| s.name == "synth").unwrap();
+    assert_eq!(synth.depends, vec!["fixup-synth"]);
+    let fixup = run.dag.steps.iter().find(|s| s.name == "fixup-synth").unwrap();
+    assert_eq!(fixup.depends, vec!["build"]);
+}
 ```
 
 - [ ] **Step 2: Run test to verify failure**
 
 Run: `cargo test -p ensemble-core -- pipeline::engine::tests::test_retry_from_step_resets_failed_and_downstream`
-Expected: FAIL — `retry_from_step` method doesn't exist.
+Expected: FAIL — `retry_from_step` and `retry_from_step_with_fixup` do not exist.
 
-- [ ] **Step 3: Implement retry_from_step**
+- [ ] **Step 3: Implement retry_from_step and retry_from_step_with_fixup**
 
 Add to `impl PipelineRun` (after `step_failed`, around line 317):
 
@@ -774,6 +810,41 @@ pub fn retry_from_step(&mut self, step_name: &str) -> HashSet<String> {
 
     downstream
 }
+
+/// Same as retry_from_step, but injects a synthetic fixup step between the
+/// reset step's dependencies and the reset step itself.
+pub fn retry_from_step_with_fixup(
+    &mut self,
+    step_name: &str,
+    fixup_agent: &str,
+) -> HashSet<String> {
+    let fixup_name = format!("fixup-{step_name}");
+    let original_deps: Vec<String> = self.dag.steps
+        .iter()
+        .find(|s| s.name == step_name)
+        .map(|s| s.depends.clone())
+        .unwrap_or_default();
+    let reset = self.retry_from_step(step_name);
+    let fixup_step = crate::pipeline::dag::DagStep {
+        name: fixup_name.clone(),
+        agent: fixup_agent.to_string(),
+        kind: crate::config::ensemble::StepKind::Agent,
+        tracker_state: None,
+        approval: None,
+        depends: original_deps.clone(),
+        on_failure: crate::config::ensemble::OnFailure::RetryStep,
+        fixup_agent: None,
+    };
+    let failed_idx = self.dag.steps.iter()
+        .position(|s| s.name == step_name)
+        .unwrap_or(self.dag.steps.len());
+    self.dag.steps.insert(failed_idx, fixup_step);
+    if let Some(step) = self.dag.steps.iter_mut().find(|s| s.name == step_name) {
+        step.depends = vec![fixup_name.clone()];
+    }
+    self.step_states.insert(fixup_name, StepState::Pending);
+    reset
+}
 ```
 
 - [ ] **Step 4: Run tests**
@@ -785,7 +856,7 @@ Expected: All tests pass including the new retry tests.
 
 ```bash
 git add crates/ensemble-core/src/pipeline/engine.rs
-git commit -m "feat: add PipelineRun::retry_from_step for step-level retry"
+git commit -m "feat: add PipelineRun step-level retry primitives"
 ```
 
 ---
@@ -795,9 +866,19 @@ git commit -m "feat: add PipelineRun::retry_from_step for step-level retry"
 ### Task 6: Add OnFailure enum and StepConfig fields
 
 **Files:**
+- Modify: `crates/ensemble-core/src/error.rs`
 - Modify: `crates/ensemble-core/src/config/ensemble.rs`
 
-- [ ] **Step 1: Add OnFailure enum**
+- [ ] **Step 1: Add a generic invalid-step config error**
+
+In `PipelineError`, add:
+
+```rust
+#[error("invalid step config for {step}: {reason}")]
+InvalidStepConfig { step: String, reason: String },
+```
+
+- [ ] **Step 2: Add OnFailure enum**
 
 After `StepKind` impl (around line 371), add:
 
@@ -818,7 +899,7 @@ pub enum OnFailure {
 }
 ```
 
-- [ ] **Step 2: Add on_failure and fixup_agent to StepConfig**
+- [ ] **Step 3: Add on_failure and fixup_agent to StepConfig**
 
 Modify `StepConfig` (lines 374-386):
 
@@ -852,7 +933,7 @@ impl OnFailure {
 }
 ```
 
-- [ ] **Step 3: Update DagStep to carry on_failure and fixup_agent**
+- [ ] **Step 4: Update DagStep to carry on_failure and fixup_agent**
 
 In `dag.rs`, update `DagStep`:
 
@@ -884,12 +965,32 @@ resolved.push(DagStep {
 });
 ```
 
-- [ ] **Step 4: Compile and fix cascading changes**
+- [ ] **Step 5: Compile and fix cascading changes**
 
 Run: `cargo build -p ensemble-core 2>&1 | head -40`
 Expected: May have compilation errors in dag.rs if `OnFailure` isn't imported. Add `use crate::config::ensemble::OnFailure;` to dag.rs if needed.
 
-- [ ] **Step 5: Write config test**
+- [ ] **Step 6: Write config validation tests**
+
+Update `validate_config` so `on_failure: fixup` requires a configured `fixup_agent`, and the named fixup agent exists in `config.agents`:
+
+```rust
+for step in &config.steps {
+    if step.on_failure == OnFailure::Fixup {
+        let Some(fixup_agent) = step.fixup_agent.as_ref() else {
+            return Err(PipelineError::InvalidStepConfig {
+                step: step.name.clone(),
+                reason: "on_failure: fixup requires fixup_agent".to_string(),
+            });
+        };
+        if !config.agents.contains_key(fixup_agent) {
+            return Err(PipelineError::UnknownAgent {
+                name: fixup_agent.clone(),
+            });
+        }
+    }
+}
+```
 
 Add to `mod tests` in ensemble.rs (or dag.rs):
 
@@ -906,15 +1007,17 @@ agent: builder
 }
 ```
 
-- [ ] **Step 6: Run tests**
+Add validation tests for `on_failure: fixup` without `fixup_agent` and with an unknown `fixup_agent`.
+
+- [ ] **Step 7: Run tests**
 
 Run: `cargo test -p ensemble-core -- config`
 Expected: All tests pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add crates/ensemble-core/src/config/ensemble.rs crates/ensemble-core/src/pipeline/dag.rs
+git add crates/ensemble-core/src/error.rs crates/ensemble-core/src/config/ensemble.rs crates/ensemble-core/src/pipeline/dag.rs
 git commit -m "feat: add OnFailure enum and on_failure/fixup_agent fields to StepConfig"
 ```
 
@@ -1081,11 +1184,14 @@ match on_failure {
     }
     OnFailure::Fixup => {
         // Fixup: inject fixup agent, then retry
-        let fixup_agent = config.steps
+        let Some(fixup_agent) = config.steps
             .iter()
             .find(|s| s.name == step)
-            .and_then(|s| s.fixup_agent.clone())
-            .unwrap_or_else(|| "fixer".to_string());
+            .and_then(|s| s.fixup_agent.clone()) else {
+            error!(issue_id = %issue_id, step = %step, "fixup step missing fixup_agent after config validation");
+            state.remove_pipeline_run(issue_id);
+            return;
+        };
 
         if let Some(run) = state.get_pipeline_run_mut(issue_id) {
             run.retry_from_step_with_fixup(&step, &fixup_agent);
@@ -1141,6 +1247,28 @@ match on_failure {
         );
         if let Some(entry) = state.remove_running(issue_id) {
             state.add_runtime_seconds(&entry);
+            let agent_name = config.steps
+                .iter()
+                .find(|s| s.name == step)
+                .map(|s| s.agent.clone())
+                .unwrap_or_default();
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: issue_id.to_string(),
+                identifier: entry.identifier.clone(),
+                interaction_request_id: format!("halted:{issue_id}:{step}"),
+                step_name: step.clone(),
+                kind: crate::interaction::model::InteractionKind::Handoff,
+                prompt: reason.clone(),
+                agent_name,
+                retry_attempt: entry.retry_attempt,
+                started_at: Some(entry.started_at),
+                agent_input_tokens: entry.agent_input_tokens,
+                agent_output_tokens: entry.agent_output_tokens,
+                agent_total_tokens: entry.agent_total_tokens,
+                requested_at: chrono::Utc::now(),
+                run_id: entry.run_id.clone(),
+                issue: Some(entry.issue.clone()),
+            });
         }
         // Do NOT remove_pipeline_run, do NOT schedule retry
         // Do NOT call remove_claimed — issue stays claimed
@@ -1269,97 +1397,7 @@ git add crates/ensemble-core/src/orchestrator/mod.rs
 git commit -m "feat: wire on_failure routing and step-level retry dispatch in orchestrator"
 ```
 
-### Task 9: Add retry_from_step_with_fixup to PipelineRun
-
-**Files:**
-- Modify: `crates/ensemble-core/src/pipeline/engine.rs`
-
-- [ ] **Step 1: Write failing test**
-
-Add to `mod tests` in engine.rs:
-
-```rust
-#[test]
-fn test_retry_from_step_with_fixup_injects_fixup_before_failed_step() {
-    let steps = vec![
-        make_step("build", "builder", &[]),
-        make_step("synth", "synth", &["build"]),
-    ];
-    let mut run = make_run(&steps);
-    run.step_states.insert("build".to_string(), StepState::Passed);
-    run.step_states.insert("synth".to_string(), StepState::Failed {
-        summary: "synthesis conflict".to_string(),
-    });
-    let reset = run.retry_from_step_with_fixup("synth", "fixer");
-    assert!(reset.contains("synth"));
-    assert!(run.step_states.contains_key("fixup-synth"));
-    assert_eq!(run.step_states["fixup-synth"], StepState::Pending);
-    let synth = run.dag.steps.iter().find(|s| s.name == "synth").unwrap();
-    assert_eq!(synth.depends, vec!["fixup-synth"]);
-    let fixup = run.dag.steps.iter().find(|s| s.name == "fixup-synth").unwrap();
-    assert_eq!(fixup.depends, vec!["build"]);
-}
-```
-
-- [ ] **Step 2: Run test to verify failure**
-
-Run: `cargo test -p ensemble-core -- pipeline::engine::tests::test_retry_from_step_with_fixup`
-Expected: FAIL — method does not exist.
-
-- [ ] **Step 3: Implement retry_from_step_with_fixup**
-
-After `retry_from_step` in engine.rs, add:
-
-```rust
-/// Same as retry_from_step, but injects a synthetic fixup step between the
-/// reset step's dependencies and the reset step itself.
-pub fn retry_from_step_with_fixup(
-    &mut self,
-    step_name: &str,
-    fixup_agent: &str,
-) -> HashSet<String> {
-    let fixup_name = format!("fixup-{step_name}");
-    let original_deps: Vec<String> = self.dag.steps
-        .iter()
-        .find(|s| s.name == step_name)
-        .map(|s| s.depends.clone())
-        .unwrap_or_default();
-    let reset = self.retry_from_step(step_name);
-    let fixup_step = crate::pipeline::dag::DagStep {
-        name: fixup_name.clone(),
-        agent: fixup_agent.to_string(),
-        kind: crate::config::ensemble::StepKind::Agent,
-        tracker_state: None,
-        approval: None,
-        depends: original_deps.clone(),
-        on_failure: crate::config::ensemble::OnFailure::RetryStep,
-        fixup_agent: None,
-    };
-    let failed_idx = self.dag.steps.iter()
-        .position(|s| s.name == step_name)
-        .unwrap_or(self.dag.steps.len());
-    self.dag.steps.insert(failed_idx, fixup_step);
-    if let Some(step) = self.dag.steps.iter_mut().find(|s| s.name == step_name) {
-        step.depends = vec![fixup_name.clone()];
-    }
-    self.step_states.insert(fixup_name, StepState::Pending);
-    reset
-}
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `cargo test -p ensemble-core -- pipeline::engine`
-Expected: All tests pass including fixup test.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add crates/ensemble-core/src/pipeline/engine.rs
-git commit -m "feat: add retry_from_step_with_fixup for fixup agent injection"
-```
-
-### Task 10: Update API retry endpoint for step-level retry
+### Task 9: Update API retry endpoint for step-level retry
 
 **Files:**
 - Modify: `crates/ensemble-core/src/api/controls.rs`
@@ -1370,9 +1408,12 @@ git commit -m "feat: add retry_from_step_with_fixup for fixup agent injection"
 In state.rs, add:
 
 ```rust
-/// Find the issue_id for a given identifier across running or waiting states.
+/// Find the issue_id for a given identifier across active control states.
 pub fn find_issue_id_by_identifier(&self, identifier: &str) -> Option<String> {
     for (id, entry) in &self.running {
+        if entry.identifier == identifier { return Some(id.clone()); }
+    }
+    for (id, entry) in &self.retry_attempts {
         if entry.identifier == identifier { return Some(id.clone()); }
     }
     for (id, entry) in &self.waiting_on_human {
@@ -1432,9 +1473,11 @@ pub async fn post_retry(
 
     if let Some(step_name) = &query.step {
         // Step-level retry: apply retry_from_step on PipelineRun, schedule retry
-        if let Some(run) = lock.get_pipeline_run_mut(&issue_id) {
-            run.retry_from_step(step_name);
-        }
+        let Some(run) = lock.get_pipeline_run_mut(&issue_id) else {
+            return issue_error_response(StatusCode::CONFLICT, "no_pipeline_run",
+                format!("issue '{}' has no resumable pipeline run", identifier));
+        };
+        run.retry_from_step(step_name);
         // Schedule retry with step info
         let identifier_copy = lock.running.get(&issue_id)
             .map(|e| e.identifier.clone())
@@ -1446,14 +1489,15 @@ pub async fn post_retry(
             .map(|a| a + 1)
             .unwrap_or(1);
         let config = state.config.read().await;
+        // Remove any existing retry entry before replacing it with the manual step retry.
+        lock.remove_retry(&issue_id);
+        lock.remove_waiting_on_human(&issue_id);
         schedule_failure_retry(
             &mut lock, &issue_id, &identifier_copy, attempt,
             config.agent.max_retry_backoff_ms, config.max_cycles,
             "manual step-level retry",
             Some(step_name.clone()), false,
         );
-        // Remove any existing retry entry
-        lock.remove_retry(&issue_id);
     } else {
         // Whole-issue retry (existing behavior)
         lock.remove_retry(&issue_id);
@@ -1493,7 +1537,7 @@ git add crates/ensemble-core/src/api/controls.rs crates/ensemble-core/src/orches
 git commit -m "feat: add step-level retry to API with ?step= query parameter"
 ```
 
-### Task 11: Update documentation
+### Task 10: Update documentation
 
 **Files:**
 - Modify: `docs/pipelines.md`
@@ -1557,9 +1601,3 @@ cargo test --workspace --exclude ensemble-desktop
 cargo clippy --workspace --exclude ensemble-desktop -- -D warnings
 cargo fmt --all -- --check
 ```
-
-<｜end▁of▁thinking｜>Let me continue writing the remaining tasks for the plan:
-
-<｜｜DSML｜｜tool_calls>
-<｜｜DSML｜｜invoke name="read">
-<｜｜DSML｜｜parameter name="filePath" string="true">/Users/chris/.paseo/worktrees/0mixpvkw/furry-snake/docs/superpowers/plans/2026-06-11-step-retry-and-results.md

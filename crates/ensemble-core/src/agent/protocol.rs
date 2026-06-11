@@ -185,8 +185,10 @@ fn extract_verdict(
     update: Option<&serde_json::Value>,
 ) -> Option<serde_json::Value> {
     update
-        .and_then(|u| u.get("verdict"))
+        .and_then(|u| u.get("result"))
         .cloned()
+        .or_else(|| update.and_then(|u| u.get("verdict")).cloned())
+        .or_else(|| params.get("result").cloned())
         .or_else(|| params.get("verdict").cloned())
 }
 
@@ -301,6 +303,35 @@ mod tests {
 
         let parsed = parse_session_update(&params).unwrap();
         assert_eq!(parsed.verdict, Some(json!({"verdict":"approve"})));
+    }
+
+    #[test]
+    fn parse_session_update_extracts_result_from_params() {
+        let params = json!({
+            "sessionId": "s1",
+            "result": {"result": "concern", "summary": "needs review"}
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        assert_eq!(
+            parsed.verdict,
+            Some(json!({"result":"concern","summary":"needs review"}))
+        );
+    }
+
+    #[test]
+    fn parse_session_update_prefers_result_over_legacy_verdict() {
+        let params = json!({
+            "sessionId": "s1",
+            "result": {"result": "concern", "summary": "new"},
+            "verdict": {"verdict": "approve"}
+        });
+
+        let parsed = parse_session_update(&params).unwrap();
+        assert_eq!(
+            parsed.verdict,
+            Some(json!({"result":"concern","summary":"new"}))
+        );
     }
 
     #[test]

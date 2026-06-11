@@ -166,6 +166,13 @@ fn text_from_content(content: &ContentBlock) -> Option<String> {
     }
 }
 
+fn runtime_verdict_from_value(value: &serde_json::Value) -> Option<serde_json::Value> {
+    value
+        .get("result")
+        .cloned()
+        .or_else(|| value.get("verdict").cloned())
+}
+
 #[derive(Debug, Default)]
 struct ParsedSdkDispatch {
     output_text: Option<String>,
@@ -187,7 +194,7 @@ fn parse_session_notification(notification: SessionNotification) -> ParsedSdkDis
                     .and_then(|v| v.get("usage").cloned())
                     .or_else(|| value.clone())
                     .and_then(token_usage_from_value),
-                verdict: value.as_ref().and_then(|v| v.get("verdict").cloned()),
+                verdict: value.as_ref().and_then(runtime_verdict_from_value),
                 output_text: None,
             }
         }
@@ -876,6 +883,29 @@ mod tests {
         let parsed = parse_session_notification(notification);
 
         assert_eq!(parsed.usage.map(|usage| usage.total_tokens), Some(42));
+    }
+
+    #[test]
+    fn runtime_verdict_from_value_extracts_result() {
+        let value = serde_json::json!({
+            "result": {"result": "concern", "summary": "needs review"}
+        });
+        assert_eq!(
+            runtime_verdict_from_value(&value),
+            Some(serde_json::json!({"result":"concern","summary":"needs review"}))
+        );
+    }
+
+    #[test]
+    fn runtime_verdict_from_value_prefers_result_over_legacy_verdict() {
+        let value = serde_json::json!({
+            "result": {"result": "concern", "summary": "new"},
+            "verdict": {"verdict": "approve"}
+        });
+        assert_eq!(
+            runtime_verdict_from_value(&value),
+            Some(serde_json::json!({"result":"concern","summary":"new"}))
+        );
     }
 
     #[tokio::test]

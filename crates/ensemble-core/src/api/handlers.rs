@@ -452,6 +452,8 @@ mod tests {
             attempt: 3,
             due_at_ms: 1711641600000,
             error: Some("no available orchestrator slots".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
         }
     }
 

@@ -47,11 +47,11 @@ The verdict model (`Approve`/`Reject`) is binary and judgmental. A review agent 
 **`Concern`** is the key addition. A review agent that finds naming issues or minor style problems reports `Concern` with details in `summary` and structured `output`. The pipeline does not halt — downstream steps (especially `kind: synthesis`) receive the concern in their `dependency_outputs` and decide what is actionable. `Failed` remains for truly blocking problems (broken build, wrong approach, unsafe code).
 
 **Result resolution** follows the same priority chain:
-1. ACP runtime result (the `result` field in the final session/update event)
+1. ACP runtime result (the `result` field in the final session/update event; legacy `verdict` is accepted while migrating)
 2. `.ensemble/verdict-{step_name}.json` (or legacy `verdict.json`)
 3. Default to `Succeeded`
 
-**Value mapping:** the existing `"approve"` / `"reject"` strings in ACP payloads and verdict files are mapped to `Succeeded` / `Failed`. The new `"concern"` value is also recognized. Old configs continue working.
+**Value mapping:** the existing `"approve"` / `"reject"` strings in ACP payloads and verdict files are mapped to `Succeeded` / `Failed`. The new `"succeeded"` / `"failed"` / `"concern"` values are also recognized.
 
 ### 2. Step-level retry
 
@@ -107,6 +107,8 @@ steps:
 | `retry_step` | Step-level retry. Resets failed step + downstream, preserves passed steps. |
 | `fixup` | Step-level retry with an injected fixup agent. The fixup step runs before the retried step. |
 | `halt` | Stop the pipeline. Do not retry. Wait for manual intervention via API/UI. |
+
+When `on_failure: fixup` is configured, `fixup_agent` is required and must reference a configured agent. Missing or unknown fixup agents are config validation errors.
 
 `halt` stops the pipeline entirely — no retry is scheduled. The issue remains claimed and the PipelineRun stays in memory. The user must explicitly retry (via API) or stop the issue. **Limitation:** PipelineRun state is in-memory only. An orchestrator restart loses the halted state — the issue unclaims on next poll and can be re-dispatched fresh. This matches existing wait-on-human behavior. Tracked in [#195](https://github.com/chrisbanes/ensemble/issues/195).
 
@@ -248,5 +250,5 @@ pub struct RetryEntry {
 
 - Existing `"approve"` and `"reject"` values in ACP payloads and verdict files continue to parse (mapped to `Succeeded`/`Failed`)
 - `on_failure` defaults to `retry_issue` (existing behavior)
-- Existing prompt templates continue working (template variables unchanged)
+- Prompt template variables are updated from verdict terminology to result terminology as part of this change
 - `max_cycles` behavior unchanged

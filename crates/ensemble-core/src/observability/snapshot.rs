@@ -360,17 +360,17 @@ pub fn extract_step_detail_state(
                         StepState::Running { .. } => "running",
                         StepState::Passed => "passed",
                         StepState::Failed { .. } => "failed",
+                        StepState::Errored { .. } => "failed",
                         StepState::BlockedOnHuman { .. } => "waiting",
                         StepState::AwaitingApproval { .. } => "waiting",
-                        StepState::Rejected { .. } => "rejected",
                     })
                     .unwrap_or("pending")
                     .to_string();
 
                 let verdict = step_state.and_then(|s| match s {
                     StepState::Passed => Some("success".to_string()),
-                    StepState::Failed { error, .. } => Some(error.clone()),
-                    StepState::Rejected { summary } => Some(summary.clone()),
+                    StepState::Failed { summary } => Some(summary.clone()),
+                    StepState::Errored { error } => Some(error.clone()),
                     _ => None,
                 });
 
@@ -648,9 +648,9 @@ pub async fn build_issue_snapshot(
                         StepState::Running { .. } => "running",
                         StepState::Passed => "passed",
                         StepState::Failed { .. } => "failed",
+                        StepState::Errored { .. } => "failed",
                         StepState::BlockedOnHuman { .. } => "waiting",
                         StepState::AwaitingApproval { .. } => "waiting",
-                        StepState::Rejected { .. } => "rejected",
                     })
                     .unwrap_or("pending");
                 WorkflowStepInfo {
@@ -867,7 +867,7 @@ fn pending_input_from_current(
 mod tests {
     use super::*;
     use crate::config::ensemble::{
-        ConcurrencyConfig, EnsembleConfig, StepConfig, StepKind, TrackerConfig,
+        ConcurrencyConfig, EnsembleConfig, OnFailure, StepConfig, StepKind, TrackerConfig,
     };
     use crate::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
     use crate::pipeline::engine::{PipelineRun, StepState};
@@ -922,6 +922,8 @@ mod tests {
             attempt: 3,
             due_at_ms: 1711641600000,
             error: Some("no available orchestrator slots".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
         }
     }
 
@@ -986,6 +988,8 @@ mod tests {
                     depends: None,
                     tracker_state: None,
                     approval: None,
+                    on_failure: OnFailure::RetryIssue,
+                    fixup_agent: None,
                 },
                 StepConfig {
                     name: "review".to_string(),
@@ -994,6 +998,8 @@ mod tests {
                     depends: Some(vec!["build".to_string()]),
                     tracker_state: None,
                     approval: None,
+                    on_failure: OnFailure::RetryIssue,
+                    fixup_agent: None,
                 },
             ],
             on_success: "finalize".to_string(),
@@ -1440,6 +1446,8 @@ mod tests {
             attempt: 1,
             due_at_ms: 1711641600000,
             error: None,
+            retry_from_step: None,
+            with_fixup: false,
         };
 
         let row = retry_entry_to_row(&entry);

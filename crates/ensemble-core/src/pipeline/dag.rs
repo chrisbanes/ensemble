@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::config::ensemble::{StepApprovalConfig, StepConfig, StepKind};
+use crate::config::ensemble::{OnFailure, StepApprovalConfig, StepConfig, StepKind};
 use crate::error::PipelineError;
 
 /// A single step in the resolved DAG, with its explicit dependency list.
@@ -11,6 +11,8 @@ pub struct DagStep {
     pub kind: StepKind,
     pub tracker_state: Option<String>,
     pub approval: Option<StepApprovalConfig>,
+    pub on_failure: OnFailure,
+    pub fixup_agent: Option<String>,
     pub depends: Vec<String>,
 }
 
@@ -22,6 +24,38 @@ pub struct DagStep {
 #[derive(Debug, Clone)]
 pub struct StepDag {
     pub steps: Vec<DagStep>,
+}
+
+impl StepDag {
+    /// Return `step_name` and every step that transitively depends on it.
+    pub fn downstream_steps(&self, step_name: &str) -> HashSet<String> {
+        let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+        for step in &self.steps {
+            for dep in &step.depends {
+                dependents
+                    .entry(dep.as_str())
+                    .or_default()
+                    .push(step.name.as_str());
+            }
+        }
+
+        let mut downstream = HashSet::new();
+        let mut queue = VecDeque::from([step_name.to_string()]);
+
+        while let Some(current) = queue.pop_front() {
+            if !downstream.insert(current.clone()) {
+                continue;
+            }
+
+            if let Some(next_steps) = dependents.get(current.as_str()) {
+                for next in next_steps {
+                    queue.push_back((*next).to_string());
+                }
+            }
+        }
+
+        downstream
+    }
 }
 
 /// Build a [`StepDag`] from a slice of [`StepConfig`] entries.
@@ -75,6 +109,8 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             kind: step.kind,
             tracker_state: step.tracker_state.clone(),
             approval: step.approval.clone(),
+            on_failure: step.on_failure,
+            fixup_agent: step.fixup_agent.clone(),
             depends: deps,
         });
     }
@@ -165,6 +201,8 @@ mod tests {
             depends: deps,
             tracker_state: None,
             approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }
     }
 
@@ -176,6 +214,8 @@ mod tests {
             depends: Some(vec![]), // explicit root
             tracker_state: None,
             approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }
     }
 
@@ -328,6 +368,8 @@ mod tests {
                 depends: Some(vec![]),
                 tracker_state: None,
                 approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -336,6 +378,8 @@ mod tests {
                 depends: Some(vec!["review-a".to_string()]),
                 tracker_state: None,
                 approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
             },
         ];
 
@@ -361,6 +405,8 @@ mod tests {
                 mode: crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent,
                 state: Some("Plan Review".to_string()),
             }),
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -375,5 +421,95 @@ mod tests {
             crate::config::ensemble::StepApprovalMode::WhenRequestedByAgent
         );
         assert_eq!(approval.state.as_deref(), Some("Plan Review"));
+    }
+
+    #[test]
+    fn preserves_on_failure_metadata() {
+        let steps = vec![StepConfig {
+            name: "build".to_string(),
+            kind: StepKind::Agent,
+            agent: "builder".to_string(),
+            depends: None,
+            tracker_state: None,
+            approval: None,
+            on_failure: OnFailure::Fixup,
+            fixup_agent: Some("fixer".to_string()),
+        }];
+
+        let dag = build_dag(&steps).unwrap();
+        let build = dag.steps.iter().find(|s| s.name == "build").unwrap();
+
+        assert_eq!(build.on_failure, OnFailure::Fixup);
+        assert_eq!(build.fixup_agent.as_deref(), Some("fixer"));
+    }
+
+    #[test]
+    fn downstream_steps_for_linear_chain_includes_middle_and_tail() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("test", "tester", &[]),
+            make_step("review", "reviewer", &[]),
+        ];
+        let dag = build_dag(&steps).unwrap();
+
+        let downstream = dag.downstream_steps("test");
+
+        assert_eq!(
+            downstream,
+            HashSet::from(["test".to_string(), "review".to_string()])
+        );
+    }
+
+    #[test]
+    fn downstream_steps_for_diamond_excludes_sibling_branch() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review-a", "reviewer", &["build"]),
+            make_step("review-b", "reviewer", &["build"]),
+            make_step("synth", "synthesizer", &["review-a", "review-b"]),
+        ];
+        let dag = build_dag(&steps).unwrap();
+
+        let downstream = dag.downstream_steps("review-a");
+
+        assert_eq!(
+            downstream,
+            HashSet::from(["review-a".to_string(), "synth".to_string()])
+        );
+    }
+
+    #[test]
+    fn downstream_steps_for_root_in_sequential_graph_includes_all_steps() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("test", "tester", &[]),
+            make_step("review", "reviewer", &[]),
+        ];
+        let dag = build_dag(&steps).unwrap();
+
+        let downstream = dag.downstream_steps("build");
+
+        assert_eq!(
+            downstream,
+            HashSet::from([
+                "build".to_string(),
+                "test".to_string(),
+                "review".to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn downstream_steps_for_leaf_returns_only_itself() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("test", "tester", &[]),
+            make_step("review", "reviewer", &[]),
+        ];
+        let dag = build_dag(&steps).unwrap();
+
+        let downstream = dag.downstream_steps("review");
+
+        assert_eq!(downstream, HashSet::from(["review".to_string()]));
     }
 }

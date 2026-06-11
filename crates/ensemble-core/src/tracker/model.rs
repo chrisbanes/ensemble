@@ -75,6 +75,12 @@ pub struct RetryEntry {
     pub attempt: u32,
     pub due_at_ms: u64,
     pub error: Option<String>,
+    /// If set, retry from this step. None means retry the whole issue.
+    #[serde(default)]
+    pub retry_from_step: Option<String>,
+    /// Whether to inject a fixup agent before retrying.
+    #[serde(default)]
+    pub with_fixup: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

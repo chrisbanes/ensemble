@@ -112,6 +112,8 @@ fn build_populated_app_state() -> (AppState, TempDir) {
         attempt: 3,
         due_at_ms: 1711641600000,
         error: Some("no available orchestrator slots".to_string()),
+        retry_from_step: None,
+        with_fixup: false,
     };
 
     let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());

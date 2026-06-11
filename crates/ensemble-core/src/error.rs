@@ -128,6 +128,8 @@ pub enum PipelineError {
     NoRootSteps,
     #[error("step {step} requires tracker writes but tracker does not support them")]
     WritesRequired { step: String },
+    #[error("invalid step config for {step}: {reason}")]
+    InvalidStepConfig { step: String, reason: String },
     #[error("max cycles ({max}) exceeded for issue {issue_id}")]
     MaxCyclesExceeded { issue_id: String, max: u32 },
     #[error("agent must have exactly one of 'prompt' or 'prompt_template', got neither or both: {agent}")]

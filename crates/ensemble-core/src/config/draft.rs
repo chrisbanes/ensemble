@@ -321,6 +321,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
             field: Some(step.clone()),
             path: Some(format!("steps.{}", step)),
         },
+        PipelineError::InvalidStepConfig { step, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid step config for '{}': {}", step, reason),
+            section: "workflow".to_string(),
+            field: Some(step.clone()),
+            path: Some(format!("steps.{}", step)),
+        },
         PipelineError::MaxCyclesExceeded { .. } => ValidationIssue {
             kind: ValidationIssueKind::Config,
             message: e.to_string(),

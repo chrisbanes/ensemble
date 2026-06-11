@@ -3,13 +3,15 @@ use std::path::Path;
 use serde::Deserialize;
 use tracing::warn;
 
-/// The verdict returned by a review agent at the end of a pipeline step.
+/// The result returned by an agent at the end of a pipeline step.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Verdict {
-    /// The step output is accepted; continue to the next step or mark success.
-    Approve,
-    /// The step output is rejected; retry or mark failure.
-    Reject { summary: String },
+pub enum StepResult {
+    /// The step output succeeded; continue to the next step or mark success.
+    Succeeded,
+    /// The step output failed; retry or mark failure.
+    Failed { summary: String },
+    /// The step output raised a concern; continue according to pipeline policy.
+    Concern { summary: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,14 +23,14 @@ pub enum VerdictSource {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepOutput {
-    pub verdict: Verdict,
+    pub result: StepResult,
     pub summary: Option<String>,
     pub output: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedVerdict {
-    pub verdict: Verdict,
+pub struct ResolvedResult {
+    pub result: StepResult,
     pub output: StepOutput,
     pub source: VerdictSource,
 }
@@ -36,21 +38,23 @@ pub struct ResolvedVerdict {
 /// Internal deserialization type for both ACP JSON values and verdict files.
 #[derive(Debug, Deserialize)]
 struct VerdictPayload {
+    result: Option<String>,
     verdict: Option<String>,
     summary: Option<String>,
     #[serde(default)]
     output: Option<serde_json::Value>,
 }
 
-/// Parse a [`Verdict`] from an arbitrary JSON value (e.g. an ACP event body).
+/// Parse a [`StepResult`] from an arbitrary JSON value (e.g. an ACP event body).
 ///
-/// Recognises `"approve"` (case-insensitive) → [`Verdict::Approve`] and
-/// `"reject"` (case-insensitive) → [`Verdict::Reject`] with an optional
-/// `summary` field. Any other value or an absent/null `verdict` field returns
-/// `None`.
-pub fn parse_verdict_from_value(value: &serde_json::Value) -> Option<Verdict> {
+/// Recognises `"approve"`/`"succeeded"` (case-insensitive) →
+/// [`StepResult::Succeeded`], `"reject"`/`"failed"` (case-insensitive) →
+/// [`StepResult::Failed`], and `"concern"` (case-insensitive) →
+/// [`StepResult::Concern`] with an optional `summary` field. Any other value or
+/// an absent/null `result`/`verdict` field returns `None`.
+pub fn parse_verdict_from_value(value: &serde_json::Value) -> Option<StepResult> {
     let payload: VerdictPayload = serde_json::from_value(value.clone()).ok()?;
-    verdict_from_payload(&payload)
+    result_from_payload(&payload)
 }
 
 pub fn parse_step_output_from_value(value: &serde_json::Value) -> Option<StepOutput> {
@@ -66,10 +70,10 @@ pub fn parse_step_output_from_value(value: &serde_json::Value) -> Option<StepOut
 pub async fn read_verdict_file(
     workspace: &Path,
     step_name: &str,
-) -> Result<Option<Verdict>, std::io::Error> {
+) -> Result<Option<StepResult>, std::io::Error> {
     read_step_output_file(workspace, step_name)
         .await
-        .map(|value| value.map(|output| output.verdict))
+        .map(|value| value.map(|output| output.result))
 }
 
 pub async fn read_step_output_file(
@@ -102,15 +106,15 @@ pub async fn read_step_output_file(
 /// 1. ACP event value (`acp_verdict`) — checked first.
 /// 2. `.ensemble/verdict-{step_name}.json` in the workspace — checked if ACP yields nothing.
 /// 3. `.ensemble/verdict.json` (legacy fallback) — checked if step-scoped file is absent.
-/// 4. Default to [`Verdict::Approve`] if no source provides a verdict.
+/// 4. Default to [`StepResult::Succeeded`] if no source provides a verdict.
 pub async fn resolve_verdict(
     acp_verdict: Option<&serde_json::Value>,
     workspace: &Path,
     step_name: &str,
-) -> Verdict {
+) -> StepResult {
     resolve_verdict_with_source(acp_verdict, workspace, step_name)
         .await
-        .verdict
+        .result
 }
 
 /// Resolve the final verdict for a completed step, including the source.
@@ -118,12 +122,12 @@ pub async fn resolve_verdict_with_source(
     acp_verdict: Option<&serde_json::Value>,
     workspace: &Path,
     step_name: &str,
-) -> ResolvedVerdict {
+) -> ResolvedResult {
     // 1. Try ACP event.
     if let Some(value) = acp_verdict {
         if let Some(output) = parse_step_output_from_value(value) {
-            return ResolvedVerdict {
-                verdict: output.verdict.clone(),
+            return ResolvedResult {
+                result: output.result.clone(),
                 output,
                 source: VerdictSource::Runtime,
             };
@@ -133,8 +137,8 @@ pub async fn resolve_verdict_with_source(
     // 2. Try file.
     match read_step_output_file(workspace, step_name).await {
         Ok(Some(output)) => {
-            return ResolvedVerdict {
-                verdict: output.verdict.clone(),
+            return ResolvedResult {
+                result: output.result.clone(),
                 output,
                 source: VerdictSource::File,
             };
@@ -143,16 +147,16 @@ pub async fn resolve_verdict_with_source(
         Err(e) => {
             // Malformed verdict file — treat as rejection, not silent approval.
             let msg = format!("failed to parse .ensemble/verdict-{step_name}.json: {e}");
-            let reject = Verdict::Reject {
+            let failed = StepResult::Failed {
                 summary: msg.clone(),
             };
             let output = StepOutput {
-                verdict: reject.clone(),
+                result: failed.clone(),
                 summary: Some(msg),
                 output: None,
             };
-            return ResolvedVerdict {
-                verdict: reject,
+            return ResolvedResult {
+                result: failed,
                 output,
                 source: VerdictSource::File,
             };
@@ -160,35 +164,43 @@ pub async fn resolve_verdict_with_source(
     }
 
     // 3. Default (no ACP verdict, no file).
-    warn!("no verdict source found for step, defaulting to Approve");
+    warn!("no verdict source found for step, defaulting to Succeeded");
     let output = StepOutput {
-        verdict: Verdict::Approve,
+        result: StepResult::Succeeded,
         summary: None,
         output: None,
     };
-    ResolvedVerdict {
-        verdict: output.verdict.clone(),
+    ResolvedResult {
+        result: output.result.clone(),
         output,
         source: VerdictSource::Default,
     }
 }
 
-/// Convert a [`VerdictPayload`] into an `Option<Verdict>`.
-fn verdict_from_payload(payload: &VerdictPayload) -> Option<Verdict> {
-    step_output_from_payload(payload).map(|output| output.verdict)
+/// Convert a [`VerdictPayload`] into an `Option<StepResult>`.
+fn result_from_payload(payload: &VerdictPayload) -> Option<StepResult> {
+    step_output_from_payload(payload).map(|output| output.result)
 }
 
 fn step_output_from_payload(payload: &VerdictPayload) -> Option<StepOutput> {
-    let verdict = match payload.verdict.as_deref() {
-        Some(v) if v.eq_ignore_ascii_case("approve") => Verdict::Approve,
-        Some(v) if v.eq_ignore_ascii_case("reject") => Verdict::Reject {
+    let result_value = payload.result.as_deref().or(payload.verdict.as_deref());
+    let result = match result_value {
+        Some(v) if v.eq_ignore_ascii_case("approve") || v.eq_ignore_ascii_case("succeeded") => {
+            StepResult::Succeeded
+        }
+        Some(v) if v.eq_ignore_ascii_case("reject") || v.eq_ignore_ascii_case("failed") => {
+            StepResult::Failed {
+                summary: payload.summary.clone().unwrap_or_default(),
+            }
+        }
+        Some(v) if v.eq_ignore_ascii_case("concern") => StepResult::Concern {
             summary: payload.summary.clone().unwrap_or_default(),
         },
         _ => return None,
     };
 
     Some(StepOutput {
-        verdict,
+        result,
         summary: payload.summary.clone(),
         output: payload.output.clone(),
     })
@@ -205,19 +217,66 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_parse_approve() {
-        let value = json!({ "verdict": "approve" });
-        assert_eq!(parse_verdict_from_value(&value), Some(Verdict::Approve));
+    fn test_parse_succeeded_result() {
+        let value = json!({ "result": "succeeded" });
+        assert_eq!(
+            parse_verdict_from_value(&value),
+            Some(StepResult::Succeeded)
+        );
     }
 
     #[test]
-    fn test_parse_reject() {
+    fn test_parse_legacy_approve_verdict() {
+        let value = json!({ "verdict": "approve" });
+        assert_eq!(
+            parse_verdict_from_value(&value),
+            Some(StepResult::Succeeded)
+        );
+    }
+
+    #[test]
+    fn test_parse_failed_result() {
+        let value = json!({ "result": "failed", "summary": "tests failed" });
+        assert_eq!(
+            parse_verdict_from_value(&value),
+            Some(StepResult::Failed {
+                summary: "tests failed".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_legacy_reject_verdict() {
         let value = json!({ "verdict": "reject", "summary": "tests failed" });
         assert_eq!(
             parse_verdict_from_value(&value),
-            Some(Verdict::Reject {
+            Some(StepResult::Failed {
                 summary: "tests failed".to_string()
             })
+        );
+    }
+
+    #[test]
+    fn test_parse_concern() {
+        let value = json!({ "result": "concern", "summary": "needs review" });
+        assert_eq!(
+            parse_verdict_from_value(&value),
+            Some(StepResult::Concern {
+                summary: "needs review".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_parse_result_preferred_over_legacy_verdict() {
+        let value = json!({
+            "result": "succeeded",
+            "verdict": "reject",
+            "summary": "legacy value should be ignored"
+        });
+        assert_eq!(
+            parse_verdict_from_value(&value),
+            Some(StepResult::Succeeded)
         );
     }
 
@@ -255,7 +314,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"approve"}"#).await;
         let result = read_verdict_file(dir.path(), "build").await.unwrap();
-        assert_eq!(result, Some(Verdict::Approve));
+        assert_eq!(result, Some(StepResult::Succeeded));
     }
 
     #[tokio::test]
@@ -265,7 +324,7 @@ mod tests {
         let result = read_verdict_file(dir.path(), "build").await.unwrap();
         assert_eq!(
             result,
-            Some(Verdict::Reject {
+            Some(StepResult::Failed {
                 summary: "lint errors".to_string()
             })
         );
@@ -288,9 +347,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"broken"}"#).await;
 
-        let acp = json!({ "verdict": "approve" });
+        let acp = json!({ "result": "succeeded" });
         let result = resolve_verdict(Some(&acp), dir.path(), "build").await;
-        assert_eq!(result, Verdict::Approve);
+        assert_eq!(result, StepResult::Succeeded);
     }
 
     #[tokio::test]
@@ -298,9 +357,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"broken"}"#).await;
 
-        let acp = json!({ "verdict": "approve" });
+        let acp = json!({ "result": "succeeded" });
         let result = resolve_verdict_with_source(Some(&acp), dir.path(), "build").await;
-        assert_eq!(result.verdict, Verdict::Approve);
+        assert_eq!(result.result, StepResult::Succeeded);
         assert_eq!(result.source, VerdictSource::Runtime);
     }
 
@@ -313,7 +372,7 @@ mod tests {
         let result = resolve_verdict(None, dir.path(), "build").await;
         assert_eq!(
             result,
-            Verdict::Reject {
+            StepResult::Failed {
                 summary: "compile error".to_string()
             }
         );
@@ -326,8 +385,8 @@ mod tests {
 
         let result = resolve_verdict_with_source(None, dir.path(), "build").await;
         assert_eq!(
-            result.verdict,
-            Verdict::Reject {
+            result.result,
+            StepResult::Failed {
                 summary: "compile error".to_string()
             }
         );
@@ -339,14 +398,14 @@ mod tests {
         // No ACP, no file — defaults to Approve.
         let dir = TempDir::new().unwrap();
         let result = resolve_verdict(None, dir.path(), "build").await;
-        assert_eq!(result, Verdict::Approve);
+        assert_eq!(result, StepResult::Succeeded);
     }
 
     #[tokio::test]
     async fn test_resolve_verdict_with_source_no_source_is_default_approve() {
         let dir = TempDir::new().unwrap();
         let result = resolve_verdict_with_source(None, dir.path(), "build").await;
-        assert_eq!(result.verdict, Verdict::Approve);
+        assert_eq!(result.result, StepResult::Succeeded);
         assert_eq!(result.source, VerdictSource::Default);
     }
 
@@ -364,7 +423,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, "not valid json").await;
         let result = resolve_verdict(None, dir.path(), "build").await;
-        assert!(matches!(result, Verdict::Reject { .. }));
+        assert!(matches!(result, StepResult::Failed { .. }));
     }
 
     // -------------------------------------------------------------------------
@@ -374,14 +433,14 @@ mod tests {
     #[test]
     fn test_parse_step_output_from_runtime_value() {
         let value = json!({
-            "verdict": "approve",
+            "result": "succeeded",
             "summary": "review passed",
             "output": {"risk": "low", "findings": []}
         });
 
         let output = parse_step_output_from_value(&value).unwrap();
 
-        assert_eq!(output.verdict, Verdict::Approve);
+        assert_eq!(output.result, StepResult::Succeeded);
         assert_eq!(output.summary.as_deref(), Some("review passed"));
         assert_eq!(output.output, Some(json!({"risk":"low","findings":[]})));
     }
@@ -400,7 +459,7 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(output.verdict, Verdict::Approve);
+        assert_eq!(output.result, StepResult::Succeeded);
         assert_eq!(output.summary.as_deref(), Some("ok"));
         assert_eq!(output.output, Some(json!({"files":["src/lib.rs"]})));
     }
