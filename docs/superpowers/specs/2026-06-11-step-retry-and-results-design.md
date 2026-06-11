@@ -110,7 +110,10 @@ steps:
 
 When `on_failure: fixup` is configured, `fixup_agent` is required and must reference a configured agent. Missing or unknown fixup agents are config validation errors.
 
-`halt` stops the pipeline entirely — no retry is scheduled. The issue remains claimed and the PipelineRun stays in memory. The user must explicitly retry (via API) or stop the issue. **Limitation:** PipelineRun state is in-memory only. An orchestrator restart loses the halted state — the issue unclaims on next poll and can be re-dispatched fresh. This matches existing wait-on-human behavior. Tracked in [#195](https://github.com/chrisbanes/ensemble/issues/195).
+`halt` stops the pipeline entirely — no retry is scheduled. The issue remains claimed and the user
+must explicitly retry (via API) or stop the issue. PipelineRun state is persisted by the pipeline
+transition journal introduced for [#195](https://github.com/chrisbanes/ensemble/issues/195), so a
+halted pipeline can be restored after orchestrator restart.
 
 ### 4. Fixup retry
 
