@@ -1,10 +1,11 @@
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 /// The result returned by an agent at the end of a pipeline step.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepResult {
     /// The step output succeeded; continue to the next step or mark success.
     Succeeded,
@@ -21,7 +22,7 @@ pub enum VerdictSource {
     Default,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepOutput {
     pub result: StepResult,
     pub summary: Option<String>,

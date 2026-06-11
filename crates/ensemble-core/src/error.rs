@@ -144,4 +144,6 @@ pub enum PipelineError {
     InvalidRuntimeConfig { agent: String, reason: String },
     #[error("invalid synthesis step {step}: {reason}")]
     InvalidSynthesisStep { step: String, reason: String },
+    #[error("invalid pipeline snapshot: {reason}")]
+    InvalidSnapshot { reason: String },
 }
