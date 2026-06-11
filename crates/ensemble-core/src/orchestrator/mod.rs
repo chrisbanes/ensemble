@@ -5015,6 +5015,103 @@ agent:
     }
 
     #[tokio::test]
+    async fn hydrate_waiting_interaction_keeps_restored_pipeline_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let interaction = crate::interaction::model::InteractionRequest {
+            id: "interaction-1".to_string(),
+            schema_version: 1,
+            issue_id: issue.id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            pipeline_cycle: 1,
+            completed_steps: vec![],
+            step_name: "build".to_string(),
+            agent_name: "builder".to_string(),
+            step_depends: vec![],
+            step_tracker_state: None,
+            kind: InteractionKind::Question,
+            status: InteractionStatus::Open,
+            blocking: true,
+            awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
+            title: "Need input".to_string(),
+            body: "Need input".to_string(),
+            options: vec![],
+            artifacts: vec![],
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: vec![],
+            response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
+        orchestrator
+            .interaction_store
+            .create(interaction)
+            .await
+            .unwrap();
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_blocked_on_human("build", "interaction-1".to_string());
+        {
+            let mut lock = state.write().await;
+            lock.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+            lock.add_claimed(&issue.id);
+        }
+
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let lock = state.read().await;
+        let run = lock.get_pipeline_run(&issue.id).unwrap();
+        assert!(matches!(
+            run.step_states.get("build"),
+            Some(StepState::BlockedOnHuman { interaction_request_id })
+                if interaction_request_id == "interaction-1"
+        ));
+        assert!(lock.is_waiting_on_human(&issue.id));
+    }
+
+    #[tokio::test]
     async fn dispatch_issue_writes_run_started_and_step_running_transitions() {
         let temp = tempfile::tempdir().unwrap();
         let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
