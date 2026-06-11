@@ -496,9 +496,16 @@ async fn detect_worker_result_with_runtime_verdict(
         }
     };
 
-    let verdict_filename = format!("verdict-{step_name}.json");
-    let verdict_path = workspace_path.join(".ensemble").join(&verdict_filename);
-    let verdict_exists = tokio::fs::try_exists(&verdict_path).await.unwrap_or(false);
+    let step_verdict_path = workspace_path
+        .join(".ensemble")
+        .join(format!("verdict-{step_name}.json"));
+    let legacy_verdict_path = workspace_path.join(".ensemble").join("verdict.json");
+    let verdict_exists = tokio::fs::try_exists(&step_verdict_path)
+        .await
+        .unwrap_or(false)
+        || tokio::fs::try_exists(&legacy_verdict_path)
+            .await
+            .unwrap_or(false);
 
     match interaction_request {
         Some(_) if approval_request.is_some() => WorkerResult::Failed {

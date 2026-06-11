@@ -76,17 +76,24 @@ pub async fn read_step_output_file(
     workspace: &Path,
     step_name: &str,
 ) -> Result<Option<StepOutput>, std::io::Error> {
-    let filename = format!("verdict-{step_name}.json");
-    let path = workspace.join(".ensemble").join(&filename);
-    match tokio::fs::read_to_string(&path).await {
-        Ok(contents) => {
-            let payload: VerdictPayload = serde_json::from_str(&contents)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            Ok(step_output_from_payload(&payload))
+    let step_file = workspace
+        .join(".ensemble")
+        .join(format!("verdict-{step_name}.json"));
+    let legacy_file = workspace.join(".ensemble").join("verdict.json");
+
+    // Try step-scoped file first, fall back to legacy verdict.json.
+    for path in [&step_file, &legacy_file] {
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => {
+                let payload: VerdictPayload = serde_json::from_str(&contents)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                return Ok(step_output_from_payload(&payload));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
     }
+    Ok(None)
 }
 
 /// Resolve the final verdict for a completed step.
@@ -94,7 +101,8 @@ pub async fn read_step_output_file(
 /// Priority:
 /// 1. ACP event value (`acp_verdict`) — checked first.
 /// 2. `.ensemble/verdict-{step_name}.json` in the workspace — checked if ACP yields nothing.
-/// 3. Default to [`Verdict::Approve`] if neither source provides a verdict.
+/// 3. `.ensemble/verdict.json` (legacy fallback) — checked if step-scoped file is absent.
+/// 4. Default to [`Verdict::Approve`] if no source provides a verdict.
 pub async fn resolve_verdict(
     acp_verdict: Option<&serde_json::Value>,
     workspace: &Path,
