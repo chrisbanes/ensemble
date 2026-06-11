@@ -818,23 +818,31 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
 
     let step_configs: Vec<StepConfig> = steps
         .iter()
-        .map(|step| StepConfig {
-            name: step.name.clone(),
-            kind: step
-                .kind
-                .as_deref()
-                .map(|k| match k {
-                    "synthesis" => StepKind::Synthesis,
-                    _ => StepKind::Agent,
-                })
-                .unwrap_or_default(),
-            agent: step.agent_role.clone(),
-            // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
-            depends: Some(step.depends.clone()),
-            tracker_state: step.tracker_state.clone(),
-            approval: None,
+        .map(|step| {
+            let kind = match step.kind.as_deref() {
+                None => StepKind::default(),
+                Some("agent") => StepKind::Agent,
+                Some("synthesis") => StepKind::Synthesis,
+                Some(other) => {
+                    return Err(ConfigError::ConfigParseError {
+                        reason: format!(
+                            "unknown step kind '{}' for step '{}' (expected 'agent' or 'synthesis')",
+                            other, step.name
+                        ),
+                    });
+                }
+            };
+            Ok(StepConfig {
+                name: step.name.clone(),
+                kind,
+                agent: step.agent_role.clone(),
+                // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
+                depends: Some(step.depends.clone()),
+                tracker_state: step.tracker_state.clone(),
+                approval: None,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     build_dag(&step_configs).map_err(|error| ConfigError::ConfigParseError {
         reason: error.to_string(),
@@ -2020,6 +2028,23 @@ on_failure: Failed
         assert!(roots.contains(&"build"));
         assert!(lint.depends.is_empty());
         assert!(build.depends.is_empty());
+    }
+
+    #[test]
+    fn build_setup_dag_rejects_unknown_step_kind() {
+        let steps = vec![SetupStep {
+            name: "build".into(),
+            agent_role: "builder".into(),
+            kind: Some("synthsis".into()),
+            depends: vec![],
+            tracker_state: None,
+        }];
+
+        let error = build_setup_dag(&steps).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown step kind"),
+            "expected 'unknown step kind' in error, got: {error}"
+        );
     }
 
     #[test]

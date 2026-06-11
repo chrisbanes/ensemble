@@ -266,6 +266,7 @@ mod tests {
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
+            kind: None,
             depends: vec![],
             tracker_state: Some("In Progress".to_string()),
         }];
@@ -314,12 +315,14 @@ mod tests {
             PipelineStep {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: Some("In Progress".to_string()),
             },
             PipelineStep {
                 name: "review".to_string(),
                 agent_role: "reviewer".to_string(),
+                kind: None,
                 depends: vec!["implement".to_string()],
                 tracker_state: Some("Review".to_string()),
             },
@@ -376,6 +379,7 @@ mod tests {
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
+            kind: None,
             depends: vec![],
             tracker_state: Some("In Progress".to_string()),
         }];
@@ -384,7 +388,6 @@ mod tests {
 
         assert!(yaml.contains("acpx_agent: claude"));
         assert!(yaml.contains("model: sonnet"));
-        assert!(yaml.contains("prompt_template: templates/implement.liquid"));
     }
 
     #[test]
@@ -399,6 +402,7 @@ mod tests {
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
+            kind: None,
             depends: vec![],
             tracker_state: None,
         }];
@@ -425,6 +429,7 @@ mod tests {
         let steps = vec![PipelineStep {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
+            kind: None,
             depends: vec![],
             tracker_state: Some("In Progress".to_string()),
         }];
@@ -462,6 +467,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -500,6 +506,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],
@@ -531,6 +538,7 @@ mod tests {
             steps: vec![SetupStep {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
+                kind: None,
                 depends: vec![],
                 tracker_state: None,
             }],

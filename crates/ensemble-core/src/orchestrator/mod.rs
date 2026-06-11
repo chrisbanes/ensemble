@@ -66,7 +66,6 @@ use state::{
 struct StepDispatchContext<'a> {
     step_name: &'a str,
     agent_name: &'a str,
-    #[allow(dead_code)]
     step_kind: StepKind,
     tracker_state: Option<&'a str>,
     attempt: Option<u32>,

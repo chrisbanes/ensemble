@@ -85,7 +85,8 @@ describe("WorkflowEditor", () => {
     renderWithProviders(<WorkflowEditor value={mockDraft} onChange={mockOnChange} />);
 
     await user.click(screen.getByLabelText("Step kind test"));
-    await user.click(screen.getByRole("option", { name: "Synthesis" }));
+    const synthesisOption = await screen.findByText("Synthesis");
+    await user.click(synthesisOption);
 
     expect(mockOnChange).toHaveBeenCalled();
     const lastCall = mockOnChange.mock.calls[mockOnChange.mock.calls.length - 1]!;
