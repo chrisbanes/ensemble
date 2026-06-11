@@ -190,6 +190,9 @@ impl PipelineRun {
     /// Compute the initial dispatch action — all root steps (no dependencies)
     /// are ready to run immediately.
     pub fn start(&self) -> PipelineAction {
+        if self.all_passed() {
+            return PipelineAction::Succeeded;
+        }
         self.find_dispatchable()
     }
 
