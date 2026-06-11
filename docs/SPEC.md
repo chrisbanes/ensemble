@@ -215,6 +215,7 @@ Per-agent configuration within `config.yaml`:
 - `model` (string) — model to use for the agent.
 - `permission_mode` (string or null) — optional acpx launch-time permission mode for `acpx_agent`
   (`approve_all`, `approve_reads`, `deny_all`).
+- `reasoning_level` (string or null) — optional reasoning/thinking level for agents that support it.
 - `prompt` (string or null) — inline prompt text.
 - `prompt_template` (path or null) — file reference to a Markdown prompt template.
 - Exactly one of `prompt` or `prompt_template` must be set.

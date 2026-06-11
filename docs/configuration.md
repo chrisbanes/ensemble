@@ -275,6 +275,7 @@ This section configures per-agent launch settings. Runtime ACP callback handling
 | `model` | string | — | Model identifier (e.g., `"claude-opus-4-6"`) |
 | `acpx_agent` | string | — | ACPX agent name (alternative to executor+model) |
 | `permission_mode` | string | — | ACPX launch-time permission mode for `acpx_agent`; supported values: `"approve_all"`, `"approve_reads"`, `"deny_all"`. Omit to preserve ACPX defaults. |
+| `reasoning_level` | string | — | Optional ACPX reasoning level passed as `--reasoning-level <value>` for `acpx_agent` agents. Common values are `"low"`, `"medium"`, and `"high"`; unsupported values are left to the selected agent/runtime to reject. |
 | `prompt` | string | — | Inline prompt text |
 | `prompt_template` | string | — | Path to a Liquid template file (config-relative) |
 

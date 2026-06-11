@@ -609,6 +609,10 @@ fn resolve_agent_command(
                 args.push("--model".to_string());
                 args.push(model.clone());
             }
+            if let Some(ref reasoning_level) = ac.reasoning_level {
+                args.push("--reasoning-level".to_string());
+                args.push(reasoning_level.clone());
+            }
             return Ok(ResolvedCommand {
                 program: PathBuf::from("acpx"),
                 args,
@@ -2093,6 +2097,31 @@ on_failure: Failed
                 "claude".to_string(),
                 "--model".to_string(),
                 "sonnet".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_agent_command_includes_reasoning_level_for_acpx_agent() {
+        let config = crate::config::ensemble::AgentConfig {
+            acpx_agent: Some("builder".to_string()),
+            model: Some("gpt-5".to_string()),
+            reasoning_level: Some("high".to_string()),
+            ..Default::default()
+        };
+
+        let command = resolve_agent_command(Some(&config), "fallback").unwrap();
+
+        assert_eq!(command.program, PathBuf::from("acpx"));
+        assert_eq!(
+            command.args,
+            vec![
+                "--agent".to_string(),
+                "builder".to_string(),
+                "--model".to_string(),
+                "gpt-5".to_string(),
+                "--reasoning-level".to_string(),
+                "high".to_string(),
             ]
         );
     }
