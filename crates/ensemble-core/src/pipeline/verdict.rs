@@ -58,19 +58,26 @@ pub fn parse_step_output_from_value(value: &serde_json::Value) -> Option<StepOut
     step_output_from_payload(&payload)
 }
 
-/// Read `.ensemble/verdict.json` from the given workspace directory.
+/// Read `.ensemble/verdict-{step_name}.json` from the given workspace directory.
 ///
 /// Returns `Ok(None)` if the file does not exist. Returns `Ok(Some(verdict))`
 /// if the file exists and parses successfully. Returns an `Err` only on
 /// unexpected I/O failures (not "file not found").
-pub async fn read_verdict_file(workspace: &Path) -> Result<Option<Verdict>, std::io::Error> {
-    read_step_output_file(workspace)
+pub async fn read_verdict_file(
+    workspace: &Path,
+    step_name: &str,
+) -> Result<Option<Verdict>, std::io::Error> {
+    read_step_output_file(workspace, step_name)
         .await
         .map(|value| value.map(|output| output.verdict))
 }
 
-pub async fn read_step_output_file(workspace: &Path) -> Result<Option<StepOutput>, std::io::Error> {
-    let path = workspace.join(".ensemble").join("verdict.json");
+pub async fn read_step_output_file(
+    workspace: &Path,
+    step_name: &str,
+) -> Result<Option<StepOutput>, std::io::Error> {
+    let filename = format!("verdict-{step_name}.json");
+    let path = workspace.join(".ensemble").join(&filename);
     match tokio::fs::read_to_string(&path).await {
         Ok(contents) => {
             let payload: VerdictPayload = serde_json::from_str(&contents)
@@ -86,10 +93,14 @@ pub async fn read_step_output_file(workspace: &Path) -> Result<Option<StepOutput
 ///
 /// Priority:
 /// 1. ACP event value (`acp_verdict`) — checked first.
-/// 2. `.ensemble/verdict.json` in the workspace — checked if ACP yields nothing.
+/// 2. `.ensemble/verdict-{step_name}.json` in the workspace — checked if ACP yields nothing.
 /// 3. Default to [`Verdict::Approve`] if neither source provides a verdict.
-pub async fn resolve_verdict(acp_verdict: Option<&serde_json::Value>, workspace: &Path) -> Verdict {
-    resolve_verdict_with_source(acp_verdict, workspace)
+pub async fn resolve_verdict(
+    acp_verdict: Option<&serde_json::Value>,
+    workspace: &Path,
+    step_name: &str,
+) -> Verdict {
+    resolve_verdict_with_source(acp_verdict, workspace, step_name)
         .await
         .verdict
 }
@@ -98,6 +109,7 @@ pub async fn resolve_verdict(acp_verdict: Option<&serde_json::Value>, workspace:
 pub async fn resolve_verdict_with_source(
     acp_verdict: Option<&serde_json::Value>,
     workspace: &Path,
+    step_name: &str,
 ) -> ResolvedVerdict {
     // 1. Try ACP event.
     if let Some(value) = acp_verdict {
@@ -111,7 +123,7 @@ pub async fn resolve_verdict_with_source(
     }
 
     // 2. Try file.
-    match read_step_output_file(workspace).await {
+    match read_step_output_file(workspace, step_name).await {
         Ok(Some(output)) => {
             return ResolvedVerdict {
                 verdict: output.verdict.clone(),
@@ -122,7 +134,7 @@ pub async fn resolve_verdict_with_source(
         Ok(None) => {} // file doesn't exist — fall through to default
         Err(e) => {
             // Malformed verdict file — treat as rejection, not silent approval.
-            let msg = format!("failed to parse .ensemble/verdict.json: {e}");
+            let msg = format!("failed to parse .ensemble/verdict-{step_name}.json: {e}");
             let reject = Verdict::Reject {
                 summary: msg.clone(),
             };
@@ -218,9 +230,14 @@ mod tests {
     // -------------------------------------------------------------------------
 
     async fn write_verdict_file(dir: &TempDir, contents: &str) {
+        write_step_verdict_file(dir, "build", contents).await;
+    }
+
+    async fn write_step_verdict_file(dir: &TempDir, step_name: &str, contents: &str) {
         let ensemble_dir = dir.path().join(".ensemble");
         tokio::fs::create_dir_all(&ensemble_dir).await.unwrap();
-        tokio::fs::write(ensemble_dir.join("verdict.json"), contents)
+        let filename = format!("verdict-{step_name}.json");
+        tokio::fs::write(ensemble_dir.join(&filename), contents)
             .await
             .unwrap();
     }
@@ -229,7 +246,7 @@ mod tests {
     async fn test_read_verdict_file_approve() {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"approve"}"#).await;
-        let result = read_verdict_file(dir.path()).await.unwrap();
+        let result = read_verdict_file(dir.path(), "build").await.unwrap();
         assert_eq!(result, Some(Verdict::Approve));
     }
 
@@ -237,7 +254,7 @@ mod tests {
     async fn test_read_verdict_file_reject() {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"lint errors"}"#).await;
-        let result = read_verdict_file(dir.path()).await.unwrap();
+        let result = read_verdict_file(dir.path(), "build").await.unwrap();
         assert_eq!(
             result,
             Some(Verdict::Reject {
@@ -249,7 +266,7 @@ mod tests {
     #[tokio::test]
     async fn test_read_verdict_file_missing() {
         let dir = TempDir::new().unwrap();
-        let result = read_verdict_file(dir.path()).await.unwrap();
+        let result = read_verdict_file(dir.path(), "build").await.unwrap();
         assert_eq!(result, None);
     }
 
@@ -264,7 +281,7 @@ mod tests {
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"broken"}"#).await;
 
         let acp = json!({ "verdict": "approve" });
-        let result = resolve_verdict(Some(&acp), dir.path()).await;
+        let result = resolve_verdict(Some(&acp), dir.path(), "build").await;
         assert_eq!(result, Verdict::Approve);
     }
 
@@ -274,7 +291,7 @@ mod tests {
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"broken"}"#).await;
 
         let acp = json!({ "verdict": "approve" });
-        let result = resolve_verdict_with_source(Some(&acp), dir.path()).await;
+        let result = resolve_verdict_with_source(Some(&acp), dir.path(), "build").await;
         assert_eq!(result.verdict, Verdict::Approve);
         assert_eq!(result.source, VerdictSource::Runtime);
     }
@@ -285,7 +302,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"compile error"}"#).await;
 
-        let result = resolve_verdict(None, dir.path()).await;
+        let result = resolve_verdict(None, dir.path(), "build").await;
         assert_eq!(
             result,
             Verdict::Reject {
@@ -299,7 +316,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, r#"{"verdict":"reject","summary":"compile error"}"#).await;
 
-        let result = resolve_verdict_with_source(None, dir.path()).await;
+        let result = resolve_verdict_with_source(None, dir.path(), "build").await;
         assert_eq!(
             result.verdict,
             Verdict::Reject {
@@ -313,14 +330,14 @@ mod tests {
     async fn test_resolve_verdict_no_source_is_approve() {
         // No ACP, no file — defaults to Approve.
         let dir = TempDir::new().unwrap();
-        let result = resolve_verdict(None, dir.path()).await;
+        let result = resolve_verdict(None, dir.path(), "build").await;
         assert_eq!(result, Verdict::Approve);
     }
 
     #[tokio::test]
     async fn test_resolve_verdict_with_source_no_source_is_default_approve() {
         let dir = TempDir::new().unwrap();
-        let result = resolve_verdict_with_source(None, dir.path()).await;
+        let result = resolve_verdict_with_source(None, dir.path(), "build").await;
         assert_eq!(result.verdict, Verdict::Approve);
         assert_eq!(result.source, VerdictSource::Default);
     }
@@ -329,7 +346,7 @@ mod tests {
     async fn test_read_verdict_file_malformed_json_is_error() {
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, "this is not json").await;
-        let result = read_verdict_file(dir.path()).await;
+        let result = read_verdict_file(dir.path(), "build").await;
         assert!(result.is_err());
     }
 
@@ -338,7 +355,7 @@ mod tests {
         // Malformed verdict.json should reject, not silently approve.
         let dir = TempDir::new().unwrap();
         write_verdict_file(&dir, "not valid json").await;
-        let result = resolve_verdict(None, dir.path()).await;
+        let result = resolve_verdict(None, dir.path(), "build").await;
         assert!(matches!(result, Verdict::Reject { .. }));
     }
 
@@ -370,7 +387,10 @@ mod tests {
         )
         .await;
 
-        let output = read_step_output_file(dir.path()).await.unwrap().unwrap();
+        let output = read_step_output_file(dir.path(), "build")
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(output.verdict, Verdict::Approve);
         assert_eq!(output.summary.as_deref(), Some("ok"));

@@ -240,6 +240,7 @@ impl AcpxRuntime {
                 Ok(detect_worker_result_with_runtime_verdict(
                     request.workspace_path,
                     outcome.runtime_verdict,
+                    request.step_name,
                 )
                 .await)
             }

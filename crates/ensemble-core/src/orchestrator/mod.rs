@@ -973,7 +973,9 @@ impl Orchestrator {
                         .unwrap_or(issue_id),
                 );
                 let resolved = match workspace_path {
-                    Some(wp) => resolve_verdict_with_source(runtime_verdict.as_ref(), &wp).await,
+                    Some(wp) => {
+                        resolve_verdict_with_source(runtime_verdict.as_ref(), &wp, step_name).await
+                    }
                     None => crate::pipeline::verdict::ResolvedVerdict {
                         verdict: Verdict::Approve,
                         output: crate::pipeline::verdict::StepOutput {
@@ -4452,7 +4454,7 @@ agent:
             .await
             .unwrap();
         tokio::fs::write(
-            workspace.join(".ensemble").join("verdict.json"),
+            workspace.join(".ensemble").join("verdict-build.json"),
             r#"{"verdict":"reject","summary":"broken"}"#,
         )
         .await
@@ -4516,7 +4518,7 @@ agent:
             .await
             .unwrap();
         tokio::fs::write(
-            workspace.join(".ensemble").join("verdict.json"),
+            workspace.join(".ensemble").join("verdict-build.json"),
             r#"{"verdict":"reject","summary":"broken"}"#,
         )
         .await
@@ -4586,7 +4588,7 @@ agent:
                 .await
                 .unwrap();
             tokio::fs::write(
-                workspace.join(".ensemble").join("verdict.json"),
+                workspace.join(".ensemble").join("verdict-build.json"),
                 r#"{"verdict":"reject","summary":"tests failed"}"#,
             )
             .await
