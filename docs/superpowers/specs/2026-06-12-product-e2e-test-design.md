@@ -16,7 +16,7 @@ The first test should be the simplest reliable path: a happy-path web/CLI workfl
 - Use only temporary local files and localhost networking.
 - Use the `todo_file` tracker and a mock local `acpx` executable.
 - Verify the workflow through public HTTP APIs, tracker-visible file state, and persisted runtime artifacts.
-- Run in normal CI as part of `cargo test --workspace --exclude ensemble-desktop`.
+- Run in normal CI as a feature-enabled product E2E step for `ensemble-cli`.
 - Document how to run the E2E test locally.
 
 ## Non-Goals

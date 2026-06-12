@@ -5,8 +5,8 @@
 Ensemble is a Rust workspace. You need Rust 1.80+ installed.
 
 ```sh
-cargo build --workspace          # compile
-cargo test --workspace           # run all tests
+cargo build --workspace          # compile default targets
+cargo test --workspace           # run default Rust tests
 cargo clippy --workspace -- -D warnings   # lint
 cargo fmt --all -- --check       # check formatting
 ```
@@ -79,7 +79,10 @@ ensemble/
 
 ## CI
 
-GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, test, clippy, fmt. All must pass. `RUSTFLAGS=-Dwarnings` is set globally.
+GitHub Actions runs on push to `main` and all PRs. The main CI job runs format, clippy,
+default non-desktop Rust tests, the feature-enabled product E2E test, and a CLI
+`web-ui` feature check. Frontend and desktop jobs run separately. All must pass.
+`RUSTFLAGS=-Dwarnings` is set globally.
 
 ## Further reading
 
