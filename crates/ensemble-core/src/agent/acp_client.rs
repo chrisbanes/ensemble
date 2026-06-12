@@ -291,20 +291,23 @@ async fn emit_permission_events_if_visible(
 }
 
 fn map_session_error(error_msg: String, read_timeout_ms: u64, turn_timeout_ms: u64) -> AgentError {
-    if error_msg.contains("response timeout") {
+    let normalized_error = error_msg.to_lowercase();
+    if normalized_error.contains("response timeout") {
         AgentError::ResponseTimeout {
             timeout_ms: read_timeout_ms,
         }
-    } else if error_msg.contains("turn timeout") || error_msg.contains("TimedOut") {
+    } else if normalized_error.contains("turn timeout") || normalized_error.contains("timedout") {
         AgentError::TurnTimeout {
             timeout_ms: turn_timeout_ms,
         }
-    } else if error_msg.contains("verdict extraction failed") {
+    } else if normalized_error.contains("verdict extraction failed") {
         AgentError::ResponseError { reason: error_msg }
-    } else if error_msg.contains("initialize") || error_msg.contains("session") {
+    } else if normalized_error.contains("initialize") || normalized_error.contains("session") {
         AgentError::SessionStartupFailed { reason: error_msg }
-    } else if error_msg.contains("cancelled") {
+    } else if normalized_error.contains("cancelled") {
         AgentError::TurnCancelled
+    } else if normalized_error.contains("stop reason") {
+        AgentError::TurnFailed { reason: error_msg }
     } else {
         AgentError::IoError { reason: error_msg }
     }
@@ -981,9 +984,10 @@ pub async fn run_acp_session(
                 }
 
                 if let TurnResult::Failed { ref reason, .. } = turn_result {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(reason.clone());
+
                     if timed_out {
-                        let mut err = session_error_inner.lock().await;
-                        *err = Some(reason.clone());
                         turn_results_inner.lock().await.push(turn_result);
                         return Ok(());
                     }
@@ -1346,7 +1350,7 @@ mod tests {
             "build",
             AgentEvent::PermissionRequested {
                 tool_call_id: "tool-1".to_string(),
-                title: "read file".to_string(),
+                title: Some("read file".to_string()),
                 options: Vec::new(),
             },
         )
@@ -1367,6 +1371,23 @@ mod tests {
             error,
             AgentError::ResponseError { reason }
                 if reason.contains("verdict extraction failed")
+        ));
+    }
+
+    #[test]
+    fn cancelled_stop_reason_maps_to_turn_cancelled() {
+        let error = map_session_error("stop reason: Cancelled".to_string(), 100, 200);
+
+        assert!(matches!(error, AgentError::TurnCancelled));
+    }
+
+    #[test]
+    fn failed_stop_reason_maps_to_turn_failed() {
+        let error = map_session_error("stop reason: Refusal".to_string(), 100, 200);
+
+        assert!(matches!(
+            error,
+            AgentError::TurnFailed { reason } if reason == "stop reason: Refusal"
         ));
     }
 
