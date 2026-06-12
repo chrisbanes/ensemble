@@ -20,9 +20,16 @@ pub struct AcpxCommandOptions<'a> {
     pub reasoning_level: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptVisibility {
+    Visible,
+    Hidden,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PromptOutcome {
     pub runtime_verdict: Option<serde_json::Value>,
+    pub output_text: String,
 }
 
 impl AcpxCli {
@@ -91,6 +98,7 @@ impl AcpxCli {
         cwd: &Path,
         prompt: &str,
         options: AcpxCommandOptions<'_>,
+        visibility: PromptVisibility,
         mut on_event: F,
     ) -> Result<PromptOutcome, AgentError>
     where
@@ -221,6 +229,8 @@ impl AcpxCli {
             }
         });
 
+        let visible = visibility == PromptVisibility::Visible;
+        let mut output_text = String::new();
         let mut reader = BufReader::new(stdout).lines();
         let mut saw_terminal_event = false;
         let mut last_usage: Option<TokenUsage> = None;
@@ -242,24 +252,31 @@ impl AcpxCli {
                     last_runtime_verdict = Some(verdict);
                 }
                 if let Some(content) = update.output_text {
-                    on_event(AgentEvent::OutputChunk {
-                        stream: RuntimeStream::Stdout,
-                        content,
-                    })
-                    .await;
+                    output_text.push_str(&content);
+                    if visible {
+                        on_event(AgentEvent::OutputChunk {
+                            stream: RuntimeStream::Stdout,
+                            content,
+                        })
+                        .await;
+                    }
                 }
                 if let Some(permission) = update.permission_request {
-                    on_event(AgentEvent::Warning {
-                        message: format!(
-                            "permission requested ({}): {}",
-                            permission.permission_id, permission.description
-                        ),
-                    })
-                    .await;
+                    if visible {
+                        on_event(AgentEvent::Warning {
+                            message: format!(
+                                "permission requested ({}): {}",
+                                permission.permission_id, permission.description
+                            ),
+                        })
+                        .await;
+                    }
                 }
                 if let Some(stop_reason) = update.stop_reason {
                     saw_terminal_event = true;
-                    on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                    if visible {
+                        on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                    }
                 }
                 continue;
             }
@@ -270,21 +287,27 @@ impl AcpxCli {
                 .and_then(protocol::parse_stop_reason_from_result)
             {
                 saw_terminal_event = true;
-                on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                if visible {
+                    on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                }
                 continue;
             }
 
             if let Some(error) = message.error.as_ref() {
                 saw_terminal_event = true;
-                on_event(AgentEvent::RunFailed {
-                    reason: error.message.clone(),
-                    usage: last_usage.clone(),
-                })
-                .await;
+                if visible {
+                    on_event(AgentEvent::RunFailed {
+                        reason: error.message.clone(),
+                        usage: last_usage.clone(),
+                    })
+                    .await;
+                }
                 continue;
             }
 
-            on_event(AgentEvent::OtherMessage { raw: line }).await;
+            if visible {
+                on_event(AgentEvent::OtherMessage { raw: line }).await;
+            }
         }
 
         let status = child.wait().await.map_err(|e| AgentError::IoError {
@@ -306,6 +329,7 @@ impl AcpxCli {
 
         Ok(PromptOutcome {
             runtime_verdict: last_runtime_verdict,
+            output_text,
         })
     }
 
@@ -454,7 +478,7 @@ mod tests {
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
-    use super::{AcpxCli, AcpxCommandOptions};
+    use super::{AcpxCli, AcpxCommandOptions, PromptVisibility};
 
     #[tokio::test]
     async fn ensure_session_uses_sessions_ensure_command() {
@@ -580,6 +604,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -617,6 +642,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -652,6 +678,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |_| async {},
             )
             .await
@@ -686,6 +713,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":11,"result":{{"stopReason":"end_turn"}}}}'
             dir.path(),
             "hi",
             AcpxCommandOptions::default(),
+            PromptVisibility::Visible,
             |event| {
                 let tx = tx.clone();
                 async move {
@@ -737,6 +765,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |_| async {},
             )
             .await
@@ -767,6 +796,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -812,6 +842,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |_| async {},
             )
             .await
@@ -824,6 +855,42 @@ JSON
                 "summary": "lint errors"
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn hidden_prompt_captures_output_without_emitting_events() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            temp.path(),
+            r#"#!/usr/bin/env bash
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+"#,
+        );
+        let cli = AcpxCli::new(script);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = events.clone();
+
+        let outcome = cli
+            .run_prompt(
+                "codex",
+                "session",
+                temp.path(),
+                "extract",
+                AcpxCommandOptions::default(),
+                PromptVisibility::Hidden,
+                move |event| {
+                    let events_for_callback = events_for_callback.clone();
+                    async move {
+                        events_for_callback.lock().unwrap().push(event);
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.output_text, "{\"result\":\"succeeded\"}");
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -847,6 +914,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -928,6 +996,7 @@ exec 0<&-
                 dir.path(),
                 &prompt,
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |_| async {},
             ),
         )
@@ -969,6 +1038,7 @@ echo "stderr line 3" >&2
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |_| async {},
             )
             .await
@@ -1011,6 +1081,7 @@ JSON
                 dir.path(),
                 "hi",
                 AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
                 |_| async {},
             )
             .await

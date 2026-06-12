@@ -468,6 +468,7 @@ async fn load_interaction_response(
     }
 }
 
+#[cfg(test)]
 pub(super) fn transitional_succeeded_output() -> crate::pipeline::verdict::StepOutput {
     crate::pipeline::verdict::StepOutput {
         result: crate::pipeline::verdict::StepResult::Succeeded,

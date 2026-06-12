@@ -9,7 +9,7 @@ use crate::observability::events_contract::{
     elapsed_ms, ACPX_PROMPT_CANCELLED, ACPX_PROMPT_COMPLETED, ACPX_PROMPT_FAILED,
 };
 
-use super::acpx_cli::{AcpxCli, AcpxCommandOptions};
+use super::acpx_cli::{AcpxCli, AcpxCommandOptions, PromptVisibility};
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
 use super::{detect_worker_result_with_output, AgentRunRequest};
 
@@ -153,6 +153,7 @@ impl AcpxRuntime {
             request.workspace_path,
             prompt,
             command_options,
+            PromptVisibility::Visible,
             |event| {
                 cb_count.fetch_add(1, Ordering::Relaxed);
                 emit_event(
@@ -218,41 +219,87 @@ impl AcpxRuntime {
             }
         };
 
-        close_session(
-            &self.cli,
-            acpx_agent,
-            &session_name,
-            request.workspace_path,
-            command_options,
-        )
-        .await;
-
         let count = event_count.load(Ordering::Relaxed);
         let duration = elapsed_ms(prompt_start);
 
-        match prompt_result {
-            Ok(outcome) => {
-                info!(
-                    event = ACPX_PROMPT_COMPLETED,
-                    issue_id = %request.issue.id,
-                    step = request.step_name,
-                    session_name,
-                    event_count = count,
-                    duration_ms = duration,
-                    "acpx prompt completed"
-                );
-                let output = outcome
-                    .runtime_verdict
-                    .as_ref()
-                    .and_then(crate::pipeline::verdict::parse_step_output_from_value)
-                    .unwrap_or_else(super::transitional_succeeded_output);
+        let step_result = match prompt_result {
+            Ok(visible_outcome) => {
+                async {
+                    info!(
+                        event = ACPX_PROMPT_COMPLETED,
+                        issue_id = %request.issue.id,
+                        step = request.step_name,
+                        session_name,
+                        event_count = count,
+                        duration_ms = duration,
+                        "acpx prompt completed"
+                    );
 
-                Ok(detect_worker_result_with_output(
-                    request.workspace_path,
-                    output,
-                    request.step_name,
-                )
-                .await)
+                    let extraction_prompt = crate::agent::extraction::build_extraction_prompt(
+                        request.step_name,
+                        &request.issue.identifier,
+                        prompt,
+                        &visible_outcome.output_text,
+                    );
+                    let extraction_outcome = self
+                        .cli
+                        .run_prompt(
+                            acpx_agent,
+                            &session_name,
+                            request.workspace_path,
+                            &extraction_prompt,
+                            command_options,
+                            PromptVisibility::Hidden,
+                            |_| async {},
+                        )
+                        .await?;
+                    let output = match crate::agent::extraction::validate_extraction_payload(
+                        extraction_outcome.runtime_verdict.as_ref(),
+                        &extraction_outcome.output_text,
+                    ) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            let previous_payload = extraction_outcome
+                                .runtime_verdict
+                                .as_ref()
+                                .map(serde_json::Value::to_string)
+                                .unwrap_or_else(|| extraction_outcome.output_text.clone());
+                            let repair_prompt = crate::agent::extraction::build_repair_prompt(
+                                &error.to_string(),
+                                &previous_payload,
+                            );
+                            let repair_outcome = self
+                                .cli
+                                .run_prompt(
+                                    acpx_agent,
+                                    &session_name,
+                                    request.workspace_path,
+                                    &repair_prompt,
+                                    command_options,
+                                    PromptVisibility::Hidden,
+                                    |_| async {},
+                                )
+                                .await?;
+                            crate::agent::extraction::validate_extraction_payload(
+                                repair_outcome.runtime_verdict.as_ref(),
+                                &repair_outcome.output_text,
+                            )
+                            .map_err(|error| {
+                                AgentError::ResponseError {
+                                    reason: format!("verdict extraction failed: {error}"),
+                                }
+                            })?
+                        }
+                    };
+
+                    Ok(detect_worker_result_with_output(
+                        request.workspace_path,
+                        output,
+                        request.step_name,
+                    )
+                    .await)
+                }
+                .await
             }
             Err(e) => {
                 warn!(
@@ -267,7 +314,18 @@ impl AcpxRuntime {
                 );
                 Err(e)
             }
-        }
+        };
+
+        close_session(
+            &self.cli,
+            acpx_agent,
+            &session_name,
+            request.workspace_path,
+            command_options,
+        )
+        .await;
+
+        step_result
     }
 }
 
@@ -406,10 +464,16 @@ case "$*" in
   exit 0
   ;;
   *" prompt --session "*)
-  cat > /dev/null
-  printf '%s\n' \
-    '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
-    '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+  prompt=$(cat)
+  if [[ "$prompt" == Extract* ]]; then
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\",\"output\":{\"artifact\":\"typed\"}}"}}}}' \
+      '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+  else
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
+      '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+  fi
   exit 0
   ;;
   *" sessions close "*)
@@ -446,6 +510,7 @@ exit 1
                 output,
                 ..
             } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
+                && output.output == Some(serde_json::json!({"artifact": "typed"}))
         ));
         let mut saw_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -463,6 +528,139 @@ exit 1
     }
 
     #[tokio::test]
+    async fn acpx_runtime_repairs_invalid_hidden_extraction() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            r#"#!/usr/bin/env bash
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    prompt=$(cat)
+    if [[ "$prompt" == Extract* ]]; then
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"failed\"}"}}}}' \
+        '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+    elif [[ "$prompt" == "The previous Ensemble step result was invalid."* ]]; then
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"concern\",\"summary\":\"needs follow-up\",\"output\":{\"fixed\":true}}"}}}}' \
+        '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"end_turn"}}'
+    else
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"visible"}}}}' \
+        '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+    fi
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let result = runner.run_step(&request, "finish the task").await.unwrap();
+
+        assert!(matches!(
+            result,
+            WorkerResult::Success {
+                output,
+                ..
+            } if matches!(
+                output.result,
+                crate::pipeline::verdict::StepResult::Concern { ref summary }
+                    if summary == "needs follow-up"
+            ) && output.output == Some(serde_json::json!({"fixed": true}))
+        ));
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_returns_response_error_when_repair_is_invalid_and_closes_session() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    prompt=$(cat)
+    if [[ "$prompt" == Extract* || "$prompt" == "The previous Ensemble step result was invalid."* ]]; then
+      printf '%s\n' \
+        '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"failed\"}}"}}}}}}}}' \
+        '{{"jsonrpc":"2.0","id":2,"result":{{"stopReason":"end_turn"}}}}'
+    else
+      printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+    fi
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let error = runner
+            .run_step(&request, "finish the task")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AgentError::ResponseError { reason } if reason.contains("verdict extraction failed")
+        ));
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("sessions close"));
+    }
+
+    #[tokio::test]
     async fn acpx_runtime_passes_reasoning_level_to_acpx_commands() {
         let workspace = tempfile::TempDir::new().unwrap();
         let args_path = workspace.path().join("args.txt");
@@ -477,7 +675,9 @@ case "$*" in
   ;;
   *" prompt --session "*)
   cat > /dev/null
-  printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+  printf '%s\n' \
+    '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"succeeded\"}}"}}}}}}}}' \
+    '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
   exit 0
   ;;
   *" sessions close "*)
@@ -556,7 +756,9 @@ case "$*" in
     ;;
   *" prompt --session "*)
     cat >/dev/null
-    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+    printf '%s\n' \
+      '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}' \
+      '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -666,7 +868,9 @@ case "$*" in
     ;;
   *" prompt --session "*)
     cat > /dev/null
-    printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
+    printf '%s\n' \
+      '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"succeeded\"}}"}}}}}}}}' \
+      '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -829,7 +1033,9 @@ case "$*" in
     ;;
   *" prompt --session "*)
     cat > /dev/null
-    printf '%s\n' '{{"jsonrpc":"2.0","id":4,"result":{{"stopReason":"end_turn"}}}}'
+    printf '%s\n' \
+      '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"succeeded\"}}"}}}}}}}}' \
+      '{{"jsonrpc":"2.0","id":4,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -900,7 +1106,9 @@ case "$*" in
     ;;
   *" prompt --session "*)
     cat > /dev/null
-    printf '%s\n' '{{"jsonrpc":"2.0","id":100,"result":{{"stopReason":"end_turn"}}}}'
+    printf '%s\n' \
+      '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"succeeded\"}}"}}}}}}}}' \
+      '{{"jsonrpc":"2.0","id":100,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
   *" sessions close "*)
@@ -959,7 +1167,9 @@ case "$*" in
     ;;
   *" prompt --session "*)
     cat > /dev/null
-    printf '%s\n' '{{"jsonrpc":"2.0","id":101,"result":{{"stopReason":"end_turn"}}}}'
+    printf '%s\n' \
+      '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"succeeded\"}}"}}}}}}}}' \
+      '{{"jsonrpc":"2.0","id":101,"result":{{"stopReason":"end_turn"}}}}'
     exit 0
     ;;
   *" sessions close "*)
