@@ -2703,7 +2703,8 @@ Use the same validation profiles as Section 17:
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch + write operations
 - Pipeline engine with step DAG construction, validation, and per-issue execution
-- Verdict collection from ACP protocol and file-based fallback
+- Validated `StepOutput` extraction from the hidden extraction turn, with one repair attempt if
+  extraction is invalid
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
