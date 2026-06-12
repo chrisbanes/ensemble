@@ -25,6 +25,18 @@ cd ensemble
 cargo install --path crates/ensemble-cli
 ```
 
+Source installs are headless by default and include `ensemble init`, `ensemble run`, and
+`ensemble open-config-dir`. To include the embedded web dashboard, generate the frontend first and
+enable the `web-ui` feature:
+
+```sh
+cd crates/ensemble-ui/src-ui
+pnpm install --frozen-lockfile
+pnpm run codegen
+cd ../../..
+cargo install --path crates/ensemble-cli --features web-ui
+```
+
 ## Quick start
 
 **1. Create a configuration directory:**
@@ -74,6 +86,9 @@ To also start the web dashboard:
 ```sh
 ensemble web --port 3000
 ```
+
+The `web` subcommand is available in release builds and source builds installed with
+`--features web-ui`.
 
 Then open `http://localhost:3000` in your browser.
 

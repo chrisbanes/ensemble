@@ -1218,7 +1218,6 @@ dependencies = [
  "dirs",
  "ensemble-core",
  "inquire",
- "mime_guess",
  "opener",
  "reqwest",
  "rust-embed",

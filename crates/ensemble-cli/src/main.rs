@@ -1,4 +1,5 @@
 mod commands;
+#[cfg(feature = "web-ui")]
 mod embedded_ui;
 
 use clap::{Args, Parser, Subcommand};
@@ -34,6 +35,7 @@ enum Command {
     /// Start the ensemble orchestrator in headless mode.
     Run,
     /// Start the ensemble orchestrator with web UI.
+    #[cfg(feature = "web-ui")]
     Web {
         /// HTTP server bind address.
         #[arg(long, env = "HOST", default_value = "127.0.0.1")]
@@ -134,6 +136,7 @@ async fn main() -> ExitCode {
             commands::init::execute(commands::init::InitArgs { config_dir }).await
         }
         Some(Command::Run) => commands::run::execute(commands::run::RunArgs { config_dir }).await,
+        #[cfg(feature = "web-ui")]
         Some(Command::Web { host, port }) => {
             commands::web::execute(commands::web::WebArgs {
                 config_dir,
@@ -227,6 +230,16 @@ mod tests {
 
     // ---- `ensemble web` subcommand ----
 
+    #[cfg(not(feature = "web-ui"))]
+    #[test]
+    fn test_cli_rejects_web_when_web_ui_disabled() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let result = Cli::try_parse_from(["ensemble", "web"]);
+        assert!(result.is_err());
+        restore_env(host, port);
+    }
+
+    #[cfg(feature = "web-ui")]
     #[test]
     fn test_cli_parse_web_defaults() {
         let (_guard, host, port) = lock_and_clear_env();
@@ -242,6 +255,7 @@ mod tests {
         restore_env(host, port);
     }
 
+    #[cfg(feature = "web-ui")]
     #[test]
     fn test_cli_parse_web_custom_args() {
         let (_guard, host, port) = lock_and_clear_env();
@@ -266,6 +280,7 @@ mod tests {
         restore_env(host, port);
     }
 
+    #[cfg(feature = "web-ui")]
     #[test]
     fn test_cli_web_env_host() {
         let (_guard, host, port) = lock_and_clear_env();
@@ -278,6 +293,7 @@ mod tests {
         restore_env(host, port);
     }
 
+    #[cfg(feature = "web-ui")]
     #[test]
     fn test_cli_web_env_port() {
         let (_guard, host, port) = lock_and_clear_env();
@@ -290,6 +306,7 @@ mod tests {
         restore_env(host, port);
     }
 
+    #[cfg(feature = "web-ui")]
     #[test]
     fn test_cli_web_flag_overrides_env() {
         let (_guard, host, port) = lock_and_clear_env();
@@ -308,6 +325,7 @@ mod tests {
         restore_env(host, port);
     }
 
+    #[cfg(feature = "web-ui")]
     #[test]
     fn test_cli_web_ephemeral_port() {
         let (_guard, host, port) = lock_and_clear_env();

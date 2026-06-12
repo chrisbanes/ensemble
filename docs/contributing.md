@@ -11,6 +11,21 @@ cargo clippy --workspace -- -D warnings   # lint
 cargo fmt --all -- --check       # check formatting
 ```
 
+The CLI's embedded dashboard is optional. Default `ensemble-cli` builds are headless and do not
+require Node, pnpm, OpenAPI generation, or frontend assets. To compile the web UI command from
+source, generate the frontend inputs and enable the feature:
+
+```sh
+cd crates/ensemble-ui/src-ui
+pnpm install --frozen-lockfile
+pnpm run codegen
+cd ../../..
+cargo build -p ensemble-cli --features web-ui
+```
+
+For Rust-only checks that intentionally compile the `web-ui` feature without rebuilding frontend
+assets, set `SKIP_UI_BUILD=1`.
+
 Run all four before pushing — CI enforces them.
 
 ## Project structure
