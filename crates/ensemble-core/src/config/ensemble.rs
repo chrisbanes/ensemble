@@ -509,7 +509,7 @@ pub struct AgentRuntimeConfig {
     #[serde(default = "default_session_mode")]
     pub session_mode: String,
     #[serde(default = "default_permission_request_policy")]
-    pub permission_request_policy: String,
+    pub permission_request_policy: PermissionRequestPolicy,
     #[serde(default = "default_turn_timeout_ms")]
     pub turn_timeout_ms: u64,
     #[serde(default = "default_read_timeout_ms")]
@@ -525,6 +525,56 @@ pub struct AgentRuntimeConfig {
     pub interaction_policy_text: Option<String>,
     #[serde(default)]
     pub interaction_policy_overrides: InteractionPolicyOverridesConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionRequestPolicyMode {
+    ApproveAll,
+    RejectAll,
+    SelectOption,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct PermissionRequestPolicy {
+    pub mode: PermissionRequestPolicyMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+}
+
+impl PermissionRequestPolicy {
+    pub fn approve_all() -> Self {
+        Self {
+            mode: PermissionRequestPolicyMode::ApproveAll,
+            option_id: None,
+        }
+    }
+
+    pub fn reject_all() -> Self {
+        Self {
+            mode: PermissionRequestPolicyMode::RejectAll,
+            option_id: None,
+        }
+    }
+
+    pub fn select_option(option_id: impl Into<String>) -> Self {
+        Self {
+            mode: PermissionRequestPolicyMode::SelectOption,
+            option_id: Some(option_id.into()),
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::approve_all()
+    }
+
+    pub fn legacy_policy_id(&self) -> String {
+        match self.mode {
+            PermissionRequestPolicyMode::ApproveAll => "auto_approve_all".to_string(),
+            PermissionRequestPolicyMode::RejectAll => "reject_all".to_string(),
+            PermissionRequestPolicyMode::SelectOption => self.option_id.clone().unwrap_or_default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -568,8 +618,8 @@ fn default_session_mode() -> String {
     "code".to_string()
 }
 
-fn default_permission_request_policy() -> String {
-    "auto_approve_all".to_string()
+fn default_permission_request_policy() -> PermissionRequestPolicy {
+    PermissionRequestPolicy::approve_all()
 }
 
 fn default_turn_timeout_ms() -> u64 {
@@ -766,11 +816,11 @@ pub fn load_config(path: &std::path::Path) -> Result<EnsembleConfig, crate::erro
 /// Note: Does NOT resolve `$VAR` or `~`. Call `config.resolve_env()` after
 /// parsing, or use `load_config()` which does both.
 pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigError> {
-    let mut value: serde_yaml::Value =
+    let value: serde_yaml::Value =
         serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::ConfigParseError {
             reason: e.to_string(),
         })?;
-    normalize_agent_permission_request_policy(&mut value)?;
+    reject_legacy_agent_permission_policy(&value)?;
     reject_legacy_notion_tracker_keys(&value)?;
     serde_yaml::from_value(value).map_err(|e| crate::error::ConfigError::ConfigParseError {
         reason: e.to_string(),
@@ -824,40 +874,32 @@ fn reject_legacy_notion_tracker_keys(
     })
 }
 
-fn normalize_agent_permission_request_policy(
-    value: &mut serde_yaml::Value,
+fn reject_legacy_agent_permission_policy(
+    value: &serde_yaml::Value,
 ) -> Result<(), crate::error::ConfigError> {
     let Some(agent) = value
-        .as_mapping_mut()
-        .and_then(|root| root.get_mut(serde_yaml::Value::String("agent".to_string())))
-        .and_then(serde_yaml::Value::as_mapping_mut)
+        .as_mapping()
+        .and_then(|root| root.get(serde_yaml::Value::String("agent".to_string())))
+        .and_then(serde_yaml::Value::as_mapping)
     else {
         return Ok(());
     };
 
     let legacy_key = serde_yaml::Value::String("permission_policy".to_string());
+    if agent.contains_key(&legacy_key) {
+        return Err(crate::error::ConfigError::ConfigParseError {
+            reason: "agent.permission_policy is no longer supported; use agent.permission_request_policy.mode instead".to_string(),
+        });
+    }
+
     let canonical_key = serde_yaml::Value::String("permission_request_policy".to_string());
-    let legacy_value = agent.get(&legacy_key).cloned();
-    let canonical_value = agent.get(&canonical_key).cloned();
-
-    if let Some(legacy_value) = legacy_value {
-        tracing::warn!(
-            "'agent.permission_policy' is deprecated and will be removed in v0.4.0; use 'agent.permission_request_policy' instead"
-        );
-
-        if let Some(canonical_value) = canonical_value {
-            if canonical_value != legacy_value {
-                return Err(crate::error::ConfigError::ConfigParseError {
-                    reason:
-                        "agent.permission_policy conflicts with agent.permission_request_policy"
-                            .to_string(),
-                });
-            }
-        } else {
-            agent.insert(canonical_key, legacy_value);
-        }
-
-        agent.remove(&legacy_key);
+    if agent
+        .get(&canonical_key)
+        .is_some_and(serde_yaml::Value::is_string)
+    {
+        return Err(crate::error::ConfigError::ConfigParseError {
+            reason: "agent.permission_request_policy string values are no longer supported; use agent.permission_request_policy.mode instead".to_string(),
+        });
     }
 
     Ok(())
@@ -939,10 +981,25 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         .agents
         .values()
         .any(|agent| RuntimeKind::for_agent(agent) == RuntimeKind::Direct);
-    if any_acpx
-        && !any_direct
-        && config.agent.permission_request_policy != default_permission_request_policy()
+    if matches!(
+        config.agent.permission_request_policy.mode,
+        PermissionRequestPolicyMode::SelectOption
+    ) && config
+        .agent
+        .permission_request_policy
+        .option_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
     {
+        return Err(PipelineError::InvalidRuntimeConfig {
+            agent: "agent".to_string(),
+            reason: "permission_request_policy.mode select_option requires a non-empty option_id"
+                .to_string(),
+        });
+    }
+    if any_acpx && !any_direct && !config.agent.permission_request_policy.is_default() {
         return Err(PipelineError::InvalidRuntimeConfig {
             agent: "agent".to_string(),
             reason: "permission_request_policy is ignored for acpx runtime; remove it or use direct runtime".to_string(),
@@ -995,10 +1052,6 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
 mod tests {
     use super::*;
     use crate::test_support::env::ENV_LOCK;
-    use std::io;
-    use std::sync::Arc;
-    use std::sync::Mutex;
-    use tracing_subscriber::fmt::writer::MakeWriter;
 
     const ENV_VARS: &[&str] = &[
         "GITHUB_TOKEN",
@@ -1010,42 +1063,6 @@ mod tests {
     struct EnvGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<String>)>,
-    }
-
-    #[derive(Clone, Default)]
-    struct SharedWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl SharedWriter {
-        fn output(&self) -> String {
-            String::from_utf8(self.buffer.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    struct BufferGuard {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl io::Write for BufferGuard {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.buffer.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for SharedWriter {
-        type Writer = BufferGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            BufferGuard {
-                buffer: Arc::clone(&self.buffer),
-            }
-        }
     }
 
     impl EnvGuard {
@@ -1559,7 +1576,10 @@ on_failure: Failed
         assert_eq!(config.agent.max_retry_backoff_ms, 300_000);
         assert_eq!(config.agent.command, "claude-code");
         assert_eq!(config.agent.session_mode, "code");
-        assert_eq!(config.agent.permission_request_policy, "auto_approve_all");
+        assert_eq!(
+            config.agent.permission_request_policy,
+            PermissionRequestPolicy::approve_all()
+        );
         assert_eq!(config.agent.turn_timeout_ms, 3_600_000);
         assert_eq!(config.agent.read_timeout_ms, 5_000);
         assert_eq!(config.agent.stall_timeout_ms, 300_000);
@@ -1992,7 +2012,10 @@ on_failure: Failed
         let config = parse_config(yaml).unwrap();
         let builder = &config.agents["builder"];
         assert_eq!(builder.permission_mode.as_deref(), Some("approve_reads"));
-        assert_eq!(config.agent.permission_request_policy, "auto_approve_all");
+        assert_eq!(
+            config.agent.permission_request_policy,
+            PermissionRequestPolicy::approve_all()
+        );
     }
 
     #[test]
@@ -2010,11 +2033,154 @@ steps:
 on_success: Done
 on_failure: Failed
 agent:
-  permission_request_policy: manual
+  permission_request_policy:
+    mode: reject_all
 "#;
         let config = parse_config(yaml).unwrap();
         assert!(config.agents["builder"].permission_mode.is_none());
-        assert_eq!(config.agent.permission_request_policy, "manual");
+        assert_eq!(
+            config.agent.permission_request_policy,
+            PermissionRequestPolicy::reject_all()
+        );
+    }
+
+    #[test]
+    fn test_parse_config_with_approve_all_permission_request_policy() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: "Review it."
+steps:
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+agent:
+  permission_request_policy:
+    mode: approve_all
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(
+            config.agent.permission_request_policy,
+            PermissionRequestPolicy::approve_all()
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_parse_config_with_select_option_permission_request_policy() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: "Review it."
+steps:
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+agent:
+  permission_request_policy:
+    mode: select_option
+    option_id: allow_always
+"#;
+        let config = parse_config(yaml).unwrap();
+        assert_eq!(
+            config.agent.permission_request_policy,
+            PermissionRequestPolicy::select_option("allow_always")
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn select_option_permission_request_policy_requires_option_id() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: hi
+agent:
+  permission_request_policy:
+    mode: select_option
+    option_id: ""
+steps:
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let err = validate_config(&config).unwrap_err();
+        assert!(err.to_string().contains("option_id"));
+    }
+
+    #[test]
+    fn legacy_string_permission_request_policy_is_rejected() {
+        let error = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: hi
+agent:
+  permission_request_policy: auto_approve_all
+steps:
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("permission_request_policy"));
+    }
+
+    #[test]
+    fn legacy_permission_policy_key_is_rejected() {
+        let error = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: hi
+agent:
+  permission_policy:
+    mode: approve_all
+steps:
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("permission_policy"));
     }
 
     #[test]
@@ -2055,7 +2221,8 @@ agents:
     runtime: acpx
     prompt: hi
 agent:
-  permission_request_policy: manual
+  permission_request_policy:
+    mode: reject_all
 steps:
   - name: build
     agent: builder
@@ -2085,7 +2252,8 @@ agents:
     model: gpt-5
     prompt: hello
 agent:
-  permission_request_policy: manual
+  permission_request_policy:
+    mode: reject_all
 steps:
   - name: build
     agent: builder
@@ -2098,115 +2266,6 @@ on_failure: Failed
         .unwrap();
 
         assert!(validate_config(&config).is_ok());
-    }
-
-    #[test]
-    fn test_parse_config_with_legacy_permission_policy() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: build
-    agent: builder
-on_success: Done
-on_failure: Failed
-agent:
-  permission_policy: manual
-"#;
-        let config = parse_config(yaml).unwrap();
-        assert_eq!(config.agent.permission_request_policy, "manual");
-    }
-
-    #[test]
-    fn test_parse_config_with_legacy_permission_policy_warns() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: build
-    agent: builder
-on_success: Done
-on_failure: Failed
-agent:
-  permission_policy: manual
-"#;
-        let writer = SharedWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .without_time()
-            .with_writer(writer.clone())
-            .finish();
-
-        tracing::subscriber::with_default(subscriber, || {
-            let config = parse_config(yaml).unwrap();
-            assert_eq!(config.agent.permission_request_policy, "manual");
-        });
-
-        let output = writer.output();
-        if !output.is_empty() {
-            assert!(output.contains("permission_policy"));
-            assert!(output.contains("permission_request_policy"));
-            assert!(output.contains("deprecated"));
-            assert!(output.contains("v0.4.0"));
-        }
-    }
-
-    #[test]
-    fn test_parse_config_accepts_matching_permission_policy_keys() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: build
-    agent: builder
-on_success: Done
-on_failure: Failed
-agent:
-  permission_policy: manual
-  permission_request_policy: manual
-"#;
-        let config = parse_config(yaml).unwrap();
-        assert_eq!(config.agent.permission_request_policy, "manual");
-    }
-
-    #[test]
-    fn test_parse_config_rejects_conflicting_permission_policy_keys() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: build
-    agent: builder
-on_success: Done
-on_failure: Failed
-agent:
-  permission_policy: auto
-  permission_request_policy: manual
-"#;
-        let error = parse_config(yaml).unwrap_err();
-        match error {
-            crate::error::ConfigError::ConfigParseError { reason } => {
-                assert!(reason.contains("permission_policy"));
-                assert!(reason.contains("permission_request_policy"));
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
     }
 
     #[test]

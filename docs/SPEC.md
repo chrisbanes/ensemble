@@ -773,13 +773,15 @@ Fields:
   - ACP session mode sent via `session/set_mode` after session creation.
   - Possible values: `code`, `architect`, `ask`.
   - Default: `code`.
-- `permission_request_policy` (string, optional)
+- `permission_request_policy` (object, optional)
   - Defines how the orchestrator handles ACP `session/request_permission` callbacks after the agent
     is launched on direct ACP runtime paths.
   - This does not control acpx launch-time permission mode; use `agents.*.permission_mode` for
     that.
-  - Values: `auto_approve_all`, `approve_reads_reject_writes`, `reject_all`, or
-    implementation-defined.
+  - Fields:
+    - `mode`: `approve_all`, `reject_all`, or `select_option`.
+    - `option_id`: required when `mode: select_option`; must match an offered ACP
+      `PermissionOption.option_id`.
   - Default: implementation-defined.
   - If all configured agents resolve to `acpx`, non-default values are invalid.
   - In mixed runtime configurations, this still applies only to agents using the direct runtime.
@@ -984,7 +986,7 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.command`: command string (tokenized into program + args, no shell interpolation), default implementation-defined
 - `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
-- `agent.permission_request_policy`: string, default implementation-defined; only applies to direct runtime paths
+- `agent.permission_request_policy`: object, default implementation-defined; only applies to direct runtime paths
 - `agent.turn_timeout_ms`: integer, default `3600000`
 - `agent.read_timeout_ms`: integer, default `5000`
 - `agent.stall_timeout_ms`: integer, default `300000`
@@ -1459,17 +1461,32 @@ Direct ACP permission handling:
 
 - The agent sends `session/request_permission` (agent-to-client JSON-RPC request) when it needs
   approval for an action (for example executing a command or writing a file).
-- The request includes `permissionId`, `description`, and available response options.
+- The request includes a typed tool-call update and available `PermissionOption[]` response options.
 - The orchestrator responds based on `agent.permission_request_policy`:
-  - `auto_approve_all`: respond with `allow_always` for all permission requests.
-  - `approve_reads_reject_writes`: approve read operations, reject write operations.
-  - `reject_all`: reject all permission requests.
-  - Implementation-defined policies may apply more nuanced logic.
-- Available response options include: `allow_once`, `allow_always`, `reject_once`, `reject_always`.
+  - `approve_all`: select `allow_always` when offered, otherwise `allow_once`.
+  - `reject_all`: select `reject_once` when offered, otherwise `reject_always`.
+  - `select_option`: select the configured `PermissionOption.option_id` exactly.
+- If no matching option is offered, the orchestrator responds with `cancelled`.
+- Ensemble does not infer read/write permission semantics from tool-call display text or raw payloads.
+- Available response option kinds include: `allow_once`, `allow_always`, `reject_once`, `reject_always`.
+- Known option IDs for ACP clients may be documented as verified examples, but they are not protocol guarantees.
 
 Example high-trust behavior:
 
-- Respond with `allow_always` for all `session/request_permission` callbacks.
+```yaml
+agent:
+  permission_request_policy:
+    mode: approve_all
+```
+
+Example client-specific option selection:
+
+```yaml
+agent:
+  permission_request_policy:
+    mode: select_option
+    option_id: allow_always
+```
 - When the agent emits an interaction request (`.ensemble/interaction-request.json`), persist it as
   a blocking interaction (`brainstorm_prompt`, `approval_gate`, or `manual_decision`) and wait for
   operator response.

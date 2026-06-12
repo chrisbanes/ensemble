@@ -10,6 +10,19 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Edit2, FileText, Settings } from "lucide-react";
 
 const SUPPORTED_PERMISSION_MODES = new Set(["approve_all", "approve_reads", "deny_all"]);
+const SUPPORTED_PERMISSION_REQUEST_POLICY_MODES = new Set(["approve_all", "reject_all", "select_option"]);
+
+function toPermissionRequestPolicy(
+  policy: GuidedConfigForm["runtime"]["agent"]["permission_request_policy"]
+): GuidedForm["runtime"]["agent"]["permission_request_policy"] {
+  const mode = SUPPORTED_PERMISSION_REQUEST_POLICY_MODES.has(policy.mode)
+    ? (policy.mode as GuidedForm["runtime"]["agent"]["permission_request_policy"]["mode"])
+    : "approve_all";
+  return {
+    mode,
+    option_id: policy.option_id ?? undefined,
+  };
+}
 
 function toGuidedForm(form: GuidedConfigForm): GuidedForm {
   return {
@@ -51,6 +64,10 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
         before_run: form.runtime.hooks.before_run ?? undefined,
         after_run: form.runtime.hooks.after_run ?? undefined,
         before_remove: form.runtime.hooks.before_remove ?? undefined,
+      },
+      agent: {
+        ...form.runtime.agent,
+        permission_request_policy: toPermissionRequestPolicy(form.runtime.agent.permission_request_policy),
       },
     },
     transitions: { ...form.transitions },

@@ -526,7 +526,9 @@ steps:
     agent: builder
 agent:
   command: claude-code
-  permission_request_policy: manual
+  permission_request_policy:
+    mode: select_option
+    option_id: manual
 on_success: Done
 on_failure: Failed
 "#;
@@ -551,7 +553,11 @@ on_failure: Failed
         "approve_reads"
     );
     assert_eq!(
-        json["guided_form"]["runtime"]["agent"]["permission_request_policy"],
+        json["guided_form"]["runtime"]["agent"]["permission_request_policy"]["mode"],
+        "select_option"
+    );
+    assert_eq!(
+        json["guided_form"]["runtime"]["agent"]["permission_request_policy"]["option_id"],
         "manual"
     );
     assert!(json["guided_form"]["agents"][0]
@@ -566,7 +572,7 @@ on_failure: Failed
 }
 
 #[tokio::test]
-async fn test_guided_form_save_round_trips_legacy_permission_policy_to_canonical_key() {
+async fn test_guided_form_save_round_trips_permission_request_policy() {
     let (state, _temp_dir) = build_app_state_without_config();
     let raw_yaml = r#"
 tracker:
@@ -583,7 +589,9 @@ steps:
     agent: builder
 agent:
   command: claude-code
-  permission_policy: manual
+  permission_request_policy:
+    mode: select_option
+    option_id: manual
 on_success: Done
 on_failure: Failed
 "#;
@@ -623,7 +631,9 @@ on_failure: Failed
 
     let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
     assert!(saved_yaml.contains("runtime: direct"));
-    assert!(saved_yaml.contains("permission_request_policy: manual"));
+    assert!(saved_yaml.contains("permission_request_policy:"));
+    assert!(saved_yaml.contains("mode: select_option"));
+    assert!(saved_yaml.contains("option_id: manual"));
     assert!(!saved_yaml.contains("permission_policy:"));
 }
 

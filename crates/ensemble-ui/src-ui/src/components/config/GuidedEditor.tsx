@@ -59,6 +59,11 @@ export interface GuidedAgent {
   label: string;
 }
 
+interface PermissionRequestPolicy {
+  mode: "approve_all" | "reject_all" | "select_option";
+  option_id?: string;
+}
+
 export interface GuidedForm {
   tracker: {
     kind: string;
@@ -119,7 +124,7 @@ export interface GuidedForm {
       max_retry_backoff_ms: number;
       command: string;
       session_mode: string;
-      permission_request_policy: string;
+      permission_request_policy: PermissionRequestPolicy;
       turn_timeout_ms: number;
       read_timeout_ms: number;
       stall_timeout_ms: number;

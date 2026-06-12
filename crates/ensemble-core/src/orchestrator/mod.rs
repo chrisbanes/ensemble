@@ -4938,7 +4938,8 @@ agent:
   max_turns: 3
   command: "echo test"
   session_mode: code
-  permission_request_policy: auto_approve_all
+  permission_request_policy:
+    mode: approve_all
   turn_timeout_ms: 30000
   read_timeout_ms: 5000
   max_retry_backoff_ms: 300000
@@ -4977,7 +4978,8 @@ agent:
   max_turns: 3
   command: "echo test"
   session_mode: code
-  permission_request_policy: auto_approve_all
+  permission_request_policy:
+    mode: approve_all
   turn_timeout_ms: 30000
   read_timeout_ms: 5000
   max_retry_backoff_ms: 300000
@@ -5533,7 +5535,8 @@ agent:
   max_turns: 3
   command: "echo test"
   session_mode: code
-  permission_request_policy: auto_approve_all
+  permission_request_policy:
+    mode: approve_all
   turn_timeout_ms: 30000
   read_timeout_ms: 5000
   max_retry_backoff_ms: 300000
@@ -5570,7 +5573,8 @@ agent:
   max_turns: 3
   command: "echo test"
   session_mode: code
-  permission_request_policy: auto_approve_all
+  permission_request_policy:
+    mode: approve_all
   turn_timeout_ms: 30000
   read_timeout_ms: 5000
   max_retry_backoff_ms: 300000

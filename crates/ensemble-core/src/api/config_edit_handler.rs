@@ -1628,7 +1628,11 @@ on_failure: Failed
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_request_policy: "manual".to_string(),
+                    permission_request_policy:
+                        crate::config::form::GuidedPermissionRequestPolicyForm {
+                            mode: "select_option".to_string(),
+                            option_id: Some("manual".to_string()),
+                        },
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,
@@ -1653,7 +1657,9 @@ on_failure: Failed
         assert_eq!(response.state, "parsed");
 
         let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
-        assert!(saved_yaml.contains("permission_request_policy: manual"));
+        assert!(saved_yaml.contains("permission_request_policy:"));
+        assert!(saved_yaml.contains("mode: select_option"));
+        assert!(saved_yaml.contains("option_id: manual"));
         assert!(!saved_yaml.contains("permission_policy:"));
     }
 
@@ -1796,7 +1802,11 @@ on_failure: Failed
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_request_policy: "auto_approve_all".to_string(),
+                    permission_request_policy:
+                        crate::config::form::GuidedPermissionRequestPolicyForm {
+                            mode: "approve_all".to_string(),
+                            option_id: None,
+                        },
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,
@@ -1951,7 +1961,11 @@ on_failure: Failed
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_request_policy: "auto_approve_all".to_string(),
+                    permission_request_policy:
+                        crate::config::form::GuidedPermissionRequestPolicyForm {
+                            mode: "approve_all".to_string(),
+                            option_id: None,
+                        },
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,
