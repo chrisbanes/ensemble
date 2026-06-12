@@ -164,7 +164,7 @@ impl PipelineRunJournal {
             }
             if let Some(record) = self.read_last_valid_record(&path).await? {
                 if record.schema_version == SCHEMA_VERSION
-                    && record.kind != PipelineTransitionKind::Released
+                    && !record.kind.is_terminal()
                     && record.snapshot.is_some()
                 {
                     records.push(record);
@@ -219,6 +219,15 @@ impl PipelineRunJournal {
             }
         }
         Ok(records)
+    }
+}
+
+impl PipelineTransitionKind {
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            PipelineTransitionKind::PipelineFailed | PipelineTransitionKind::Released
+        )
     }
 }
 
@@ -373,6 +382,30 @@ mod tests {
             .unwrap();
         journal
             .append_released("issue/1", "repo#1", None, "completed")
+            .await
+            .unwrap();
+
+        let live = journal.latest_live_records().await.unwrap();
+        assert!(live.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_live_records_skip_terminal_failed_issues() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineFailed,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("failed".to_string()),
+                retry: None,
+                snapshot: Some(snapshot()),
+            })
             .await
             .unwrap();
 
