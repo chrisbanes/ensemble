@@ -390,6 +390,9 @@ Runtime settings for agent execution.
 
 This section configures Ensemble's runtime behavior after the agent is launched. It does not set per-agent ACPX launch flags; those belong in `agents.*`.
 
+Agent step results are extracted by Ensemble through a hidden second turn in the same runtime
+session. There is no config switch for this behavior.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `max_turns` | integer | `20` | Maximum agent conversation turns per session |
@@ -401,15 +404,12 @@ This section configures Ensemble's runtime behavior after the agent is launched.
 | `turn_timeout_ms` | integer | `3600000` | Maximum time for a single agent turn (1 hour) |
 | `read_timeout_ms` | integer | `5000` | Timeout for reading agent output |
 | `stall_timeout_ms` | integer | `300000` | Timeout for detecting a stalled agent |
-| `inject_verdict_fallback_instructions` | boolean | `true` | Appends Ensemble-owned fallback instructions so agents can write `.ensemble/verdict.json` when no structured runtime verdict is emitted |
 | `inject_interaction_policy_instructions` | boolean | `true` | Automatically appends Ensemble interaction policy guidance to prompts (batched clarifications as a soft preference) |
 | `interaction_policy_text` | string | built-in default | Optional global replacement text for the injected interaction policy block |
 | `interaction_policy_overrides.agents.<agent>.mode` | string | `inherit` | Per-agent override mode: `inherit`, `custom`, or `off` |
 | `interaction_policy_overrides.agents.<agent>.text` | string | — | Required for useful `custom` overrides; policy text appended for that agent |
 | `interaction_policy_overrides.steps.<step>.mode` | string | `inherit` | Per-step override mode. Step override wins over agent override |
 | `interaction_policy_overrides.steps.<step>.text` | string | — | Required for useful `custom` per-step overrides |
-
-`agent.inject_verdict_instructions` is accepted as a shorter alias for `agent.inject_verdict_fallback_instructions`.
 
 Interaction policy override precedence is: `step override` → `agent override` → global `agent.*` defaults.
 
