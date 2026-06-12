@@ -8,6 +8,9 @@
   ],
   "labels": ["dependencies"],
   "prConcurrentLimit": 5,
+  "minimumReleaseAge": "1 day",
+  "minimumReleaseAgeBehaviour": "timestamp-required",
+  "internalChecksFilter": "strict",
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 6am"]
