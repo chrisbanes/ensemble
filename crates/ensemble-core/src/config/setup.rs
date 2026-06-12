@@ -794,7 +794,7 @@ pub fn generate_template(step_name: &str) -> String {
              {{ issue.description }}\n\
              \n\
              Check for correctness, test coverage, and code quality.\n\
-             Write your verdict to `.ensemble/verdict.json`.\n"
+             Share your review findings in your final answer. Ensemble will extract the structured result afterward.\n"
             .to_string(),
         _ => "Solve the following issue:\n\
              \n\
@@ -1471,6 +1471,17 @@ mod tests {
             .templates
             .contains_key("templates/implement.liquid"));
         assert!(artifacts.todo_md.is_some());
+    }
+
+    #[test]
+    fn generated_review_template_uses_visible_review_answer() {
+        let template = generate_template("review");
+
+        assert!(template.contains("Review the changes made for:"));
+        assert!(template.contains("Share your review findings in your final answer."));
+        let legacy_name = String::from("verdict") + ".json";
+        assert!(!template.contains(&[".ensemble", &legacy_name].join("/")));
+        assert!(!template.contains(&["verdict", "file"].join(" ")));
     }
 
     #[test]

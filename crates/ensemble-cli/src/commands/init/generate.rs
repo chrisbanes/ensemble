@@ -354,7 +354,8 @@ mod tests {
     fn test_generate_template_review() {
         let template = generate_template("review");
         assert!(template.contains("{{ issue.title }}"));
-        assert!(template.contains("verdict"));
+        assert!(template.contains("Ensemble will extract the structured result afterward"));
+        assert!(!template.contains(".ensemble/verdict.json"));
         assert!(template.contains("Review the changes"));
     }
 

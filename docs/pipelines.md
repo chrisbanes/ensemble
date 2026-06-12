@@ -107,18 +107,23 @@ Todo → Building → In Review → Done
 
 ## Results
 
-After an agent finishes, Ensemble resolves results with this strict precedence:
+After an agent finishes its visible working turn, Ensemble runs a hidden extraction turn in the same
+runtime session. The extraction turn produces the step's structured result. Extraction messages are
+not shown in the timeline.
 
-1. **Runtime result (primary)** — if the runtime reports a parseable structured result, Ensemble uses it.
-2. **File fallback** — only when no runtime result is available, Ensemble checks `.ensemble/verdict-{step}.json`:
+Every successful agent step must produce:
 
 ```json
 {
-  "result": "succeeded"
+  "result": "succeeded",
+  "summary": "optional human-readable summary",
+  "output": {
+    "optional": "structured data for downstream steps"
+  }
 }
 ```
 
-or:
+Failed and concern results require a non-empty `summary`:
 
 ```json
 {
@@ -136,13 +141,11 @@ or:
 }
 ```
 
-3. **Default success** — if neither source provides a result, the step is treated as succeeded.
+If extraction produces invalid JSON or violates the result contract, Ensemble runs one hidden repair
+turn. If repair also fails, the worker fails and the orchestrator applies the configured retry or
+failure behavior.
 
-If both runtime and file results exist, the runtime result takes precedence and the file result is ignored.
-
-By default, Ensemble appends fallback result instructions to rendered prompts (`agent.inject_verdict_fallback_instructions: true`, alias `agent.inject_verdict_instructions`), so users do not need to manually add `.ensemble/verdict-{step}.json` instructions in their templates.
-
-For compatibility with older agent outputs, payloads that use `"verdict": "approve"` or `"verdict": "reject"` are still parsed. New templates and runtime payloads should use `result`.
+Verdict files and default-success fallback are not part of the runtime result contract.
 
 **Succeeded** means the step passed. The pipeline moves to the next step or completes.
 
@@ -284,7 +287,7 @@ Review B risk: {{ steps["review-b"].output.risk }}
 ```
 
 Steps can produce structured `output` data alongside their result. Set the `output` field in
-`.ensemble/verdict-{step}.json` or in the ACP runtime result:
+the extracted runtime `StepOutput`:
 
 ```json
 {

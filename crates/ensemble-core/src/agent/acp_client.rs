@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use crate::config::ensemble::{
     PermissionRequestPolicyMode,
 };
 use crate::error::AgentError;
+use crate::pipeline::verdict::StepOutput;
 
 use super::events::{
     AgentEvent, AgentPermissionOption, AgentPermissionOptionKind, AgentPermissionOutcome,
@@ -71,6 +73,40 @@ pub struct AcpSessionConfig {
     pub cancel_token: CancellationToken,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnVisibility {
+    Visible,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnPurpose {
+    Working,
+    Extraction,
+    Repair,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionTurn {
+    pub prompt: String,
+    pub visibility: TurnVisibility,
+    pub purpose: TurnPurpose,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtractionContext {
+    pub step_name: String,
+    pub issue_identifier: String,
+    pub original_prompt: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpSessionOutcome {
+    pub output: StepOutput,
+    pub turn_results: Vec<TurnResult>,
+    pub capabilities: DiscoveredCapabilities,
+}
+
 #[derive(Debug)]
 pub struct AcpCapabilityDiscoveryConfig {
     pub command: ResolvedCommand,
@@ -83,11 +119,13 @@ pub enum TurnResult {
     Completed {
         usage: Option<TokenUsage>,
         runtime_verdict: Option<serde_json::Value>,
+        output_text: String,
     },
     Failed {
         reason: String,
         usage: Option<TokenUsage>,
         runtime_verdict: Option<serde_json::Value>,
+        output_text: String,
     },
 }
 
@@ -232,6 +270,103 @@ fn runtime_verdict_from_value(value: &serde_json::Value) -> Option<serde_json::V
         .get("result")
         .cloned()
         .or_else(|| value.get("verdict").cloned())
+}
+
+fn should_emit_turn_events(turn: &SessionTurn) -> bool {
+    turn.visibility == TurnVisibility::Visible
+}
+
+async fn emit_permission_events_if_visible(
+    visibility: TurnVisibility,
+    tx: &mpsc::Sender<WorkerEvent>,
+    issue_id: &str,
+    step_name: &str,
+    event: AgentEvent,
+) {
+    if visibility != TurnVisibility::Visible {
+        return;
+    }
+
+    emit_event(tx, issue_id, step_name, event).await;
+}
+
+fn map_session_error(error_msg: String, read_timeout_ms: u64, turn_timeout_ms: u64) -> AgentError {
+    let normalized_error = error_msg.to_lowercase();
+    if normalized_error.contains("response timeout") {
+        AgentError::ResponseTimeout {
+            timeout_ms: read_timeout_ms,
+        }
+    } else if normalized_error.contains("turn timeout") || normalized_error.contains("timedout") {
+        AgentError::TurnTimeout {
+            timeout_ms: turn_timeout_ms,
+        }
+    } else if normalized_error.contains("verdict extraction failed") {
+        AgentError::ResponseError { reason: error_msg }
+    } else if normalized_error.contains("initialize") || normalized_error.contains("session") {
+        AgentError::SessionStartupFailed { reason: error_msg }
+    } else if normalized_error.contains("cancelled") {
+        AgentError::TurnCancelled
+    } else if normalized_error.contains("stop reason") {
+        AgentError::TurnFailed { reason: error_msg }
+    } else {
+        AgentError::IoError { reason: error_msg }
+    }
+}
+
+#[derive(Debug)]
+enum CompletedTurnAction {
+    Queue(SessionTurn),
+    Finished(StepOutput),
+    Failed(String),
+}
+
+fn handle_completed_turn(
+    turn: &SessionTurn,
+    extraction_context: &ExtractionContext,
+    runtime_verdict: Option<&serde_json::Value>,
+    output_text: &str,
+    repair_attempted: &mut bool,
+) -> CompletedTurnAction {
+    match turn.purpose {
+        TurnPurpose::Working => {
+            let extraction_prompt = crate::agent::extraction::build_extraction_prompt(
+                &extraction_context.step_name,
+                &extraction_context.issue_identifier,
+                &extraction_context.original_prompt,
+                output_text,
+            );
+            CompletedTurnAction::Queue(SessionTurn {
+                prompt: extraction_prompt,
+                visibility: TurnVisibility::Hidden,
+                purpose: TurnPurpose::Extraction,
+            })
+        }
+        TurnPurpose::Extraction | TurnPurpose::Repair => {
+            match crate::agent::extraction::validate_extraction_payload(
+                runtime_verdict,
+                output_text,
+            ) {
+                Ok(output) => CompletedTurnAction::Finished(output),
+                Err(error) if turn.purpose == TurnPurpose::Extraction && !*repair_attempted => {
+                    *repair_attempted = true;
+                    let previous_payload = runtime_verdict
+                        .map(serde_json::Value::to_string)
+                        .unwrap_or_else(|| output_text.to_string());
+                    CompletedTurnAction::Queue(SessionTurn {
+                        prompt: crate::agent::extraction::build_repair_prompt(
+                            &error.to_string(),
+                            &previous_payload,
+                        ),
+                        visibility: TurnVisibility::Hidden,
+                        purpose: TurnPurpose::Repair,
+                    })
+                }
+                Err(error) => {
+                    CompletedTurnAction::Failed(format!("verdict extraction failed: {error}"))
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -454,18 +589,12 @@ pub async fn discover_capabilities(
 
 pub async fn run_acp_session(
     config: AcpSessionConfig,
-    prompts: Vec<String>,
+    working_turn: SessionTurn,
+    extraction_context: ExtractionContext,
     issue_id: &str,
     step_name: &str,
     event_tx: &mpsc::Sender<WorkerEvent>,
-) -> Result<
-    (
-        Option<serde_json::Value>,
-        Vec<TurnResult>,
-        DiscoveredCapabilities,
-    ),
-    AgentError,
-> {
+) -> Result<AcpSessionOutcome, AgentError> {
     let agent = build_acp_agent(&config.command, &config.workspace_path);
     let permission_policy = config.permission_request_policy.clone();
     let issue_id_owned = issue_id.to_string();
@@ -473,11 +602,13 @@ pub async fn run_acp_session(
     let event_tx_clone = event_tx.clone();
 
     let turn_results: Arc<Mutex<Vec<TurnResult>>> = Arc::new(Mutex::new(Vec::new()));
-    let final_verdict: Arc<Mutex<Option<serde_json::Value>>> = Arc::new(Mutex::new(None));
+    let final_output: Arc<Mutex<Option<StepOutput>>> = Arc::new(Mutex::new(None));
     let session_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let current_turn_visibility = Arc::new(Mutex::new(TurnVisibility::Visible));
     let discovered_capabilities: Arc<Mutex<DiscoveredCapabilities>> =
         Arc::new(Mutex::new(DiscoveredCapabilities::default()));
-    let prompts = Arc::new(prompts);
+    let working_turn = Arc::new(working_turn);
+    let extraction_context = Arc::new(extraction_context);
     let session_mode = config.session_mode.clone();
     let read_timeout_ms = config.read_timeout_ms;
     let turn_timeout_ms = config.turn_timeout_ms;
@@ -485,19 +616,22 @@ pub async fn run_acp_session(
     let cancel_token = config.cancel_token.clone();
 
     let turn_results_inner = turn_results.clone();
-    let final_verdict_inner = final_verdict.clone();
+    let final_output_inner = final_output.clone();
     let session_error_inner = session_error.clone();
     let session_error_outer = session_error.clone();
+    let current_turn_visibility_inner = current_turn_visibility.clone();
     let discovered_capabilities_inner = discovered_capabilities.clone();
 
     let builder = Client.builder().name("ensemble").on_receive_request(
         async move |request: RequestPermissionRequest,
                     responder: agent_client_protocol::Responder<RequestPermissionResponse>,
                     _cx| {
+            let visibility = *current_turn_visibility_inner.lock().await;
             let tool_call_id = request.tool_call.tool_call_id.to_string();
             let title = request.tool_call.fields.title.clone();
 
-            emit_event(
+            emit_permission_events_if_visible(
+                visibility,
                 &event_tx_clone,
                 &issue_id_owned,
                 &step_name_owned,
@@ -509,10 +643,15 @@ pub async fn run_acp_session(
             )
             .await;
 
-            let decision = resolve_permission_outcome(&permission_policy, &request.options);
+            let decision = if visibility == TurnVisibility::Visible {
+                resolve_permission_outcome(&permission_policy, &request.options)
+            } else {
+                cancelled_decision()
+            };
             let response = RequestPermissionResponse::new(decision.outcome.clone());
 
-            emit_event(
+            emit_permission_events_if_visible(
+                visibility,
                 &event_tx_clone,
                 &issue_id_owned,
                 &step_name_owned,
@@ -653,23 +792,34 @@ pub async fn run_acp_session(
                 }
             }
 
-            for (i, prompt) in prompts.iter().enumerate() {
+            let mut turns = VecDeque::from([(*working_turn).clone()]);
+            let mut repair_attempted = false;
+            let mut turn_index = 0usize;
+
+            while let Some(turn) = turns.pop_front() {
+                turn_index += 1;
+                let visible = should_emit_turn_events(&turn);
+                *current_turn_visibility.lock().await = turn.visibility;
                 if cancel_token.is_cancelled() {
-                    emit_event(
-                        event_tx,
-                        issue_id,
-                        step_name,
-                        AgentEvent::Cancelled { reason: None },
-                    )
-                    .await;
+                    if visible {
+                        emit_event(
+                            event_tx,
+                            issue_id,
+                            step_name,
+                            AgentEvent::Cancelled { reason: None },
+                        )
+                        .await;
+                    }
                     let mut err = session_error_inner.lock().await;
                     *err = Some("cancelled by user".to_string());
                     return Ok(());
                 }
 
-                emit_event(event_tx, issue_id, step_name, AgentEvent::PromptStarted).await;
+                if visible {
+                    emit_event(event_tx, issue_id, step_name, AgentEvent::PromptStarted).await;
+                }
 
-                if let Err(e) = session.send_prompt(prompt) {
+                if let Err(e) = session.send_prompt(&turn.prompt) {
                     let mut err = session_error_inner.lock().await;
                     *err = Some(format!("send_prompt failed: {e}"));
                     return Ok(());
@@ -677,6 +827,7 @@ pub async fn run_acp_session(
 
                 let mut last_usage: Option<TokenUsage> = None;
                 let mut last_runtime_verdict: Option<serde_json::Value> = None;
+                let mut output_text = String::new();
                 let mut timed_out = false;
 
                 let turn_future = async {
@@ -684,7 +835,12 @@ pub async fn run_acp_session(
                         match session.read_update().await {
                             Ok(SessionMessage::StopReason(stop)) => {
                                 let mapped = map_sdk_stop_reason(&stop);
-                                return Ok((mapped, last_usage, last_runtime_verdict));
+                                return Ok((
+                                    mapped,
+                                    last_usage,
+                                    last_runtime_verdict,
+                                    output_text,
+                                ));
                             }
                             Ok(SessionMessage::SessionMessage(dispatch)) => {
                                 if let Some(parsed) = parse_sdk_dispatch(dispatch)
@@ -698,16 +854,19 @@ pub async fn run_acp_session(
                                         last_runtime_verdict = Some(verdict);
                                     }
                                     if let Some(content) = parsed.output_text {
-                                        emit_event(
-                                            event_tx,
-                                            issue_id,
-                                            step_name,
-                                            AgentEvent::OutputChunk {
-                                                stream: RuntimeStream::Stdout,
-                                                content,
-                                            },
-                                        )
-                                        .await;
+                                        output_text.push_str(&content);
+                                        if visible {
+                                            emit_event(
+                                                event_tx,
+                                                issue_id,
+                                                step_name,
+                                                AgentEvent::OutputChunk {
+                                                    stream: RuntimeStream::Stdout,
+                                                    content,
+                                                },
+                                            )
+                                            .await;
+                                        }
                                     }
                                 }
                             }
@@ -722,13 +881,15 @@ pub async fn run_acp_session(
                 let cancel = cancel_token.clone();
                 let turn_result: TurnResult = tokio::select! {
                     _ = cancel.cancelled() => {
-                        emit_event(
-                            event_tx,
-                            issue_id,
-                            step_name,
-                            AgentEvent::Cancelled { reason: None },
-                        )
-                        .await;
+                        if visible {
+                            emit_event(
+                                event_tx,
+                                issue_id,
+                                step_name,
+                                AgentEvent::Cancelled { reason: None },
+                            )
+                            .await;
+                        }
                         let mut err = session_error_inner.lock().await;
                         *err = Some("cancelled by user".to_string());
                         return Ok(());
@@ -738,39 +899,45 @@ pub async fn run_acp_session(
                         turn_future,
                     ) => {
                         match result {
-                            Ok(Ok((stop_reason, usage, verdict))) => match stop_reason {
+                            Ok(Ok((stop_reason, usage, verdict, output_text))) => match stop_reason {
                                 super::events::StopReason::EndTurn
                                 | super::events::StopReason::MaxTokens => {
-                                    emit_event(
-                                        event_tx,
-                                        issue_id,
-                                        step_name,
-                                        AgentEvent::RunCompleted {
-                                            usage: usage.clone(),
-                                        },
-                                    )
-                                    .await;
+                                    if visible {
+                                        emit_event(
+                                            event_tx,
+                                            issue_id,
+                                            step_name,
+                                            AgentEvent::RunCompleted {
+                                                usage: usage.clone(),
+                                            },
+                                        )
+                                        .await;
+                                    }
                                     TurnResult::Completed {
                                         usage,
                                         runtime_verdict: verdict,
+                                        output_text,
                                     }
                                 }
                                 _ => {
                                     let reason = format!("stop reason: {:?}", stop_reason);
-                                    emit_event(
-                                        event_tx,
-                                        issue_id,
-                                        step_name,
-                                        AgentEvent::RunFailed {
-                                            reason: reason.clone(),
-                                            usage: usage.clone(),
-                                        },
-                                    )
-                                    .await;
+                                    if visible {
+                                        emit_event(
+                                            event_tx,
+                                            issue_id,
+                                            step_name,
+                                            AgentEvent::RunFailed {
+                                                reason: reason.clone(),
+                                                usage: usage.clone(),
+                                            },
+                                        )
+                                        .await;
+                                    }
                                     TurnResult::Failed {
                                         reason,
                                         usage,
                                         runtime_verdict: verdict,
+                                        output_text,
                                     }
                                 }
                             },
@@ -785,6 +952,7 @@ pub async fn run_acp_session(
                                     reason: format!("turn timeout after {turn_timeout_ms}ms"),
                                     usage: None,
                                     runtime_verdict: None,
+                                    output_text: String::new(),
                                 }
                             }
                         }
@@ -793,42 +961,63 @@ pub async fn run_acp_session(
 
                 if let TurnResult::Completed {
                     ref runtime_verdict,
+                    ref output_text,
                     ..
                 } = turn_result
                 {
-                    if runtime_verdict.is_some() {
-                        let mut v = final_verdict_inner.lock().await;
-                        *v = runtime_verdict.clone();
+                    match handle_completed_turn(
+                        &turn,
+                        &extraction_context,
+                        runtime_verdict.as_ref(),
+                        output_text,
+                        &mut repair_attempted,
+                    ) {
+                        CompletedTurnAction::Queue(next_turn) => turns.push_back(next_turn),
+                        CompletedTurnAction::Finished(output) => {
+                            *final_output_inner.lock().await = Some(output);
+                        }
+                        CompletedTurnAction::Failed(error) => {
+                            let mut err = session_error_inner.lock().await;
+                            *err = Some(error);
+                        }
                     }
                 }
 
                 if let TurnResult::Failed { ref reason, .. } = turn_result {
+                    let mut err = session_error_inner.lock().await;
+                    *err = Some(reason.clone());
+
                     if timed_out {
-                        let mut err = session_error_inner.lock().await;
-                        *err = Some(reason.clone());
                         turn_results_inner.lock().await.push(turn_result);
                         return Ok(());
                     }
-                    if i < prompts.len() - 1 {
-                        warn!(
-                            issue_id = %issue_id,
-                            step = step_name,
-                            turn = i + 1,
-                            reason = %reason,
-                            "turn failed, stopping remaining turns"
-                        );
-                        turn_results_inner.lock().await.push(turn_result);
-                        return Ok(());
-                    }
+                    warn!(
+                        issue_id = %issue_id,
+                        step = step_name,
+                        turn = turn_index,
+                        purpose = ?turn.purpose,
+                        reason = %reason,
+                        "turn failed, stopping remaining turns"
+                    );
+                    turn_results_inner.lock().await.push(turn_result);
+                    return Ok(());
                 }
 
                 info!(
                     issue_id = %issue_id,
                     step = step_name,
-                    turn = i + 1,
+                    turn = turn_index,
+                    purpose = ?turn.purpose,
                     "turn completed successfully"
                 );
                 turn_results_inner.lock().await.push(turn_result);
+
+                if final_output_inner.lock().await.is_some() {
+                    break;
+                }
+                if session_error_inner.lock().await.is_some() {
+                    return Ok(());
+                }
             }
 
             Ok(())
@@ -839,42 +1028,32 @@ pub async fn run_acp_session(
         let error_msg = e.to_string();
         let captured = session_error_outer.lock().await.clone();
         let msg = captured.unwrap_or(error_msg);
-        if msg.contains("response timeout") {
-            return Err(AgentError::ResponseTimeout {
-                timeout_ms: read_timeout_ms,
-            });
-        }
-        if msg.contains("turn timeout") || msg.contains("TimedOut") {
-            return Err(AgentError::TurnTimeout {
-                timeout_ms: turn_timeout_ms,
-            });
-        }
-        return Err(AgentError::IoError { reason: msg });
+        return Err(map_session_error(msg, read_timeout_ms, turn_timeout_ms));
     }
 
     let captured_error = session_error_outer.lock().await.clone();
     if let Some(error_msg) = captured_error {
-        if error_msg.contains("response timeout") {
-            return Err(AgentError::ResponseTimeout {
-                timeout_ms: read_timeout_ms,
-            });
-        } else if error_msg.contains("turn timeout") || error_msg.contains("TimedOut") {
-            return Err(AgentError::TurnTimeout {
-                timeout_ms: turn_timeout_ms,
-            });
-        } else if error_msg.contains("initialize") || error_msg.contains("session") {
-            return Err(AgentError::SessionStartupFailed { reason: error_msg });
-        } else if error_msg.contains("cancelled") {
-            return Err(AgentError::TurnCancelled);
-        } else {
-            return Err(AgentError::IoError { reason: error_msg });
-        }
+        return Err(map_session_error(
+            error_msg,
+            read_timeout_ms,
+            turn_timeout_ms,
+        ));
     }
 
-    let verdict = final_verdict.lock().await.take();
+    let output = final_output
+        .lock()
+        .await
+        .take()
+        .ok_or_else(|| AgentError::ResponseError {
+            reason: "verdict extraction did not produce a valid StepOutput".to_string(),
+        })?;
     let results = turn_results.lock().await.clone();
     let capabilities = discovered_capabilities.lock().await.clone();
-    Ok((verdict, results, capabilities))
+    Ok(AcpSessionOutcome {
+        output,
+        turn_results: results,
+        capabilities,
+    })
 }
 
 #[cfg(test)]
@@ -888,6 +1067,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::pipeline::verdict::StepResult;
 
     #[test]
     fn permission_option_event_kind_serializes_as_snake_case() {
@@ -1104,6 +1284,179 @@ mod tests {
         );
     }
 
+    fn extraction_context() -> ExtractionContext {
+        ExtractionContext {
+            step_name: "build".to_string(),
+            issue_identifier: "repo#1".to_string(),
+            original_prompt: "Build it".to_string(),
+        }
+    }
+
+    fn hidden_extraction_turn() -> SessionTurn {
+        SessionTurn {
+            prompt: "extract".to_string(),
+            visibility: TurnVisibility::Hidden,
+            purpose: TurnPurpose::Extraction,
+        }
+    }
+
+    #[test]
+    fn hidden_extraction_validates_runtime_verdict_as_session_output() {
+        let mut repair_attempted = false;
+        let runtime_verdict = serde_json::json!({
+            "result": "concern",
+            "summary": "manual review needed",
+            "output": {"risk": "medium"}
+        });
+
+        let action = handle_completed_turn(
+            &hidden_extraction_turn(),
+            &extraction_context(),
+            Some(&runtime_verdict),
+            "not json",
+            &mut repair_attempted,
+        );
+
+        let CompletedTurnAction::Finished(output) = action else {
+            panic!("expected finished output, got {action:?}");
+        };
+        assert_eq!(
+            output.result,
+            StepResult::Concern {
+                summary: "manual review needed".to_string()
+            }
+        );
+        assert_eq!(output.output, Some(serde_json::json!({"risk": "medium"})));
+    }
+
+    #[test]
+    fn hidden_extraction_turns_do_not_emit_visible_events() {
+        assert!(!should_emit_turn_events(&hidden_extraction_turn()));
+        assert!(should_emit_turn_events(&SessionTurn {
+            prompt: "work".to_string(),
+            visibility: TurnVisibility::Visible,
+            purpose: TurnPurpose::Working,
+        }));
+    }
+
+    #[tokio::test]
+    async fn hidden_permission_callback_does_not_emit_visible_events() {
+        let (tx, mut rx) = mpsc::channel(10);
+
+        emit_permission_events_if_visible(
+            TurnVisibility::Hidden,
+            &tx,
+            "issue-1",
+            "build",
+            AgentEvent::PermissionRequested {
+                tool_call_id: "tool-1".to_string(),
+                title: Some("read file".to_string()),
+                options: Vec::new(),
+            },
+        )
+        .await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn extraction_failure_maps_to_response_error() {
+        let error = map_session_error(
+            "verdict extraction failed: failed results require a non-empty summary".to_string(),
+            100,
+            200,
+        );
+
+        assert!(matches!(
+            error,
+            AgentError::ResponseError { reason }
+                if reason.contains("verdict extraction failed")
+        ));
+    }
+
+    #[test]
+    fn cancelled_stop_reason_maps_to_turn_cancelled() {
+        let error = map_session_error("stop reason: Cancelled".to_string(), 100, 200);
+
+        assert!(matches!(error, AgentError::TurnCancelled));
+    }
+
+    #[test]
+    fn failed_stop_reason_maps_to_turn_failed() {
+        let error = map_session_error("stop reason: Refusal".to_string(), 100, 200);
+
+        assert!(matches!(
+            error,
+            AgentError::TurnFailed { reason } if reason == "stop reason: Refusal"
+        ));
+    }
+
+    #[test]
+    fn invalid_extraction_then_valid_repair_succeeds() {
+        let mut repair_attempted = false;
+        let action = handle_completed_turn(
+            &hidden_extraction_turn(),
+            &extraction_context(),
+            None,
+            r#"{"result":"failed"}"#,
+            &mut repair_attempted,
+        );
+
+        let CompletedTurnAction::Queue(repair_turn) = action else {
+            panic!("expected repair turn, got {action:?}");
+        };
+        assert!(repair_attempted);
+        assert_eq!(repair_turn.visibility, TurnVisibility::Hidden);
+        assert_eq!(repair_turn.purpose, TurnPurpose::Repair);
+
+        let repair_action = handle_completed_turn(
+            &repair_turn,
+            &extraction_context(),
+            None,
+            r#"{"result":"failed","summary":"tests failed"}"#,
+            &mut repair_attempted,
+        );
+
+        let CompletedTurnAction::Finished(output) = repair_action else {
+            panic!("expected repaired output, got {repair_action:?}");
+        };
+        assert_eq!(
+            output.result,
+            StepResult::Failed {
+                summary: "tests failed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_extraction_then_invalid_repair_fails() {
+        let mut repair_attempted = false;
+        let action = handle_completed_turn(
+            &hidden_extraction_turn(),
+            &extraction_context(),
+            None,
+            r#"{"result":"failed"}"#,
+            &mut repair_attempted,
+        );
+        let CompletedTurnAction::Queue(repair_turn) = action else {
+            panic!("expected repair turn, got {action:?}");
+        };
+
+        let repair_action = handle_completed_turn(
+            &repair_turn,
+            &extraction_context(),
+            None,
+            r#"{"result":"failed"}"#,
+            &mut repair_attempted,
+        );
+
+        let CompletedTurnAction::Failed(error) = repair_action else {
+            panic!("expected extraction failure, got {repair_action:?}");
+        };
+        assert!(error.contains("verdict extraction failed"));
+        assert!(error.contains("failed results require a non-empty summary"));
+    }
+
     #[tokio::test]
     async fn startup_initialize_uses_configured_read_timeout() {
         let workspace = TempDir::new().unwrap();
@@ -1124,7 +1477,22 @@ mod tests {
 
         let result = tokio::time::timeout(
             Duration::from_millis(500),
-            run_acp_session(config, vec!["hello".to_string()], "issue-1", "build", &tx),
+            run_acp_session(
+                config,
+                SessionTurn {
+                    prompt: "hello".to_string(),
+                    visibility: TurnVisibility::Visible,
+                    purpose: TurnPurpose::Working,
+                },
+                ExtractionContext {
+                    step_name: "build".to_string(),
+                    issue_identifier: "repo#1".to_string(),
+                    original_prompt: "hello".to_string(),
+                },
+                "issue-1",
+                "build",
+                &tx,
+            ),
         )
         .await;
 

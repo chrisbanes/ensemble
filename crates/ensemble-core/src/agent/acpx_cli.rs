@@ -20,9 +20,26 @@ pub struct AcpxCommandOptions<'a> {
     pub reasoning_level: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptVisibility {
+    Visible,
+    Hidden,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PromptOutcome {
     pub runtime_verdict: Option<serde_json::Value>,
+    pub output_text: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AcpxPromptRequest<'a> {
+    pub agent: &'a str,
+    pub session_name: &'a str,
+    pub cwd: &'a Path,
+    pub prompt: &'a str,
+    pub options: AcpxCommandOptions<'a>,
+    pub visibility: PromptVisibility,
 }
 
 impl AcpxCli {
@@ -86,31 +103,27 @@ impl AcpxCli {
 
     pub async fn run_prompt<F, Fut>(
         &self,
-        agent: &str,
-        session_name: &str,
-        cwd: &Path,
-        prompt: &str,
-        options: AcpxCommandOptions<'_>,
+        request: AcpxPromptRequest<'_>,
         mut on_event: F,
     ) -> Result<PromptOutcome, AgentError>
     where
         F: FnMut(AgentEvent) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
-        let mut command = self.base_command(agent, cwd, options);
+        let mut command = self.base_command(request.agent, request.cwd, request.options);
         command
-            .args(["prompt", "--session", session_name, "--file", "-"])
+            .args(["prompt", "--session", request.session_name, "--file", "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        debug!(agent, session_name, cwd = %cwd.display(), "running acpx prompt");
+        debug!(agent = request.agent, session_name = request.session_name, cwd = %request.cwd.display(), "running acpx prompt");
 
         let mut child = spawn_with_etxtbsy_retry(command).map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx prompt: {e}"),
         })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+            if let Err(error) = stdin.write_all(request.prompt.as_bytes()).await {
                 if error.kind() != std::io::ErrorKind::BrokenPipe {
                     cleanup_prompt_child(&mut child).await;
                     return Err(AgentError::IoError {
@@ -154,9 +167,10 @@ impl AcpxCli {
             reason: "failed to capture acpx stderr".to_string(),
         })?;
 
-        let stderr_path = cwd
+        let stderr_path = request
+            .cwd
             .join(".ensemble")
-            .join(format!("acpx-stderr-{}.log", session_name));
+            .join(format!("acpx-stderr-{}.log", request.session_name));
         let parent = stderr_path.parent().ok_or_else(|| AgentError::IoError {
             reason: "stderr path has no parent".to_string(),
         })?;
@@ -173,9 +187,9 @@ impl AcpxCli {
                 })?;
 
         let stderr_path_clone = stderr_path.clone();
-        debug!(agent = %agent, session = %session_name, path = %stderr_path.display(), "acpx stderr -> {}", stderr_path.display());
+        debug!(agent = %request.agent, session = %request.session_name, path = %stderr_path.display(), "acpx stderr -> {}", stderr_path.display());
 
-        let agent_name = agent.to_string();
+        let agent_name = request.agent.to_string();
         let stderr_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             let mut line_count: u64 = 0;
@@ -221,20 +235,45 @@ impl AcpxCli {
             }
         });
 
+        let visible = request.visibility == PromptVisibility::Visible;
+        let mut output_text = String::new();
         let mut reader = BufReader::new(stdout).lines();
         let mut saw_terminal_event = false;
         let mut last_usage: Option<TokenUsage> = None;
         let mut last_runtime_verdict: Option<serde_json::Value> = None;
 
-        while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to read acpx stdout: {e}"),
-        })? {
-            let message =
-                protocol::parse_jsonrpc(&line).ok_or_else(|| AgentError::ResponseError {
-                    reason: format!("invalid JSON-RPC message from acpx: {line}"),
-                })?;
+        let mut read_result = Ok(());
+        loop {
+            let line = match reader.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => {
+                    read_result = Err(AgentError::IoError {
+                        reason: format!("failed to read acpx stdout: {error}"),
+                    });
+                    break;
+                }
+            };
 
-            if let Some(update) = parse_session_update_from_message(&message)? {
+            let message = match protocol::parse_jsonrpc(&line) {
+                Some(message) => message,
+                None => {
+                    read_result = Err(AgentError::ResponseError {
+                        reason: format!("invalid JSON-RPC message from acpx: {line}"),
+                    });
+                    break;
+                }
+            };
+
+            let update = match parse_session_update_from_message(&message) {
+                Ok(update) => update,
+                Err(error) => {
+                    read_result = Err(error);
+                    break;
+                }
+            };
+
+            if let Some(update) = update {
                 if let Some(usage) = update.usage {
                     last_usage = Some(usage);
                 }
@@ -242,24 +281,31 @@ impl AcpxCli {
                     last_runtime_verdict = Some(verdict);
                 }
                 if let Some(content) = update.output_text {
-                    on_event(AgentEvent::OutputChunk {
-                        stream: RuntimeStream::Stdout,
-                        content,
-                    })
-                    .await;
+                    output_text.push_str(&content);
+                    if visible {
+                        on_event(AgentEvent::OutputChunk {
+                            stream: RuntimeStream::Stdout,
+                            content,
+                        })
+                        .await;
+                    }
                 }
                 if let Some(permission) = update.permission_request {
-                    on_event(AgentEvent::Warning {
-                        message: format!(
-                            "permission requested ({}): {}",
-                            permission.permission_id, permission.description
-                        ),
-                    })
-                    .await;
+                    if visible {
+                        on_event(AgentEvent::Warning {
+                            message: format!(
+                                "permission requested ({}): {}",
+                                permission.permission_id, permission.description
+                            ),
+                        })
+                        .await;
+                    }
                 }
                 if let Some(stop_reason) = update.stop_reason {
                     saw_terminal_event = true;
-                    on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                    if visible {
+                        on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                    }
                 }
                 continue;
             }
@@ -270,28 +316,44 @@ impl AcpxCli {
                 .and_then(protocol::parse_stop_reason_from_result)
             {
                 saw_terminal_event = true;
-                on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                if visible {
+                    on_event(map_stop_reason(stop_reason, last_usage.clone())).await;
+                }
                 continue;
             }
 
             if let Some(error) = message.error.as_ref() {
                 saw_terminal_event = true;
-                on_event(AgentEvent::RunFailed {
-                    reason: error.message.clone(),
-                    usage: last_usage.clone(),
-                })
-                .await;
+                if visible {
+                    on_event(AgentEvent::RunFailed {
+                        reason: error.message.clone(),
+                        usage: last_usage.clone(),
+                    })
+                    .await;
+                }
                 continue;
             }
 
-            on_event(AgentEvent::OtherMessage { raw: line }).await;
+            if visible {
+                on_event(AgentEvent::OtherMessage { raw: line }).await;
+            }
         }
 
-        let status = child.wait().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to wait for acpx prompt: {e}"),
-        })?;
+        let status = if read_result.is_err() {
+            cleanup_prompt_child(&mut child).await;
+            None
+        } else {
+            let wait_result = child.wait().await.map_err(|e| AgentError::IoError {
+                reason: format!("failed to wait for acpx prompt: {e}"),
+            });
+            Some(wait_result)
+        };
         // Wait for the stderr sink to finish draining and flushing.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stderr_task).await;
+
+        read_result?;
+
+        let status = status.expect("prompt status should be present when stdout read succeeds")?;
         if !status.success() {
             return Err(AgentError::AcpxCommandFailed {
                 command: "prompt".to_string(),
@@ -300,12 +362,16 @@ impl AcpxCli {
         }
         if !saw_terminal_event {
             return Err(AgentError::AcpxFinalStatusMissing {
-                context: format!("session '{session_name}' ended without a terminal event"),
+                context: format!(
+                    "session '{}' ended without a terminal event",
+                    request.session_name
+                ),
             });
         }
 
         Ok(PromptOutcome {
             runtime_verdict: last_runtime_verdict,
+            output_text,
         })
     }
 
@@ -448,13 +514,38 @@ fn map_stop_reason(stop_reason: StopReason, usage: Option<TokenUsage>) -> AgentE
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use crate::agent::events::{AgentEvent, TokenUsage};
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
-    use super::{AcpxCli, AcpxCommandOptions};
+    use super::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
+
+    fn prompt_request<'a>(
+        cwd: &'a Path,
+        prompt: &'a str,
+        visibility: PromptVisibility,
+    ) -> AcpxPromptRequest<'a> {
+        prompt_request_for("build-session", cwd, prompt, visibility)
+    }
+
+    fn prompt_request_for<'a>(
+        session_name: &'a str,
+        cwd: &'a Path,
+        prompt: &'a str,
+        visibility: PromptVisibility,
+    ) -> AcpxPromptRequest<'a> {
+        AcpxPromptRequest {
+            agent: "codex",
+            session_name,
+            cwd,
+            prompt,
+            options: AcpxCommandOptions::default(),
+            visibility,
+        }
+    }
 
     #[tokio::test]
     async fn ensure_session_uses_sessions_ensure_command() {
@@ -575,11 +666,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -612,11 +699,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -647,11 +730,7 @@ JSON
         let client = AcpxCli::new(script);
         let error = client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -681,11 +760,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":11,"result":{{"stopReason":"end_turn"}}}}'
         let client = AcpxCli::new(script);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let run = client.run_prompt(
-            "codex",
-            "build-session",
-            dir.path(),
-            "hi",
-            AcpxCommandOptions::default(),
+            prompt_request(dir.path(), "hi", PromptVisibility::Visible),
             |event| {
                 let tx = tx.clone();
                 async move {
@@ -732,11 +807,7 @@ JSON
         let client = AcpxCli::new(script);
         let error = client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -762,11 +833,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -807,11 +874,7 @@ JSON
         let client = AcpxCli::new(script);
         let outcome = client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -824,6 +887,37 @@ JSON
                 "summary": "lint errors"
             }))
         );
+    }
+
+    #[tokio::test]
+    async fn hidden_prompt_captures_output_without_emitting_events() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            temp.path(),
+            r#"#!/usr/bin/env bash
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+"#,
+        );
+        let cli = AcpxCli::new(script);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_callback = events.clone();
+
+        let outcome = cli
+            .run_prompt(
+                prompt_request_for("session", temp.path(), "extract", PromptVisibility::Hidden),
+                move |event| {
+                    let events_for_callback = events_for_callback.clone();
+                    async move {
+                        events_for_callback.lock().unwrap().push(event);
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.output_text, "{\"result\":\"succeeded\"}");
+        assert!(events.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -842,11 +936,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -923,11 +1013,7 @@ exec 0<&-
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client.run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                &prompt,
-                AcpxCommandOptions::default(),
+                prompt_request(dir.path(), &prompt, PromptVisibility::Visible),
                 |_| async {},
             ),
         )
@@ -942,6 +1028,50 @@ exec 0<&-
         assert!(
             !alive,
             "acpx child should be terminated after stdin write failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_protocol_error_kills_spawned_process() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_path = dir.path().join("pid.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                r#"#!/bin/bash
+printf '%s' "$$" > "{}"
+printf '%s\n' 'not-jsonrpc'
+/bin/sleep 30
+"#,
+                pid_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.run_prompt(
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
+                |_| async {},
+            ),
+        )
+        .await
+        .expect("run_prompt should not hang after invalid stdout")
+        .unwrap_err();
+
+        assert!(matches!(error, AgentError::ResponseError { .. }));
+
+        let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !alive,
+            "acpx child should be terminated after stdout protocol error"
         );
     }
 
@@ -964,11 +1094,7 @@ echo "stderr line 3" >&2
         let client = AcpxCli::new(script);
         client
             .run_prompt(
-                "codex",
-                "test-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request_for("test-session", dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -1006,11 +1132,7 @@ JSON
         let client = AcpxCli::new(script);
         client
             .run_prompt(
-                "codex",
-                "empty-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
+                prompt_request_for("empty-session", dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await

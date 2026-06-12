@@ -3,6 +3,7 @@ pub mod acpx_cli;
 pub mod acpx_runtime;
 pub mod cancellation;
 pub mod events;
+pub mod extraction;
 pub mod protocol;
 pub mod runtime;
 
@@ -31,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use acp_client::{
     discover_capabilities, run_acp_session, AcpCapabilityDiscoveryConfig, AcpSessionConfig,
-    TurnResult,
+    ExtractionContext, SessionTurn, TurnPurpose, TurnResult, TurnVisibility,
 };
 use acpx_runtime::AcpxRuntime;
 
@@ -76,15 +77,6 @@ pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, 
         args,
         env: Vec::new(),
     })
-}
-
-fn verdict_fallback_instruction(step_name: &str) -> String {
-    format!(
-        "If you cannot return a structured runtime verdict, write .ensemble/verdict-{step_name}.json with:\n\
-         {{\"verdict\":\"approve\"}}\n\
-         or\n\
-         {{\"verdict\":\"reject\",\"summary\":\"<reason>\"}}"
-    )
 }
 
 const DEFAULT_INTERACTION_POLICY_INSTRUCTION: &str = "\
@@ -287,11 +279,7 @@ impl AcpAgentRunner {
                 rendered,
                 resolve_interaction_policy_instruction(config, agent_name, step_name).as_deref(),
             );
-            Ok(maybe_append_verdict_fallback_instruction(
-                rendered,
-                config.agent.inject_verdict_fallback_instructions,
-                step_name,
-            ))
+            Ok(rendered)
         } else {
             // Continuation turns: send guidance, not the full original prompt
             Ok(format!(
@@ -337,24 +325,6 @@ fn maybe_append_synthesis_instruction(rendered: String, step_kind: StepKind) -> 
          Merge, compare, or adjudicate those final structured outputs. Do not assume intermediate tool calls or hidden reasoning are available unless the prompt included them explicitly. \
          Return a normal Ensemble verdict with a concise `summary` and, when useful, a structured `output` JSON value describing the merged result."
     )
-}
-
-fn maybe_append_verdict_fallback_instruction(
-    prompt: String,
-    enabled: bool,
-    step_name: &str,
-) -> String {
-    let instruction = verdict_fallback_instruction(step_name);
-    if !enabled || prompt.contains(&instruction) {
-        return prompt;
-    }
-
-    let trimmed = prompt.trim_end();
-    if trimmed.is_empty() {
-        instruction
-    } else {
-        format!("{trimmed}\n\n{instruction}")
-    }
 }
 
 fn resolve_interaction_policy_instruction(
@@ -467,9 +437,18 @@ async fn load_interaction_response(
     }
 }
 
-async fn detect_worker_result_with_runtime_verdict(
+#[cfg(test)]
+pub(super) fn succeeded_step_output() -> crate::pipeline::verdict::StepOutput {
+    crate::pipeline::verdict::StepOutput {
+        result: crate::pipeline::verdict::StepResult::Succeeded,
+        summary: None,
+        output: None,
+    }
+}
+
+pub(super) async fn detect_worker_result_with_output(
     workspace_path: &Path,
-    runtime_verdict: Option<serde_json::Value>,
+    output: crate::pipeline::verdict::StepOutput,
     step_name: &str,
 ) -> WorkerResult {
     let interaction_path = workspace_path
@@ -536,7 +515,7 @@ async fn detect_worker_result_with_runtime_verdict(
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
         None => WorkerResult::Success {
-            runtime_verdict,
+            output,
             approval_request,
         },
     }
@@ -544,7 +523,7 @@ async fn detect_worker_result_with_runtime_verdict(
 
 #[cfg(test)]
 async fn detect_worker_result(workspace_path: &Path, step_name: &str) -> WorkerResult {
-    detect_worker_result_with_runtime_verdict(workspace_path, None, step_name).await
+    detect_worker_result_with_output(workspace_path, succeeded_step_output(), step_name).await
 }
 
 async fn write_interaction_response_file(
@@ -751,40 +730,46 @@ impl AcpAgentRunner {
             cancel_token: request.cancel_token.clone(),
         };
 
-        let max_turns = config.agent.max_turns.max(1);
-        let mut prompts = Vec::with_capacity(max_turns as usize);
-        for turn in 1..=max_turns {
-            let prompt = self
-                .build_prompt(
-                    config.as_ref(),
-                    BuildPromptRequest {
-                        issue: request.issue,
-                        agent_name: request.agent_name,
-                        step_name: request.step_name,
-                        step_kind: request.step_kind,
-                        attempt: request.attempt,
-                        workspace_path: request.workspace_path,
-                        turn_number: turn,
-                        step_outputs: &request.step_outputs,
-                    },
-                )
-                .await?;
-            prompts.push(prompt);
-        }
+        let working_prompt = self
+            .build_prompt(
+                config.as_ref(),
+                BuildPromptRequest {
+                    issue: request.issue,
+                    agent_name: request.agent_name,
+                    step_name: request.step_name,
+                    step_kind: request.step_kind,
+                    attempt: request.attempt,
+                    workspace_path: request.workspace_path,
+                    turn_number: 1,
+                    step_outputs: &request.step_outputs,
+                },
+            )
+            .await?;
+        let working_turn = SessionTurn {
+            prompt: working_prompt.clone(),
+            visibility: TurnVisibility::Visible,
+            purpose: TurnPurpose::Working,
+        };
+        let extraction_context = ExtractionContext {
+            step_name: request.step_name.to_string(),
+            issue_identifier: request.issue.identifier.clone(),
+            original_prompt: working_prompt,
+        };
 
-        let (final_verdict, turn_results, capabilities) = run_acp_session(
+        let outcome = run_acp_session(
             session_config,
-            prompts,
+            working_turn,
+            extraction_context,
             &request.issue.id,
             request.step_name,
             &request.event_tx,
         )
         .await?;
 
-        self.store_agent_capabilities(request.agent_name, capabilities)
+        self.store_agent_capabilities(request.agent_name, outcome.capabilities)
             .await;
 
-        for (i, result) in turn_results.iter().enumerate() {
+        for (i, result) in outcome.turn_results.iter().enumerate() {
             if let TurnResult::Failed { reason, .. } = result {
                 return Err(AgentError::TurnFailed {
                     reason: format!("turn {} failed: {}", i + 1, reason),
@@ -792,9 +777,9 @@ impl AcpAgentRunner {
             }
         }
 
-        Ok(detect_worker_result_with_runtime_verdict(
+        Ok(detect_worker_result_with_output(
             request.workspace_path,
-            final_verdict,
+            outcome.output,
             request.step_name,
         )
         .await)
@@ -889,7 +874,7 @@ mod tests {
 
             if self.should_succeed {
                 Ok(WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: succeeded_step_output(),
                     approval_request: None,
                 })
             } else {
@@ -1111,9 +1096,9 @@ on_failure: Todo
         assert!(matches!(
             result,
             Ok(WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            })
+            }) if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
 
         let evt = rx.try_recv().unwrap();
@@ -1172,6 +1157,16 @@ case "$*" in
     exit 0
     ;;
   *"prompt --session"*)
+    prompt=""
+    while IFS= read -r line; do
+      prompt="${prompt}${line}"
+    done
+    if [[ "$prompt" == *"Extract the Ensemble step result"* ]]; then
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}' \
+        '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+      exit 0
+    fi
     printf '%s\n' \
       '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
       '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
@@ -1216,9 +1211,9 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
@@ -1235,6 +1230,16 @@ exit 1
             r#"#!/bin/bash
 case "$*" in
   *"prompt --session"*)
+    prompt=""
+    while IFS= read -r line; do
+      prompt="${prompt}${line}"
+    done
+    if [[ "$prompt" == *"Extract the Ensemble step result"* ]]; then
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}' \
+        '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+      exit 0
+    fi
     printf '%s\n' \
       '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
       '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
@@ -1273,9 +1278,9 @@ exit 0
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
@@ -1287,34 +1292,6 @@ exit 0
         tokio::fs::write(ensemble_dir.join(name), contents)
             .await
             .unwrap();
-    }
-
-    #[test]
-    fn injects_verdict_block_when_enabled() {
-        let prompt = "Do the work.".to_string();
-        let rendered = maybe_append_verdict_fallback_instruction(prompt, true, "build");
-        assert!(rendered.contains("write .ensemble/verdict-build.json"));
-    }
-
-    #[test]
-    fn does_not_inject_verdict_block_when_disabled() {
-        let prompt = "Do the work.".to_string();
-        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), false, "build");
-        assert_eq!(rendered, prompt);
-    }
-
-    #[test]
-    fn does_not_duplicate_verdict_block_when_present() {
-        let instruction = verdict_fallback_instruction("build");
-        let prompt = format!("Do work.\n\n{instruction}");
-        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), true, "build");
-        assert_eq!(rendered, prompt);
-        assert_eq!(
-            rendered
-                .matches("write .ensemble/verdict-build.json")
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -1682,9 +1659,9 @@ agent:
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
     }
 
@@ -1780,7 +1757,7 @@ on_failure: Todo
             .unwrap();
 
         assert!(prompt.starts_with("question: Use staging"));
-        assert!(prompt.contains("write .ensemble/verdict-build.json"));
+        assert!(!prompt.contains("write .ensemble/verdict-build.json"));
     }
 
     #[tokio::test]
@@ -1845,7 +1822,7 @@ on_failure: Todo
             .unwrap();
 
         assert!(prompt.starts_with("hi"));
-        assert!(prompt.contains("write .ensemble/verdict-build.json"));
+        assert!(!prompt.contains("write .ensemble/verdict-build.json"));
     }
 
     #[tokio::test]

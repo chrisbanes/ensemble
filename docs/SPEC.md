@@ -89,7 +89,8 @@ Important boundary:
 
 5. `Pipeline Engine`
    - Builds a step DAG from `config.yaml` step definitions.
-   - Executes pipeline steps per issue, dispatching agents and collecting verdicts.
+   - Executes pipeline steps per issue, dispatching agents and collecting validated `StepOutput`
+     results.
    - Drives tracker state transitions at step boundaries.
    - Enforces concurrency limits (global and per-issue).
 
@@ -111,7 +112,7 @@ Important boundary:
    - Launches the coding agent via ACP over stdio from a structured command; implementations should
      avoid shell interpolation for agent command arguments.
    - Streams agent updates back to the orchestrator.
-   - Collects verdict (ACP protocol field or `.ensemble/verdict.json` fallback).
+   - Runs a hidden extraction turn in the same runtime session and collects a validated `StepOutput`.
 
 8. `Status Surface` (optional)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
@@ -199,7 +200,7 @@ Parsed `config.yaml` payload:
 - `on_success` (string)
   - Terminal tracker state when all pipeline steps pass.
 - `on_failure` (string)
-  - Terminal tracker state when any pipeline step fails or rejects.
+  - Terminal tracker state when any pipeline step fails.
 - `concurrency` (ConcurrencyConfig)
   - `max_concurrent_agents` (global cap) and `max_step_parallelism` (per-issue cap).
 - `max_cycles` (integer, default 3)
@@ -266,9 +267,9 @@ Step states:
 - `Running` — agent dispatched, session active
 - `AwaitingApproval` — step completed but blocked on an approval gate. The orchestrator
   holds the pipeline here until a `approve_gate` or `reject_gate` signal is received.
-- `Passed` — agent exited successfully with approve verdict (or no verdict), or approved at an
-  approval gate
-- `Rejected` — agent exited successfully with reject verdict, or rejected at an approval gate
+- `Passed` — agent exited successfully with a `succeeded` or `concern` result, or was approved at
+  an approval gate
+- `Rejected` — agent exited successfully with a `failed` result, or was rejected at an approval gate
 - `Failed` — agent crashed, timed out, or errored
 
 **Post-step approval checkpoints:** When a step succeeds and has `approval` configured, the
@@ -291,26 +292,33 @@ Pipeline run recovery:
 - A `released` transition prevents older snapshots for the issue from being restored after
   completion, stop, terminal reconciliation, or whole-issue retry.
 
-#### 4.1.7 Verdict
+#### 4.1.7 StepOutput
 
-Agent judgment returned after a pipeline step completes:
+Structured result returned after a pipeline step completes:
 
-- `verdict` (string: `"approve"`, `"reject"`, or null)
-  - `"approve"` — step passed.
-  - `"reject"` — step failed quality/review check.
-  - null/absent — treated as `"approve"` (backwards compatible for non-review agents).
-- `summary` (string or null) — human-readable explanation of the verdict.
-- `output` (JSON value or null) — arbitrary structured data produced by a step for downstream
+- `result` (string: `"succeeded"`, `"failed"`, or `"concern"`)
+  - `"succeeded"` — step passed.
+  - `"failed"` — step failed quality/review checks or could not complete the requested work.
+  - `"concern"` — step passed with a non-blocking concern that downstream steps can inspect.
+- `summary` (string or null) — human-readable explanation of the result. Required and non-empty for
+  `failed` and `concern`; optional for `succeeded`.
+- `output` (JSON value or null) — optional structured data produced by a step for downstream
   prompt templates.
 
-Verdict sources (checked in priority order):
+Result extraction:
 
-1. ACP protocol: `verdict` field in the final `session/update` status event.
-2. File-based fallback: `.ensemble/verdict.json` in the workspace directory.
+1. The agent performs its visible working turn.
+2. Ensemble runs a hidden extraction turn in the same runtime session to produce `StepOutput`.
+3. If extraction produces invalid JSON or violates the result contract, Ensemble runs one hidden
+   repair turn.
+4. If repair also fails, the worker fails and the orchestrator applies the configured retry or
+   failure behavior.
+
+There is no default-success result. A step must produce valid `StepOutput` through extraction.
 
 Prompt templates for downstream steps receive:
 
-- `steps` — map of completed step name to `{ step, verdict, summary, output }`.
+- `steps` — map of completed step name to `{ step, result, summary, output }`.
 - `dependency_outputs` — ordered list of direct dependency outputs for the step being dispatched.
 
 #### 4.1.8 Run Attempt
@@ -684,7 +692,7 @@ Terminal tracker state to write when all pipeline steps pass. Required.
 
 #### 5.3.6 `on_failure` (string)
 
-Terminal tracker state to write when any pipeline step fails or a review agent rejects. Required.
+Terminal tracker state to write when any pipeline step fails or returns a failed result. Required.
 
 #### 5.3.7 `concurrency` (object)
 
@@ -812,11 +820,11 @@ Template input variables:
   - `null`/absent on first attempt.
   - Integer on retry or continuation run.
 - `steps` (map of string to object, optional)
-  - Present when upstream steps have completed. Each entry contains `step`, `verdict`, `summary`,
+  - Present when upstream steps have completed. Each entry contains `step`, `result`, `summary`,
     and `output` fields.
 - `dependency_outputs` (list of objects, optional)
   - Ordered list of outputs from the step's direct dependencies. Each entry has the same shape as
-    `steps` entries: `{ step, verdict, summary, output }`.
+    `steps` entries: `{ step, result, summary, output }`.
 
 Synthesis steps receive the same `steps` and `dependency_outputs` variables as normal steps. The
 runtime appends synthesis-specific guidance to the first turn prompt, instructing the agent to
@@ -1728,7 +1736,7 @@ Orchestrator-driven writes:
   to the tracker (for example "In Progress", "In Review").
 - **Pipeline success**: When all steps pass, the orchestrator writes `on_success` (for example
   "Done").
-- **Pipeline failure/rejection**: When any step fails or a review agent rejects, the orchestrator
+- **Pipeline failure/rejection**: When any step fails or returns a failed result, the orchestrator
   writes `on_failure` (for example "Needs Rework"). This is a terminal state from the pipeline's
   perspective — a human must intervene.
 
@@ -1791,7 +1799,7 @@ Implementations may append runtime-owned instruction blocks after template rende
 
 At minimum, Ensemble v1 appends:
 
-- verdict fallback instructions (enabled by default)
+- result extraction instructions for the hidden extraction turn
 - interaction-policy guidance (enabled by default), including:
   - prefer batched clarification requests instead of one-by-one ping-pong
   - this is a soft preference, not a strict prohibition
@@ -2695,7 +2703,8 @@ Use the same validation profiles as Section 17:
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch + write operations
 - Pipeline engine with step DAG construction, validation, and per-issue execution
-- Verdict collection from ACP protocol and file-based fallback
+- Validated `StepOutput` extraction from the hidden extraction turn, with one repair attempt if
+  extraction is invalid
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)

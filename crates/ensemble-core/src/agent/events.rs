@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::interaction::InteractionKind;
+use crate::pipeline::verdict::StepOutput;
 
 /// Token usage reported by the ACP agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -225,7 +226,7 @@ pub enum WorkerEvent {
 #[derive(Debug, Clone)]
 pub enum WorkerResult {
     Success {
-        runtime_verdict: Option<serde_json::Value>,
+        output: StepOutput,
         approval_request: Option<StepApprovalRequestDraft>,
     },
     BlockedOnHuman {
@@ -351,7 +352,11 @@ mod tests {
     #[test]
     fn test_worker_result_is_success() {
         assert!(WorkerResult::Success {
-            runtime_verdict: None,
+            output: StepOutput {
+                result: crate::pipeline::verdict::StepResult::Succeeded,
+                summary: None,
+                output: None,
+            },
             approval_request: None,
         }
         .is_success());

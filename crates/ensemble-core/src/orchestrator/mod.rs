@@ -51,7 +51,7 @@ use crate::pipeline::engine::{
     DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, StepOutputTemplateContext,
     StepState,
 };
-use crate::pipeline::verdict::{resolve_verdict_with_source, StepResult, VerdictSource};
+use crate::pipeline::verdict::StepResult;
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::{Issue, RetryEntry};
 use crate::tracker::IssueTracker;
@@ -1211,40 +1211,20 @@ impl Orchestrator {
 
         match result {
             WorkerResult::Success {
-                runtime_verdict,
+                output,
                 approval_request,
             } => {
                 let config = self.config.read().await;
                 info!(
                     issue_id = %issue_id,
                     step = step_name,
-                    "worker exited successfully, resolving verdict"
+                    "worker exited successfully"
                 );
 
                 let mut state = self.state.write().await;
 
-                // Resolve verdict from workspace
-                let workspace_path = self.workspace_mgr.workspace_path(
-                    issue_snapshot
-                        .as_ref()
-                        .map(|i| i.identifier.as_str())
-                        .unwrap_or(issue_id),
-                );
-                let resolved = match workspace_path {
-                    Some(wp) => {
-                        resolve_verdict_with_source(runtime_verdict.as_ref(), &wp, step_name).await
-                    }
-                    None => crate::pipeline::verdict::ResolvedResult {
-                        result: StepResult::Succeeded,
-                        output: crate::pipeline::verdict::StepOutput {
-                            result: StepResult::Succeeded,
-                            summary: None,
-                            output: None,
-                        },
-                        source: VerdictSource::Default,
-                    },
-                };
-                let verdict_value = match &resolved.result {
+                let resolved_output = output;
+                let verdict_value = match &resolved_output.result {
                     StepResult::Succeeded => "succeeded",
                     StepResult::Failed { .. } => "failed",
                     StepResult::Concern { .. } => "concern",
@@ -1252,22 +1232,14 @@ impl Orchestrator {
                 info!(
                     issue_id = %issue_id,
                     step = step_name,
-                    verdict_source = ?resolved.source,
                     verdict_value,
-                    "resolved step verdict"
+                    "received validated step result"
                 );
-                if matches!(resolved.source, VerdictSource::Default) {
-                    warn!(
-                        issue_id = %issue_id,
-                        step = step_name,
-                        "no runtime or file verdict found; defaulting to approve"
-                    );
-                }
 
                 // Drive the pipeline
                 let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                     Some((
-                        run.step_completed(step_name, resolved.output, approval_request.is_some()),
+                        run.step_completed(step_name, resolved_output, approval_request.is_some()),
                         state.get_pipeline_config(issue_id).cloned(),
                     ))
                 } else {
@@ -4795,9 +4767,27 @@ mod tests {
                 return Err(AgentError::TurnCancelled);
             }
             Ok(WorkerResult::Success {
-                runtime_verdict: None,
+                output: succeeded_step_output(),
                 approval_request: None,
             })
+        }
+    }
+
+    fn succeeded_step_output() -> crate::pipeline::verdict::StepOutput {
+        crate::pipeline::verdict::StepOutput {
+            result: crate::pipeline::verdict::StepResult::Succeeded,
+            summary: None,
+            output: None,
+        }
+    }
+
+    fn failed_step_output(summary: &str) -> crate::pipeline::verdict::StepOutput {
+        crate::pipeline::verdict::StepOutput {
+            result: crate::pipeline::verdict::StepResult::Failed {
+                summary: summary.to_string(),
+            },
+            summary: Some(summary.to_string()),
+            output: None,
         }
     }
 
@@ -5387,10 +5377,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: Some(serde_json::json!({
-                        "result": "failed",
-                        "summary": "tests failed"
-                    })),
+                    output: failed_step_output("tests failed"),
                     approval_request: None,
                 },
             )
@@ -5872,7 +5859,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: succeeded_step_output(),
                     approval_request: None,
                 },
             )
@@ -5926,10 +5913,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: Some(serde_json::json!({
-                        "result": "failed",
-                        "summary": "tests failed"
-                    })),
+                    output: failed_step_output("tests failed"),
                     approval_request: None,
                 },
             )
@@ -6007,10 +5991,7 @@ agent:
                 "1",
                 "fixup-review",
                 WorkerResult::Success {
-                    runtime_verdict: Some(serde_json::json!({
-                        "result": "failed",
-                        "summary": "fixup could not repair"
-                    })),
+                    output: failed_step_output("fixup could not repair"),
                     approval_request: None,
                 },
             )
@@ -6070,10 +6051,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: Some(serde_json::json!({
-                        "result": "failed",
-                        "summary": "needs manual repair"
-                    })),
+                    output: failed_step_output("needs manual repair"),
                     approval_request: None,
                 },
             )
@@ -6104,8 +6082,8 @@ agent:
     }
 
     #[tokio::test]
-    async fn test_worker_exit_runtime_verdict_overrides_file_verdict() {
-        let config = Arc::new(RwLock::new(make_config()));
+    async fn test_worker_exit_uses_typed_step_output() {
+        let config = Arc::new(RwLock::new(make_halt_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
@@ -6156,78 +6134,20 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: Some(serde_json::json!({"verdict":"approve"})),
+                    output: failed_step_output("tests failed"),
                     approval_request: None,
                 },
             )
             .await;
 
         let state = orchestrator.state.read().await;
-        assert!(state.completed.contains_key("1"));
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .and_then(|run| run.step_states.get("build")),
+            Some(StepState::Failed { summary }) if summary == "tests failed"
+        ));
         assert!(!state.retry_attempts.contains_key("1"));
-    }
-
-    #[tokio::test]
-    async fn test_worker_exit_uses_file_verdict_when_runtime_missing() {
-        let config = Arc::new(RwLock::new(make_config()));
-        let issues = Arc::new(RwLock::new(vec![]));
-        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
-            delay_ms: 0,
-            observed_commands: None,
-            cancellation_probe: None,
-        });
-        let dir = tempfile::TempDir::new().unwrap();
-        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
-        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
-
-        let orchestrator = Orchestrator::new(
-            config.clone(),
-            tracker,
-            runner,
-            workspace_mgr,
-            dir.path(),
-            shutdown_rx,
-        );
-
-        {
-            let cfg = config.read().await;
-            let mut state = orchestrator.state.write().await;
-            state.add_running(&test_issue("1", "Todo"), None);
-            let dag = build_dag(&cfg.steps).unwrap();
-            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
-            pipeline_run.start();
-            pipeline_run.mark_running("build", "session-1".to_string());
-            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
-        }
-
-        let workspace = orchestrator
-            .workspace_mgr
-            .workspace_path("repo#1")
-            .expect("workspace path");
-        tokio::fs::create_dir_all(workspace.join(".ensemble"))
-            .await
-            .unwrap();
-        tokio::fs::write(
-            workspace.join(".ensemble").join("verdict-build.json"),
-            r#"{"verdict":"reject","summary":"broken"}"#,
-        )
-        .await
-        .unwrap();
-
-        orchestrator
-            .handle_worker_exit(
-                "1",
-                "build",
-                WorkerResult::Success {
-                    runtime_verdict: None,
-                    approval_request: None,
-                },
-            )
-            .await;
-
-        let state = orchestrator.state.read().await;
-        assert!(state.retry_attempts.contains_key("1"));
     }
 
     #[tokio::test]
@@ -6290,7 +6210,7 @@ agent:
                     "1",
                     "build",
                     WorkerResult::Success {
-                        runtime_verdict: None,
+                        output: failed_step_output("tests failed"),
                         approval_request: None,
                     },
                 )
@@ -6347,7 +6267,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: succeeded_step_output(),
                     approval_request: None,
                 },
             )
@@ -7259,7 +7179,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: succeeded_step_output(),
                     approval_request: Some(StepApprovalRequestDraft {
                         schema_version: 1,
                         title: "Approve plan".to_string(),
@@ -7921,7 +7841,7 @@ agent:
                 "1",
                 "docs",
                 WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: succeeded_step_output(),
                     approval_request: None,
                 },
             )
@@ -9412,7 +9332,7 @@ agent:
                 "1",
                 "build",
                 WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: succeeded_step_output(),
                     approval_request: None,
                 },
             )
