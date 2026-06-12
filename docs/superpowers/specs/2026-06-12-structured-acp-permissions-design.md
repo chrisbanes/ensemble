@@ -19,6 +19,7 @@ The correct client behavior is to choose one of the offered options and respond 
 - Make direct ACP permission responses protocol-correct.
 - Remove description and display-text heuristics from permission decisions.
 - Remove compatibility with the legacy `approve_reads_reject_writes` policy.
+- Allow advanced users to select a known ACP permission option ID explicitly.
 - Emit structured permission events that include option IDs and selected outcomes.
 - Keep permission behavior simple, explicit, and testable.
 
@@ -31,10 +32,30 @@ The correct client behavior is to choose one of the offered options and respond 
 
 ## Policy Model
 
-Replace the open string behavior of `agent.permission_request_policy` with a validated policy set:
+Replace the open string behavior of `agent.permission_request_policy` with a validated tagged policy:
+
+```yaml
+agent:
+  permission_request_policy:
+    mode: approve_all
+```
+
+Supported modes:
 
 - `approve_all`
 - `reject_all`
+- `select_option`
+
+`select_option` requires an explicit ACP permission option ID:
+
+```yaml
+agent:
+  permission_request_policy:
+    mode: select_option
+    option_id: allow_always
+```
+
+This is intentionally an option ID selector, not a request ID selector. ACP permission responses select one of the request's offered `PermissionOption.option_id` values. The agent/client chooses those option IDs, so this mode is for users who know the concrete ACP client behavior they are configuring.
 
 `approve_reads_reject_writes` should be removed. If a config still uses it, config loading should fail with a clear error explaining that Ensemble no longer supports heuristic read/write permission classification for direct ACP permission callbacks.
 
@@ -42,7 +63,13 @@ The existing `auto_approve_all` spelling should also be removed. The long-term p
 
 ## Permission Selection
 
-Permission handling should inspect only `PermissionOptionKind` when choosing a response option.
+Permission handling should use only structured ACP fields when choosing a response option. Built-in policies use `PermissionOptionKind`; `select_option` uses an exact `PermissionOption.option_id`.
+
+For `select_option`:
+
+1. Find an offered option whose `option_id` exactly matches the configured `option_id`.
+2. Select that option regardless of its label or kind.
+3. If the option is not offered on this request, respond with `RequestPermissionOutcome::Cancelled`.
 
 For `approve_all`:
 
@@ -63,6 +90,8 @@ RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option.option_
 ```
 
 `Cancelled` should mean "no suitable offered option exists" or "the prompt turn was actually cancelled." It should not be the normal representation of a deny decision when a reject option is available.
+
+`select_option` is the only mode that matches a literal option ID. The built-in `approve_all` and `reject_all` modes stay portable by selecting from semantic `PermissionOptionKind` values and then returning the chosen option's ID.
 
 ## Event Model
 
@@ -94,9 +123,11 @@ The emitted `Warning` and generic `Notification` messages currently used around 
 Update `docs/SPEC.md` and `docs/configuration.md` to say:
 
 - `agent.permission_request_policy` applies only to direct ACP runtime paths.
-- Supported values are `approve_all` and `reject_all`.
+- Supported modes are `approve_all`, `reject_all`, and `select_option`.
 - Ensemble selects from ACP `PermissionOption[]` by `PermissionOptionKind` and responds using the selected `option_id`.
+- `select_option` selects a configured ACP `PermissionOption.option_id` exactly and is intended for client-specific configurations.
 - Ensemble does not support read/write permission inference because ACP tool call display fields are not an authorization semantics contract.
+- Known option IDs for supported ACP clients should be documented with examples as they are verified. These examples are documentation aids, not protocol guarantees.
 
 ## Testing
 
@@ -106,6 +137,8 @@ Add focused unit tests around the permission selection helper:
 - `approve_all` falls back to `AllowOnce`.
 - `reject_all` selects `RejectOnce` before `RejectAlways`.
 - `reject_all` falls back to `RejectAlways`.
+- `select_option` selects the exact configured option ID.
+- `select_option` returns `Cancelled` when the configured option ID is not offered.
 - no matching option yields `Cancelled`.
 - option names, tool titles, and serialized tool call text do not affect selection.
 
@@ -113,6 +146,7 @@ Add config tests:
 
 - `approve_all` parses and validates.
 - `reject_all` parses and validates.
+- `select_option` requires a non-empty `option_id`.
 - `approve_reads_reject_writes` is rejected with a clear message.
 - unknown values are rejected with a clear message.
 
