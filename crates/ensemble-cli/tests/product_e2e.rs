@@ -1,3 +1,5 @@
+#![cfg(feature = "web-ui")]
+
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;

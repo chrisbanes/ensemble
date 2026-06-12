@@ -424,7 +424,7 @@ fn section_contains_issue(markdown: &str, section: &str, issue_id: &str) -> bool
 Run:
 
 ```sh
-cargo test -p ensemble-cli --test product_e2e -- --nocapture
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
 ```
 
 Expected before any fixes: this may either pass immediately or fail with a concrete product/fixture error. Acceptable failures include a config validation error, mock `acpx` invocation mismatch, timeout waiting for completion, or an assertion that points at a missing observable. Do not broaden scope for retry, human interaction, or UI automation. Keep both `Todo` and `In Progress` in `active_states`; `In Progress` is required because the step transitions the tracker to that state while the worker runs.
@@ -454,7 +454,7 @@ Expected: the matcher handles the actual `acpx` argument order emitted by `AcpxC
 Run:
 
 ```sh
-cargo test -p ensemble-cli --test product_e2e -- --nocapture
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
 ```
 
 Expected: `web_cli_runs_todo_issue_to_completion_with_mock_acpx ... ok`.
@@ -485,7 +485,7 @@ In `docs/contributing.md`, after the initial build/test command block, add:
 Run the black-box product workflow test with:
 
 ```sh
-cargo test -p ensemble-cli --test product_e2e -- --nocapture
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
 ```
 
 The test starts the real `ensemble web` CLI entrypoint on localhost with a temporary config directory, a todo-file tracker fixture, and a mock `acpx` executable. It does not require GitHub, Notion, real ACP credentials, or network access beyond localhost.
@@ -496,7 +496,7 @@ The test starts the real `ensemble web` CLI entrypoint on localhost with a tempo
 Run:
 
 ```sh
-cargo test -p ensemble-cli --test product_e2e -- --nocapture
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
 ```
 
 Expected: the E2E test still passes. There is no separate Markdown linter in this repository, so the practical validation is keeping the documented command accurate.
@@ -523,7 +523,7 @@ git commit -m "docs: document product e2e test"
 Run:
 
 ```sh
-cargo test -p ensemble-cli --test product_e2e -- --nocapture
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
 ```
 
 Expected: the product E2E test passes.

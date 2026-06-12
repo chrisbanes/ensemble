@@ -116,7 +116,7 @@ Bound all polling with clear timeout errors so CI failures point at the missing 
 Update `docs/contributing.md` with a short E2E section:
 
 ```sh
-cargo test -p ensemble-cli --test product_e2e
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e
 ```
 
 Mention that the test uses temp files, a mock `acpx`, and localhost only.
