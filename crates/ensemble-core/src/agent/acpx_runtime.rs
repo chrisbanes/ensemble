@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -147,77 +148,25 @@ impl AcpxRuntime {
         let event_count = Arc::new(AtomicUsize::new(0));
         let prompt_start = std::time::Instant::now();
         let cb_count = event_count.clone();
-        let run_prompt = self.cli.run_prompt(
-            acpx_agent,
-            &session_name,
-            request.workspace_path,
-            prompt,
-            command_options,
-            PromptVisibility::Visible,
-            |event| {
-                cb_count.fetch_add(1, Ordering::Relaxed);
-                emit_event(
-                    &request.event_tx,
-                    &request.issue.id,
-                    request.step_name,
-                    event,
-                )
-            },
-        );
-        tokio::pin!(run_prompt);
-
-        let prompt_result = tokio::select! {
-            result = &mut run_prompt => result,
-            _ = request.cancel_token.cancelled() => {
-                debug!(
-                    issue_id = %request.issue.id,
-                    step = request.step_name,
-                    session_name,
-                    "cancelling acpx prompt"
-                );
-                self.cli
-                    .cancel(
-                        acpx_agent,
-                        &session_name,
-                        request.workspace_path,
-                        command_options,
+        let prompt_result = self
+            .run_prompt_with_cancellation(
+                request,
+                acpx_agent,
+                &session_name,
+                prompt,
+                command_options,
+                PromptVisibility::Visible,
+                |event| {
+                    cb_count.fetch_add(1, Ordering::Relaxed);
+                    emit_event(
+                        &request.event_tx,
+                        &request.issue.id,
+                        request.step_name,
+                        event,
                     )
-                    .await?;
-
-                emit_event(
-                    &request.event_tx,
-                    &request.issue.id,
-                    request.step_name,
-                    AgentEvent::Cancelled {
-                        reason: Some("cancel requested".to_string()),
-                    },
-                )
-                .await;
-
-                // Wait for the prompt process to exit after cancellation, with a timeout
-                // to prevent hanging if acpx fails to exit gracefully.
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_prompt).await;
-
-                close_session(
-                    &self.cli,
-                    acpx_agent,
-                    &session_name,
-                    request.workspace_path,
-                    command_options,
-                )
-                .await;
-                info!(
-                    event = ACPX_PROMPT_CANCELLED,
-                    issue_id = %request.issue.id,
-                    step = request.step_name,
-                    session_name,
-                    event_count = event_count.load(Ordering::Relaxed),
-                    duration_ms = elapsed_ms(prompt_start),
-                    "acpx prompt cancelled"
-                );
-                return Err(AgentError::TurnCancelled);
-            }
-        };
+                },
+            )
+            .await;
 
         let count = event_count.load(Ordering::Relaxed);
         let duration = elapsed_ms(prompt_start);
@@ -242,11 +191,10 @@ impl AcpxRuntime {
                         &visible_outcome.output_text,
                     );
                     let extraction_outcome = self
-                        .cli
-                        .run_prompt(
+                        .run_prompt_with_cancellation(
+                            request,
                             acpx_agent,
                             &session_name,
-                            request.workspace_path,
                             &extraction_prompt,
                             command_options,
                             PromptVisibility::Hidden,
@@ -269,11 +217,10 @@ impl AcpxRuntime {
                                 &previous_payload,
                             );
                             let repair_outcome = self
-                                .cli
-                                .run_prompt(
+                                .run_prompt_with_cancellation(
+                                    request,
                                     acpx_agent,
                                     &session_name,
-                                    request.workspace_path,
                                     &repair_prompt,
                                     command_options,
                                     PromptVisibility::Hidden,
@@ -302,16 +249,28 @@ impl AcpxRuntime {
                 .await
             }
             Err(e) => {
-                warn!(
-                    event = ACPX_PROMPT_FAILED,
-                    issue_id = %request.issue.id,
-                    step = request.step_name,
-                    session_name,
-                    event_count = count,
-                    duration_ms = duration,
-                    error = %e,
-                    "acpx prompt failed"
-                );
+                if matches!(e, AgentError::TurnCancelled) {
+                    info!(
+                        event = ACPX_PROMPT_CANCELLED,
+                        issue_id = %request.issue.id,
+                        step = request.step_name,
+                        session_name,
+                        event_count = count,
+                        duration_ms = duration,
+                        "acpx prompt cancelled"
+                    );
+                } else {
+                    warn!(
+                        event = ACPX_PROMPT_FAILED,
+                        issue_id = %request.issue.id,
+                        step = request.step_name,
+                        session_name,
+                        event_count = count,
+                        duration_ms = duration,
+                        error = %e,
+                        "acpx prompt failed"
+                    );
+                }
                 Err(e)
             }
         };
@@ -326,6 +285,68 @@ impl AcpxRuntime {
         .await;
 
         step_result
+    }
+
+    async fn run_prompt_with_cancellation<F, Fut>(
+        &self,
+        request: &AgentRunRequest<'_>,
+        acpx_agent: &str,
+        session_name: &str,
+        prompt: &str,
+        command_options: AcpxCommandOptions<'_>,
+        visibility: PromptVisibility,
+        on_event: F,
+    ) -> Result<super::acpx_cli::PromptOutcome, AgentError>
+    where
+        F: FnMut(AgentEvent) -> Fut,
+        Fut: Future<Output = ()> + Send,
+    {
+        let run_prompt = self.cli.run_prompt(
+            acpx_agent,
+            session_name,
+            request.workspace_path,
+            prompt,
+            command_options,
+            visibility,
+            on_event,
+        );
+        tokio::pin!(run_prompt);
+
+        tokio::select! {
+            result = &mut run_prompt => result,
+            _ = request.cancel_token.cancelled() => {
+                debug!(
+                    issue_id = %request.issue.id,
+                    step = request.step_name,
+                    session_name,
+                    "cancelling acpx prompt"
+                );
+                self.cli
+                    .cancel(
+                        acpx_agent,
+                        session_name,
+                        request.workspace_path,
+                        command_options,
+                    )
+                    .await?;
+
+                if visibility == PromptVisibility::Visible {
+                    emit_event(
+                        &request.event_tx,
+                        &request.issue.id,
+                        request.step_name,
+                        AgentEvent::Cancelled {
+                            reason: Some("cancel requested".to_string()),
+                        },
+                    )
+                    .await;
+                }
+
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_prompt).await;
+
+                Err(AgentError::TurnCancelled)
+            }
+        }
     }
 }
 
@@ -657,6 +678,190 @@ exit 1
             AgentError::ResponseError { reason } if reason.contains("verdict extraction failed")
         ));
         let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("sessions close"));
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_cancels_hidden_extraction_and_closes_session() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let extraction_started_path = workspace.path().join("extraction-started.flag");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    prompt=$(cat)
+    if [[ "$prompt" == Extract* ]]; then
+      : > "{}"
+      while [ ! -f "{}/cancelled.flag" ]; do
+        /bin/sleep 0.05
+      done
+      printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"stopReason":"cancelled"}}}}'
+    else
+      printf '%s\n' \
+        '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"visible"}}}}}}}}' \
+        '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+    fi
+    exit 0
+    ;;
+  *" cancel --session "*)
+    : > "{}/cancelled.flag"
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display(),
+                extraction_started_path.display(),
+                workspace.path().display(),
+                workspace.path().display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let cancel_token = CancellationToken::new();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: cancel_token.clone(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let canceller = tokio::spawn({
+            let cancel_token = cancel_token.clone();
+            let extraction_started_path = extraction_started_path.clone();
+            async move {
+                while !extraction_started_path.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                cancel_token.cancel();
+            }
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            runner.run_step(&request, "finish the task"),
+        )
+        .await
+        .expect("hidden extraction cancellation should not hang");
+        canceller.await.unwrap();
+
+        assert!(matches!(result, Err(AgentError::TurnCancelled)));
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("cancel --session"));
+        assert!(args.contains("sessions close"));
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_cancels_hidden_repair_and_closes_session() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let repair_started_path = workspace.path().join("repair-started.flag");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    prompt=$(cat)
+    if [[ "$prompt" == Extract* ]]; then
+      printf '%s\n' \
+        '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"failed\"}}"}}}}}}}}' \
+        '{{"jsonrpc":"2.0","id":2,"result":{{"stopReason":"end_turn"}}}}'
+    elif [[ "$prompt" == "The previous Ensemble step result was invalid."* ]]; then
+      : > "{}"
+      while [ ! -f "{}/cancelled.flag" ]; do
+        /bin/sleep 0.05
+      done
+      printf '%s\n' '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"cancelled"}}}}'
+    else
+      printf '%s\n' \
+        '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"visible"}}}}}}}}' \
+        '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+    fi
+    exit 0
+    ;;
+  *" cancel --session "*)
+    : > "{}/cancelled.flag"
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display(),
+                repair_started_path.display(),
+                workspace.path().display(),
+                workspace.path().display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let cancel_token = CancellationToken::new();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: cancel_token.clone(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let canceller = tokio::spawn({
+            let cancel_token = cancel_token.clone();
+            let repair_started_path = repair_started_path.clone();
+            async move {
+                while !repair_started_path.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+                cancel_token.cancel();
+            }
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            runner.run_step(&request, "finish the task"),
+        )
+        .await
+        .expect("hidden repair cancellation should not hang");
+        canceller.await.unwrap();
+
+        assert!(matches!(result, Err(AgentError::TurnCancelled)));
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("cancel --session"));
         assert!(args.contains("sessions close"));
     }
 

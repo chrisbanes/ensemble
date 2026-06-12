@@ -236,15 +236,38 @@ impl AcpxCli {
         let mut last_usage: Option<TokenUsage> = None;
         let mut last_runtime_verdict: Option<serde_json::Value> = None;
 
-        while let Some(line) = reader.next_line().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to read acpx stdout: {e}"),
-        })? {
-            let message =
-                protocol::parse_jsonrpc(&line).ok_or_else(|| AgentError::ResponseError {
-                    reason: format!("invalid JSON-RPC message from acpx: {line}"),
-                })?;
+        let mut read_result = Ok(());
+        loop {
+            let line = match reader.next_line().await {
+                Ok(Some(line)) => line,
+                Ok(None) => break,
+                Err(error) => {
+                    read_result = Err(AgentError::IoError {
+                        reason: format!("failed to read acpx stdout: {error}"),
+                    });
+                    break;
+                }
+            };
 
-            if let Some(update) = parse_session_update_from_message(&message)? {
+            let message = match protocol::parse_jsonrpc(&line) {
+                Some(message) => message,
+                None => {
+                    read_result = Err(AgentError::ResponseError {
+                        reason: format!("invalid JSON-RPC message from acpx: {line}"),
+                    });
+                    break;
+                }
+            };
+
+            let update = match parse_session_update_from_message(&message) {
+                Ok(update) => update,
+                Err(error) => {
+                    read_result = Err(error);
+                    break;
+                }
+            };
+
+            if let Some(update) = update {
                 if let Some(usage) = update.usage {
                     last_usage = Some(usage);
                 }
@@ -310,11 +333,23 @@ impl AcpxCli {
             }
         }
 
-        let status = child.wait().await.map_err(|e| AgentError::IoError {
-            reason: format!("failed to wait for acpx prompt: {e}"),
-        })?;
+        let status = if read_result.is_err() {
+            cleanup_prompt_child(&mut child).await;
+            None
+        } else {
+            let wait_result = child.wait().await.map_err(|e| AgentError::IoError {
+                reason: format!("failed to wait for acpx prompt: {e}"),
+            });
+            Some(wait_result)
+        };
         // Wait for the stderr sink to finish draining and flushing.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stderr_task).await;
+
+        if let Err(error) = read_result {
+            return Err(error);
+        }
+
+        let status = status.expect("prompt status should be present when stdout read succeeds")?;
         if !status.success() {
             return Err(AgentError::AcpxCommandFailed {
                 command: "prompt".to_string(),
@@ -1011,6 +1046,55 @@ exec 0<&-
         assert!(
             !alive,
             "acpx child should be terminated after stdin write failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_protocol_error_kills_spawned_process() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pid_path = dir.path().join("pid.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                r#"#!/bin/bash
+printf '%s' "$$" > "{}"
+printf '%s\n' 'not-jsonrpc'
+/bin/sleep 30
+"#,
+                pid_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                AcpxCommandOptions::default(),
+                PromptVisibility::Visible,
+                |_| async {},
+            ),
+        )
+        .await
+        .expect("run_prompt should not hang after invalid stdout")
+        .unwrap_err();
+
+        assert!(matches!(error, AgentError::ResponseError { .. }));
+
+        let pid: i32 = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !alive,
+            "acpx child should be terminated after stdout protocol error"
         );
     }
 
