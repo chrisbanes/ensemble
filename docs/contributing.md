@@ -28,6 +28,22 @@ assets, set `SKIP_UI_BUILD=1`.
 
 Run all four before pushing — CI enforces them.
 
+## Product E2E
+
+Run the local product E2E test with:
+
+```sh
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --test product_e2e -- --nocapture
+```
+
+`SKIP_UI_BUILD=1` is required locally because the CLI `build.rs` expects either
+generated UI assets/openapi.json or the skip flag. CI already sets
+`SKIP_UI_BUILD=1` globally.
+
+The test starts a real `ensemble web` server on localhost with a temporary
+config directory, a todo-file tracker fixture, and mock `acpx`. It does not
+require GitHub, Notion, real ACP credentials, or non-localhost network access.
+
 ## Project structure
 
 ```
