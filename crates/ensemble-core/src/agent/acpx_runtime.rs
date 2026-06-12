@@ -11,7 +11,7 @@ use crate::observability::events_contract::{
 
 use super::acpx_cli::{AcpxCli, AcpxCommandOptions};
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
-use super::{detect_worker_result_with_runtime_verdict, AgentRunRequest};
+use super::{detect_worker_result_with_output, AgentRunRequest};
 
 /// Agent runtime backed by the `acpx` CLI tool.
 ///
@@ -241,9 +241,15 @@ impl AcpxRuntime {
                     duration_ms = duration,
                     "acpx prompt completed"
                 );
-                Ok(detect_worker_result_with_runtime_verdict(
+                let output = outcome
+                    .runtime_verdict
+                    .as_ref()
+                    .and_then(crate::pipeline::verdict::parse_step_output_from_value)
+                    .unwrap_or_else(super::transitional_succeeded_output);
+
+                Ok(detect_worker_result_with_output(
                     request.workspace_path,
-                    outcome.runtime_verdict,
+                    output,
                     request.step_name,
                 )
                 .await)
@@ -437,9 +443,9 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
         let mut saw_output = false;
         while let Ok(event) = rx.try_recv() {
@@ -584,9 +590,9 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
     }
 

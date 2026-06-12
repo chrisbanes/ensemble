@@ -468,9 +468,17 @@ async fn load_interaction_response(
     }
 }
 
-async fn detect_worker_result_with_runtime_verdict(
+pub(super) fn transitional_succeeded_output() -> crate::pipeline::verdict::StepOutput {
+    crate::pipeline::verdict::StepOutput {
+        result: crate::pipeline::verdict::StepResult::Succeeded,
+        summary: None,
+        output: None,
+    }
+}
+
+pub(super) async fn detect_worker_result_with_output(
     workspace_path: &Path,
-    runtime_verdict: Option<serde_json::Value>,
+    output: crate::pipeline::verdict::StepOutput,
     step_name: &str,
 ) -> WorkerResult {
     let interaction_path = workspace_path
@@ -537,7 +545,7 @@ async fn detect_worker_result_with_runtime_verdict(
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
         None => WorkerResult::Success {
-            runtime_verdict,
+            output,
             approval_request,
         },
     }
@@ -545,7 +553,8 @@ async fn detect_worker_result_with_runtime_verdict(
 
 #[cfg(test)]
 async fn detect_worker_result(workspace_path: &Path, step_name: &str) -> WorkerResult {
-    detect_worker_result_with_runtime_verdict(workspace_path, None, step_name).await
+    detect_worker_result_with_output(workspace_path, transitional_succeeded_output(), step_name)
+        .await
 }
 
 async fn write_interaction_response_file(
@@ -793,12 +802,15 @@ impl AcpAgentRunner {
             }
         }
 
-        Ok(detect_worker_result_with_runtime_verdict(
-            request.workspace_path,
-            final_verdict,
-            request.step_name,
+        let output = final_verdict
+            .as_ref()
+            .and_then(crate::pipeline::verdict::parse_step_output_from_value)
+            .unwrap_or_else(transitional_succeeded_output);
+
+        Ok(
+            detect_worker_result_with_output(request.workspace_path, output, request.step_name)
+                .await,
         )
-        .await)
     }
 }
 
@@ -890,7 +902,7 @@ mod tests {
 
             if self.should_succeed {
                 Ok(WorkerResult::Success {
-                    runtime_verdict: None,
+                    output: transitional_succeeded_output(),
                     approval_request: None,
                 })
             } else {
@@ -1112,9 +1124,9 @@ on_failure: Todo
         assert!(matches!(
             result,
             Ok(WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            })
+            }) if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
 
         let evt = rx.try_recv().unwrap();
@@ -1217,9 +1229,9 @@ exit 1
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
@@ -1274,9 +1286,9 @@ exit 0
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
         let event_names = collect_event_names(&mut rx);
         assert!(event_names.contains(&"output_chunk".to_string()));
@@ -1683,9 +1695,9 @@ agent:
         assert!(matches!(
             result,
             WorkerResult::Success {
-                runtime_verdict: None,
+                output,
                 ..
-            }
+            } if matches!(output.result, crate::pipeline::verdict::StepResult::Succeeded)
         ));
     }
 
