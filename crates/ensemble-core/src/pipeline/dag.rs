@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use serde::{Deserialize, Serialize};
+
 use crate::config::ensemble::{OnFailure, StepApprovalConfig, StepConfig, StepKind};
 use crate::error::PipelineError;
 
 /// A single step in the resolved DAG, with its explicit dependency list.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DagStep {
     pub name: String,
     pub agent: String,
@@ -21,7 +23,7 @@ pub struct DagStep {
 /// `steps` is ordered such that every dependency appears before the steps
 /// that depend on it (topological order). Use [`root_steps`] and
 /// [`ready_steps`] to drive execution.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepDag {
     pub steps: Vec<DagStep>,
 }

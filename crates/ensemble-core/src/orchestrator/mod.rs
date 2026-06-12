@@ -1,3 +1,4 @@
+pub mod pipeline_journal;
 pub mod reconciler;
 pub mod retry;
 pub mod scheduler;
@@ -42,13 +43,17 @@ use crate::observability::events_contract::{
     ORCH_TICK_STARTED, STEP_STARTED, TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED,
     TRACKER_TRANSITION_SUCCEEDED,
 };
+use crate::orchestrator::pipeline_journal::{
+    PipelineRunJournal, PipelineTransitionInput, PipelineTransitionKind, PipelineTransitionRecord,
+};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
-    DispatchRequest, PipelineAction, PipelineRun, StepOutputTemplateContext, StepState,
+    DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, StepOutputTemplateContext,
+    StepState,
 };
 use crate::pipeline::verdict::{resolve_verdict_with_source, StepResult, VerdictSource};
 use crate::timeline::persistence::TimelinePersistence;
-use crate::tracker::model::Issue;
+use crate::tracker::model::{Issue, RetryEntry};
 use crate::tracker::IssueTracker;
 use crate::workspace::finalize::FinalizeMode;
 use crate::workspace::manager::WorkspaceManager;
@@ -105,6 +110,7 @@ pub struct Orchestrator {
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
     history_store: Option<HistoryStore>,
+    pipeline_journal: PipelineRunJournal,
     event_bus: EventBus,
     timeline_persistence: Option<TimelinePersistence>,
     worker_tx: mpsc::Sender<WorkerEvent>,
@@ -194,6 +200,7 @@ impl Orchestrator {
                 error
             })
             .ok(),
+            pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             event_bus: parts.event_bus,
             timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root)),
             worker_tx,
@@ -233,6 +240,8 @@ impl Orchestrator {
             state.max_concurrent_agents = max_concurrent_agents;
             state.init_state_lists(&config_clone);
         }
+
+        self.restore_pipeline_runs_from_journal().await;
 
         // Startup terminal workspace cleanup
         {
@@ -570,7 +579,16 @@ impl Orchestrator {
                 )
             };
 
-            if eligible.is_none() {
+            let restored_pipeline_ready = {
+                let state = self.state.read().await;
+                state.get_pipeline_run(&issue.id).is_some()
+                    && state.is_claimed(&issue.id)
+                    && !state.is_running(&issue.id)
+                    && !state.is_waiting_on_human(&issue.id)
+                    && !state.retry_attempts.contains_key(&issue.id)
+            };
+
+            if eligible.is_none() || restored_pipeline_ready {
                 self.dispatch_issue(issue, None).await;
             }
         }
@@ -622,70 +640,158 @@ impl Orchestrator {
                     "resuming with existing pipeline"
                 );
 
-                if let PipelineAction::Dispatch(requests) = action {
-                    for req in requests {
-                        let workspace_path =
-                            match self.prepare_step_workspace(issue, &config_snapshot).await {
-                                Ok(path) => path,
-                                Err(error) => {
-                                    warn!(
-                                        issue_id = %issue.id,
-                                        step = %req.step_name,
-                                        error = %error,
-                                        "failed to prepare step workspace"
-                                    );
-                                    let mut state = self.state.write().await;
-                                    if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
-                                        run.step_failed(&req.step_name, error.to_string());
-                                    }
-                                    if let Some(entry) = state.remove_running(&issue.id) {
-                                        state.add_runtime_seconds(&entry);
-                                        schedule_failure_retry(
-                                            &mut state,
-                                            FailureRetryRequest {
-                                                issue_id: &issue.id,
-                                                identifier: &entry.identifier,
-                                                attempt: next_attempt(entry.retry_attempt),
-                                                max_backoff_ms: config_snapshot
-                                                    .agent
-                                                    .max_retry_backoff_ms,
-                                                max_cycles: config_snapshot.max_cycles,
-                                                error: &error.to_string(),
-                                                retry_from_step: None,
-                                                with_fixup: false,
-                                            },
-                                        );
-                                    }
-                                    state.remove_pipeline_run(&issue.id);
-                                    return;
-                                }
-                            };
+                match action {
+                    PipelineAction::Succeeded => {
+                        info!(
+                            issue_id = %issue.id,
+                            "restored pipeline already succeeded"
+                        );
+                        let finalize_state = self
+                            .run_finalize_phase(&issue.identifier, &config_snapshot)
+                            .await;
+                        let completed_at = Utc::now();
+                        let (history_record, history_run_id, release_run_id, should_release) = {
+                            let mut state = self.state.write().await;
+                            let history_record = state
+                                .running
+                                .get(&issue.id)
+                                .zip(state.get_pipeline_run(&issue.id))
+                                .map(|(entry, run)| {
+                                    self.build_history_record(
+                                        &issue.id,
+                                        HISTORY_OUTCOME_SUCCEEDED,
+                                        None,
+                                        entry,
+                                        run,
+                                        completed_at,
+                                    )
+                                });
+                            let running_entry = state.get_running(&issue.id).cloned();
+                            let history_run_id = running_entry
+                                .as_ref()
+                                .and_then(|entry| entry.run_id.clone());
+                            let release_run_id = history_run_id.clone();
 
-                        let step_outputs = {
-                            let state = self.state.read().await;
-                            state
-                                .get_pipeline_run(&issue.id)
-                                .and_then(|run| run.output_context_for(&req.step_name))
-                                .unwrap_or_default()
+                            if finalize_state.status == FinalizeStatus::Succeeded
+                                || finalize_state.status == FinalizeStatus::NotRequired
+                            {
+                                state.add_completed(
+                                    issue.id.clone(),
+                                    issue.identifier.clone(),
+                                    "completed_succeeded".to_string(),
+                                );
+                                if let Some(entry) = state.remove_running(&issue.id) {
+                                    state.add_runtime_seconds(&entry);
+                                }
+                                state.release_claim(&issue.id);
+                                state.remove_pipeline_run(&issue.id);
+                                state.clear_finalize_state(&issue.id);
+                                (history_record, history_run_id, release_run_id, true)
+                            } else {
+                                state.set_finalize_state(&issue.id, finalize_state);
+                                state.remove_pipeline_run(&issue.id);
+                                (history_record, history_run_id, release_run_id, false)
+                            }
                         };
 
-                        let _ = self
-                            .dispatch_step(
-                                issue,
-                                Arc::clone(&config_snapshot),
-                                StepDispatchContext {
-                                    step_name: &req.step_name,
-                                    agent_name: &req.agent_name,
-                                    step_kind: req.step_kind,
-                                    tracker_state: req.tracker_state.as_deref(),
-                                    attempt,
-                                    interaction_response: None,
-                                    workspace_path,
-                                    step_outputs,
-                                },
+                        if should_release && self.tracker.supports_writes() {
+                            if let Err(error) = self
+                                .tracker
+                                .set_issue_state(&issue.id, &config_snapshot.on_success)
+                                .await
+                            {
+                                warn!(
+                                    issue_id = %issue.id,
+                                    error = %error,
+                                    "failed to set tracker success state for restored pipeline"
+                                );
+                            }
+                        }
+
+                        if should_release {
+                            self.append_pipeline_release(
+                                &issue.id,
+                                &issue.identifier,
+                                release_run_id,
+                                "completed",
                             )
                             .await;
+                        }
+
+                        if let Some(record) = history_record {
+                            self.append_history_record(history_run_id.as_deref(), record)
+                                .await;
+                        }
                     }
+                    PipelineAction::Dispatch(requests) => {
+                        for req in requests {
+                            let workspace_path =
+                                match self.prepare_step_workspace(issue, &config_snapshot).await {
+                                    Ok(path) => path,
+                                    Err(error) => {
+                                        warn!(
+                                            issue_id = %issue.id,
+                                            step = %req.step_name,
+                                            error = %error,
+                                            "failed to prepare step workspace"
+                                        );
+                                        let mut state = self.state.write().await;
+                                        if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
+                                            run.step_failed(&req.step_name, error.to_string());
+                                        }
+                                        if let Some(entry) = state.remove_running(&issue.id) {
+                                            state.add_runtime_seconds(&entry);
+                                            schedule_failure_retry(
+                                                &mut state,
+                                                FailureRetryRequest {
+                                                    issue_id: &issue.id,
+                                                    identifier: &entry.identifier,
+                                                    attempt: next_attempt(entry.retry_attempt),
+                                                    max_backoff_ms: config_snapshot
+                                                        .agent
+                                                        .max_retry_backoff_ms,
+                                                    max_cycles: config_snapshot.max_cycles,
+                                                    error: &error.to_string(),
+                                                    retry_from_step: None,
+                                                    with_fixup: false,
+                                                },
+                                            );
+                                        }
+                                        state.remove_pipeline_run(&issue.id);
+                                        return;
+                                    }
+                                };
+
+                            let step_outputs = {
+                                let state = self.state.read().await;
+                                state
+                                    .get_pipeline_run(&issue.id)
+                                    .and_then(|run| run.output_context_for(&req.step_name))
+                                    .unwrap_or_default()
+                            };
+
+                            let _ = self
+                                .dispatch_step(
+                                    issue,
+                                    Arc::clone(&config_snapshot),
+                                    StepDispatchContext {
+                                        step_name: &req.step_name,
+                                        agent_name: &req.agent_name,
+                                        step_kind: req.step_kind,
+                                        tracker_state: req.tracker_state.as_deref(),
+                                        attempt,
+                                        interaction_response: None,
+                                        workspace_path,
+                                        step_outputs,
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                    PipelineAction::Waiting
+                    | PipelineAction::Failed { .. }
+                    | PipelineAction::BlockedOnHuman { .. }
+                    | PipelineAction::AwaitingApproval { .. } => {}
                 }
 
                 info!(
@@ -721,10 +827,22 @@ impl Orchestrator {
             "dispatching issue with pipeline"
         );
 
-        {
+        let run_started_transition = {
             let mut state = self.state.write().await;
             state.add_running(issue, attempt);
             state.insert_pipeline_run(&issue.id, pipeline_run, Arc::clone(&config_snapshot));
+            Self::transition_input_for_run(
+                &state,
+                &issue.id,
+                &issue.identifier,
+                PipelineTransitionKind::RunStarted,
+                None,
+                None,
+                None,
+            )
+        };
+        if let Some(input) = run_started_transition {
+            self.append_pipeline_transition(input).await;
         }
 
         // Process initial dispatch requests
@@ -872,7 +990,7 @@ impl Orchestrator {
         }
 
         // Mark step as running in pipeline
-        let (run_id, sequence, attempt_num) = {
+        let (run_id, sequence, attempt_num, step_running_transition) = {
             let mut state = self.state.write().await;
             let run_context = Self::run_context_for_issue(&mut state, &issue.id);
             {
@@ -886,8 +1004,21 @@ impl Orchestrator {
                     );
                 }
             }
-            run_context
+            let transition = Self::transition_input_for_run(
+                &state,
+                &issue.id,
+                &issue.identifier,
+                PipelineTransitionKind::StepRunning,
+                Some(dispatch.step_name.to_string()),
+                None,
+                None,
+            );
+            (run_context.0, run_context.1, run_context.2, transition)
         };
+
+        if let Some(input) = step_running_transition {
+            self.append_pipeline_transition(input).await;
+        }
 
         self.publish_pipeline_event(
             run_id,
@@ -1145,6 +1276,18 @@ impl Orchestrator {
                 };
 
                 if let Some((action, config_snapshot)) = pipeline_action {
+                    let step_transition = Self::transition_input_for_run(
+                        &state,
+                        issue_id,
+                        issue_snapshot
+                            .as_ref()
+                            .map(|issue| issue.identifier.as_str())
+                            .unwrap_or(issue_id),
+                        Self::transition_kind_for_action(&action),
+                        Some(step_name.to_string()),
+                        Some(verdict_value.to_string()),
+                        None,
+                    );
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Collect output contexts while state lock is still held
@@ -1165,6 +1308,9 @@ impl Orchestrator {
                             };
                             // Need to drop state lock before dispatching
                             drop(state);
+                            if let Some(input) = step_transition {
+                                self.append_pipeline_transition(input).await;
+                            }
                             if let Some(ref issue) = issue_snapshot {
                                 let Some(config_snapshot) = config_snapshot else {
                                     warn!(issue_id = %issue_id, "no config snapshot found for pipeline dispatch");
@@ -1292,7 +1438,22 @@ impl Orchestrator {
                                 let history_run_id = running_entry
                                     .as_ref()
                                     .and_then(|entry| entry.run_id.clone());
+                                let release_identifier = running_entry
+                                    .as_ref()
+                                    .map(|entry| entry.identifier.clone())
+                                    .unwrap_or_else(|| issue_identifier.clone());
+                                let release_run_id = history_run_id.clone();
                                 drop(state);
+                                if let Some(input) = step_transition {
+                                    self.append_pipeline_transition(input).await;
+                                }
+                                self.append_pipeline_release(
+                                    issue_id,
+                                    &release_identifier,
+                                    release_run_id,
+                                    "completed",
+                                )
+                                .await;
                                 if let Some(record) = history_record {
                                     self.append_history_record(history_run_id.as_deref(), record)
                                         .await;
@@ -1329,6 +1490,10 @@ impl Orchestrator {
                             let mut completed_identifier = None;
                             let mut rejection_comment = None;
                             let mut history_run_id = None;
+                            let mut post_failure_transitions = Vec::new();
+                            if let Some(input) = step_transition {
+                                post_failure_transitions.push(input);
+                            }
                             let runtime_step = state
                                 .get_pipeline_run(issue_id)
                                 .and_then(|run| run.step(&step))
@@ -1348,12 +1513,13 @@ impl Orchestrator {
                                         state.add_runtime_seconds(&entry);
                                         completed_identifier = Some(entry.identifier.clone());
                                         history_run_id = entry.run_id.clone();
+                                        let attempt = next_attempt(entry.retry_attempt);
                                         let retry_scheduled = schedule_failure_retry(
                                             &mut state,
                                             FailureRetryRequest {
                                                 issue_id,
                                                 identifier: &entry.identifier,
-                                                attempt: next_attempt(entry.retry_attempt),
+                                                attempt,
                                                 max_backoff_ms: config.agent.max_retry_backoff_ms,
                                                 max_cycles: config.max_cycles,
                                                 error: &reason,
@@ -1390,6 +1556,37 @@ impl Orchestrator {
                                                 warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
                                             }
                                         }
+                                        if let Some(due_at_ms) = retry_scheduled {
+                                            if let Some(input) = Self::transition_input_for_run(
+                                                &state,
+                                                issue_id,
+                                                &entry.identifier,
+                                                PipelineTransitionKind::StepRetryScheduled,
+                                                Some(step.clone()),
+                                                Some(reason.clone()),
+                                                Some(RetryEntry {
+                                                    issue_id: issue_id.to_string(),
+                                                    identifier: entry.identifier.clone(),
+                                                    attempt,
+                                                    due_at_ms,
+                                                    error: Some(reason.clone()),
+                                                    retry_from_step: Some(step.clone()),
+                                                    with_fixup: false,
+                                                }),
+                                            ) {
+                                                post_failure_transitions.push(input);
+                                            }
+                                        } else if let Some(input) = Self::transition_input_for_run(
+                                            &state,
+                                            issue_id,
+                                            &entry.identifier,
+                                            PipelineTransitionKind::PipelineFailed,
+                                            Some(step.clone()),
+                                            Some(reason.clone()),
+                                            None,
+                                        ) {
+                                            post_failure_transitions.push(input);
+                                        }
                                     }
                                 }
                                 OnFailure::Fixup => {
@@ -1419,12 +1616,13 @@ impl Orchestrator {
                                         state.add_runtime_seconds(&entry);
                                         completed_identifier = Some(entry.identifier.clone());
                                         history_run_id = entry.run_id.clone();
+                                        let attempt = next_attempt(entry.retry_attempt);
                                         let retry_scheduled = schedule_failure_retry(
                                             &mut state,
                                             FailureRetryRequest {
                                                 issue_id,
                                                 identifier: &entry.identifier,
-                                                attempt: next_attempt(entry.retry_attempt),
+                                                attempt,
                                                 max_backoff_ms: config.agent.max_retry_backoff_ms,
                                                 max_cycles: config.max_cycles,
                                                 error: &reason,
@@ -1461,6 +1659,37 @@ impl Orchestrator {
                                                 warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
                                             }
                                         }
+                                        if let Some(due_at_ms) = retry_scheduled {
+                                            if let Some(input) = Self::transition_input_for_run(
+                                                &state,
+                                                issue_id,
+                                                &entry.identifier,
+                                                PipelineTransitionKind::FixupRetryScheduled,
+                                                Some(step.clone()),
+                                                Some(reason.clone()),
+                                                Some(RetryEntry {
+                                                    issue_id: issue_id.to_string(),
+                                                    identifier: entry.identifier.clone(),
+                                                    attempt,
+                                                    due_at_ms,
+                                                    error: Some(reason.clone()),
+                                                    retry_from_step: Some(step.clone()),
+                                                    with_fixup: true,
+                                                }),
+                                            ) {
+                                                post_failure_transitions.push(input);
+                                            }
+                                        } else if let Some(input) = Self::transition_input_for_run(
+                                            &state,
+                                            issue_id,
+                                            &entry.identifier,
+                                            PipelineTransitionKind::PipelineFailed,
+                                            Some(step.clone()),
+                                            Some(reason.clone()),
+                                            None,
+                                        ) {
+                                            post_failure_transitions.push(input);
+                                        }
                                     }
                                 }
                                 OnFailure::Halt => {
@@ -1496,6 +1725,17 @@ impl Orchestrator {
                                             run_id: entry.run_id.clone(),
                                             issue: Some(entry.issue.clone()),
                                         });
+                                        if let Some(input) = Self::transition_input_for_run(
+                                            &state,
+                                            issue_id,
+                                            &entry.identifier,
+                                            PipelineTransitionKind::PipelineHalted,
+                                            Some(step.clone()),
+                                            Some(reason.clone()),
+                                            None,
+                                        ) {
+                                            post_failure_transitions.push(input);
+                                        }
                                     }
                                 }
                                 OnFailure::RetryIssue => {
@@ -1503,12 +1743,13 @@ impl Orchestrator {
                                         state.add_runtime_seconds(&entry);
                                         completed_identifier = Some(entry.identifier.clone());
                                         history_run_id = entry.run_id.clone();
+                                        let attempt = next_attempt(entry.retry_attempt);
                                         let retry_scheduled = schedule_failure_retry(
                                             &mut state,
                                             FailureRetryRequest {
                                                 issue_id,
                                                 identifier: &entry.identifier,
-                                                attempt: next_attempt(entry.retry_attempt),
+                                                attempt,
                                                 max_backoff_ms: config.agent.max_retry_backoff_ms,
                                                 max_cycles: config.max_cycles,
                                                 error: &reason,
@@ -1545,6 +1786,19 @@ impl Orchestrator {
                                                 warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
                                             }
                                         }
+                                        if final_failure {
+                                            if let Some(input) = Self::transition_input_for_run(
+                                                &state,
+                                                issue_id,
+                                                &entry.identifier,
+                                                PipelineTransitionKind::PipelineFailed,
+                                                Some(step.clone()),
+                                                Some(reason.clone()),
+                                                None,
+                                            ) {
+                                                post_failure_transitions.push(input);
+                                            }
+                                        }
                                     }
                                     state.remove_pipeline_run(issue_id);
                                 }
@@ -1560,6 +1814,9 @@ impl Orchestrator {
                             }
 
                             drop(state);
+                            for input in post_failure_transitions {
+                                self.append_pipeline_transition(input).await;
+                            }
                             if final_failure {
                                 if let Some((step_name, summary)) = rejection_comment {
                                     self.post_rejection_summary_comment(
@@ -1579,6 +1836,9 @@ impl Orchestrator {
                             approval_state,
                         } => {
                             drop(state);
+                            if let Some(input) = step_transition {
+                                self.append_pipeline_transition(input).await;
+                            }
                             if let Err(error) = self
                                 .handle_post_step_approval(
                                     issue_id,
@@ -1632,6 +1892,10 @@ impl Orchestrator {
                             }
 
                             debug!(issue_id = %issue_id, "pipeline waiting for other steps");
+                            drop(state);
+                            if let Some(input) = step_transition {
+                                self.append_pipeline_transition(input).await;
+                            }
                         }
                     }
                 }
@@ -2493,6 +2757,199 @@ impl Orchestrator {
                 run_id: None,
                 issue,
             });
+        }
+    }
+
+    async fn restore_pipeline_runs_from_journal(&self) {
+        let records = match self.pipeline_journal.latest_live_records().await {
+            Ok(records) => records,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to read pipeline transition journal during startup"
+                );
+                return;
+            }
+        };
+
+        if records.is_empty() {
+            return;
+        }
+
+        let config_snapshot = {
+            let config = self.config.read().await;
+            Arc::new(config.clone())
+        };
+
+        let issue_ids = records
+            .iter()
+            .map(|record| record.issue_id.clone())
+            .collect::<Vec<_>>();
+        let issues = self
+            .tracker
+            .fetch_issue_states_by_ids(&issue_ids)
+            .await
+            .unwrap_or_default();
+        let issues_by_id: HashMap<String, Issue> = issues
+            .into_iter()
+            .map(|issue| (issue.id.clone(), issue))
+            .collect();
+
+        for record in records {
+            if let Err(error) = self
+                .restore_pipeline_run_record(&record, Arc::clone(&config_snapshot), &issues_by_id)
+                .await
+            {
+                warn!(
+                    issue_id = %record.issue_id,
+                    error = %error,
+                    "failed to restore pipeline run from transition journal"
+                );
+            }
+        }
+    }
+
+    async fn restore_pipeline_run_record(
+        &self,
+        record: &PipelineTransitionRecord,
+        config_snapshot: Arc<EnsembleConfig>,
+        issues_by_id: &HashMap<String, Issue>,
+    ) -> Result<(), EnsembleError> {
+        let snapshot = record
+            .snapshot
+            .clone()
+            .ok_or_else(|| AgentError::PromptError {
+                reason: format!(
+                    "pipeline journal record {} for issue '{}' has no snapshot",
+                    record.seq, record.issue_id
+                ),
+            })?;
+
+        validate_restored_snapshot_against_config(&snapshot, &config_snapshot)?;
+        let mut run = PipelineRun::from_snapshot(snapshot)?;
+        run.normalize_stale_running_steps();
+
+        let mut state = self.state.write().await;
+        if state.get_pipeline_run(&record.issue_id).is_some() || state.is_running(&record.issue_id)
+        {
+            return Ok(());
+        }
+
+        state.insert_pipeline_run(&record.issue_id, run, Arc::clone(&config_snapshot));
+        state.add_claimed(&record.issue_id);
+        if let Some(run_id) = record.run_id.clone() {
+            state.issue_run_ids.insert(record.issue_id.clone(), run_id);
+        }
+
+        if let Some(retry) = record.retry.clone() {
+            state.add_retry(retry);
+        }
+
+        if record.kind == PipelineTransitionKind::PipelineHalted {
+            let step_name = record.step.clone().unwrap_or_default();
+            let agent_name = state
+                .get_pipeline_run(&record.issue_id)
+                .and_then(|run| run.step(&step_name))
+                .map(|step| step.agent.clone())
+                .unwrap_or_default();
+            state.add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: record.issue_id.clone(),
+                identifier: record.identifier.clone(),
+                interaction_request_id: format!("halted:{}:{step_name}", record.issue_id),
+                step_name,
+                kind: InteractionKind::Handoff,
+                prompt: record
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "pipeline halted".to_string()),
+                agent_name,
+                retry_attempt: Some(record.cycle.max(1)),
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: record.written_at,
+                run_id: record.run_id.clone(),
+                issue: issues_by_id.get(&record.issue_id).cloned(),
+            });
+        }
+
+        Ok(())
+    }
+
+    async fn append_pipeline_transition(&self, input: PipelineTransitionInput) {
+        if let Err(error) = self.pipeline_journal.append(input).await {
+            warn!(
+                error = %error,
+                "failed to append pipeline transition journal record"
+            );
+        }
+    }
+
+    async fn append_pipeline_release(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        run_id: Option<String>,
+        reason: &str,
+    ) {
+        if let Err(error) = self
+            .pipeline_journal
+            .append_released(issue_id, identifier, run_id, reason)
+            .await
+        {
+            warn!(
+                issue_id = %issue_id,
+                error = %error,
+                "failed to append pipeline release journal record"
+            );
+        }
+    }
+
+    fn transition_input_for_run(
+        state: &OrchestratorState,
+        issue_id: &str,
+        identifier: &str,
+        kind: PipelineTransitionKind,
+        step: Option<String>,
+        reason: Option<String>,
+        retry: Option<RetryEntry>,
+    ) -> Option<PipelineTransitionInput> {
+        let run = state.get_pipeline_run(issue_id)?;
+        let run_id = state
+            .running
+            .get(issue_id)
+            .and_then(|entry| entry.run_id.clone())
+            .or_else(|| {
+                state
+                    .waiting_on_human
+                    .get(issue_id)
+                    .and_then(|entry| entry.run_id.clone())
+            })
+            .or_else(|| state.issue_run_ids.get(issue_id).cloned());
+
+        Some(PipelineTransitionInput {
+            kind,
+            issue_id: issue_id.to_string(),
+            identifier: identifier.to_string(),
+            run_id,
+            cycle: run.cycle,
+            step,
+            reason,
+            retry,
+            snapshot: Some(run.to_snapshot()),
+        })
+    }
+
+    fn transition_kind_for_action(action: &PipelineAction) -> PipelineTransitionKind {
+        match action {
+            PipelineAction::Dispatch(_) | PipelineAction::Succeeded => {
+                PipelineTransitionKind::StepCompleted
+            }
+            PipelineAction::Failed { .. } => PipelineTransitionKind::StepFailed,
+            PipelineAction::BlockedOnHuman { .. } => PipelineTransitionKind::StepBlockedOnHuman,
+            PipelineAction::AwaitingApproval { .. } => PipelineTransitionKind::StepAwaitingApproval,
+            PipelineAction::Waiting => PipelineTransitionKind::StepCompleted,
         }
     }
 
@@ -4078,6 +4535,46 @@ fn interaction_kind_name(kind: &InteractionKind) -> &'static str {
     }
 }
 
+fn validate_restored_snapshot_against_config(
+    snapshot: &PipelineRunSnapshot,
+    config: &EnsembleConfig,
+) -> Result<(), EnsembleError> {
+    for persisted_step in &snapshot.dag_steps {
+        if snapshot
+            .synthetic_fixup_steps
+            .contains(&persisted_step.name)
+        {
+            continue;
+        }
+
+        let Some(config_step) = config
+            .steps
+            .iter()
+            .find(|candidate| candidate.name == persisted_step.name)
+        else {
+            return Err(AgentError::PromptError {
+                reason: format!(
+                    "persisted pipeline step '{}' no longer exists in config",
+                    persisted_step.name
+                ),
+            }
+            .into());
+        };
+
+        if config_step.agent != persisted_step.agent || config_step.kind != persisted_step.kind {
+            return Err(AgentError::PromptError {
+                reason: format!(
+                    "persisted pipeline step '{}' no longer matches config",
+                    persisted_step.name
+                ),
+            }
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4090,7 +4587,10 @@ mod tests {
         InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
         InteractionStore,
     };
+    use crate::orchestrator::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind};
+    use crate::orchestrator::retry::current_time_ms;
     use crate::pipeline::verdict::{StepOutput, StepResult};
+    use crate::tracker::model::RetryEntry;
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
 
@@ -4484,6 +4984,518 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn restore_pipeline_runs_from_journal_restores_halted_pipeline() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_retry_step_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let workspace_root = temp.path().join("workspaces");
+        let workspace_mgr = WorkspaceManager::new(&workspace_root, None).unwrap();
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr,
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_failed("build", "manual halt".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("manual halt".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+
+        let lock = state.read().await;
+        assert!(lock.get_pipeline_run(&issue.id).is_some());
+        assert!(lock.is_claimed(&issue.id));
+        assert!(lock.is_waiting_on_human(&issue.id));
+    }
+
+    #[tokio::test]
+    async fn restore_pipeline_runs_from_journal_restores_step_retry_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_retry_step_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.retry_from_step("build");
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: 2,
+            due_at_ms: current_time_ms().saturating_sub(1),
+            error: Some("retry".to_string()),
+            retry_from_step: Some("build".to_string()),
+            with_fixup: false,
+        };
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRetryScheduled,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("retry".to_string()),
+                retry: Some(retry),
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+
+        let lock = state.read().await;
+        assert!(lock.get_pipeline_run(&issue.id).is_some());
+        assert!(lock.retry_attempts.contains_key(&issue.id));
+        assert_eq!(
+            lock.retry_attempts
+                .get(&issue.id)
+                .and_then(|entry| entry.retry_from_step.as_deref()),
+            Some("build")
+        );
+    }
+
+    #[tokio::test]
+    async fn restored_live_pipeline_run_dispatches_on_next_tick() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let run = PipelineRun::new(issue.id.clone(), 1, dag);
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::RunStarted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        assert!(state.read().await.is_claimed(&issue.id));
+
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(lock.is_running(&issue.id));
+        assert!(matches!(
+            lock.get_pipeline_run(&issue.id)
+                .and_then(|run| run.step_states.get("build")),
+            Some(StepState::Running { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn hydrate_waiting_interaction_keeps_restored_pipeline_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let interaction = crate::interaction::model::InteractionRequest {
+            id: "interaction-1".to_string(),
+            schema_version: 1,
+            issue_id: issue.id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            pipeline_cycle: 1,
+            completed_steps: vec![],
+            step_name: "build".to_string(),
+            agent_name: "builder".to_string(),
+            step_depends: vec![],
+            step_tracker_state: None,
+            kind: InteractionKind::Question,
+            status: InteractionStatus::Open,
+            blocking: true,
+            awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
+            title: "Need input".to_string(),
+            body: "Need input".to_string(),
+            options: vec![],
+            artifacts: vec![],
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: vec![],
+            response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            resolved_at: None,
+        };
+        orchestrator
+            .interaction_store
+            .create(interaction)
+            .await
+            .unwrap();
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_blocked_on_human("build", "interaction-1".to_string());
+        {
+            let mut lock = state.write().await;
+            lock.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+            lock.add_claimed(&issue.id);
+        }
+
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let lock = state.read().await;
+        let run = lock.get_pipeline_run(&issue.id).unwrap();
+        assert!(matches!(
+            run.step_states.get("build"),
+            Some(StepState::BlockedOnHuman { interaction_request_id })
+                if interaction_request_id == "interaction-1"
+        ));
+        assert!(lock.is_waiting_on_human(&issue.id));
+    }
+
+    #[tokio::test]
+    async fn dispatch_issue_writes_run_started_and_step_running_transitions() {
+        let temp = tempfile::tempdir().unwrap();
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let cfg = make_config();
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state,
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        orchestrator.handle_tick().await;
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::RunStarted));
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::StepRunning));
+    }
+
+    #[tokio::test]
+    async fn failed_step_retry_writes_retry_transition_as_latest_record() {
+        let config = Arc::new(RwLock::new(make_retry_step_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    runtime_verdict: Some(serde_json::json!({
+                        "result": "failed",
+                        "summary": "tests failed"
+                    })),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        let latest = records.last().expect("journal record");
+        assert_eq!(latest.kind, PipelineTransitionKind::StepRetryScheduled);
+        assert_eq!(
+            latest
+                .retry
+                .as_ref()
+                .and_then(|retry| retry.retry_from_step.as_deref()),
+            Some("build")
+        );
+        assert!(matches!(
+            latest
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.step_states.get("build")),
+            Some(StepState::Pending)
+        ));
+    }
+
+    #[tokio::test]
+    async fn restored_all_passed_pipeline_completes_on_next_tick() {
+        let temp = tempfile::tempdir().unwrap();
+        let issue = test_issue("1", "Todo");
+        let issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let cfg = make_config();
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_completed(
+            "build",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: None,
+            },
+            false,
+        );
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepCompleted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("succeeded".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(
+            lock.completed.contains_key(&issue.id),
+            "restored all-passed pipeline should complete"
+        );
+        assert!(
+            lock.get_pipeline_run(&issue.id).is_none(),
+            "completed restored pipeline should be released"
+        );
+        assert!(
+            !lock.is_running(&issue.id),
+            "completed restored pipeline should not remain running"
+        );
     }
 
     fn make_fixup_config() -> EnsembleConfig {
@@ -5074,6 +6086,17 @@ agent:
         assert_eq!(waiting.step_name, "build");
         assert_eq!(waiting.prompt, "needs manual repair");
         assert!(matches!(waiting.kind, InteractionKind::Handoff));
+        drop(state);
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::PipelineHalted)
+        );
     }
 
     #[tokio::test]

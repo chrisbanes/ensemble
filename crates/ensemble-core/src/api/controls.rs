@@ -2,6 +2,7 @@ use crate::agent::cancellation::{cancel_issue, clear_issue_cancellation};
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
+use crate::orchestrator::pipeline_journal::PipelineRunJournal;
 use crate::orchestrator::retry::{next_attempt, schedule_failure_retry, FailureRetryRequest};
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
 use axum::extract::{Path, Query, State};
@@ -155,6 +156,35 @@ fn interaction_store(state: &AppState) -> InteractionStore {
     InteractionStore::new(config_dir)
 }
 
+fn pipeline_journal(state: &AppState) -> PipelineRunJournal {
+    let config_dir = state
+        .config_runtime
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    PipelineRunJournal::new(config_dir)
+}
+
+async fn append_release_record(
+    state: &AppState,
+    issue_id: &str,
+    identifier: &str,
+    run_id: Option<String>,
+    reason: &str,
+) {
+    if let Err(error) = pipeline_journal(state)
+        .append_released(issue_id, identifier, run_id, reason)
+        .await
+    {
+        tracing::warn!(
+            issue_id = %issue_id,
+            error = %error,
+            "failed to append pipeline release record from api control"
+        );
+    }
+}
+
 /// POST /api/v1/{identifier}/stop
 ///
 /// Stops a running agent for the specified issue. Sends SIGTERM to the agent process
@@ -249,12 +279,17 @@ pub async fn post_stop(
     }
 
     clear_issue_cancellation(&state.cancellation_registry, &issue_id);
+    let release_run_id = lock
+        .get_running(&issue_id)
+        .and_then(|entry| entry.run_id.clone());
     if let Some(entry) = lock.remove_running(&issue_id) {
         lock.add_runtime_seconds(&entry);
     }
     lock.remove_claimed(&issue_id);
     lock.remove_pipeline_run(&issue_id);
     drop(lock);
+
+    append_release_record(&state, &issue_id, &identifier, release_run_id, "stopped").await;
 
     (
         StatusCode::OK,
@@ -343,6 +378,8 @@ pub async fn post_retry(
         },
     };
 
+    let mut release_record: Option<(String, String, Option<String>, &'static str)> = None;
+
     if let Some(step_name) = query.step.as_ref() {
         let Some(run) = lock.get_pipeline_run_mut(&issue_id) else {
             return issue_error_response(
@@ -403,12 +440,31 @@ pub async fn post_retry(
         );
     } else {
         // Whole-issue retry: release the claim so the next poll can pick it up fresh.
+        let release_identifier = identifier.clone();
+        let release_run_id = lock
+            .get_running(&issue_id)
+            .and_then(|entry| entry.run_id.clone())
+            .or_else(|| {
+                lock.waiting_on_human
+                    .get(&issue_id)
+                    .and_then(|entry| entry.run_id.clone())
+            });
         lock.remove_retry(&issue_id);
         lock.remove_waiting_on_human(&issue_id);
         lock.remove_claimed(&issue_id);
         lock.remove_pipeline_run(&issue_id);
+        release_record = Some((
+            issue_id.clone(),
+            release_identifier,
+            release_run_id,
+            "whole_issue_retry",
+        ));
     }
     drop(lock);
+
+    if let Some((issue_id, identifier, run_id, reason)) = release_record {
+        append_release_record(&state, &issue_id, &identifier, run_id, reason).await;
+    }
 
     // Signal the orchestrator to poll immediately so it picks up the now-unclaimed issue
     state.refresh_requested.notify_one();
@@ -769,6 +825,7 @@ mod tests {
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::{ConcurrencyConfig, OnFailure, StepConfig, StepKind};
     use crate::interaction::model::InteractionKind;
+    use crate::orchestrator::pipeline_journal::PipelineTransitionKind;
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
         WaitingOnHumanEntry,
@@ -1102,6 +1159,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_stop_appends_pipeline_released_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_running_pid(None);
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+        let cancellation = CancellationToken::new();
+        register_issue_cancellation(
+            &state.cancellation_registry,
+            "NODE_123",
+            cancellation.clone(),
+        );
+
+        let response = post_stop(State(state.clone()), Path("my-repo#42".to_string()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let journal = PipelineRunJournal::new(temp.path());
+        let records = journal.read_records_for_issue("NODE_123").await.unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::Released));
+    }
+
+    #[tokio::test]
     async fn test_stop_running_issue_without_session_keeps_conflict_even_if_cancelled() {
         let state = build_app_state_with_running();
         let cancellation = CancellationToken::new();
@@ -1170,6 +1251,28 @@ mod tests {
         let lock = state.orchestrator_state.read().await;
         assert!(lock.retry_attempts.is_empty());
         assert!(!lock.is_claimed("NODE_456"));
+    }
+
+    #[tokio::test]
+    async fn whole_issue_retry_appends_pipeline_released_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_retry();
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#99".to_string()),
+            Query(RetryQuery { step: None }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let journal = PipelineRunJournal::new(temp.path());
+        let records = journal.read_records_for_issue("NODE_456").await.unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::Released));
     }
 
     #[tokio::test]

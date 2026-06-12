@@ -395,6 +395,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
             field: Some("kind".to_string()),
             path: Some(format!("steps.{}", step)),
         },
+        PipelineError::InvalidSnapshot { reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid pipeline snapshot: {}", reason),
+            section: "runtime".to_string(),
+            field: None,
+            path: None,
+        },
     }
 }
 

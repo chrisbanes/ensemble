@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{OnFailure, StepKind};
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
 
 /// The execution state of a single pipeline step.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepState {
     /// Step has not started yet.
     Pending,
@@ -122,6 +123,16 @@ pub struct PipelineRun {
     synthetic_fixup_steps: HashSet<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipelineRunSnapshot {
+    pub issue_id: String,
+    pub cycle: u32,
+    pub step_states: HashMap<String, StepState>,
+    pub step_outputs: HashMap<String, StepOutput>,
+    pub dag_steps: Vec<DagStep>,
+    pub synthetic_fixup_steps: HashSet<String>,
+}
+
 impl PipelineRun {
     /// Create a new `PipelineRun` for the given issue, initialising all steps
     /// as [`StepState::Pending`].
@@ -141,9 +152,47 @@ impl PipelineRun {
         }
     }
 
+    pub fn to_snapshot(&self) -> PipelineRunSnapshot {
+        PipelineRunSnapshot {
+            issue_id: self.issue_id.clone(),
+            cycle: self.cycle,
+            step_states: self.step_states.clone(),
+            step_outputs: self.step_outputs.clone(),
+            dag_steps: self.dag.steps.clone(),
+            synthetic_fixup_steps: self.synthetic_fixup_steps.clone(),
+        }
+    }
+
+    pub fn from_snapshot(
+        snapshot: PipelineRunSnapshot,
+    ) -> Result<Self, crate::error::PipelineError> {
+        validate_snapshot(&snapshot)?;
+        Ok(Self {
+            issue_id: snapshot.issue_id,
+            cycle: snapshot.cycle,
+            step_states: snapshot.step_states,
+            step_outputs: snapshot.step_outputs,
+            dag: StepDag {
+                steps: snapshot.dag_steps,
+            },
+            synthetic_fixup_steps: snapshot.synthetic_fixup_steps,
+        })
+    }
+
+    pub fn normalize_stale_running_steps(&mut self) {
+        for state in self.step_states.values_mut() {
+            if matches!(state, StepState::Running { .. }) {
+                *state = StepState::Pending;
+            }
+        }
+    }
+
     /// Compute the initial dispatch action — all root steps (no dependencies)
     /// are ready to run immediately.
     pub fn start(&self) -> PipelineAction {
+        if self.all_passed() {
+            return PipelineAction::Succeeded;
+        }
         self.find_dispatchable()
     }
 
@@ -556,6 +605,107 @@ impl PipelineRun {
     }
 }
 
+fn validate_snapshot(snapshot: &PipelineRunSnapshot) -> Result<(), crate::error::PipelineError> {
+    if snapshot.dag_steps.is_empty() {
+        return Err(crate::error::PipelineError::InvalidSnapshot {
+            reason: "runtime dag has no steps".to_string(),
+        });
+    }
+
+    let mut known_steps = HashSet::new();
+    for step in &snapshot.dag_steps {
+        if !known_steps.insert(step.name.as_str()) {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!("runtime dag contains duplicate step '{}'", step.name),
+            });
+        }
+    }
+
+    for step_name in snapshot.step_states.keys() {
+        if !known_steps.contains(step_name.as_str()) {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!("step state references missing step '{step_name}'"),
+            });
+        }
+    }
+
+    for step_name in snapshot.step_outputs.keys() {
+        if !known_steps.contains(step_name.as_str()) {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!("step output references missing step '{step_name}'"),
+            });
+        }
+    }
+
+    for step in &snapshot.dag_steps {
+        if !snapshot.step_states.contains_key(&step.name) {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!("runtime dag step '{}' has no step state", step.name),
+            });
+        }
+        for dependency in &step.depends {
+            if !known_steps.contains(dependency.as_str()) {
+                return Err(crate::error::PipelineError::InvalidSnapshot {
+                    reason: format!(
+                        "step '{}' depends on missing step '{}'",
+                        step.name, dependency
+                    ),
+                });
+            }
+        }
+    }
+
+    validate_snapshot_acyclic(snapshot)?;
+
+    Ok(())
+}
+
+fn validate_snapshot_acyclic(
+    snapshot: &PipelineRunSnapshot,
+) -> Result<(), crate::error::PipelineError> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum VisitState {
+        Visiting,
+        Visited,
+    }
+
+    fn visit<'a>(
+        step_name: &'a str,
+        steps_by_name: &HashMap<&'a str, &'a DagStep>,
+        visit_states: &mut HashMap<&'a str, VisitState>,
+    ) -> Result<(), crate::error::PipelineError> {
+        match visit_states.get(step_name) {
+            Some(VisitState::Visiting) => {
+                return Err(crate::error::PipelineError::InvalidSnapshot {
+                    reason: format!("runtime dag contains a cycle at step '{step_name}'"),
+                });
+            }
+            Some(VisitState::Visited) => return Ok(()),
+            None => {}
+        }
+
+        visit_states.insert(step_name, VisitState::Visiting);
+        if let Some(step) = steps_by_name.get(step_name) {
+            for dependency in &step.depends {
+                visit(dependency, steps_by_name, visit_states)?;
+            }
+        }
+        visit_states.insert(step_name, VisitState::Visited);
+        Ok(())
+    }
+
+    let steps_by_name: HashMap<&str, &DagStep> = snapshot
+        .dag_steps
+        .iter()
+        .map(|step| (step.name.as_str(), step))
+        .collect();
+    let mut visit_states = HashMap::new();
+    for step in &snapshot.dag_steps {
+        visit(step.name.as_str(), &steps_by_name, &mut visit_states)?;
+    }
+    Ok(())
+}
+
 fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
     StepOutputTemplateEntry {
         step: step.to_string(),
@@ -595,6 +745,157 @@ mod tests {
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
         }
+    }
+
+    fn test_step(name: &str, agent: &str, depends: Option<Vec<String>>) -> StepConfig {
+        StepConfig {
+            name: name.to_string(),
+            kind: StepKind::Agent,
+            agent: agent.to_string(),
+            depends,
+            tracker_state: None,
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+        }
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_round_trips_runtime_dag_and_outputs() {
+        let steps = vec![
+            test_step("build", "builder", Some(vec![])),
+            test_step("review", "reviewer", Some(vec!["build".to_string()])),
+        ];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let mut run = PipelineRun::new("issue-1".to_string(), 2, dag);
+        run.mark_running("build", "session-build".to_string());
+        run.step_completed(
+            "build",
+            crate::pipeline::verdict::StepOutput {
+                result: crate::pipeline::verdict::StepResult::Succeeded,
+                summary: Some("compiled".to_string()),
+                output: Some(serde_json::json!({"binary": "ok"})),
+            },
+            false,
+        );
+        run.retry_from_step_with_fixup("review", "fixer");
+
+        let snapshot = run.to_snapshot();
+        let json = serde_json::to_string(&snapshot).unwrap();
+        let decoded: PipelineRunSnapshot = serde_json::from_str(&json).unwrap();
+        let restored = PipelineRun::from_snapshot(decoded).unwrap();
+
+        assert_eq!(restored.issue_id, "issue-1");
+        assert_eq!(restored.cycle, 2);
+        assert_eq!(restored.step_states.get("build"), Some(&StepState::Passed));
+        assert!(restored.step_outputs.contains_key("build"));
+        assert!(restored.step("fixup-review").is_some());
+        assert_eq!(
+            restored.step("review").unwrap().depends,
+            vec!["fixup-review".to_string()]
+        );
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_normalizes_stale_running_steps_to_pending() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let mut run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        run.mark_running("build", "session-build".to_string());
+
+        let mut restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+        restored.normalize_stale_running_steps();
+
+        assert_eq!(restored.step_states.get("build"), Some(&StepState::Pending));
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_rejects_step_state_outside_runtime_dag() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        let mut snapshot = run.to_snapshot();
+        snapshot
+            .step_states
+            .insert("missing".to_string(), StepState::Passed);
+
+        let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_rejects_step_output_outside_runtime_dag() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        let mut snapshot = run.to_snapshot();
+        snapshot.step_outputs.insert(
+            "missing".to_string(),
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: None,
+            },
+        );
+
+        let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_rejects_missing_dependency() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        let mut snapshot = run.to_snapshot();
+        snapshot.dag_steps[0].depends = vec!["missing".to_string()];
+
+        let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_rejects_dag_step_without_state() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        let mut snapshot = run.to_snapshot();
+        snapshot.step_states.remove("build");
+
+        let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
+        assert!(err.to_string().contains("no step state"));
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_rejects_duplicate_dag_steps() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        let mut snapshot = run.to_snapshot();
+        snapshot.dag_steps.push(snapshot.dag_steps[0].clone());
+
+        let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_rejects_cycles() {
+        let steps = vec![
+            test_step("build", "builder", Some(vec![])),
+            test_step("review", "reviewer", Some(vec!["build".to_string()])),
+        ];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        let mut snapshot = run.to_snapshot();
+        snapshot
+            .dag_steps
+            .iter_mut()
+            .find(|step| step.name == "build")
+            .unwrap()
+            .depends = vec!["review".to_string()];
+
+        let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
+        assert!(err.to_string().contains("cycle"));
     }
 
     fn make_step_with_state(

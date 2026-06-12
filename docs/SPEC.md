@@ -278,6 +278,18 @@ orchestrator updates the issue tracker state to `approval.state` (if set) and wa
 `Rejected` transition does not write a separate rejection state — it is treated as a failure in the
 `on_failure` sense.
 
+Pipeline run recovery:
+
+- Ensemble appends pipeline transition records to
+  `<config_dir>/state/pipeline-runs/<encoded_issue_id>.jsonl`.
+- Each recoverable transition includes a full `PipelineRun` snapshot.
+- On orchestrator startup, Ensemble restores the latest non-released snapshot for each issue before
+  the first poll tick.
+- Stale `Running` steps from a previous process are normalized to `Pending`; agent processes are not
+  recovered across orchestrator restarts.
+- A `released` transition prevents older snapshots for the issue from being restored after
+  completion, stop, terminal reconciliation, or whole-issue retry.
+
 #### 4.1.7 Verdict
 
 Agent judgment returned after a pipeline step completes:
