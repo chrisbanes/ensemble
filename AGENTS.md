@@ -35,15 +35,15 @@ ensemble/
 │   │   └── tests/
 │   │       └── workflow_to_workspace.rs  # integration test
 │   ├── ensemble-cli/             # CLI binary
-│   │   ├── build.rs              # SPA build + embed script
+│   │   ├── build.rs              # optional SPA build + embed script (`web-ui` feature)
 │   │   ├── src/
 │   │   │   ├── main.rs           # CLI entry point, subcommand dispatch
-│   │   │   ├── embedded_ui.rs    # rust-embed SPA serving
+│   │   │   ├── embedded_ui.rs    # rust-embed SPA serving (`web-ui` feature)
 │   │   │   └── commands/
 │   │   │       ├── mod.rs        # re-exports
 │   │   │       ├── init.rs       # `ensemble init` interactive config wizard
 │   │   │       ├── run.rs        # `ensemble run` headless orchestrator
-│   │   │       └── web.rs        # `ensemble web` orchestrator + SPA + API
+│   │   │       └── web.rs        # `ensemble web` orchestrator + SPA + API (`web-ui` feature)
 │   │   └── tests/
 │   └── ensemble-desktop/         # Tauri desktop app
 │       ├── build.rs              # tauri-build + SPA embed script
@@ -65,6 +65,9 @@ cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 ```
 
+Default `ensemble-cli` builds are headless. Compile the web dashboard command with
+`--features web-ui`; for Rust-only checks of that feature, use `SKIP_UI_BUILD=1`.
+
 ## Pre-push checklist
 
 Before pushing commits, ensure all checks pass locally:
@@ -72,6 +75,8 @@ Before pushing commits, ensure all checks pass locally:
 ```sh
 # Rust code
 cargo test --workspace --exclude ensemble-desktop
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
+SKIP_UI_BUILD=1 cargo check -p ensemble-cli --features web-ui
 cargo clippy --workspace --exclude ensemble-desktop -- -D warnings
 cargo fmt --all -- --check
 
@@ -85,7 +90,10 @@ CI will run these checks on your PR; failures block merge.
 
 ## CI
 
-GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, test, clippy, fmt. All must pass. `RUSTFLAGS=-Dwarnings` is set globally — treat warnings as errors.
+GitHub Actions runs on push to `main` and all PRs. The main CI job runs format, clippy,
+default non-desktop Rust tests, the feature-enabled product E2E test, and a CLI
+`web-ui` feature check. Frontend and desktop jobs run separately. All must pass.
+`RUSTFLAGS=-Dwarnings` is set globally — treat warnings as errors.
 
 ## Release
 
@@ -138,7 +146,7 @@ Before finishing any change, check whether it changes documented behavior. Updat
 - **Config directory based**: All runtime config lives in a configuration directory containing `config.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. The config directory is resolved via `--config-dir`, `ENSEMBLE_CONFIG_DIR`, or platform defaults. Agent definitions, step DAG, and prompt references are all defined in `config.yaml`. Relative paths are resolved from the config directory.
 - **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `ensemble.yaml`.
 - **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects verdicts from review agents.
-- **Shared orchestrator startup**: `ensemble run`, `ensemble web`, and desktop/Tauri should all start the same real orchestrator runtime path. Do not add placeholder poll loops or separate per-frontend orchestrator implementations when the shared bootstrap can be reused.
+- **Shared orchestrator startup**: `ensemble run`, `ensemble web` (when compiled with `web-ui`), and desktop/Tauri should all start the same real orchestrator runtime path. Do not add placeholder poll loops or separate per-frontend orchestrator implementations when the shared bootstrap can be reused.
 - **Manual refresh behavior**: Refresh, retry, and resume controls should signal the orchestrator loop to run a tick; do not implement ad-hoc polling/state mutation in API or UI handlers that bypasses the orchestrator.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
 - **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.

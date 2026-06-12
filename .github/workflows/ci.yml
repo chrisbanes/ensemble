@@ -36,6 +36,11 @@ jobs:
       - name: Test
         run: cargo test --workspace --exclude ensemble-desktop
 
+      - name: Product E2E
+        run: cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
+        env:
+          SKIP_UI_BUILD: 1
+
       - name: Check CLI web UI feature
         run: cargo check -p ensemble-cli --features web-ui
         env:

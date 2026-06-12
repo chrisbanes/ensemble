@@ -5,8 +5,8 @@
 Ensemble is a Rust workspace. You need Rust 1.80+ installed.
 
 ```sh
-cargo build --workspace          # compile
-cargo test --workspace           # run all tests
+cargo build --workspace          # compile default targets
+cargo test --workspace           # run default Rust tests
 cargo clippy --workspace -- -D warnings   # lint
 cargo fmt --all -- --check       # check formatting
 ```
@@ -27,6 +27,23 @@ For Rust-only checks that intentionally compile the `web-ui` feature without reb
 assets, set `SKIP_UI_BUILD=1`.
 
 Run all four before pushing — CI enforces them.
+
+## Product E2E
+
+Run the local product E2E test with:
+
+```sh
+SKIP_UI_BUILD=1 cargo test -p ensemble-cli --features web-ui --test product_e2e -- --nocapture
+```
+
+The test exercises the real `ensemble web` command, so it must compile the optional
+`web-ui` feature. `SKIP_UI_BUILD=1` keeps the Rust E2E focused on backend product
+behavior without rebuilding frontend assets; omit it when you specifically want to
+verify frontend embedding as part of the build.
+
+The test starts a real `ensemble web` server on localhost with a temporary
+config directory, a todo-file tracker fixture, and mock `acpx`. It does not
+require GitHub, Notion, real ACP credentials, or non-localhost network access.
 
 ## Project structure
 
@@ -62,7 +79,10 @@ ensemble/
 
 ## CI
 
-GitHub Actions runs on push to `main` and all PRs. Four parallel jobs: check, test, clippy, fmt. All must pass. `RUSTFLAGS=-Dwarnings` is set globally.
+GitHub Actions runs on push to `main` and all PRs. The main CI job runs format, clippy,
+default non-desktop Rust tests, the feature-enabled product E2E test, and a CLI
+`web-ui` feature check. Frontend and desktop jobs run separately. All must pass.
+`RUSTFLAGS=-Dwarnings` is set globally.
 
 ## Further reading
 
