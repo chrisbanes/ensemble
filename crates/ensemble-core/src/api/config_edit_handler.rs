@@ -12,6 +12,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 use tracing::warn;
 
 /// Redact literal secret values from YAML text.
@@ -389,6 +390,46 @@ pub struct DiscoveredAgentInfo {
     pub available_modes: Vec<crate::config::ensemble::ModeDefinition>,
 }
 
+fn discovered_agent_info_from_parts(
+    name: String,
+    label: String,
+    version: String,
+    capabilities: crate::config::setup::AgentCapabilities,
+) -> DiscoveredAgentInfo {
+    let available_models = if capabilities.typed_models.is_empty() {
+        capabilities
+            .available_models
+            .into_iter()
+            .map(|id| crate::config::ensemble::ModelDefinition {
+                name: id.clone(),
+                id,
+                description: None,
+            })
+            .collect()
+    } else {
+        capabilities.typed_models
+    };
+
+    DiscoveredAgentInfo {
+        name,
+        label,
+        version,
+        available_models,
+        available_modes: capabilities.available_modes,
+    }
+}
+
+async fn discover_setup_agent_capabilities(
+    agent_name: &str,
+) -> crate::config::setup::AgentCapabilities {
+    tokio::time::timeout(
+        Duration::from_secs(12),
+        crate::config::setup::discover_agent_capabilities(agent_name),
+    )
+    .await
+    .unwrap_or_default()
+}
+
 /// GET /api/v1/config/setup/agents
 ///
 /// Returns discovered agents.
@@ -407,16 +448,25 @@ pub async fn get_setup_agents(
     // Discover available agents
     match crate::config::setup::discover_available_agents().await {
         Ok(agents) => {
-            let agent_infos: Vec<DiscoveredAgentInfo> = agents
-                .into_iter()
-                .map(|a| DiscoveredAgentInfo {
-                    name: a.name.clone(),
-                    label: a.label,
-                    version: a.version,
-                    available_models: Vec::new(),
-                    available_modes: Vec::new(),
-                })
-                .collect();
+            let mut probe_tasks = tokio::task::JoinSet::new();
+            for agent in agents {
+                probe_tasks.spawn(async move {
+                    let capabilities = discover_setup_agent_capabilities(&agent.name).await;
+                    discovered_agent_info_from_parts(
+                        agent.name,
+                        agent.label,
+                        agent.version,
+                        capabilities,
+                    )
+                });
+            }
+
+            let mut agent_infos = Vec::new();
+            while let Some(join_result) = probe_tasks.join_next().await {
+                if let Ok(agent) = join_result {
+                    agent_infos.push(agent);
+                }
+            }
 
             let response = SetupAgentsResponse {
                 agents: agent_infos,
@@ -455,15 +505,14 @@ pub async fn get_setup_agents_stream() -> impl axum::response::IntoResponse {
             let name = name.to_string();
             let label = label.to_string();
             probe_tasks.spawn(async move {
-                crate::config::setup::probe_agent(&name)
-                    .await
-                    .map(|version| DiscoveredAgentInfo {
-                        name,
-                        label,
-                        version,
-                        available_models: Vec::new(),
-                        available_modes: Vec::new(),
-                    })
+                let version = crate::config::setup::probe_agent(&name).await?;
+                let capabilities = discover_setup_agent_capabilities(&name).await;
+                Some(discovered_agent_info_from_parts(
+                    name,
+                    label,
+                    version,
+                    capabilities,
+                ))
             });
         }
 
@@ -1076,6 +1125,32 @@ on_failure: Failed
         assert_eq!(modes[0].id, "code");
     }
 
+    #[test]
+    fn discovered_agent_info_includes_typed_capabilities() {
+        let info = discovered_agent_info_from_parts(
+            "claude".to_string(),
+            "Claude".to_string(),
+            "1.0.0".to_string(),
+            crate::config::setup::AgentCapabilities {
+                available_models: vec![],
+                typed_models: vec![crate::config::ensemble::ModelDefinition {
+                    id: "sonnet".to_string(),
+                    name: "Claude Sonnet".to_string(),
+                    description: Some("Balanced".to_string()),
+                }],
+                available_modes: vec![crate::config::ensemble::ModeDefinition {
+                    id: "plan".to_string(),
+                    name: "Plan".to_string(),
+                    description: Some("Plan first".to_string()),
+                }],
+            },
+        );
+
+        assert_eq!(info.available_models[0].id, "sonnet");
+        assert_eq!(info.available_models[0].name, "Claude Sonnet");
+        assert_eq!(info.available_modes[0].id, "plan");
+    }
+
     #[tokio::test]
     async fn test_validate_setup_allows_save_when_only_environment_checks_fail() {
         let (state, _temp_dir) = test_app_state();
@@ -1092,6 +1167,8 @@ on_failure: Failed
                     role: "builder".to_string(),
                     acpx_agent: "claude".to_string(),
                     model: None,
+                    reasoning_level: None,
+                    permission_mode: None,
                     prompt: None,
                     prompt_file: None,
                 }],
@@ -1417,6 +1494,8 @@ custom_root:
                     role: "builder".to_string(),
                     acpx_agent: "codex".to_string(),
                     model: Some("sonnet".to_string()),
+                    reasoning_level: None,
+                    permission_mode: None,
                     prompt: None,
                     prompt_file: None,
                 }],
@@ -1948,6 +2027,8 @@ on_failure: Failed
                     role: "builder".to_string(),
                     acpx_agent: "claude".to_string(),
                     model: Some("sonnet".to_string()),
+                    reasoning_level: None,
+                    permission_mode: None,
                     prompt: None,
                     prompt_file: None,
                 }],

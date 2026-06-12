@@ -9,7 +9,7 @@ use crate::observability::events_contract::{
     elapsed_ms, ACPX_PROMPT_CANCELLED, ACPX_PROMPT_COMPLETED, ACPX_PROMPT_FAILED,
 };
 
-use super::acpx_cli::AcpxCli;
+use super::acpx_cli::{AcpxCli, AcpxCommandOptions};
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
 use super::{detect_worker_result_with_runtime_verdict, AgentRunRequest};
 
@@ -112,12 +112,16 @@ impl AcpxRuntime {
             session_name,
             "ensuring acpx session"
         );
+        let command_options = AcpxCommandOptions {
+            model: agent.model.as_deref(),
+            reasoning_level: agent.reasoning_level.as_deref(),
+        };
         self.cli
             .ensure_session(
                 acpx_agent,
                 &session_name,
                 request.workspace_path,
-                agent.model.as_deref(),
+                command_options,
             )
             .await?;
 
@@ -148,7 +152,7 @@ impl AcpxRuntime {
             &session_name,
             request.workspace_path,
             prompt,
-            agent.model.as_deref(),
+            command_options,
             |event| {
                 cb_count.fetch_add(1, Ordering::Relaxed);
                 emit_event(
@@ -175,7 +179,7 @@ impl AcpxRuntime {
                         acpx_agent,
                         &session_name,
                         request.workspace_path,
-                        agent.model.as_deref(),
+                        command_options,
                     )
                     .await?;
 
@@ -198,7 +202,7 @@ impl AcpxRuntime {
                     acpx_agent,
                     &session_name,
                     request.workspace_path,
-                    agent.model.as_deref(),
+                    command_options,
                 )
                 .await;
                 info!(
@@ -219,7 +223,7 @@ impl AcpxRuntime {
             acpx_agent,
             &session_name,
             request.workspace_path,
-            agent.model.as_deref(),
+            command_options,
         )
         .await;
 
@@ -334,13 +338,13 @@ async fn close_session(
     acpx_agent: &str,
     session_name: &str,
     workspace_path: &std::path::Path,
-    model: Option<&str>,
+    options: AcpxCommandOptions<'_>,
 ) {
     debug!(session_name, "closing acpx session");
     // Session close is best-effort cleanup; orchestration should preserve the
     // primary run outcome even if acpx session teardown fails.
     if let Err(error) = cli
-        .close_session(acpx_agent, session_name, workspace_path, model)
+        .close_session(acpx_agent, session_name, workspace_path, options)
         .await
     {
         warn!(%error, session_name, "failed to close acpx session");
@@ -450,6 +454,88 @@ exit 1
             }
         }
         assert!(saw_output);
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_passes_reasoning_level_to_acpx_commands() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+  exit 0
+  ;;
+  *" prompt --session "*)
+  cat > /dev/null
+  printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+  exit 0
+  ;;
+  *" sessions close "*)
+  exit 0
+  ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = Arc::new(
+            parse_config(
+                r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: codex
+    model: gpt-5
+    reasoning_level: high
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+on_success: Done
+on_failure: Failed
+"#,
+            )
+            .unwrap(),
+        );
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        runner.run_step(&request, "finish the task").await.unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let ensure_args = args
+            .lines()
+            .find(|line| line.contains("sessions ensure"))
+            .expect("sessions ensure command should be recorded");
+        let prompt_args = args
+            .lines()
+            .find(|line| line.contains("prompt --session"))
+            .expect("prompt command should be recorded");
+        assert!(ensure_args.contains("--reasoning-level high"));
+        assert!(prompt_args.contains("--reasoning-level high"));
     }
 
     #[tokio::test]

@@ -9,6 +9,51 @@ import FileBrowser from "./FileBrowser";
 import WorkflowEditor from "./WorkflowEditor";
 import type { ValidationIssue } from "@/generated/models";
 
+type CapabilityDefinition = {
+  id: string;
+  name: string;
+  description?: string | null;
+};
+
+const NONE_VALUE = "__none__";
+
+const REASONING_LEVELS: CapabilityDefinition[] = [
+  { id: "low", name: "Low" },
+  { id: "medium", name: "Medium" },
+  { id: "high", name: "High" },
+];
+
+const PERMISSION_MODE_FALLBACKS: CapabilityDefinition[] = [
+  { id: "approve_reads", name: "Approve reads" },
+  { id: "approve_all", name: "Approve all" },
+  { id: "deny_all", name: "Deny all" },
+];
+
+const SUPPORTED_PERMISSION_MODES = new Set(PERMISSION_MODE_FALLBACKS.map((mode) => mode.id));
+
+function capabilityLabel(item: CapabilityDefinition) {
+  return item.name || item.id;
+}
+
+function permissionModeOptions(availableModes: CapabilityDefinition[] | undefined) {
+  const discovered = (availableModes ?? []).filter((mode) => SUPPORTED_PERMISSION_MODES.has(mode.id));
+  return discovered.length > 0 ? discovered : PERMISSION_MODE_FALLBACKS;
+}
+
+function supportedPermissionMode(value: string | undefined) {
+  return value && SUPPORTED_PERMISSION_MODES.has(value) ? value : undefined;
+}
+
+function normalizeGuidedForm(form: GuidedForm): GuidedForm {
+  return {
+    ...form,
+    agents: form.agents.map(({ available_models: _availableModels, available_modes: _availableModes, ...agent }) => ({
+      ...agent,
+      permission_mode: supportedPermissionMode(agent.permission_mode),
+    })),
+  };
+}
+
 export interface GuidedAgent {
   name: string;
   label: string;
@@ -40,6 +85,8 @@ export interface GuidedForm {
     prompt_template?: string;
     reasoning_level?: string;
     permission_mode?: string;
+    available_models?: CapabilityDefinition[];
+    available_modes?: CapabilityDefinition[];
   }>;
   steps: Array<{
     name: string;
@@ -122,10 +169,23 @@ export default function GuidedEditor({
     setIsDirty(true);
   };
 
+  const handleAgentChange = (
+    name: string,
+    patch: Partial<GuidedForm["agents"][number]>
+  ) => {
+    setForm((prev) => ({
+      ...prev,
+      agents: prev.agents.map((agent) =>
+        agent.name === name ? { ...agent, ...patch } : agent
+      ),
+    }));
+    setIsDirty(true);
+  };
+
   const handleValidate = async () => {
       setIsValidating(true);
     try {
-      const validatedIssues = await onValidate(form, baseRawYaml);
+      const validatedIssues = await onValidate(normalizeGuidedForm(form), baseRawYaml);
       setDisplayedIssues(validatedIssues);
       setLastValidation({
         timestamp: new Date(),
@@ -139,7 +199,7 @@ export default function GuidedEditor({
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await onSave(form, baseRawYaml);
+      await onSave(normalizeGuidedForm(form), baseRawYaml);
       setIsDirty(false);
     } finally {
       setIsSaving(false);
@@ -347,12 +407,88 @@ export default function GuidedEditor({
                       {agent.executor}
                     </div>
                   )}
-                  {agent.model && (
-                    <div>
-                      <span className="text-muted-foreground">model:</span>{" "}
-                      {agent.model}
-                    </div>
-                  )}
+                  <div className="space-y-2">
+                    <label htmlFor={`guided-agent-model-${agent.name}`} className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Model</label>
+                    {(agent.available_models?.length ?? 0) > 0 ? (
+                      <Select
+                        value={agent.model ?? NONE_VALUE}
+                      onValueChange={(value) =>
+                        handleAgentChange(agent.name, {
+                            model: !value || value === NONE_VALUE ? undefined : value,
+                          })
+                        }
+                      >
+                        <SelectTrigger id={`guided-agent-model-${agent.name}`}>
+                          <SelectValue placeholder="Default" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NONE_VALUE}>Default</SelectItem>
+                          {agent.available_models?.map((model) => (
+                            <SelectItem key={model.id} value={model.id}>
+                              {capabilityLabel(model)}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    ) : (
+                      <Input
+                        id={`guided-agent-model-${agent.name}`}
+                        value={agent.model || ""}
+                        onChange={(event) =>
+                          handleAgentChange(agent.name, {
+                            model: event.target.value || undefined,
+                          })
+                        }
+                        placeholder="Default"
+                      />
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor={`guided-agent-reasoning-${agent.name}`} className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Reasoning Level</label>
+                    <Select
+                      value={agent.reasoning_level ?? NONE_VALUE}
+                      onValueChange={(value) =>
+                        handleAgentChange(agent.name, {
+                          reasoning_level: !value || value === NONE_VALUE ? undefined : value,
+                        })
+                      }
+                    >
+                      <SelectTrigger id={`guided-agent-reasoning-${agent.name}`}>
+                        <SelectValue placeholder="Default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NONE_VALUE}>Default</SelectItem>
+                        {REASONING_LEVELS.map((level) => (
+                          <SelectItem key={level.id} value={level.id}>
+                            {level.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <label htmlFor={`guided-agent-mode-${agent.name}`} className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Mode</label>
+                    <Select
+                      value={supportedPermissionMode(agent.permission_mode) ?? NONE_VALUE}
+                      onValueChange={(value) =>
+                        handleAgentChange(agent.name, {
+                          permission_mode: !value || value === NONE_VALUE ? undefined : value,
+                        })
+                      }
+                    >
+                      <SelectTrigger id={`guided-agent-mode-${agent.name}`}>
+                        <SelectValue placeholder="Default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NONE_VALUE}>Default</SelectItem>
+                        {permissionModeOptions(agent.available_modes).map((mode) => (
+                          <SelectItem key={mode.id} value={mode.id}>
+                            {capabilityLabel(mode)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
                   {agent.prompt && (
                     <div className="col-span-2">
                       <span className="text-muted-foreground">prompt:</span>{" "}

@@ -51,10 +51,17 @@ pub struct SetupRepo {
 pub struct SetupAgent {
     pub role: String,
     pub acpx_agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// Inline prompt text (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// Path to prompt template file (optional, maps to prompt_template in config)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_file: Option<String>,
 }
 
@@ -687,6 +694,18 @@ fn generate_yaml(request: &SetupRequest) -> String {
         if let Some(ref model) = agent.model {
             agent_map.insert("model".into(), serde_yaml::Value::String(model.clone()));
         }
+        if let Some(ref reasoning_level) = agent.reasoning_level {
+            agent_map.insert(
+                "reasoning_level".into(),
+                serde_yaml::Value::String(reasoning_level.clone()),
+            );
+        }
+        if let Some(ref permission_mode) = agent.permission_mode {
+            agent_map.insert(
+                "permission_mode".into(),
+                serde_yaml::Value::String(permission_mode.clone()),
+            );
+        }
         // Emit prompt or prompt_template based on agent config
         // If both are set, prompt takes precedence and prompt_file is silently ignored
         if let Some(ref prompt) = agent.prompt {
@@ -1050,6 +1069,14 @@ fn extract_agents(doc: &serde_yaml::Value) -> Result<Vec<SetupAgent>, ConfigErro
                         .get("model")
                         .and_then(|m| m.as_str())
                         .map(String::from);
+                    let reasoning_level = config
+                        .get("reasoning_level")
+                        .and_then(|value| value.as_str())
+                        .map(String::from);
+                    let permission_mode = config
+                        .get("permission_mode")
+                        .and_then(|value| value.as_str())
+                        .map(String::from);
                     let prompt = config
                         .get("prompt")
                         .and_then(|p| p.as_str())
@@ -1062,6 +1089,8 @@ fn extract_agents(doc: &serde_yaml::Value) -> Result<Vec<SetupAgent>, ConfigErro
                         role: role.to_string(),
                         acpx_agent: acpx_agent.to_string(),
                         model,
+                        reasoning_level,
+                        permission_mode,
                         prompt,
                         prompt_file,
                     })
@@ -1193,7 +1222,14 @@ fn update_yaml_from_request(
             .and_then(|value| value.as_mapping())
             .cloned()
             .unwrap_or_default();
-        for key in ["acpx_agent", "model", "prompt_template", "prompt"] {
+        for key in [
+            "acpx_agent",
+            "model",
+            "reasoning_level",
+            "permission_mode",
+            "prompt_template",
+            "prompt",
+        ] {
             agent_config.remove(serde_yaml::Value::String(key.to_string()));
         }
         agent_config.insert(
@@ -1202,6 +1238,18 @@ fn update_yaml_from_request(
         );
         if let Some(ref model) = agent.model {
             agent_config.insert("model".into(), serde_yaml::Value::String(model.clone()));
+        }
+        if let Some(ref reasoning_level) = agent.reasoning_level {
+            agent_config.insert(
+                "reasoning_level".into(),
+                serde_yaml::Value::String(reasoning_level.clone()),
+            );
+        }
+        if let Some(ref permission_mode) = agent.permission_mode {
+            agent_config.insert(
+                "permission_mode".into(),
+                serde_yaml::Value::String(permission_mode.clone()),
+            );
         }
         // Emit prompt or prompt_template based on agent config
         if let Some(ref prompt) = agent.prompt {
@@ -1400,6 +1448,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -1439,6 +1489,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("sonnet".to_string()),
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -1465,6 +1517,40 @@ mod tests {
     }
 
     #[test]
+    fn generate_yaml_includes_reasoning_level_and_permission_mode() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: Some("sonnet".to_string()),
+                reasoning_level: Some("high".to_string()),
+                permission_mode: Some("approve_reads".to_string()),
+                prompt: Some("Build it.".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                kind: None,
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let yaml = generate_yaml(&request);
+
+        assert!(yaml.contains("model: sonnet"));
+        assert!(yaml.contains("reasoning_level: high"));
+        assert!(yaml.contains("permission_mode: approve_reads"));
+    }
+
+    #[test]
     fn build_setup_artifacts_generates_env_file_with_token() {
         let request = SetupRequest {
             tracker: SetupTracker::GitHub {
@@ -1480,6 +1566,8 @@ mod tests {
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -1547,6 +1635,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: Some("Build it.".to_string()),
                 prompt_file: None,
             }],
@@ -1585,6 +1675,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: Some("templates/custom.liquid".to_string()),
             }],
@@ -1622,6 +1714,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: Some("Build it: use #hashtags and \"quotes\"".to_string()),
                 prompt_file: None,
             }],
@@ -1657,6 +1751,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: Some("Inline prompt".to_string()),
                 prompt_file: Some("templates/ignored.liquid".to_string()),
             }],
@@ -1797,6 +1893,8 @@ custom_section:
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("opus".to_string()),
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -1856,6 +1954,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "codex".to_string(),
                 model: Some("sonnet".to_string()),
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -2503,6 +2603,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: Some("opus".to_string()),
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -2561,6 +2663,8 @@ on_failure: Failed
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],
@@ -2628,6 +2732,8 @@ on_failure: Done
                 role: "builder".to_string(),
                 acpx_agent: "claude".to_string(),
                 model: None,
+                reasoning_level: None,
+                permission_mode: None,
                 prompt: None,
                 prompt_file: None,
             }],

@@ -28,10 +28,26 @@ type WizardStep = "tracker" | "repos" | "agents" | "workflow" | "validation";
 
 type TrackerKind = "todo_file" | "github";
 
+type CapabilityDefinition = {
+  id: string;
+  name: string;
+  description?: string | null;
+};
+
+type SetupAgentDraft = SetupAgent & {
+  reasoning_level?: string | null;
+  permission_mode?: string | null;
+};
+
+type DiscoveredAgentWithCapabilities = DiscoveredAgentInfo & {
+  available_models?: CapabilityDefinition[];
+  available_modes?: CapabilityDefinition[];
+};
+
 interface SetupDraft {
   tracker: SetupTracker;
   repos: SetupRepo[];
-  agents: SetupAgent[];
+  agents: SetupAgentDraft[];
   steps: SetupStep[];
   onSuccess: string;
   onFailure: string;
@@ -55,11 +71,55 @@ const DEFAULT_GH_TRACKER: SetupTracker = {
 const DEFAULT_DRAFT: SetupDraft = {
   tracker: { ...DEFAULT_TODO_TRACKER },
   repos: [],
-  agents: [{ role: "implement", acpx_agent: "", model: null, prompt: null, prompt_file: null }],
+  agents: [{ role: "implement", acpx_agent: "", model: null, reasoning_level: null, permission_mode: null, prompt: null, prompt_file: null }],
   steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
   onSuccess: "done",
   onFailure: "paused",
 };
+
+const CUSTOM_VALUE = "__custom__";
+const NONE_VALUE = "__none__";
+
+const REASONING_LEVELS: CapabilityDefinition[] = [
+  { id: "low", name: "Low" },
+  { id: "medium", name: "Medium" },
+  { id: "high", name: "High" },
+];
+
+const PERMISSION_MODE_FALLBACKS: CapabilityDefinition[] = [
+  { id: "approve_reads", name: "Approve reads" },
+  { id: "approve_all", name: "Approve all" },
+  { id: "deny_all", name: "Deny all" },
+];
+
+const SUPPORTED_PERMISSION_MODES = new Set(PERMISSION_MODE_FALLBACKS.map((mode) => mode.id));
+
+function capabilityLabel(item: CapabilityDefinition) {
+  return item.name || item.id;
+}
+
+function permissionModeOptions(availableModes: CapabilityDefinition[] | undefined) {
+  const discovered = (availableModes ?? []).filter((mode) => SUPPORTED_PERMISSION_MODES.has(mode.id));
+  return discovered.length > 0 ? discovered : PERMISSION_MODE_FALLBACKS;
+}
+
+function supportedPermissionMode(value: string | null | undefined) {
+  return value && SUPPORTED_PERMISSION_MODES.has(value) ? value : null;
+}
+
+function modelOptions(availableModels: CapabilityDefinition[] | undefined) {
+  const models = availableModels ?? [];
+  return models.some((model) => model.id === "default")
+    ? models
+    : [{ id: "default", name: "Default" }, ...models];
+}
+
+function findDiscoveredAgent(
+  agents: DiscoveredAgentInfo[],
+  name: string | null | undefined
+) {
+  return agents.find((agent) => agent.name === name) as DiscoveredAgentWithCapabilities | undefined;
+}
 
 export default function SetupWizard({ mode = "create", onComplete }: SetupWizardProps) {
   const [currentStep, setCurrentStep] = useState<WizardStep>("tracker");
@@ -80,6 +140,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
 
   // Custom agent tracking
   const [customAgents, setCustomAgents] = useState<Record<number, boolean>>({});
+  const [customModels, setCustomModels] = useState<Record<number, boolean>>({});
 
   // Prompt mode tracking for each agent (UI-only state)
   const [promptModes, setPromptModes] = useState<Record<number, "inline" | "file">>({});
@@ -159,12 +220,16 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   };
 
   const handleValidate = async () => {
+    const agents = draft.agents.map((agent) => ({
+      ...agent,
+      permission_mode: supportedPermissionMode(agent.permission_mode),
+    }));
     const result = await validateMutation.mutateAsync({
       data: {
         setup: {
           tracker: draft.tracker,
           repos: draft.repos,
-          agents: draft.agents,
+          agents,
           steps: draft.steps,
           on_success: draft.onSuccess,
           on_failure: draft.onFailure,
@@ -181,12 +246,16 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   };
 
   const handleSave = async () => {
+    const agents = draft.agents.map((agent) => ({
+      ...agent,
+      permission_mode: supportedPermissionMode(agent.permission_mode),
+    }));
     await saveMutation.mutateAsync({
       data: {
         setup: {
           tracker: draft.tracker,
           repos: draft.repos,
-          agents: draft.agents,
+          agents,
           steps: draft.steps,
           on_success: draft.onSuccess,
           on_failure: draft.onFailure,
@@ -197,7 +266,19 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   };
 
   // Generate default workflow steps based on agent count (CLI parity)
-  const generateDefaultWorkflow = (agents: SetupAgent[]): SetupStep[] => {
+  const updateAgent = (index: number, patch: Partial<SetupAgentDraft>) => {
+    setDraft(prev => {
+      const newAgents = [...prev.agents];
+      const currentAgent = newAgents[index];
+      if (!currentAgent) {
+        return prev;
+      }
+      newAgents[index] = { ...currentAgent, ...patch };
+      return { ...prev, agents: newAgents };
+    });
+  };
+
+  const generateDefaultWorkflow = (agents: SetupAgentDraft[]): SetupStep[] => {
     if (agents.length === 1 && agents[0]) {
       return [{ name: "implement", agent_role: agents[0].role, depends: [], tracker_state: null }];
     } else if (agents.length >= 2 && agents[0] && agents[1]) {
@@ -461,8 +542,11 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           )}
           
           {draft.agents.map((agent, index) => {
-            const hasDiscoveredMatch = !!(agent.acpx_agent && discoveredAgents.find((a: DiscoveredAgentInfo) => a.name === agent.acpx_agent));
+            const selectedDiscoveredAgent = findDiscoveredAgent(discoveredAgents, agent.acpx_agent);
+            const hasDiscoveredMatch = !!selectedDiscoveredAgent;
             const isCustom = customAgents[index] || (!!agent.acpx_agent && !isLoadingAgents && !hasDiscoveredMatch);
+            const hasModelOptions = (selectedDiscoveredAgent?.available_models?.length ?? 0) > 0;
+            const isCustomModel = customModels[index] || !hasModelOptions;
             const promptMode = promptModes[index] || "inline";
             
             return (
@@ -479,6 +563,15 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                         agents: prev.agents.filter((_, i) => i !== index),
                       }));
                       setCustomAgents(prev => {
+                        const updated: Record<number, boolean> = {};
+                        for (const [k, v] of Object.entries(prev)) {
+                          const numK = Number(k);
+                          if (numK < index) updated[numK] = v;
+                          else if (numK > index) updated[numK - 1] = v;
+                        }
+                        return updated;
+                      });
+                      setCustomModels(prev => {
                         const updated: Record<number, boolean> = {};
                         for (const [k, v] of Object.entries(prev)) {
                           const numK = Number(k);
@@ -520,22 +613,15 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                 <div className="space-y-2">
                   <label className="text-sm" htmlFor={`agent-select-${index}`}>Agent</label>
                   <Select
-                    value={isCustom ? "__custom__" : agent.acpx_agent}
+                    value={isCustom ? CUSTOM_VALUE : agent.acpx_agent}
                     onValueChange={(value) => {
-                      if (value === "__custom__") {
+                      if (value === CUSTOM_VALUE) {
                         setCustomAgents(prev => ({ ...prev, [index]: true }));
-                        setDraft(prev => {
-                          const newAgents = [...prev.agents];
-                          newAgents[index] = { ...agent, acpx_agent: "" };
-                          return { ...prev, agents: newAgents };
-                        });
+                        updateAgent(index, { acpx_agent: "", model: null, reasoning_level: null, permission_mode: null });
                       } else if (value) {
                         setCustomAgents(prev => ({ ...prev, [index]: false }));
-                        setDraft(prev => {
-                          const newAgents = [...prev.agents];
-                          newAgents[index] = { ...agent, acpx_agent: value };
-                          return { ...prev, agents: newAgents };
-                        });
+                        setCustomModels(prev => ({ ...prev, [index]: false }));
+                        updateAgent(index, { acpx_agent: value, model: null, reasoning_level: null, permission_mode: null });
                       }
                     }}
                   >
@@ -548,7 +634,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                           {discoveredAgent.label} {discoveredAgent.version && `(${discoveredAgent.version})`}
                         </SelectItem>
                       ))}
-                      <SelectItem value="__custom__">Custom...</SelectItem>
+                      <SelectItem value={CUSTOM_VALUE}>Custom...</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
@@ -573,17 +659,86 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               )}
 
               <div className="space-y-2">
-                <label className="text-sm" htmlFor={`agent-model-${index}`}>Model (optional)</label>
-                <Input
-                  id={`agent-model-${index}`}
-                  value={agent.model || ""}
-                  onChange={(e) => setDraft(prev => {
-                    const newAgents = [...prev.agents];
-                    newAgents[index] = { ...agent, model: e.target.value || null };
-                    return { ...prev, agents: newAgents };
-                  })}
-                  placeholder="e.g., gpt-4"
-                />
+                <label
+                  className="text-sm"
+                  htmlFor={isCustomModel && hasModelOptions ? `agent-model-custom-${index}` : `agent-model-${index}`}
+                >
+                  Model (optional)
+                </label>
+                {hasModelOptions && (
+                  <Select
+                    value={customModels[index] ? CUSTOM_VALUE : agent.model ?? "default"}
+                    onValueChange={(value) => {
+                      if (value === CUSTOM_VALUE) {
+                        setCustomModels(prev => ({ ...prev, [index]: true }));
+                        return;
+                      }
+                      setCustomModels(prev => ({ ...prev, [index]: false }));
+                      updateAgent(index, { model: value === "default" ? null : value });
+                    }}
+                  >
+                    <SelectTrigger id={`agent-model-${index}`}>
+                      <SelectValue placeholder="Select model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {modelOptions(selectedDiscoveredAgent?.available_models).map((model) => (
+                        <SelectItem key={model.id} value={model.id}>
+                          {capabilityLabel(model)}
+                        </SelectItem>
+                      ))}
+                      <SelectItem value={CUSTOM_VALUE}>Custom...</SelectItem>
+                    </SelectContent>
+                  </Select>
+                )}
+                {isCustomModel && (
+                  <Input
+                    id={hasModelOptions ? `agent-model-custom-${index}` : `agent-model-${index}`}
+                    value={agent.model || ""}
+                    onChange={(e) => updateAgent(index, { model: e.target.value || null })}
+                    placeholder="e.g., gpt-5"
+                  />
+                )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <label className="text-sm" htmlFor={`agent-reasoning-${index}`}>Reasoning Level</label>
+                  <Select
+                    value={agent.reasoning_level ?? NONE_VALUE}
+                    onValueChange={(value) => updateAgent(index, { reasoning_level: value === NONE_VALUE ? null : value })}
+                  >
+                    <SelectTrigger id={`agent-reasoning-${index}`}>
+                      <SelectValue placeholder="Default" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>Default</SelectItem>
+                      {REASONING_LEVELS.map((level) => (
+                        <SelectItem key={level.id} value={level.id}>
+                          {level.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <label className="text-sm" htmlFor={`agent-mode-${index}`}>Mode</label>
+                  <Select
+                    value={agent.permission_mode ?? NONE_VALUE}
+                    onValueChange={(value) => updateAgent(index, { permission_mode: value === NONE_VALUE ? null : value })}
+                  >
+                    <SelectTrigger id={`agent-mode-${index}`}>
+                      <SelectValue placeholder="Default" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value={NONE_VALUE}>Default</SelectItem>
+                      {permissionModeOptions(selectedDiscoveredAgent?.available_modes).map((mode) => (
+                        <SelectItem key={mode.id} value={mode.id}>
+                          {capabilityLabel(mode)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
 
               {/* Prompt Configuration */}
@@ -693,7 +848,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
             onClick={() => {
               setDraft(prev => ({
                 ...prev,
-                agents: [...prev.agents, { role: "agent", acpx_agent: "", model: null, prompt: null, prompt_file: null }],
+                agents: [...prev.agents, { role: "agent", acpx_agent: "", model: null, reasoning_level: null, permission_mode: null, prompt: null, prompt_file: null }],
               }));
             }}
           >

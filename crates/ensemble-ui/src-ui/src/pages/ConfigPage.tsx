@@ -9,6 +9,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Edit2, FileText, Settings } from "lucide-react";
 
+const SUPPORTED_PERMISSION_MODES = new Set(["approve_all", "approve_reads", "deny_all"]);
+
 function toGuidedForm(form: GuidedConfigForm): GuidedForm {
   return {
     tracker: {
@@ -29,6 +31,8 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
       prompt: agent.prompt ?? undefined,
       prompt_template: agent.prompt_template ?? undefined,
       reasoning_level: agent.reasoning_level ?? undefined,
+      available_models: agent.available_models ?? undefined,
+      available_modes: agent.available_modes ?? undefined,
     })),
     steps: form.steps.map((step) => ({
       ...step,
@@ -53,6 +57,19 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
   };
 }
 
+function stripGuidedRuntimeMetadata(form: GuidedForm): GuidedForm {
+  return {
+    ...form,
+    agents: form.agents.map(({ available_models: _availableModels, available_modes: _availableModes, ...agent }) => ({
+      ...agent,
+      permission_mode:
+        agent.permission_mode && SUPPORTED_PERMISSION_MODES.has(agent.permission_mode)
+          ? agent.permission_mode
+          : undefined,
+    })),
+  };
+}
+
 export default function ConfigPage() {
   const { data, isLoading, isError, refetch } = useConfigStateQuery();
   const [showSetupWizard, setShowSetupWizard] = useState(false);
@@ -67,7 +84,10 @@ export default function ConfigPage() {
   const saveYamlMutation = useSaveYamlDraftMutation();
 
   const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string): Promise<ValidationIssue[]> => {
-    const response = await validateGuidedFormMutation.mutateAsync({ baseRawYaml, form });
+    const response = await validateGuidedFormMutation.mutateAsync({
+      baseRawYaml,
+      form: stripGuidedRuntimeMetadata(form),
+    });
     setDisplayedIssues(response.data.issues);
     await refetch();
     return response.data.issues;
@@ -75,7 +95,7 @@ export default function ConfigPage() {
 
   const handleSaveGuided = async (form: GuidedForm, baseRawYaml: string) => {
     const normalizedForm = {
-      ...form,
+      ...stripGuidedRuntimeMetadata(form),
       steps: form.steps.map((step) => ({
         ...step,
         kind: step.kind && step.kind !== "agent" ? step.kind : undefined,

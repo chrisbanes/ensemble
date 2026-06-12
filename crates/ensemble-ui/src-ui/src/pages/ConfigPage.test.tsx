@@ -38,9 +38,23 @@ vi.mock("@/components/config/SetupWizard", () => ({
 }));
 
 vi.mock("@/components/config/GuidedEditor", () => ({
-  default: ({ issues }: { issues: ValidationIssue[] }) => (
+  default: ({
+    initialForm,
+    baseRawYaml,
+    issues,
+    onValidate,
+    onSave,
+  }: {
+    initialForm: any;
+    baseRawYaml: string;
+    issues: ValidationIssue[];
+    onValidate: (form: any, baseRawYaml: string) => Promise<ValidationIssue[]>;
+    onSave: (form: any, baseRawYaml: string) => Promise<void>;
+  }) => (
     <div>
       <div>Guided Configuration Editor</div>
+      <button type="button" onClick={() => onValidate(initialForm, baseRawYaml)}>Validate Guided</button>
+      <button type="button" onClick={() => onSave(initialForm, baseRawYaml)}>Save Guided</button>
       {issues.map((issue, index) => (
         <div key={index}>{issue.message}</div>
       ))}
@@ -187,5 +201,65 @@ describe("ConfigPage", () => {
 
     expect(await screen.findByText(/configuration has validation issues/i)).toBeInTheDocument();
     expect(screen.getAllByText(/tracker path is invalid/i).length).toBeGreaterThan(0);
+  });
+
+  it("does not send guided capability metadata or unsupported permission modes", async () => {
+    const user = userEvent.setup();
+    mockConfigData = {
+      state: "parsed",
+      config_path: "/tmp/ensemble/config.yaml",
+      raw_yaml: "tracker:\n  kind: todo_file\n",
+      issues: [],
+      active_config: {},
+      guided_form: {
+        tracker: { kind: "todo_file", active_states: [], terminal_states: [], labels_filter: [] },
+        repos: [],
+        agents: [
+          {
+            name: "builder",
+            acpx_agent: "claude",
+            permission_mode: "plan",
+            available_models: [{ id: "sonnet", name: "Sonnet" }],
+            available_modes: [{ id: "plan", name: "Plan" }],
+          },
+        ],
+        steps: [],
+        runtime: {
+          max_cycles: 1,
+          concurrency: { max_concurrent_agents: 1, max_step_parallelism: 1 },
+          polling: { interval_ms: 1000 },
+          workspace: {},
+          hooks: { timeout_ms: 1000 },
+          agent: {
+            max_turns: 1,
+            max_retry_backoff_ms: 1,
+            command: "agent",
+            session_mode: "code",
+            permission_request_policy: "auto",
+            turn_timeout_ms: 1,
+            read_timeout_ms: 1,
+            stall_timeout_ms: 1,
+          },
+        },
+        transitions: { on_success: "Done", on_failure: "Failed" },
+      },
+    };
+    validateGuidedMock.mockResolvedValue({ data: { issues: [] } });
+    saveGuidedMock.mockResolvedValue({ data: {} });
+
+    renderWithProviders(<ConfigPage />, { route: "/config" });
+
+    await user.click(await screen.findByRole("button", { name: /validate guided/i }));
+    await user.click(screen.getByRole("button", { name: /save guided/i }));
+
+    const validatedAgent = validateGuidedMock.mock.calls[0]?.[0]?.form.agents[0];
+    const savedAgent = saveGuidedMock.mock.calls[0]?.[0]?.form.agents[0];
+
+    expect(validatedAgent).not.toHaveProperty("available_models");
+    expect(validatedAgent).not.toHaveProperty("available_modes");
+    expect(validatedAgent.permission_mode).toBeUndefined();
+    expect(savedAgent).not.toHaveProperty("available_models");
+    expect(savedAgent).not.toHaveProperty("available_modes");
+    expect(savedAgent.permission_mode).toBeUndefined();
   });
 });

@@ -31,8 +31,27 @@ class MockEventSource {
       if (this.onmessage) {
         // Send mock agents one by one to simulate progressive discovery
         const mockAgents = [
-          { name: "builder", label: "Builder Agent", version: "1.0.0" },
-          { name: "reviewer", label: "Reviewer Agent", version: "1.0.0" },
+          {
+            name: "builder",
+            label: "Builder Agent",
+            version: "1.0.0",
+            available_models: [
+              { id: "default", name: "Default" },
+              { id: "sonnet", name: "Sonnet" },
+            ],
+            available_modes: [
+              { id: "approve_reads", name: "Approve reads" },
+              { id: "approve_all", name: "Approve all" },
+              { id: "plan", name: "Plan" },
+            ],
+          },
+          {
+            name: "reviewer",
+            label: "Reviewer Agent",
+            version: "1.0.0",
+            available_models: [],
+            available_modes: [],
+          },
         ];
         mockAgents.forEach((agent, index) => {
           setTimeout(() => {
@@ -120,7 +139,7 @@ describe("SetupWizard", () => {
     const validateMock = vi.fn();
     const saveMock = vi.fn();
 
-    vi.stubGlobal("fetch", vi.fn((url: string) => {
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
       if (url.includes("/api/v1/config/setup/defaults")) {
         return jsonResponse({
           has_existing_config: false,
@@ -128,7 +147,7 @@ describe("SetupWizard", () => {
         });
       }
       if (url.includes("/api/v1/config/setup/validate")) {
-        validateMock();
+        validateMock(JSON.parse(String(init?.body)));
         return jsonResponse({
           can_save: true,
           checks: [
@@ -139,7 +158,7 @@ describe("SetupWizard", () => {
         });
       }
       if (url.includes("/api/v1/config/setup/save")) {
-        saveMock();
+        saveMock(JSON.parse(String(init?.body)));
         return jsonResponse({ success: true });
       }
       return jsonResponse({});
@@ -178,8 +197,17 @@ describe("SetupWizard", () => {
     // Select an agent from dropdown
     const agentSelect = screen.getByLabelText("Agent");
     await user.click(agentSelect);
-    const builderOption = await screen.findByText(/builder agent/i);
+    const builderOption = await screen.findByRole("option", { name: /builder agent/i });
     await user.click(builderOption);
+
+    await user.click(screen.getByLabelText(/model/i));
+    await user.click(await screen.findByRole("option", { name: "Sonnet" }));
+
+    await user.click(screen.getByLabelText(/reasoning/i));
+    await user.click(await screen.findByRole("option", { name: "High" }));
+
+    await user.click(screen.getByLabelText("Mode"));
+    await user.click(await screen.findByRole("option", { name: "Approve reads" }));
 
     // Navigate to Workflow step
     await user.click(screen.getByRole("button", { name: /next/i }));
@@ -194,6 +222,13 @@ describe("SetupWizard", () => {
     // Assert validation summary appears
     await waitFor(() => {
       expect(screen.getByText("Validation Passed")).toBeInTheDocument();
+    });
+
+    expect(validateMock.mock.calls[0]?.[0]?.setup.agents[0]).toMatchObject({
+      acpx_agent: "builder",
+      model: "sonnet",
+      reasoning_level: "high",
+      permission_mode: "approve_reads",
     });
 
     // Assert check details are displayed (use function matchers because text is split)
@@ -211,6 +246,12 @@ describe("SetupWizard", () => {
     // Assert save mutation is called
     await waitFor(() => {
       expect(saveMock).toHaveBeenCalled();
+    });
+    expect(saveMock.mock.calls[0]?.[0]?.setup.agents[0]).toMatchObject({
+      acpx_agent: "builder",
+      model: "sonnet",
+      reasoning_level: "high",
+      permission_mode: "approve_reads",
     });
   });
 
@@ -360,5 +401,202 @@ describe("SetupWizard", () => {
 
     expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.active_states).toEqual(["Todo", "In Progress"]);
     expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.terminal_states).toEqual(["Done"]);
+  });
+
+  it("offers default model when discovered models omit default", async () => {
+    const user = userEvent.setup();
+
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key_env: "GITHUB_TOKEN",
+              active_states: ["Todo", "In Progress"],
+              terminal_states: ["Done"],
+            },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null }],
+            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+
+    await user.click(await screen.findByLabelText("Model (optional)"));
+
+    expect(await screen.findByRole("option", { name: "Default" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Sonnet" })).toBeInTheDocument();
+  });
+
+  it("allows a custom model when discovered models are available", async () => {
+    const user = userEvent.setup();
+    const validateMock = vi.fn();
+
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: { kind: "todo_file", path: "/tmp/todo.md" },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null }],
+            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+          },
+        });
+      }
+      if (url.includes("/api/v1/config/setup/validate")) {
+        validateMock(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          can_save: true,
+          checks: [{ label: "Agents", passed: true, detail: "ok" }],
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(await screen.findByLabelText("Model (optional)"));
+    await user.click(await screen.findByRole("option", { name: "Custom..." }));
+    await user.type(screen.getByLabelText("Model (optional)"), "gpt-custom");
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+
+    await waitFor(() => {
+      expect(validateMock).toHaveBeenCalled();
+    });
+
+    expect(validateMock.mock.calls[0]?.[0]?.setup.agents[0].model).toBe("gpt-custom");
+  });
+
+  it("uses free text model input when a selected agent has no discovered models", async () => {
+    const user = userEvent.setup();
+    const validateMock = vi.fn();
+
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: { kind: "todo_file", path: "/tmp/todo.md" },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "review", acpx_agent: "reviewer", model: null }],
+            steps: [{ name: "review", agent_role: "review", depends: [], tracker_state: null }],
+          },
+        });
+      }
+      if (url.includes("/api/v1/config/setup/validate")) {
+        validateMock(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          can_save: true,
+          checks: [{ label: "Agents", passed: true, detail: "ok" }],
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    const modelInput = await screen.findByLabelText("Model (optional)");
+    await user.type(modelInput, "review-model");
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+
+    await waitFor(() => {
+      expect(validateMock).toHaveBeenCalled();
+    });
+
+    expect(validateMock.mock.calls[0]?.[0]?.setup.agents[0].model).toBe("review-model");
+  });
+
+  it("does not show unsupported discovered modes in the mode dropdown", async () => {
+    const user = userEvent.setup();
+
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: { kind: "todo_file", path: "/tmp/todo.md" },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null }],
+            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(await screen.findByLabelText("Mode"));
+
+    expect(await screen.findByRole("option", { name: "Approve reads" })).toBeInTheDocument();
+    expect(screen.queryByRole("option", { name: "Plan" })).not.toBeInTheDocument();
+  });
+
+  it("does not submit unsupported setup permission modes from defaults", async () => {
+    const user = userEvent.setup();
+    const validateMock = vi.fn();
+
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: { kind: "todo_file", path: "/tmp/todo.md" },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null, permission_mode: "plan" }],
+            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+          },
+        });
+      }
+      if (url.includes("/api/v1/config/setup/validate")) {
+        validateMock(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          can_save: true,
+          checks: [{ label: "Agents", passed: true, detail: "ok" }],
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+
+    await waitFor(() => {
+      expect(validateMock).toHaveBeenCalled();
+    });
+
+    expect(validateMock.mock.calls[0]?.[0]?.setup.agents[0].permission_mode).toBeNull();
   });
 });

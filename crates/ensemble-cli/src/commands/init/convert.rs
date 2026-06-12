@@ -48,6 +48,8 @@ impl From<&AgentEntry> for SetupAgent {
             role: entry.role.clone(),
             acpx_agent: entry.acpx_agent.clone(),
             model: entry.model.clone(),
+            reasoning_level: None,
+            permission_mode: None,
             prompt: None,
             prompt_file: None,
         }
