@@ -10,7 +10,7 @@ use crate::observability::events_contract::{
     elapsed_ms, ACPX_PROMPT_CANCELLED, ACPX_PROMPT_COMPLETED, ACPX_PROMPT_FAILED,
 };
 
-use super::acpx_cli::{AcpxCli, AcpxCommandOptions, PromptVisibility};
+use super::acpx_cli::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
 use super::{detect_worker_result_with_output, AgentRunRequest};
 
@@ -24,6 +24,15 @@ use super::{detect_worker_result_with_output, AgentRunRequest};
 /// for the full session model rationale.
 pub struct AcpxRuntime {
     cli: AcpxCli,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimePromptRequest<'a> {
+    acpx_agent: &'a str,
+    session_name: &'a str,
+    prompt: &'a str,
+    command_options: AcpxCommandOptions<'a>,
+    visibility: PromptVisibility,
 }
 
 impl AcpxRuntime {
@@ -151,11 +160,13 @@ impl AcpxRuntime {
         let prompt_result = self
             .run_prompt_with_cancellation(
                 request,
-                acpx_agent,
-                &session_name,
-                prompt,
-                command_options,
-                PromptVisibility::Visible,
+                RuntimePromptRequest {
+                    acpx_agent,
+                    session_name: &session_name,
+                    prompt,
+                    command_options,
+                    visibility: PromptVisibility::Visible,
+                },
                 |event| {
                     cb_count.fetch_add(1, Ordering::Relaxed);
                     emit_event(
@@ -193,11 +204,13 @@ impl AcpxRuntime {
                     let extraction_outcome = self
                         .run_prompt_with_cancellation(
                             request,
-                            acpx_agent,
-                            &session_name,
-                            &extraction_prompt,
-                            command_options,
-                            PromptVisibility::Hidden,
+                            RuntimePromptRequest {
+                                acpx_agent,
+                                session_name: &session_name,
+                                prompt: &extraction_prompt,
+                                command_options,
+                                visibility: PromptVisibility::Hidden,
+                            },
                             |_| async {},
                         )
                         .await?;
@@ -219,11 +232,13 @@ impl AcpxRuntime {
                             let repair_outcome = self
                                 .run_prompt_with_cancellation(
                                     request,
-                                    acpx_agent,
-                                    &session_name,
-                                    &repair_prompt,
-                                    command_options,
-                                    PromptVisibility::Hidden,
+                                    RuntimePromptRequest {
+                                        acpx_agent,
+                                        session_name: &session_name,
+                                        prompt: &repair_prompt,
+                                        command_options,
+                                        visibility: PromptVisibility::Hidden,
+                                    },
                                     |_| async {},
                                 )
                                 .await?;
@@ -290,11 +305,7 @@ impl AcpxRuntime {
     async fn run_prompt_with_cancellation<F, Fut>(
         &self,
         request: &AgentRunRequest<'_>,
-        acpx_agent: &str,
-        session_name: &str,
-        prompt: &str,
-        command_options: AcpxCommandOptions<'_>,
-        visibility: PromptVisibility,
+        prompt_request: RuntimePromptRequest<'_>,
         on_event: F,
     ) -> Result<super::acpx_cli::PromptOutcome, AgentError>
     where
@@ -302,12 +313,14 @@ impl AcpxRuntime {
         Fut: Future<Output = ()> + Send,
     {
         let run_prompt = self.cli.run_prompt(
-            acpx_agent,
-            session_name,
-            request.workspace_path,
-            prompt,
-            command_options,
-            visibility,
+            AcpxPromptRequest {
+                agent: prompt_request.acpx_agent,
+                session_name: prompt_request.session_name,
+                cwd: request.workspace_path,
+                prompt: prompt_request.prompt,
+                options: prompt_request.command_options,
+                visibility: prompt_request.visibility,
+            },
             on_event,
         );
         tokio::pin!(run_prompt);
@@ -318,19 +331,19 @@ impl AcpxRuntime {
                 debug!(
                     issue_id = %request.issue.id,
                     step = request.step_name,
-                    session_name,
+                    prompt_request.session_name,
                     "cancelling acpx prompt"
                 );
                 self.cli
                     .cancel(
-                        acpx_agent,
-                        session_name,
+                        prompt_request.acpx_agent,
+                        prompt_request.session_name,
                         request.workspace_path,
-                        command_options,
+                        prompt_request.command_options,
                     )
                     .await?;
 
-                if visibility == PromptVisibility::Visible {
+                if prompt_request.visibility == PromptVisibility::Visible {
                     emit_event(
                         &request.event_tx,
                         &request.issue.id,

@@ -32,6 +32,16 @@ pub struct PromptOutcome {
     pub output_text: String,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AcpxPromptRequest<'a> {
+    pub agent: &'a str,
+    pub session_name: &'a str,
+    pub cwd: &'a Path,
+    pub prompt: &'a str,
+    pub options: AcpxCommandOptions<'a>,
+    pub visibility: PromptVisibility,
+}
+
 impl AcpxCli {
     pub fn new(executable: String) -> Self {
         Self { executable }
@@ -93,32 +103,27 @@ impl AcpxCli {
 
     pub async fn run_prompt<F, Fut>(
         &self,
-        agent: &str,
-        session_name: &str,
-        cwd: &Path,
-        prompt: &str,
-        options: AcpxCommandOptions<'_>,
-        visibility: PromptVisibility,
+        request: AcpxPromptRequest<'_>,
         mut on_event: F,
     ) -> Result<PromptOutcome, AgentError>
     where
         F: FnMut(AgentEvent) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
-        let mut command = self.base_command(agent, cwd, options);
+        let mut command = self.base_command(request.agent, request.cwd, request.options);
         command
-            .args(["prompt", "--session", session_name, "--file", "-"])
+            .args(["prompt", "--session", request.session_name, "--file", "-"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        debug!(agent, session_name, cwd = %cwd.display(), "running acpx prompt");
+        debug!(agent = request.agent, session_name = request.session_name, cwd = %request.cwd.display(), "running acpx prompt");
 
         let mut child = spawn_with_etxtbsy_retry(command).map_err(|e| AgentError::IoError {
             reason: format!("failed to run acpx prompt: {e}"),
         })?;
 
         if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(prompt.as_bytes()).await {
+            if let Err(error) = stdin.write_all(request.prompt.as_bytes()).await {
                 if error.kind() != std::io::ErrorKind::BrokenPipe {
                     cleanup_prompt_child(&mut child).await;
                     return Err(AgentError::IoError {
@@ -162,9 +167,10 @@ impl AcpxCli {
             reason: "failed to capture acpx stderr".to_string(),
         })?;
 
-        let stderr_path = cwd
+        let stderr_path = request
+            .cwd
             .join(".ensemble")
-            .join(format!("acpx-stderr-{}.log", session_name));
+            .join(format!("acpx-stderr-{}.log", request.session_name));
         let parent = stderr_path.parent().ok_or_else(|| AgentError::IoError {
             reason: "stderr path has no parent".to_string(),
         })?;
@@ -181,9 +187,9 @@ impl AcpxCli {
                 })?;
 
         let stderr_path_clone = stderr_path.clone();
-        debug!(agent = %agent, session = %session_name, path = %stderr_path.display(), "acpx stderr -> {}", stderr_path.display());
+        debug!(agent = %request.agent, session = %request.session_name, path = %stderr_path.display(), "acpx stderr -> {}", stderr_path.display());
 
-        let agent_name = agent.to_string();
+        let agent_name = request.agent.to_string();
         let stderr_task = tokio::spawn(async move {
             let mut reader = BufReader::new(stderr).lines();
             let mut line_count: u64 = 0;
@@ -229,7 +235,7 @@ impl AcpxCli {
             }
         });
 
-        let visible = visibility == PromptVisibility::Visible;
+        let visible = request.visibility == PromptVisibility::Visible;
         let mut output_text = String::new();
         let mut reader = BufReader::new(stdout).lines();
         let mut saw_terminal_event = false;
@@ -345,9 +351,7 @@ impl AcpxCli {
         // Wait for the stderr sink to finish draining and flushing.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stderr_task).await;
 
-        if let Err(error) = read_result {
-            return Err(error);
-        }
+        read_result?;
 
         let status = status.expect("prompt status should be present when stdout read succeeds")?;
         if !status.success() {
@@ -358,7 +362,10 @@ impl AcpxCli {
         }
         if !saw_terminal_event {
             return Err(AgentError::AcpxFinalStatusMissing {
-                context: format!("session '{session_name}' ended without a terminal event"),
+                context: format!(
+                    "session '{}' ended without a terminal event",
+                    request.session_name
+                ),
             });
         }
 
@@ -507,13 +514,38 @@ fn map_stop_reason(stop_reason: StopReason, usage: Option<TokenUsage>) -> AgentE
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
 
     use crate::agent::events::{AgentEvent, TokenUsage};
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
-    use super::{AcpxCli, AcpxCommandOptions, PromptVisibility};
+    use super::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
+
+    fn prompt_request<'a>(
+        cwd: &'a Path,
+        prompt: &'a str,
+        visibility: PromptVisibility,
+    ) -> AcpxPromptRequest<'a> {
+        prompt_request_for("build-session", cwd, prompt, visibility)
+    }
+
+    fn prompt_request_for<'a>(
+        session_name: &'a str,
+        cwd: &'a Path,
+        prompt: &'a str,
+        visibility: PromptVisibility,
+    ) -> AcpxPromptRequest<'a> {
+        AcpxPromptRequest {
+            agent: "codex",
+            session_name,
+            cwd,
+            prompt,
+            options: AcpxCommandOptions::default(),
+            visibility,
+        }
+    }
 
     #[tokio::test]
     async fn ensure_session_uses_sessions_ensure_command() {
@@ -634,12 +666,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -672,12 +699,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -708,12 +730,7 @@ JSON
         let client = AcpxCli::new(script);
         let error = client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -743,12 +760,7 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":11,"result":{{"stopReason":"end_turn"}}}}'
         let client = AcpxCli::new(script);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let run = client.run_prompt(
-            "codex",
-            "build-session",
-            dir.path(),
-            "hi",
-            AcpxCommandOptions::default(),
-            PromptVisibility::Visible,
+            prompt_request(dir.path(), "hi", PromptVisibility::Visible),
             |event| {
                 let tx = tx.clone();
                 async move {
@@ -795,12 +807,7 @@ JSON
         let client = AcpxCli::new(script);
         let error = client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -826,12 +833,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -872,12 +874,7 @@ JSON
         let client = AcpxCli::new(script);
         let outcome = client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -908,12 +905,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
 
         let outcome = cli
             .run_prompt(
-                "codex",
-                "session",
-                temp.path(),
-                "extract",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Hidden,
+                prompt_request_for("session", temp.path(), "extract", PromptVisibility::Hidden),
                 move |event| {
                     let events_for_callback = events_for_callback.clone();
                     async move {
@@ -944,12 +936,7 @@ JSON
         let events = Arc::new(Mutex::new(Vec::new()));
         client
             .run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |event| {
                     let events = Arc::clone(&events);
                     async move {
@@ -1026,12 +1013,7 @@ exec 0<&-
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client.run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                &prompt,
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), &prompt, PromptVisibility::Visible),
                 |_| async {},
             ),
         )
@@ -1070,12 +1052,7 @@ printf '%s\n' 'not-jsonrpc'
         let error = tokio::time::timeout(
             std::time::Duration::from_secs(10),
             client.run_prompt(
-                "codex",
-                "build-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             ),
         )
@@ -1117,12 +1094,7 @@ echo "stderr line 3" >&2
         let client = AcpxCli::new(script);
         client
             .run_prompt(
-                "codex",
-                "test-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request_for("test-session", dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
@@ -1160,12 +1132,7 @@ JSON
         let client = AcpxCli::new(script);
         client
             .run_prompt(
-                "codex",
-                "empty-session",
-                dir.path(),
-                "hi",
-                AcpxCommandOptions::default(),
-                PromptVisibility::Visible,
+                prompt_request_for("empty-session", dir.path(), "hi", PromptVisibility::Visible),
                 |_| async {},
             )
             .await
