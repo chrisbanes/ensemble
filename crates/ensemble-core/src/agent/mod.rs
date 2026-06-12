@@ -3,6 +3,7 @@ pub mod acpx_cli;
 pub mod acpx_runtime;
 pub mod cancellation;
 pub mod events;
+pub mod extraction;
 pub mod protocol;
 pub mod runtime;
 
