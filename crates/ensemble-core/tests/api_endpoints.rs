@@ -568,7 +568,7 @@ on_failure: Failed
 }
 
 #[tokio::test]
-async fn test_guided_form_save_round_trips_legacy_permission_policy_to_canonical_key() {
+async fn test_guided_form_save_round_trips_permission_request_policy() {
     let (state, _temp_dir) = build_app_state_without_config();
     let raw_yaml = r#"
 tracker:
@@ -585,7 +585,9 @@ steps:
     agent: builder
 agent:
   command: claude-code
-  permission_policy: manual
+  permission_request_policy:
+    mode: select_option
+    option_id: manual
 on_success: Done
 on_failure: Failed
 "#;

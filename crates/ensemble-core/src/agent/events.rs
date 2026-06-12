@@ -58,6 +58,29 @@ impl StopReason {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermissionOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPermissionOption {
+    pub option_id: String,
+    pub name: String,
+    pub kind: AgentPermissionOptionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentPermissionOutcome {
+    Selected,
+    Cancelled,
+}
+
 /// Internal event types emitted by the ACP client to the orchestrator.
 #[derive(Debug, Clone, Serialize)]
 pub enum AgentEvent {
@@ -99,11 +122,14 @@ pub enum AgentEvent {
         usage: Option<TokenUsage>,
     },
     PermissionRequested {
-        permission_id: String,
-        description: String,
+        tool_call_id: String,
+        title: Option<String>,
+        options: Vec<AgentPermissionOption>,
     },
     PermissionResolved {
-        permission_id: String,
+        outcome: AgentPermissionOutcome,
+        selected_option_id: Option<String>,
+        selected_option_kind: Option<AgentPermissionOptionKind>,
         allowed: bool,
     },
     Notification {
@@ -149,9 +175,17 @@ impl AgentEvent {
             AgentEvent::OutputChunk { content, .. } => Some(truncate_for_state(content)),
             AgentEvent::TurnUpdate { content } => Some(truncate_for_state(content)),
             AgentEvent::TurnFailed { reason, .. } => Some(truncate_for_state(reason)),
-            AgentEvent::PermissionRequested { description, .. } => {
-                Some(truncate_for_state(description))
+            AgentEvent::PermissionRequested { title, .. } => {
+                title.as_deref().map(truncate_for_state)
             }
+            AgentEvent::PermissionResolved {
+                outcome,
+                selected_option_id,
+                ..
+            } => Some(Cow::Owned(match selected_option_id {
+                Some(option_id) => format!("permission {outcome:?}: {option_id}"),
+                None => format!("permission {outcome:?}"),
+            })),
             AgentEvent::Notification { message } => Some(truncate_for_state(message)),
             AgentEvent::OtherMessage { raw } => Some(truncate_for_state(raw)),
             AgentEvent::Malformed { line } => Some(truncate_for_state(line)),

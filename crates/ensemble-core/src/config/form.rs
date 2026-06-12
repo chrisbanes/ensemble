@@ -882,7 +882,9 @@ steps:
     agent: builder
 agent:
   command: claude-code
-  permission_request_policy: manual
+  permission_request_policy:
+    mode: select_option
+    option_id: manual
 on_success: Done
 on_failure: Failed
 "#;

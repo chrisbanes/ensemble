@@ -21,7 +21,10 @@ use crate::config::ensemble::{
 };
 use crate::error::AgentError;
 
-use super::events::{AgentEvent, RuntimeStream, TokenUsage, WorkerEvent};
+use super::events::{
+    AgentEvent, AgentPermissionOption, AgentPermissionOptionKind, AgentPermissionOutcome,
+    RuntimeStream, TokenUsage, WorkerEvent,
+};
 use super::ResolvedCommand;
 
 /// Build an `AcpAgent` from a structured `ResolvedCommand`. The SDK's
@@ -174,6 +177,27 @@ fn resolve_permission_outcome(
     selected
         .map(selected_decision)
         .unwrap_or_else(cancelled_decision)
+}
+
+fn event_permission_kind(kind: PermissionOptionKind) -> AgentPermissionOptionKind {
+    match kind {
+        PermissionOptionKind::AllowOnce => AgentPermissionOptionKind::AllowOnce,
+        PermissionOptionKind::AllowAlways => AgentPermissionOptionKind::AllowAlways,
+        PermissionOptionKind::RejectOnce => AgentPermissionOptionKind::RejectOnce,
+        PermissionOptionKind::RejectAlways => AgentPermissionOptionKind::RejectAlways,
+        _ => AgentPermissionOptionKind::RejectOnce,
+    }
+}
+
+fn event_permission_options(options: &[PermissionOption]) -> Vec<AgentPermissionOption> {
+    options
+        .iter()
+        .map(|option| AgentPermissionOption {
+            option_id: option.option_id.to_string(),
+            name: option.name.clone(),
+            kind: event_permission_kind(option.kind),
+        })
+        .collect()
 }
 
 fn token_usage_from_value(value: serde_json::Value) -> Option<TokenUsage> {
@@ -470,31 +494,40 @@ pub async fn run_acp_session(
         async move |request: RequestPermissionRequest,
                     responder: agent_client_protocol::Responder<RequestPermissionResponse>,
                     _cx| {
-            let description = serde_json::to_string(&request.tool_call).unwrap_or_default();
+            let tool_call_id = request.tool_call.tool_call_id.to_string();
+            let title = request.tool_call.fields.title.clone();
 
             emit_event(
                 &event_tx_clone,
                 &issue_id_owned,
                 &step_name_owned,
-                AgentEvent::Warning {
-                    message: format!("permission requested: {description}"),
+                AgentEvent::PermissionRequested {
+                    tool_call_id,
+                    title,
+                    options: event_permission_options(&request.options),
                 },
             )
             .await;
 
             let decision = resolve_permission_outcome(&permission_policy, &request.options);
-            let allowed = decision.allowed;
-            let response = RequestPermissionResponse::new(decision.outcome);
+            let response = RequestPermissionResponse::new(decision.outcome.clone());
 
             emit_event(
                 &event_tx_clone,
                 &issue_id_owned,
                 &step_name_owned,
-                AgentEvent::Notification {
-                    message: format!(
-                        "permission {}",
-                        if allowed { "approved" } else { "rejected" }
-                    ),
+                AgentEvent::PermissionResolved {
+                    outcome: if decision.selected_option_id.is_some() {
+                        AgentPermissionOutcome::Selected
+                    } else {
+                        AgentPermissionOutcome::Cancelled
+                    },
+                    selected_option_id: decision
+                        .selected_option_id
+                        .as_ref()
+                        .map(ToString::to_string),
+                    selected_option_kind: decision.selected_option_kind.map(event_permission_kind),
+                    allowed: decision.allowed,
                 },
             )
             .await;
@@ -855,6 +888,37 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn permission_option_event_kind_serializes_as_snake_case() {
+        let option = AgentPermissionOption {
+            option_id: "allow_always".to_string(),
+            name: "Allow always".to_string(),
+            kind: AgentPermissionOptionKind::AllowAlways,
+        };
+
+        let value = serde_json::to_value(option).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "option_id": "allow_always",
+                "name": "Allow always",
+                "kind": "allow_always"
+            })
+        );
+    }
+
+    #[test]
+    fn permission_requested_message_uses_tool_title() {
+        let event = AgentEvent::PermissionRequested {
+            tool_call_id: "tool-1".to_string(),
+            title: Some("Run tests".to_string()),
+            options: vec![],
+        };
+
+        assert_eq!(event.message_for_state().as_deref(), Some("Run tests"));
+    }
 
     fn selected_option_id(outcome: RequestPermissionOutcome) -> Option<String> {
         match outcome {
