@@ -14,6 +14,12 @@ pub struct AcpxCli {
     executable: String,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AcpxCommandOptions<'a> {
+    pub model: Option<&'a str>,
+    pub reasoning_level: Option<&'a str>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PromptOutcome {
     pub runtime_verdict: Option<serde_json::Value>,
@@ -29,12 +35,15 @@ impl AcpxCli {
         agent: &str,
         session_name: &str,
         cwd: &Path,
-        model: Option<&str>,
+        options: AcpxCommandOptions<'_>,
     ) -> Result<(), AgentError> {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
-        if let Some(model) = model {
+        if let Some(model) = options.model {
             command.args(["--model", model]);
+        }
+        if let Some(reasoning_level) = options.reasoning_level {
+            command.args(["--reasoning-level", reasoning_level]);
         }
         command
             .arg("--cwd")
@@ -42,7 +51,7 @@ impl AcpxCli {
             .args(["--format", "json", "--json-strict"])
             .arg(agent)
             .args(["sessions", "ensure", "--name", session_name]);
-        debug!(agent, session_name, cwd = %cwd.display(), model, "running acpx sessions ensure");
+        debug!(agent, session_name, cwd = %cwd.display(), model = options.model, reasoning_level = options.reasoning_level, "running acpx sessions ensure");
 
         let output = spawn_with_etxtbsy_retry(command)
             .map_err(|e| AgentError::IoError {
@@ -81,14 +90,14 @@ impl AcpxCli {
         session_name: &str,
         cwd: &Path,
         prompt: &str,
-        model: Option<&str>,
+        options: AcpxCommandOptions<'_>,
         mut on_event: F,
     ) -> Result<PromptOutcome, AgentError>
     where
         F: FnMut(AgentEvent) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
-        let mut command = self.base_command(agent, cwd, model);
+        let mut command = self.base_command(agent, cwd, options);
         command
             .args(["prompt", "--session", session_name, "--file", "-"])
             .stdin(std::process::Stdio::piped())
@@ -305,9 +314,9 @@ impl AcpxCli {
         agent: &str,
         session_name: &str,
         cwd: &Path,
-        model: Option<&str>,
+        options: AcpxCommandOptions<'_>,
     ) -> Result<(), AgentError> {
-        let mut command = self.base_command(agent, cwd, model);
+        let mut command = self.base_command(agent, cwd, options);
         command.args(["cancel", "--session", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), "running acpx cancel");
         let status = spawn_with_etxtbsy_retry(command)
@@ -333,9 +342,9 @@ impl AcpxCli {
         agent: &str,
         session_name: &str,
         cwd: &Path,
-        model: Option<&str>,
+        options: AcpxCommandOptions<'_>,
     ) -> Result<(), AgentError> {
-        let mut command = self.base_command(agent, cwd, model);
+        let mut command = self.base_command(agent, cwd, options);
         command.args(["sessions", "close", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), "running acpx sessions close");
         let status = spawn_with_etxtbsy_retry(command)
@@ -356,11 +365,14 @@ impl AcpxCli {
         Ok(())
     }
 
-    fn base_command(&self, agent: &str, cwd: &Path, model: Option<&str>) -> Command {
+    fn base_command(&self, agent: &str, cwd: &Path, options: AcpxCommandOptions<'_>) -> Command {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
-        if let Some(model) = model {
+        if let Some(model) = options.model {
             command.args(["--model", model]);
+        }
+        if let Some(reasoning_level) = options.reasoning_level {
+            command.args(["--reasoning-level", reasoning_level]);
         }
         command
             .arg("--cwd")
@@ -442,7 +454,7 @@ mod tests {
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
-    use super::AcpxCli;
+    use super::{AcpxCli, AcpxCommandOptions};
 
     #[tokio::test]
     async fn ensure_session_uses_sessions_ensure_command() {
@@ -458,7 +470,12 @@ mod tests {
 
         let client = AcpxCli::new(script);
         client
-            .ensure_session("codex", "build-session", dir.path(), None)
+            .ensure_session(
+                "codex",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions::default(),
+            )
             .await
             .unwrap();
 
@@ -481,7 +498,15 @@ mod tests {
 
         let client = AcpxCli::new(script);
         client
-            .ensure_session("codex", "build-session", dir.path(), Some("gpt-5.4/medium"))
+            .ensure_session(
+                "codex",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: Some("gpt-5.4/medium"),
+                    reasoning_level: None,
+                },
+            )
             .await
             .unwrap();
 
@@ -491,6 +516,44 @@ mod tests {
         assert!(
             model_pos < agent_pos,
             "--model must come BEFORE agent; got: {}",
+            args
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_session_puts_reasoning_level_before_agent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .ensure_session(
+                "codex",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: None,
+                    reasoning_level: Some("high"),
+                },
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let reasoning_pos = args
+            .find("--reasoning-level")
+            .expect("--reasoning-level should be present");
+        let agent_pos = args.find("codex").expect("codex agent should be present");
+        assert!(
+            reasoning_pos < agent_pos,
+            "--reasoning-level must come BEFORE agent; got: {}",
             args
         );
     }
@@ -511,12 +574,19 @@ JSON
         let client = AcpxCli::new(script);
         let events = Arc::new(Mutex::new(Vec::new()));
         client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
-                let events = Arc::clone(&events);
-                async move {
-                    events.lock().unwrap().push(event);
-                }
-            })
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                AcpxCommandOptions::default(),
+                |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(event);
+                    }
+                },
+            )
             .await
             .unwrap();
         let events = events.lock().unwrap();
@@ -541,12 +611,19 @@ JSON
         let client = AcpxCli::new(script);
         let events = Arc::new(Mutex::new(Vec::new()));
         client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
-                let events = Arc::clone(&events);
-                async move {
-                    events.lock().unwrap().push(event);
-                }
-            })
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                AcpxCommandOptions::default(),
+                |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(event);
+                    }
+                },
+            )
             .await
             .unwrap();
         let events = events.lock().unwrap();
@@ -574,7 +651,7 @@ JSON
                 "build-session",
                 dir.path(),
                 "hi",
-                None,
+                AcpxCommandOptions::default(),
                 |_| async {},
             )
             .await
@@ -603,12 +680,19 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":11,"result":{{"stopReason":"end_turn"}}}}'
 
         let client = AcpxCli::new(script);
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let run = client.run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
-            let tx = tx.clone();
-            async move {
-                let _ = tx.send(event).await;
-            }
-        });
+        let run = client.run_prompt(
+            "codex",
+            "build-session",
+            dir.path(),
+            "hi",
+            AcpxCommandOptions::default(),
+            |event| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx.send(event).await;
+                }
+            },
+        );
         tokio::pin!(run);
 
         let saw_output = tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -652,7 +736,7 @@ JSON
                 "build-session",
                 dir.path(),
                 "hi",
-                None,
+                AcpxCommandOptions::default(),
                 |_| async {},
             )
             .await
@@ -677,12 +761,19 @@ JSON
         let client = AcpxCli::new(script);
         let events = Arc::new(Mutex::new(Vec::new()));
         client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
-                let events = Arc::clone(&events);
-                async move {
-                    events.lock().unwrap().push(event);
-                }
-            })
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                AcpxCommandOptions::default(),
+                |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(event);
+                    }
+                },
+            )
             .await
             .unwrap();
         let events = events.lock().unwrap();
@@ -720,7 +811,7 @@ JSON
                 "build-session",
                 dir.path(),
                 "hi",
-                None,
+                AcpxCommandOptions::default(),
                 |_| async {},
             )
             .await
@@ -750,12 +841,19 @@ JSON
         let client = AcpxCli::new(script);
         let events = Arc::new(Mutex::new(Vec::new()));
         client
-            .run_prompt("codex", "build-session", dir.path(), "hi", None, |event| {
-                let events = Arc::clone(&events);
-                async move {
-                    events.lock().unwrap().push(event);
-                }
-            })
+            .run_prompt(
+                "codex",
+                "build-session",
+                dir.path(),
+                "hi",
+                AcpxCommandOptions::default(),
+                |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(event);
+                    }
+                },
+            )
             .await
             .unwrap();
         let events = events.lock().unwrap();
@@ -780,11 +878,21 @@ JSON
 
         let client = AcpxCli::new(script);
         client
-            .cancel("codex", "build-session", dir.path(), None)
+            .cancel(
+                "codex",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions::default(),
+            )
             .await
             .unwrap();
         client
-            .close_session("codex", "build-session", dir.path(), None)
+            .close_session(
+                "codex",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions::default(),
+            )
             .await
             .unwrap();
 
@@ -819,7 +927,7 @@ exec 0<&-
                 "build-session",
                 dir.path(),
                 &prompt,
-                None,
+                AcpxCommandOptions::default(),
                 |_| async {},
             ),
         )
@@ -855,8 +963,14 @@ echo "stderr line 3" >&2
 
         let client = AcpxCli::new(script);
         client
-            .run_prompt("codex", "test-session", dir.path(), "hi", None, |_| async {
-            })
+            .run_prompt(
+                "codex",
+                "test-session",
+                dir.path(),
+                "hi",
+                AcpxCommandOptions::default(),
+                |_| async {},
+            )
             .await
             .unwrap();
 
@@ -896,7 +1010,7 @@ JSON
                 "empty-session",
                 dir.path(),
                 "hi",
-                None,
+                AcpxCommandOptions::default(),
                 |_| async {},
             )
             .await
