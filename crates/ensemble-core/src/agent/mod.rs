@@ -32,7 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use acp_client::{
     discover_capabilities, run_acp_session, AcpCapabilityDiscoveryConfig, AcpSessionConfig,
-    TurnResult,
+    ExtractionContext, SessionTurn, TurnPurpose, TurnResult, TurnVisibility,
 };
 use acpx_runtime::AcpxRuntime;
 
@@ -761,40 +761,46 @@ impl AcpAgentRunner {
             cancel_token: request.cancel_token.clone(),
         };
 
-        let max_turns = config.agent.max_turns.max(1);
-        let mut prompts = Vec::with_capacity(max_turns as usize);
-        for turn in 1..=max_turns {
-            let prompt = self
-                .build_prompt(
-                    config.as_ref(),
-                    BuildPromptRequest {
-                        issue: request.issue,
-                        agent_name: request.agent_name,
-                        step_name: request.step_name,
-                        step_kind: request.step_kind,
-                        attempt: request.attempt,
-                        workspace_path: request.workspace_path,
-                        turn_number: turn,
-                        step_outputs: &request.step_outputs,
-                    },
-                )
-                .await?;
-            prompts.push(prompt);
-        }
+        let working_prompt = self
+            .build_prompt(
+                config.as_ref(),
+                BuildPromptRequest {
+                    issue: request.issue,
+                    agent_name: request.agent_name,
+                    step_name: request.step_name,
+                    step_kind: request.step_kind,
+                    attempt: request.attempt,
+                    workspace_path: request.workspace_path,
+                    turn_number: 1,
+                    step_outputs: &request.step_outputs,
+                },
+            )
+            .await?;
+        let working_turn = SessionTurn {
+            prompt: working_prompt.clone(),
+            visibility: TurnVisibility::Visible,
+            purpose: TurnPurpose::Working,
+        };
+        let extraction_context = ExtractionContext {
+            step_name: request.step_name.to_string(),
+            issue_identifier: request.issue.identifier.clone(),
+            original_prompt: working_prompt,
+        };
 
-        let (final_verdict, turn_results, capabilities) = run_acp_session(
+        let outcome = run_acp_session(
             session_config,
-            prompts,
+            working_turn,
+            extraction_context,
             &request.issue.id,
             request.step_name,
             &request.event_tx,
         )
         .await?;
 
-        self.store_agent_capabilities(request.agent_name, capabilities)
+        self.store_agent_capabilities(request.agent_name, outcome.capabilities)
             .await;
 
-        for (i, result) in turn_results.iter().enumerate() {
+        for (i, result) in outcome.turn_results.iter().enumerate() {
             if let TurnResult::Failed { reason, .. } = result {
                 return Err(AgentError::TurnFailed {
                     reason: format!("turn {} failed: {}", i + 1, reason),
@@ -802,15 +808,12 @@ impl AcpAgentRunner {
             }
         }
 
-        let output = final_verdict
-            .as_ref()
-            .and_then(crate::pipeline::verdict::parse_step_output_from_value)
-            .unwrap_or_else(transitional_succeeded_output);
-
-        Ok(
-            detect_worker_result_with_output(request.workspace_path, output, request.step_name)
-                .await,
+        Ok(detect_worker_result_with_output(
+            request.workspace_path,
+            outcome.output,
+            request.step_name,
         )
+        .await)
     }
 }
 
