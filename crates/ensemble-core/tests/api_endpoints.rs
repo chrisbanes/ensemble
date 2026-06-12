@@ -526,7 +526,9 @@ steps:
     agent: builder
 agent:
   command: claude-code
-  permission_request_policy: manual
+  permission_request_policy:
+    mode: select_option
+    option_id: manual
 on_success: Done
 on_failure: Failed
 "#;
@@ -623,7 +625,9 @@ on_failure: Failed
 
     let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
     assert!(saved_yaml.contains("runtime: direct"));
-    assert!(saved_yaml.contains("permission_request_policy: manual"));
+    assert!(saved_yaml.contains("permission_request_policy:"));
+    assert!(saved_yaml.contains("mode: select_option"));
+    assert!(saved_yaml.contains("option_id: manual"));
     assert!(!saved_yaml.contains("permission_policy:"));
 }
 

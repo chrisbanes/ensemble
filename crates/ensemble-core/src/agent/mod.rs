@@ -745,7 +745,7 @@ impl AcpAgentRunner {
             command,
             workspace_path: request.workspace_path.to_path_buf(),
             session_mode,
-            permission_request_policy: config.agent.permission_request_policy.clone(),
+            permission_request_policy: config.agent.permission_request_policy.legacy_policy_id(),
             read_timeout_ms: config.agent.read_timeout_ms,
             turn_timeout_ms: config.agent.turn_timeout_ms,
             cancel_token: request.cancel_token.clone(),

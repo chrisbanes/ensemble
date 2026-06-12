@@ -1653,7 +1653,9 @@ on_failure: Failed
         assert_eq!(response.state, "parsed");
 
         let saved_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
-        assert!(saved_yaml.contains("permission_request_policy: manual"));
+        assert!(saved_yaml.contains("permission_request_policy:"));
+        assert!(saved_yaml.contains("mode: select_option"));
+        assert!(saved_yaml.contains("option_id: manual"));
         assert!(!saved_yaml.contains("permission_policy:"));
     }
 

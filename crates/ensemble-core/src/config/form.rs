@@ -5,13 +5,22 @@
 //! The key constraint: unknown YAML fields are preserved during the
 //! round-trip to support custom user extensions.
 
-use crate::config::ensemble::{ModeDefinition, ModelDefinition, StepKind};
+use crate::config::ensemble::{ModeDefinition, ModelDefinition, PermissionRequestPolicy, StepKind};
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
 /// Helper to convert Option<T> to serde_yaml::Value
 fn opt_to_value<T: Into<serde_yaml::Value>>(opt: Option<T>) -> Option<serde_yaml::Value> {
     opt.map(|v| v.into())
+}
+
+fn permission_request_policy_value(policy: &str) -> serde_yaml::Value {
+    let policy = match policy {
+        "auto_approve_all" | "approve_all" => PermissionRequestPolicy::approve_all(),
+        "reject_all" => PermissionRequestPolicy::reject_all(),
+        option_id => PermissionRequestPolicy::select_option(option_id),
+    };
+    serde_yaml::to_value(policy).expect("permission policy should serialize")
 }
 
 /// Guided form representation for structured config editing.
@@ -237,7 +246,10 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 max_retry_backoff_ms: config.agent.max_retry_backoff_ms,
                 command: config.agent.command.clone(),
                 session_mode: config.agent.session_mode.clone(),
-                permission_request_policy: config.agent.permission_request_policy.clone(),
+                permission_request_policy: config
+                    .agent
+                    .permission_request_policy
+                    .legacy_policy_id(),
                 turn_timeout_ms: config.agent.turn_timeout_ms,
                 read_timeout_ms: config.agent.read_timeout_ms,
                 stall_timeout_ms: config.agent.stall_timeout_ms,
@@ -549,7 +561,7 @@ pub fn apply_guided_form(
         );
         am.insert(
             "permission_request_policy".into(),
-            form.runtime.agent.permission_request_policy.clone().into(),
+            permission_request_policy_value(&form.runtime.agent.permission_request_policy),
         );
         am.remove("permission_policy");
         am.insert(
@@ -918,8 +930,10 @@ on_failure: Failed
         assert_eq!(
             agent
                 .get("permission_request_policy")
+                .and_then(serde_yaml::Value::as_mapping)
+                .and_then(|policy| policy.get(serde_yaml::Value::String("mode".to_string())))
                 .and_then(serde_yaml::Value::as_str),
-            Some("auto_approve_all")
+            Some("approve_all")
         );
         assert!(
             !agent.contains_key("permission_mode"),

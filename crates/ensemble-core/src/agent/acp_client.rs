@@ -4,8 +4,9 @@ use std::time::Duration;
 
 use agent_client_protocol::schema::{
     ContentBlock, EnvVariable, InitializeRequest, McpServer, McpServerStdio, NewSessionRequest,
-    PermissionOption, PermissionOptionKind, ProtocolVersion, RequestPermissionRequest,
-    RequestPermissionResponse, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, ProtocolVersion,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
     SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionModeRequest,
     StopReason as SdkStopReason,
 };
@@ -14,7 +15,10 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::config::ensemble::{DiscoveredCapabilities, ModeDefinition, ModelDefinition};
+use crate::config::ensemble::{
+    DiscoveredCapabilities, ModeDefinition, ModelDefinition, PermissionRequestPolicy,
+    PermissionRequestPolicyMode,
+};
 use crate::error::AgentError;
 
 use super::events::{AgentEvent, RuntimeStream, TokenUsage, WorkerEvent};
@@ -58,7 +62,7 @@ pub struct AcpSessionConfig {
     pub command: ResolvedCommand,
     pub workspace_path: PathBuf,
     pub session_mode: Option<String>,
-    pub permission_request_policy: String,
+    pub permission_request_policy: PermissionRequestPolicy,
     pub read_timeout_ms: u64,
     pub turn_timeout_ms: u64,
     pub cancel_token: CancellationToken,
@@ -106,37 +110,70 @@ async fn emit_event(
         .await;
 }
 
-fn resolve_permission(permission_request_policy: &str, description: &str) -> bool {
-    match permission_request_policy {
-        "auto_approve_all" => true,
-        "reject_all" => false,
-        "approve_reads_reject_writes" => {
-            let desc_lower = description.to_lowercase();
-            desc_lower.contains("read")
-                || desc_lower.contains("list")
-                || desc_lower.contains("view")
-        }
-        _ => true,
+#[derive(Debug, Clone)]
+struct PermissionDecision {
+    outcome: RequestPermissionOutcome,
+    selected_option_id: Option<PermissionOptionId>,
+    selected_option_kind: Option<PermissionOptionKind>,
+    allowed: bool,
+}
+
+fn selected_decision(option: &PermissionOption) -> PermissionDecision {
+    let allowed = matches!(
+        option.kind,
+        PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+    );
+    PermissionDecision {
+        outcome: RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(
+            option.option_id.clone(),
+        )),
+        selected_option_id: Some(option.option_id.clone()),
+        selected_option_kind: Some(option.kind),
+        allowed,
     }
 }
 
-fn select_permission_option<'a>(
-    permission_request_policy: &str,
-    description: &str,
-    options: &'a [PermissionOption],
-) -> Option<&'a PermissionOption> {
-    if !resolve_permission(permission_request_policy, description) {
-        return None;
+fn cancelled_decision() -> PermissionDecision {
+    PermissionDecision {
+        outcome: RequestPermissionOutcome::Cancelled,
+        selected_option_id: None,
+        selected_option_kind: None,
+        allowed: false,
     }
+}
 
-    options
-        .iter()
-        .find(|option| matches!(option.kind, PermissionOptionKind::AllowOnce))
-        .or_else(|| {
-            options
-                .iter()
-                .find(|option| matches!(option.kind, PermissionOptionKind::AllowAlways))
-        })
+fn find_option_by_kind(
+    options: &[PermissionOption],
+    kind: PermissionOptionKind,
+) -> Option<&PermissionOption> {
+    options.iter().find(|option| option.kind == kind)
+}
+
+fn resolve_permission_outcome(
+    policy: &PermissionRequestPolicy,
+    options: &[PermissionOption],
+) -> PermissionDecision {
+    let selected = match policy.mode {
+        PermissionRequestPolicyMode::ApproveAll => {
+            find_option_by_kind(options, PermissionOptionKind::AllowAlways)
+                .or_else(|| find_option_by_kind(options, PermissionOptionKind::AllowOnce))
+        }
+        PermissionRequestPolicyMode::RejectAll => {
+            find_option_by_kind(options, PermissionOptionKind::RejectOnce)
+                .or_else(|| find_option_by_kind(options, PermissionOptionKind::RejectAlways))
+        }
+        PermissionRequestPolicyMode::SelectOption => {
+            policy.option_id.as_deref().and_then(|option_id| {
+                options
+                    .iter()
+                    .find(|option| option.option_id.to_string() == option_id)
+            })
+        }
+    };
+
+    selected
+        .map(selected_decision)
+        .unwrap_or_else(cancelled_decision)
 }
 
 fn token_usage_from_value(value: serde_json::Value) -> Option<TokenUsage> {
@@ -445,21 +482,9 @@ pub async fn run_acp_session(
             )
             .await;
 
-            let selected_option =
-                select_permission_option(&permission_policy, &description, &request.options);
-            let allowed = selected_option.is_some();
-
-            let outcome = if let Some(option) = selected_option {
-                let option_id: agent_client_protocol::schema::PermissionOptionId =
-                    option.option_id.clone();
-                agent_client_protocol::schema::RequestPermissionOutcome::Selected(
-                    agent_client_protocol::schema::SelectedPermissionOutcome::new(option_id),
-                )
-            } else {
-                agent_client_protocol::schema::RequestPermissionOutcome::Cancelled
-            };
-
-            let response = RequestPermissionResponse::new(outcome);
+            let decision = resolve_permission_outcome(&permission_policy, &request.options);
+            let allowed = decision.allowed;
+            let response = RequestPermissionResponse::new(decision.outcome);
 
             emit_event(
                 &event_tx_clone,
@@ -831,32 +856,139 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn select_permission_option_prefers_allow_once_over_first_option() {
-        let options = vec![
-            PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
-            PermissionOption::new("allow", "Allow", PermissionOptionKind::AllowOnce),
-        ];
-
-        let selected = select_permission_option("auto_approve_all", "write file", &options);
-
-        assert_eq!(
-            selected.map(|option| option.option_id.to_string()),
-            Some("allow".to_string())
-        );
+    fn selected_option_id(outcome: RequestPermissionOutcome) -> Option<String> {
+        match outcome {
+            RequestPermissionOutcome::Selected(selected) => Some(selected.option_id.to_string()),
+            RequestPermissionOutcome::Cancelled => None,
+            _ => None,
+        }
     }
 
     #[test]
-    fn select_permission_option_rejects_when_policy_denies_request() {
+    fn approve_all_selects_allow_always_before_allow_once() {
+        let options = vec![
+            PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+            PermissionOption::new(
+                "allow_always",
+                "Allow always",
+                PermissionOptionKind::AllowAlways,
+            ),
+        ];
+
+        let decision =
+            resolve_permission_outcome(&PermissionRequestPolicy::approve_all(), &options);
+
+        assert_eq!(
+            selected_option_id(decision.outcome),
+            Some("allow_always".to_string())
+        );
+        assert!(decision.allowed);
+    }
+
+    #[test]
+    fn approve_all_falls_back_to_allow_once() {
+        let options = vec![
+            PermissionOption::new(
+                "reject_once",
+                "Reject once",
+                PermissionOptionKind::RejectOnce,
+            ),
+            PermissionOption::new("allow_once", "Allow once", PermissionOptionKind::AllowOnce),
+        ];
+
+        let decision =
+            resolve_permission_outcome(&PermissionRequestPolicy::approve_all(), &options);
+
+        assert_eq!(
+            selected_option_id(decision.outcome),
+            Some("allow_once".to_string())
+        );
+        assert!(decision.allowed);
+    }
+
+    #[test]
+    fn reject_all_selects_reject_once_before_reject_always() {
+        let options = vec![
+            PermissionOption::new(
+                "reject_always",
+                "Reject always",
+                PermissionOptionKind::RejectAlways,
+            ),
+            PermissionOption::new(
+                "reject_once",
+                "Reject once",
+                PermissionOptionKind::RejectOnce,
+            ),
+        ];
+
+        let decision = resolve_permission_outcome(&PermissionRequestPolicy::reject_all(), &options);
+
+        assert_eq!(
+            selected_option_id(decision.outcome),
+            Some("reject_once".to_string())
+        );
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn reject_all_falls_back_to_reject_always() {
         let options = vec![PermissionOption::new(
-            "allow",
-            "Allow",
+            "reject_always",
+            "Reject always",
+            PermissionOptionKind::RejectAlways,
+        )];
+
+        let decision = resolve_permission_outcome(&PermissionRequestPolicy::reject_all(), &options);
+
+        assert_eq!(
+            selected_option_id(decision.outcome),
+            Some("reject_always".to_string())
+        );
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn select_option_uses_exact_option_id() {
+        let options = vec![
+            PermissionOption::new(
+                "allow_once",
+                "Read-only looking label",
+                PermissionOptionKind::AllowOnce,
+            ),
+            PermissionOption::new(
+                "custom-deny",
+                "Allow all text",
+                PermissionOptionKind::RejectAlways,
+            ),
+        ];
+
+        let decision = resolve_permission_outcome(
+            &PermissionRequestPolicy::select_option("custom-deny"),
+            &options,
+        );
+
+        assert_eq!(
+            selected_option_id(decision.outcome),
+            Some("custom-deny".to_string())
+        );
+        assert!(!decision.allowed);
+    }
+
+    #[test]
+    fn select_option_cancels_when_option_id_is_not_offered() {
+        let options = vec![PermissionOption::new(
+            "allow_once",
+            "Allow once",
             PermissionOptionKind::AllowOnce,
         )];
 
-        let selected = select_permission_option("reject_all", "read file", &options);
+        let decision = resolve_permission_outcome(
+            &PermissionRequestPolicy::select_option("allow_always"),
+            &options,
+        );
 
-        assert!(selected.is_none());
+        assert_eq!(selected_option_id(decision.outcome), None);
+        assert!(!decision.allowed);
     }
 
     #[test]
@@ -919,7 +1051,7 @@ mod tests {
             },
             workspace_path: workspace.path().to_path_buf(),
             session_mode: None,
-            permission_request_policy: "auto_approve_all".to_string(),
+            permission_request_policy: PermissionRequestPolicy::approve_all(),
             read_timeout_ms: 50,
             turn_timeout_ms: 10_000,
             cancel_token: CancellationToken::new(),
