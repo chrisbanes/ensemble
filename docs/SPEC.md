@@ -1903,6 +1903,8 @@ If implemented:
 - The implementation may serve server-rendered HTML or a client-side application for the dashboard.
 - The dashboard/API must be observability/control surfaces only and must not become required for
   orchestrator correctness.
+- CLI builds may compile this extension behind an optional feature. When the feature is disabled,
+  the HTTP server subcommand is not part of the CLI command surface.
 
 Enablement (extension):
 

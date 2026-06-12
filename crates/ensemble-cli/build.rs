@@ -2,6 +2,12 @@ use std::path::Path;
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_WEB_UI");
+
+    if std::env::var("CARGO_FEATURE_WEB_UI").is_err() {
+        return;
+    }
+
     // Only rebuild if UI source changes
     println!("cargo:rerun-if-changed=../ensemble-ui/src-ui/src");
     println!("cargo:rerun-if-changed=../ensemble-ui/src-ui/package.json");
@@ -48,6 +54,14 @@ fn main() {
     // which would deadlock (cargo already holds the build lock).
     let openapi_json = ui_dir.join("openapi.json");
     if !openapi_json.exists() {
+        if prebuilt_spa_exists(assets_dir) {
+            println!(
+                "cargo:warning=openapi.json not found at {}. Using existing embedded UI assets.",
+                openapi_json.display()
+            );
+            println!("cargo:warning=Run `pnpm run codegen:spec` in crates/ensemble-ui/src-ui/ to regenerate it.");
+            return;
+        }
         println!(
             "cargo:warning=openapi.json not found at {}. UI will not be embedded.",
             openapi_json.display()

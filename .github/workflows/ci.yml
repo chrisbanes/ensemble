@@ -12,7 +12,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
-  SKIP_UI_BUILD: 1
 
 jobs:
   ci:
@@ -36,6 +35,11 @@ jobs:
 
       - name: Test
         run: cargo test --workspace --exclude ensemble-desktop
+
+      - name: Check CLI web UI feature
+        run: cargo check -p ensemble-cli --features web-ui
+        env:
+          SKIP_UI_BUILD: 1
 
   frontend:
     name: Frontend Test and Build
@@ -121,6 +125,8 @@ jobs:
 
       - name: Run E2E smoke test (verify app launches)
         run: ${{ matrix.runner == 'ubuntu-latest' && 'xvfb-run -a' || '' }} cargo test -p ensemble-desktop --test e2e app_launches_without_crash -- --ignored --nocapture
+        env:
+          SKIP_UI_BUILD: 1
         timeout-minutes: 2
 
   # Full Tauri bundle (dmg/deb/AppImage). Runs on:
@@ -202,6 +208,8 @@ jobs:
 
       - name: Run E2E smoke test (verify app launches)
         run: ${{ matrix.runner == 'ubuntu-latest' && 'xvfb-run -a' || '' }} cargo test -p ensemble-desktop --test e2e app_launches_without_crash -- --ignored --nocapture
+        env:
+          SKIP_UI_BUILD: 1
         timeout-minutes: 2
 
       - name: Upload desktop artifacts
@@ -250,7 +258,7 @@ jobs:
           path: crates/ensemble-cli/assets/spa/
 
       - name: Build CLI
-        run: cargo build --release -p ensemble-cli --target ${{ matrix.target }}
+        run: cargo build --release -p ensemble-cli --features web-ui --target ${{ matrix.target }}
 
       - name: Package binary
         run: |
