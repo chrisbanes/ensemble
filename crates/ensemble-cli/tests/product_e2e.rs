@@ -173,6 +173,7 @@ tracker:
   path: {}
   active_states:
     - Todo
+    - In Progress
   terminal_states:
     - Done
 workspace:
@@ -189,7 +190,7 @@ on_success: Done
 on_failure: Failed
 max_cycles: 1
 polling:
-  interval_ms: 5000
+  interval_ms: 100
 concurrency:
   max_concurrent_agents: 1
   max_step_parallelism: 1

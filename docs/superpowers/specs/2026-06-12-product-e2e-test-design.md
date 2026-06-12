@@ -43,7 +43,7 @@ The config uses:
 
 - `tracker.kind: todo_file`
 - `tracker.path` pointing at the temp `TODO.md`
-- active state `Todo`
+- active states `Todo` and `In Progress`, because the step transitions the tracker to `In Progress` while the worker runs and reconciliation stops claimed issues that are no longer active
 - terminal state `Done`
 - one `acpx_agent` agent with an inline prompt
 - one `implement` step with `tracker_state: In Progress`

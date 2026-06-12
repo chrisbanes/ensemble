@@ -199,6 +199,7 @@ tracker:
   path: {}
   active_states:
     - Todo
+    - In Progress
   terminal_states:
     - Done
 workspace:
@@ -426,7 +427,7 @@ Run:
 cargo test -p ensemble-cli --test product_e2e -- --nocapture
 ```
 
-Expected before any fixes: this may either pass immediately or fail with a concrete product/fixture error. Acceptable failures include a config validation error, mock `acpx` invocation mismatch, timeout waiting for completion, or an assertion that points at a missing observable. Do not broaden scope for retry, human interaction, or UI automation.
+Expected before any fixes: this may either pass immediately or fail with a concrete product/fixture error. Acceptable failures include a config validation error, mock `acpx` invocation mismatch, timeout waiting for completion, or an assertion that points at a missing observable. Do not broaden scope for retry, human interaction, or UI automation. Keep both `Todo` and `In Progress` in `active_states`; `In Progress` is required because the step transitions the tracker to that state while the worker runs.
 
 - [ ] **Step 3: If the mock invocation does not match, adjust only the script matcher**
 
