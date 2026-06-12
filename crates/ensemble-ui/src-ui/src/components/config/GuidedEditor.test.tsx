@@ -44,7 +44,7 @@ const initialForm: GuidedForm = {
       max_retry_backoff_ms: 1,
       command: "agent",
       session_mode: "code",
-      permission_request_policy: "auto",
+      permission_request_policy: { mode: "approve_all" },
       turn_timeout_ms: 1,
       read_timeout_ms: 1,
       stall_timeout_ms: 1,
