@@ -516,9 +516,6 @@ pub struct AgentRuntimeConfig {
     pub read_timeout_ms: u64,
     #[serde(default = "default_stall_timeout_ms")]
     pub stall_timeout_ms: i64,
-    #[serde(default = "default_inject_verdict_fallback_instructions")]
-    #[serde(alias = "inject_verdict_instructions")]
-    pub inject_verdict_fallback_instructions: bool,
     #[serde(default = "default_inject_interaction_policy_instructions")]
     pub inject_interaction_policy_instructions: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,10 +631,6 @@ fn default_stall_timeout_ms() -> i64 {
     300_000
 }
 
-fn default_inject_verdict_fallback_instructions() -> bool {
-    true
-}
-
 fn default_inject_interaction_policy_instructions() -> bool {
     true
 }
@@ -653,7 +646,6 @@ impl Default for AgentRuntimeConfig {
             turn_timeout_ms: default_turn_timeout_ms(),
             read_timeout_ms: default_read_timeout_ms(),
             stall_timeout_ms: default_stall_timeout_ms(),
-            inject_verdict_fallback_instructions: default_inject_verdict_fallback_instructions(),
             inject_interaction_policy_instructions: default_inject_interaction_policy_instructions(
             ),
             interaction_policy_text: None,
@@ -1583,7 +1575,6 @@ on_failure: Failed
         assert_eq!(config.agent.turn_timeout_ms, 3_600_000);
         assert_eq!(config.agent.read_timeout_ms, 5_000);
         assert_eq!(config.agent.stall_timeout_ms, 300_000);
-        assert!(config.agent.inject_verdict_fallback_instructions);
         assert!(config.agent.inject_interaction_policy_instructions);
         assert!(config.agent.interaction_policy_text.is_none());
         assert!(config.agent.interaction_policy_overrides.agents.is_empty());
@@ -2747,70 +2738,6 @@ on_failure: Failed
 
         assert_eq!(config.tracker.api_key, None);
         std::env::remove_var("GITHUB_TOKEN");
-    }
-
-    #[test]
-    fn test_agent_runtime_defaults_include_verdict_fallback_injection_enabled() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: implement
-    agent: builder
-on_success: Done
-on_failure: Failed
-"#;
-
-        let config = parse_config(yaml).unwrap();
-        assert!(config.agent.inject_verdict_fallback_instructions);
-    }
-
-    #[test]
-    fn test_parse_config_with_verdict_fallback_injection_disabled() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: implement
-    agent: builder
-on_success: Done
-on_failure: Failed
-agent:
-  inject_verdict_fallback_instructions: false
-"#;
-
-        let config = parse_config(yaml).unwrap();
-        assert!(!config.agent.inject_verdict_fallback_instructions);
-    }
-
-    #[test]
-    fn test_parse_config_with_short_verdict_injection_field_name() {
-        let yaml = r#"
-tracker:
-  kind: todo_file
-agents:
-  builder:
-    acpx_agent: claude
-    prompt: "Build it."
-steps:
-  - name: implement
-    agent: builder
-on_success: Done
-on_failure: Failed
-agent:
-  inject_verdict_instructions: false
-"#;
-
-        let config = parse_config(yaml).unwrap();
-        assert!(!config.agent.inject_verdict_fallback_instructions);
     }
 
     #[test]

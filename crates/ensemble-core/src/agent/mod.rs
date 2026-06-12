@@ -79,15 +79,6 @@ pub(crate) fn tokenize_command_string(command: &str) -> Result<ResolvedCommand, 
     })
 }
 
-fn verdict_fallback_instruction(step_name: &str) -> String {
-    format!(
-        "If you cannot return a structured runtime verdict, write .ensemble/verdict-{step_name}.json with:\n\
-         {{\"verdict\":\"approve\"}}\n\
-         or\n\
-         {{\"verdict\":\"reject\",\"summary\":\"<reason>\"}}"
-    )
-}
-
 const DEFAULT_INTERACTION_POLICY_INSTRUCTION: &str = "\
 When you need human input, prefer batching related questions into a single interaction request instead of asking one-by-one.\n\
 This is a soft preference: ask a single urgent question when sequential discovery or risk requires it.\n\
@@ -288,11 +279,7 @@ impl AcpAgentRunner {
                 rendered,
                 resolve_interaction_policy_instruction(config, agent_name, step_name).as_deref(),
             );
-            Ok(maybe_append_verdict_fallback_instruction(
-                rendered,
-                config.agent.inject_verdict_fallback_instructions,
-                step_name,
-            ))
+            Ok(rendered)
         } else {
             // Continuation turns: send guidance, not the full original prompt
             Ok(format!(
@@ -338,24 +325,6 @@ fn maybe_append_synthesis_instruction(rendered: String, step_kind: StepKind) -> 
          Merge, compare, or adjudicate those final structured outputs. Do not assume intermediate tool calls or hidden reasoning are available unless the prompt included them explicitly. \
          Return a normal Ensemble verdict with a concise `summary` and, when useful, a structured `output` JSON value describing the merged result."
     )
-}
-
-fn maybe_append_verdict_fallback_instruction(
-    prompt: String,
-    enabled: bool,
-    step_name: &str,
-) -> String {
-    let instruction = verdict_fallback_instruction(step_name);
-    if !enabled || prompt.contains(&instruction) {
-        return prompt;
-    }
-
-    let trimmed = prompt.trim_end();
-    if trimmed.is_empty() {
-        instruction
-    } else {
-        format!("{trimmed}\n\n{instruction}")
-    }
 }
 
 fn resolve_interaction_policy_instruction(
@@ -469,7 +438,7 @@ async fn load_interaction_response(
 }
 
 #[cfg(test)]
-pub(super) fn transitional_succeeded_output() -> crate::pipeline::verdict::StepOutput {
+pub(super) fn succeeded_step_output() -> crate::pipeline::verdict::StepOutput {
     crate::pipeline::verdict::StepOutput {
         result: crate::pipeline::verdict::StepResult::Succeeded,
         summary: None,
@@ -554,8 +523,7 @@ pub(super) async fn detect_worker_result_with_output(
 
 #[cfg(test)]
 async fn detect_worker_result(workspace_path: &Path, step_name: &str) -> WorkerResult {
-    detect_worker_result_with_output(workspace_path, transitional_succeeded_output(), step_name)
-        .await
+    detect_worker_result_with_output(workspace_path, succeeded_step_output(), step_name).await
 }
 
 async fn write_interaction_response_file(
@@ -906,7 +874,7 @@ mod tests {
 
             if self.should_succeed {
                 Ok(WorkerResult::Success {
-                    output: transitional_succeeded_output(),
+                    output: succeeded_step_output(),
                     approval_request: None,
                 })
             } else {
@@ -1189,6 +1157,16 @@ case "$*" in
     exit 0
     ;;
   *"prompt --session"*)
+    prompt=""
+    while IFS= read -r line; do
+      prompt="${prompt}${line}"
+    done
+    if [[ "$prompt" == *"Extract the Ensemble step result"* ]]; then
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}' \
+        '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
+      exit 0
+    fi
     printf '%s\n' \
       '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
       '{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}'
@@ -1252,6 +1230,16 @@ exit 1
             r#"#!/bin/bash
 case "$*" in
   *"prompt --session"*)
+    prompt=""
+    while IFS= read -r line; do
+      prompt="${prompt}${line}"
+    done
+    if [[ "$prompt" == *"Extract the Ensemble step result"* ]]; then
+      printf '%s\n' \
+        '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"{\"result\":\"succeeded\"}"}}}}' \
+        '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
+      exit 0
+    fi
     printf '%s\n' \
       '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}' \
       '{"jsonrpc":"2.0","id":2,"result":{"stopReason":"end_turn"}}'
@@ -1304,34 +1292,6 @@ exit 0
         tokio::fs::write(ensemble_dir.join(name), contents)
             .await
             .unwrap();
-    }
-
-    #[test]
-    fn injects_verdict_block_when_enabled() {
-        let prompt = "Do the work.".to_string();
-        let rendered = maybe_append_verdict_fallback_instruction(prompt, true, "build");
-        assert!(rendered.contains("write .ensemble/verdict-build.json"));
-    }
-
-    #[test]
-    fn does_not_inject_verdict_block_when_disabled() {
-        let prompt = "Do the work.".to_string();
-        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), false, "build");
-        assert_eq!(rendered, prompt);
-    }
-
-    #[test]
-    fn does_not_duplicate_verdict_block_when_present() {
-        let instruction = verdict_fallback_instruction("build");
-        let prompt = format!("Do work.\n\n{instruction}");
-        let rendered = maybe_append_verdict_fallback_instruction(prompt.clone(), true, "build");
-        assert_eq!(rendered, prompt);
-        assert_eq!(
-            rendered
-                .matches("write .ensemble/verdict-build.json")
-                .count(),
-            1
-        );
     }
 
     #[test]
@@ -1797,7 +1757,7 @@ on_failure: Todo
             .unwrap();
 
         assert!(prompt.starts_with("question: Use staging"));
-        assert!(prompt.contains("write .ensemble/verdict-build.json"));
+        assert!(!prompt.contains("write .ensemble/verdict-build.json"));
     }
 
     #[tokio::test]
@@ -1862,7 +1822,7 @@ on_failure: Todo
             .unwrap();
 
         assert!(prompt.starts_with("hi"));
-        assert!(prompt.contains("write .ensemble/verdict-build.json"));
+        assert!(!prompt.contains("write .ensemble/verdict-build.json"));
     }
 
     #[tokio::test]
