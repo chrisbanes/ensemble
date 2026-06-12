@@ -5,22 +5,15 @@
 //! The key constraint: unknown YAML fields are preserved during the
 //! round-trip to support custom user extensions.
 
-use crate::config::ensemble::{ModeDefinition, ModelDefinition, PermissionRequestPolicy, StepKind};
+use crate::config::ensemble::{
+    ModeDefinition, ModelDefinition, PermissionRequestPolicy, PermissionRequestPolicyMode, StepKind,
+};
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
 /// Helper to convert Option<T> to serde_yaml::Value
 fn opt_to_value<T: Into<serde_yaml::Value>>(opt: Option<T>) -> Option<serde_yaml::Value> {
     opt.map(|v| v.into())
-}
-
-fn permission_request_policy_value(policy: &str) -> serde_yaml::Value {
-    let policy = match policy {
-        "auto_approve_all" | "approve_all" => PermissionRequestPolicy::approve_all(),
-        "reject_all" => PermissionRequestPolicy::reject_all(),
-        option_id => PermissionRequestPolicy::select_option(option_id),
-    };
-    serde_yaml::to_value(policy).expect("permission policy should serialize")
 }
 
 /// Guided form representation for structured config editing.
@@ -128,10 +121,32 @@ pub struct GuidedAgentRuntimeForm {
     pub max_retry_backoff_ms: u64,
     pub command: String,
     pub session_mode: String,
-    pub permission_request_policy: String,
+    pub permission_request_policy: GuidedPermissionRequestPolicyForm,
     pub turn_timeout_ms: u64,
     pub read_timeout_ms: u64,
     pub stall_timeout_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct GuidedPermissionRequestPolicyForm {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option_id: Option<String>,
+}
+
+impl From<&PermissionRequestPolicy> for GuidedPermissionRequestPolicyForm {
+    fn from(policy: &PermissionRequestPolicy) -> Self {
+        let mode = match policy.mode {
+            PermissionRequestPolicyMode::ApproveAll => "approve_all",
+            PermissionRequestPolicyMode::RejectAll => "reject_all",
+            PermissionRequestPolicyMode::SelectOption => "select_option",
+        }
+        .to_string();
+        Self {
+            mode,
+            option_id: policy.option_id.clone(),
+        }
+    }
 }
 
 /// State transitions in guided form.
@@ -246,10 +261,9 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 max_retry_backoff_ms: config.agent.max_retry_backoff_ms,
                 command: config.agent.command.clone(),
                 session_mode: config.agent.session_mode.clone(),
-                permission_request_policy: config
-                    .agent
-                    .permission_request_policy
-                    .legacy_policy_id(),
+                permission_request_policy: GuidedPermissionRequestPolicyForm::from(
+                    &config.agent.permission_request_policy,
+                ),
                 turn_timeout_ms: config.agent.turn_timeout_ms,
                 read_timeout_ms: config.agent.read_timeout_ms,
                 stall_timeout_ms: config.agent.stall_timeout_ms,
@@ -559,9 +573,27 @@ pub fn apply_guided_form(
             "session_mode".into(),
             form.runtime.agent.session_mode.clone().into(),
         );
+        let mut policy = serde_yaml::Mapping::new();
+        policy.insert(
+            serde_yaml::Value::String("mode".to_string()),
+            serde_yaml::Value::String(form.runtime.agent.permission_request_policy.mode.clone()),
+        );
+        if let Some(option_id) = form
+            .runtime
+            .agent
+            .permission_request_policy
+            .option_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+        {
+            policy.insert(
+                serde_yaml::Value::String("option_id".to_string()),
+                serde_yaml::Value::String(option_id),
+            );
+        }
         am.insert(
             "permission_request_policy".into(),
-            permission_request_policy_value(&form.runtime.agent.permission_request_policy),
+            serde_yaml::Value::Mapping(policy),
         );
         am.remove("permission_policy");
         am.insert(
@@ -705,7 +737,10 @@ mod tests {
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
-                    permission_request_policy: "auto_approve_all".to_string(),
+                    permission_request_policy: GuidedPermissionRequestPolicyForm {
+                        mode: "approve_all".to_string(),
+                        option_id: None,
+                    },
                     turn_timeout_ms: 3600000,
                     read_timeout_ms: 5000,
                     stall_timeout_ms: 300000,
@@ -896,7 +931,105 @@ on_failure: Failed
             Some("approve_reads")
         );
         assert_eq!(form.agents[0].runtime, None);
-        assert_eq!(form.runtime.agent.permission_request_policy, "manual");
+        assert_eq!(
+            form.runtime.agent.permission_request_policy.mode,
+            "select_option"
+        );
+        assert_eq!(
+            form.runtime
+                .agent
+                .permission_request_policy
+                .option_id
+                .as_deref(),
+            Some("manual")
+        );
+    }
+
+    #[test]
+    fn extract_guided_form_includes_tagged_permission_request_policy() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  reviewer:
+    runtime: direct
+    executor: codex
+    model: gpt-5
+    prompt: "Review it."
+steps:
+  - name: review
+    agent: reviewer
+on_success: Done
+on_failure: Failed
+agent:
+  permission_request_policy:
+    mode: select_option
+    option_id: allow_always
+"#;
+
+        let form = extract_guided_form(yaml).unwrap();
+
+        assert_eq!(
+            form.runtime.agent.permission_request_policy.mode,
+            "select_option"
+        );
+        assert_eq!(
+            form.runtime
+                .agent
+                .permission_request_policy
+                .option_id
+                .as_deref(),
+            Some("allow_always")
+        );
+    }
+
+    #[test]
+    fn apply_guided_form_writes_tagged_permission_request_policy() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: hello
+steps:
+  - name: implement
+    agent: builder
+agent:
+  permission_request_policy:
+    mode: reject_all
+on_success: Done
+on_failure: Failed
+"#;
+        let mut form = guided_form_with_workspace_root("/tmp/ws");
+        form.runtime.agent.permission_request_policy = GuidedPermissionRequestPolicyForm {
+            mode: "select_option".to_string(),
+            option_id: Some("allow_always".to_string()),
+        };
+
+        let merged = apply_guided_form(raw, &form).unwrap();
+        let val: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let policy = val
+            .get("agent")
+            .unwrap()
+            .get("permission_request_policy")
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+
+        assert_eq!(
+            policy
+                .get(serde_yaml::Value::String("mode".to_string()))
+                .and_then(serde_yaml::Value::as_str),
+            Some("select_option")
+        );
+        assert_eq!(
+            policy
+                .get(serde_yaml::Value::String("option_id".to_string()))
+                .and_then(serde_yaml::Value::as_str),
+            Some("allow_always")
+        );
     }
 
     #[test]

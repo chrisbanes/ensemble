@@ -553,7 +553,11 @@ on_failure: Failed
         "approve_reads"
     );
     assert_eq!(
-        json["guided_form"]["runtime"]["agent"]["permission_request_policy"],
+        json["guided_form"]["runtime"]["agent"]["permission_request_policy"]["mode"],
+        "select_option"
+    );
+    assert_eq!(
+        json["guided_form"]["runtime"]["agent"]["permission_request_policy"]["option_id"],
         "manual"
     );
     assert!(json["guided_form"]["agents"][0]
