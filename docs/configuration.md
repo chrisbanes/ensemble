@@ -345,7 +345,7 @@ steps:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `on_success` | string | *required* | Tracker state when all pipeline steps pass |
-| `on_failure` | string | *required* | Tracker state when any step fails or rejects |
+| `on_failure` | string | *required* | Tracker state when any step fails |
 
 ### concurrency
 

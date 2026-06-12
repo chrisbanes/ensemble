@@ -200,7 +200,7 @@ Parsed `config.yaml` payload:
 - `on_success` (string)
   - Terminal tracker state when all pipeline steps pass.
 - `on_failure` (string)
-  - Terminal tracker state when any pipeline step fails or rejects.
+  - Terminal tracker state when any pipeline step fails.
 - `concurrency` (ConcurrencyConfig)
   - `max_concurrent_agents` (global cap) and `max_step_parallelism` (per-issue cap).
 - `max_cycles` (integer, default 3)
