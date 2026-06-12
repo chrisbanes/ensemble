@@ -121,7 +121,6 @@ impl TestFixture {
         let acpx_log_path = root.join("mock-acpx.log");
 
         fs::create_dir_all(&workspace_root)?;
-        fs::create_dir_all(workspace_root.join(".ensemble").join("history.db"))?;
         fs::create_dir_all(&mock_bin_dir)?;
         fs::write(&todo_path, todo_fixture())?;
         fs::write(
