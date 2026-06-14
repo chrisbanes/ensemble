@@ -76,6 +76,7 @@ struct StepDispatchContext<'a> {
     step_kind: StepKind,
     tracker_state: Option<&'a str>,
     attempt: Option<u32>,
+    timeout_ms: u64,
     interaction_response: Option<InteractionResponseEnvelope>,
     workspace_path: std::path::PathBuf,
     step_outputs: StepOutputTemplateContext,
@@ -134,6 +135,10 @@ pub struct OrchestratorRuntimeParts {
 }
 
 impl Orchestrator {
+    fn effective_step_timeout_ms(timeout_ms: Option<u64>, config: &EnsembleConfig) -> u64 {
+        timeout_ms.unwrap_or(config.agent.turn_timeout_ms)
+    }
+
     /// Create a new Orchestrator.
     pub fn new(
         config: Arc<RwLock<EnsembleConfig>>,
@@ -780,6 +785,10 @@ impl Orchestrator {
                                         step_kind: req.step_kind,
                                         tracker_state: req.tracker_state.as_deref(),
                                         attempt,
+                                        timeout_ms: Self::effective_step_timeout_ms(
+                                            req.timeout_ms,
+                                            &config_snapshot,
+                                        ),
                                         interaction_response: None,
                                         workspace_path,
                                         step_outputs,
@@ -893,6 +902,10 @@ impl Orchestrator {
                             step_kind: req.step_kind,
                             tracker_state: req.tracker_state.as_deref(),
                             attempt,
+                            timeout_ms: Self::effective_step_timeout_ms(
+                                req.timeout_ms,
+                                &config_snapshot,
+                            ),
                             interaction_response: None,
                             workspace_path,
                             step_outputs: StepOutputTemplateContext::default(),
@@ -1043,6 +1056,7 @@ impl Orchestrator {
         let event_tx = self.worker_tx.clone();
         let workspace_path = dispatch.workspace_path.clone();
         let attempt = dispatch.attempt;
+        let timeout_ms = dispatch.timeout_ms;
         let step_outputs = dispatch.step_outputs.clone();
         let cancel_token = tokio_util::sync::CancellationToken::new();
         register_issue_cancellation(&self.cancellation_registry, &issue.id, cancel_token.clone());
@@ -1056,6 +1070,7 @@ impl Orchestrator {
                     step_name: &step_name_owned,
                     step_kind: dispatch.step_kind,
                     attempt,
+                    timeout_ms,
                     interaction_response: interaction_response.clone(),
                     workspace_path: &workspace_path,
                     event_tx: event_tx.clone(),
@@ -1340,6 +1355,10 @@ impl Orchestrator {
                                                 step_kind: req.step_kind,
                                                 tracker_state: req.tracker_state.as_deref(),
                                                 attempt: None,
+                                                timeout_ms: Self::effective_step_timeout_ms(
+                                                    req.timeout_ms,
+                                                    &config_snapshot,
+                                                ),
                                                 interaction_response: None,
                                                 workspace_path,
                                                 step_outputs,
@@ -3851,6 +3870,10 @@ impl Orchestrator {
                         step_kind: current_step.kind,
                         tracker_state: current_step.tracker_state.as_deref(),
                         attempt: Some(attempt),
+                        timeout_ms: Self::effective_step_timeout_ms(
+                            current_step.timeout_ms,
+                            &current_config,
+                        ),
                         interaction_response: Some(interaction_response),
                         workspace_path,
                         step_outputs,
@@ -3966,6 +3989,10 @@ impl Orchestrator {
                                     step_kind: req.step_kind,
                                     tracker_state: req.tracker_state.as_deref(),
                                     attempt: Some(attempt),
+                                    timeout_ms: Self::effective_step_timeout_ms(
+                                        req.timeout_ms,
+                                        &current_config,
+                                    ),
                                     interaction_response: None,
                                     workspace_path,
                                     step_outputs,
@@ -4725,6 +4752,7 @@ mod tests {
     struct MockRunner {
         delay_ms: u64,
         observed_commands: Option<Arc<RwLock<Vec<String>>>>,
+        observed_timeouts: Option<Arc<RwLock<Vec<u64>>>>,
         cancellation_probe: Option<Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>>,
     }
 
@@ -4737,6 +4765,7 @@ mod tests {
                 step_name,
                 event_tx,
                 cancel_token,
+                timeout_ms,
                 ..
             } = request;
             if let Some(observed_commands) = &self.observed_commands {
@@ -4744,6 +4773,9 @@ mod tests {
                     .write()
                     .await
                     .push(config.agent.command.clone());
+            }
+            if let Some(observed_timeouts) = &self.observed_timeouts {
+                observed_timeouts.write().await.push(timeout_ms);
             }
             if self.delay_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
@@ -4989,6 +5021,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config = Arc::new(RwLock::new(cfg.clone()));
@@ -5054,6 +5087,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config = Arc::new(RwLock::new(cfg.clone()));
@@ -5132,6 +5166,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config = Arc::new(RwLock::new(cfg.clone()));
@@ -5201,6 +5236,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config = Arc::new(RwLock::new(cfg.clone()));
@@ -5295,6 +5331,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let cfg = make_config();
@@ -5345,6 +5382,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -5415,6 +5453,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let cfg = make_config();
@@ -5786,6 +5825,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 10,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -5815,6 +5855,39 @@ agent:
     }
 
     #[tokio::test]
+    async fn dispatch_passes_effective_step_timeout_to_agent_runner() {
+        let observed_timeouts = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: Some(Arc::clone(&observed_timeouts)),
+            cancellation_probe: None,
+        });
+        let mut raw_config = make_config();
+        raw_config.steps[0].timeout_ms = Some(1234);
+        let config = Arc::new(RwLock::new(raw_config));
+        let issue = test_issue("issue-timeout", "Todo");
+        let issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        orchestrator.dispatch_issue(&issue, Some(1)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(*observed_timeouts.read().await, vec![1234]);
+    }
+
+    #[tokio::test]
     async fn test_orchestrator_handles_worker_exit_success() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
@@ -5822,6 +5895,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -5881,6 +5955,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -5949,6 +6024,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6019,6 +6095,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6089,6 +6166,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6164,6 +6242,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6236,6 +6315,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -6299,6 +6379,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -6363,6 +6444,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -6414,6 +6496,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6473,6 +6556,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6566,6 +6650,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6621,6 +6706,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6680,6 +6766,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 10,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6733,6 +6820,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6805,6 +6893,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: Some(Arc::new(std::sync::Mutex::new(Some(probe_tx)))),
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6905,6 +6994,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -6942,6 +7032,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 1000,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -7003,6 +7094,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -7063,6 +7155,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_dir = tempfile::TempDir::new().unwrap();
@@ -7146,6 +7239,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_dir = tempfile::TempDir::new().unwrap();
@@ -7237,6 +7331,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config_dir = tempfile::TempDir::new().unwrap();
@@ -7319,6 +7414,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config_dir = tempfile::TempDir::new().unwrap();
@@ -7397,6 +7493,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let config_dir = tempfile::TempDir::new().unwrap();
@@ -7470,6 +7567,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -7550,6 +7648,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -7631,6 +7730,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -7714,6 +7814,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -7782,6 +7883,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -7860,6 +7962,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -7974,6 +8077,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8086,6 +8190,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8189,6 +8294,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8285,6 +8391,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8381,6 +8488,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8483,6 +8591,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8572,6 +8681,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8667,6 +8777,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8779,6 +8890,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -8892,6 +9004,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9007,6 +9120,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9129,6 +9243,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9197,6 +9312,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -9245,6 +9361,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9301,6 +9418,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let workspace_mgr = WorkspaceManager::new(&workspace_root, None).unwrap();
@@ -9352,6 +9470,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9454,6 +9573,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9531,6 +9651,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9638,6 +9759,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9700,6 +9822,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9810,6 +9933,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9855,6 +9979,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9914,6 +10039,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -9980,6 +10106,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -10045,6 +10172,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -10121,6 +10249,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -10238,6 +10367,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
