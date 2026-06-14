@@ -118,6 +118,7 @@ steps:
   - name: build
     agent: builder
     tracker_state: Building
+    timeout_ms: 600000
   - name: review
     agent: reviewer
     depends:
@@ -298,6 +299,7 @@ Pipeline step definitions. Each step invokes one agent.
 | `kind` | string | `agent` | Step kind. Use `agent` for normal steps and `synthesis` for steps that merge direct dependency outputs. |
 | `depends` | list of strings | — | Steps this depends on. Omit for sequential order. Use `[]` for no dependencies (root step). |
 | `tracker_state` | string | — | Tracker state to write when this step starts |
+| `timeout_ms` | integer | inherits `agent.turn_timeout_ms` | Optional maximum time for each runtime prompt or turn in this step |
 | `approval.mode` | string | — | Optional post-step approval policy: `always` or `when_requested_by_agent` |
 | `approval.state` | string | — | Optional tracker state to mirror while waiting for approval |
 
