@@ -26,13 +26,13 @@ import {
   getConfig,
   getSetupDefaults,
 } from "./generated/api/config/config";
-import { getConversation } from "./generated/api/conversation/conversation";
+import { getStepConversation } from "./generated/api/conversation/conversation";
 import type {
-  GetConversationParams,
+  GetStepConversationParams,
   GetHistoryParams,
   RuntimeSnapshot,
   IssueDetailSnapshot,
-  ConversationResponse,
+  TranscriptResponse,
   HistoryResponse,
   ConfigStateResponse,
   GuidedConfigForm,
@@ -200,18 +200,18 @@ export function useInteractionDetailQuery(id: string) {
   });
 }
 
-export function useConversationQuery(identifier: string, cursor?: string) {
-  const params: GetConversationParams = {
-    cursor: cursor ? Number(cursor) : undefined,
-    limit: 50,
-  };
-
+export function useStepConversationQuery(
+  identifier: string,
+  runId: string,
+  stepName: string,
+  params: GetStepConversationParams = {},
+) {
   return useQuery({
-    queryKey: ["getConversation", identifier, cursor],
-    enabled: identifier.length > 0,
-    queryFn: async (): Promise<ConversationResponse> => {
-      const resp = await getConversation(identifier, params);
-      return resp.data as ConversationResponse;
+    queryKey: ["getStepConversation", identifier, runId, stepName, params],
+    enabled: identifier.length > 0 && runId.length > 0 && stepName.length > 0,
+    queryFn: async (): Promise<TranscriptResponse> => {
+      const resp = await getStepConversation(identifier, runId, stepName, params);
+      return resp.data as TranscriptResponse;
     },
   });
 }

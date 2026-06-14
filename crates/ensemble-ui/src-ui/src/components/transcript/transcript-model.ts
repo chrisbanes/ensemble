@@ -1,8 +1,17 @@
-import type { ConversationMessage, InteractionDetail } from "@/generated/models";
+import type { InteractionDetail, TranscriptRecord } from "@/generated/models";
 import type { WsEventData } from "@/ws-types";
+
+export interface ConversationMessage {
+  index: number;
+  role: string;
+  content: string;
+  tool_calls: unknown;
+  tool_output?: unknown;
+}
 
 export interface TranscriptSource {
   conversation: ConversationMessage[];
+  transcriptRecords?: TranscriptRecord[];
   interactions: InteractionDetail[];
   events: WsEventData[];
 }
@@ -129,6 +138,80 @@ function eventPriority(eventType: string): number {
 
 function interactionSequence(index: number): number {
   return index;
+}
+
+function payloadText(payload: unknown): string {
+  if (typeof payload === "object" && payload != null && "text" in payload) {
+    return String((payload as { text?: unknown }).text ?? "");
+  }
+  const json = JSON.stringify(payload);
+  return json ?? "";
+}
+
+function transcriptRecordEvent(record: TranscriptRecord, detail: string): WsEventData {
+  return {
+    type: record.kind,
+    timestamp: record.timestamp,
+    detail,
+    runId: record.run_id,
+    sequence: record.sequence,
+    stepName: record.step_name,
+    attempt: record.attempt,
+  };
+}
+
+function entryFromTranscriptRecord(record: TranscriptRecord): TranscriptEntry | null {
+  const timestamp = record.timestamp;
+  const id = `transcript:${record.run_id}:${record.step_name}:${record.sequence}`;
+  const text = payloadText(record.payload);
+
+  if (record.kind === "assistant_message") {
+    return {
+      kind: "agent_message",
+      id,
+      message: {
+        index: record.sequence,
+        role: "assistant",
+        content: text,
+        tool_calls: null,
+        tool_output: null,
+      },
+      timestamp,
+    };
+  }
+
+  if (record.kind === "error") {
+    return {
+      kind: "error",
+      id,
+      message: text,
+      timestamp,
+    };
+  }
+
+  if (
+    record.kind === "reasoning" ||
+    record.kind === "tool_call" ||
+    record.kind === "tool_result" ||
+    record.kind === "prompt" ||
+    record.kind === "permission_request" ||
+    record.kind === "permission_resolution" ||
+    record.kind === "raw"
+  ) {
+    return {
+      kind: "tool_activity",
+      id,
+      event: transcriptRecordEvent(record, text),
+      timestamp,
+    };
+  }
+
+  return {
+    kind: "workflow_event",
+    id,
+    event: transcriptRecordEvent(record, text),
+    timestamp,
+  };
 }
 
 function earliestInteractionTimestamp(interactions: InteractionDetail[]): string | null {
@@ -299,6 +382,17 @@ function reuseGroupedEntries(
 
 export function buildTranscriptEntries(source: TranscriptSource): TranscriptEntry[] {
   const sortable: SortableEntry[] = [];
+
+  for (const record of source.transcriptRecords ?? []) {
+    const entry = entryFromTranscriptRecord(record);
+    if (entry == null) continue;
+    sortable.push({
+      entry,
+      sortTimestamp: toMs(record.timestamp),
+      sortSequence: record.sequence,
+      sortPriority: TRANSCRIPT_SORT_PRIORITY.agentOrTool,
+    });
+  }
 
   for (const event of source.events) {
     const entryId = `event:${event.runId ?? "run"}:${event.sequence ?? event.timestamp}:${event.type}`;
