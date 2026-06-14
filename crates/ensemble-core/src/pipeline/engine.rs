@@ -51,6 +51,8 @@ pub struct DispatchRequest {
     pub step_kind: StepKind,
     /// Optional tracker state to set while the step is running.
     pub tracker_state: Option<String>,
+    /// Optional per-step turn timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
 }
 
 /// The action the orchestrator should take after a state transition.
@@ -441,6 +443,7 @@ impl PipelineRun {
                         agent: fixup_agent.to_string(),
                         kind: StepKind::Agent,
                         tracker_state: None,
+                        timeout_ms: None,
                         approval: None,
                         on_failure: OnFailure::Halt,
                         fixup_agent: None,
@@ -594,6 +597,7 @@ impl PipelineRun {
                 agent_name: s.agent.clone(),
                 step_kind: s.kind,
                 tracker_state: s.tracker_state.clone(),
+                timeout_ms: s.timeout_ms,
             })
             .collect();
 
@@ -898,6 +902,28 @@ mod tests {
 
         let err = PipelineRun::from_snapshot(snapshot).unwrap_err();
         assert!(err.to_string().contains("cycle"));
+    }
+
+    #[test]
+    fn dispatch_request_carries_step_timeout_ms() {
+        let steps = vec![StepConfig {
+            name: "build".to_string(),
+            kind: StepKind::Agent,
+            agent: "builder".to_string(),
+            depends: Some(vec![]),
+            tracker_state: None,
+            timeout_ms: Some(90_000),
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+        }];
+        let run = make_run(&steps);
+
+        let PipelineAction::Dispatch(requests) = run.start() else {
+            panic!("expected dispatch action");
+        };
+
+        assert_eq!(requests[0].timeout_ms, Some(90_000));
     }
 
     fn make_step_with_state(

@@ -12,6 +12,7 @@ pub struct DagStep {
     pub agent: String,
     pub kind: StepKind,
     pub tracker_state: Option<String>,
+    pub timeout_ms: Option<u64>,
     pub approval: Option<StepApprovalConfig>,
     pub on_failure: OnFailure,
     pub fixup_agent: Option<String>,
@@ -110,6 +111,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             agent: step.agent.clone(),
             kind: step.kind,
             tracker_state: step.tracker_state.clone(),
+            timeout_ms: step.timeout_ms,
             approval: step.approval.clone(),
             on_failure: step.on_failure,
             fixup_agent: step.fixup_agent.clone(),
@@ -397,6 +399,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(synth.kind, StepKind::Synthesis);
+    }
+
+    #[test]
+    fn build_dag_preserves_step_timeout_ms() {
+        let steps = vec![StepConfig {
+            name: "build".to_string(),
+            kind: StepKind::Agent,
+            agent: "builder".to_string(),
+            depends: Some(vec![]),
+            tracker_state: None,
+            timeout_ms: Some(120_000),
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+        }];
+
+        let dag = build_dag(&steps).unwrap();
+
+        assert_eq!(dag.steps[0].timeout_ms, Some(120_000));
     }
 
     #[test]
