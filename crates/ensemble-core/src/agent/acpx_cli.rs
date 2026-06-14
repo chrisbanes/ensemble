@@ -687,8 +687,12 @@ JSON
             .unwrap();
         let events = events.lock().unwrap();
 
-        assert!(matches!(events[0], AgentEvent::OutputChunk { .. }));
-        assert!(matches!(events[1], AgentEvent::RunCompleted { .. }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::OutputChunk { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RunCompleted { .. })));
     }
 
     #[tokio::test]
@@ -720,8 +724,12 @@ JSON
             .unwrap();
         let events = events.lock().unwrap();
 
-        assert!(matches!(events[0], AgentEvent::OutputChunk { .. }));
-        assert!(matches!(events[1], AgentEvent::RunCompleted { .. }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::OutputChunk { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RunCompleted { .. })));
     }
 
     #[tokio::test]

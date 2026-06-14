@@ -92,6 +92,10 @@ async fn web_cli_runs_todo_issue_to_completion_with_mock_acpx() {
         .await
         .expect("timeline artifact should be persisted");
 
+    wait_for_transcript_artifact(&fixture.workspace_root)
+        .await
+        .expect("step transcript artifact should be persisted");
+
     let todo = fs::read_to_string(&fixture.todo_path).expect("read TODO.md");
     assert!(
         section_contains_issue(&todo, "Done", ISSUE_ID),
@@ -246,6 +250,7 @@ if [[ " $* " == *" prompt "* ]]; then
 JSON
 
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mock agent completed"}}}}'
+  printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":{"type":"tool_call","name":"read_file","arguments":{"path":"Cargo.toml"}}}}}'
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}},"stopReason":"end_turn"}}}'
   exit 0
 fi
@@ -373,6 +378,65 @@ fn read_first_timeline_file(workspace_root: &Path) -> Result<Option<String>, Str
         let path = entry.path().join("events.jsonl");
         match fs::read_to_string(&path) {
             Ok(contents) => return Ok(Some(contents)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+
+    Ok(None)
+}
+
+async fn wait_for_transcript_artifact(workspace_root: &Path) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+
+    loop {
+        match read_first_transcript_file(workspace_root)? {
+            Some((_, contents))
+                if contents.contains("\"assistant_message\"")
+                    && contents.contains("\"tool_call\"")
+                    && contents.contains("\"read_file\"") =>
+            {
+                return Ok(());
+            }
+            Some((path, contents)) => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "transcript did not contain expected records at {}:\n{contents}",
+                        path.display()
+                    ));
+                }
+            }
+            None => {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "transcript artifact not found under {}",
+                        workspace_root.display()
+                    ));
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn read_first_transcript_file(workspace_root: &Path) -> Result<Option<(PathBuf, String)>, String> {
+    let runs_dir = workspace_root.join(".ensemble").join("runs");
+    let entries = match fs::read_dir(&runs_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry
+            .path()
+            .join("steps")
+            .join("implement")
+            .join("transcript.jsonl");
+        match fs::read_to_string(&path) {
+            Ok(contents) => return Ok(Some((path, contents))),
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.to_string()),
         }

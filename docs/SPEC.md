@@ -1434,7 +1434,23 @@ Line handling requirements:
   - ignore it or log it as diagnostics
   - do not attempt protocol JSON parsing on stderr
 
-### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
+### 10.4 Per-Step Conversation Transcripts
+
+For each pipeline step, Ensemble persists a typed JSONL transcript at:
+
+```text
+{workspace}/.ensemble/runs/{run_id}/steps/{step_name}/transcript.jsonl
+```
+
+Transcript records are distinct from timeline events. Timeline events summarize run progress;
+transcript records preserve step-level agent activity such as assistant messages, exposed reasoning
+chunks, tool calls, tool results, permission activity, turn completion, prompts, and errors.
+
+Large tool results are truncated with head and tail retention. Adjacent assistant and reasoning
+deltas may be coalesced before persistence. Transcript persistence failures are logged and do not
+fail the agent step.
+
+### 10.5 Emitted Runtime Events (Upstream to Orchestrator)
 
 The active runtime emits structured events to the orchestrator callback. Each event should
 include:
@@ -1459,7 +1475,7 @@ Important emitted events may include:
 - `other_message` — unrecognized JSON-RPC message
 - `malformed` — unparseable line
 
-### 10.5 Permission, Tool Calls, and User Input Policy
+### 10.6 Permission, Tool Calls, and User Input Policy
 
 Permission and user-input behavior on direct ACP paths is governed by `agent.permission_request_policy`.
 
@@ -1564,7 +1580,7 @@ Human interaction requirement:
 - First valid command wins immediately (request-level lock). Later valid/invalid commands are ignored
   for state transitions and may be audited as ignored events.
 
-### 10.6 Timeouts and Error Mapping
+### 10.7 Timeouts and Error Mapping
 
 Timeouts:
 
@@ -1585,7 +1601,7 @@ Error mapping (recommended normalized categories):
 - `turn_failed`
 - `turn_cancelled`
 
-### 10.7 Agent Runner Contract
+### 10.8 Agent Runner Contract
 
 The `Agent Runner` wraps workspace + prompt + ACP session client.
 

@@ -1227,7 +1227,7 @@ impl Orchestrator {
 
         let sequence = pipeline_event
             .as_ref()
-            .and_then(|_| run_id.as_ref())
+            .and(run_id.as_ref())
             .map(|run_id| state.next_timeline_sequence(run_id));
 
         // Common path: update agent event
