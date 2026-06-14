@@ -728,7 +728,7 @@ impl AcpAgentRunner {
             session_mode,
             permission_request_policy: config.agent.permission_request_policy.clone(),
             read_timeout_ms: config.agent.read_timeout_ms,
-            turn_timeout_ms: config.agent.turn_timeout_ms,
+            turn_timeout_ms: request.timeout_ms,
             cancel_token: request.cancel_token.clone(),
         };
 
@@ -786,6 +786,11 @@ impl AcpAgentRunner {
         )
         .await)
     }
+}
+
+#[cfg(test)]
+fn effective_request_timeout_ms(request: &AgentRunRequest<'_>) -> u64 {
+    request.timeout_ms
 }
 
 #[cfg(test)]
@@ -930,6 +935,27 @@ on_failure: Todo
         )
     }
 
+    fn minimal_config() -> &'static str {
+        r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo"]
+  terminal_states: ["Done"]
+agents:
+  builder:
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+agent:
+  command: echo test
+on_success: Done
+on_failure: Todo
+"#
+    }
+
     fn test_acpx_config() -> Arc<EnsembleConfig> {
         Arc::new(
             parse_config(
@@ -957,6 +983,29 @@ on_failure: Todo
 
     fn test_runner() -> AcpAgentRunner {
         AcpAgentRunner::new(Arc::new(RwLock::new(test_config().as_ref().clone())))
+    }
+
+    #[test]
+    fn direct_runtime_uses_agent_run_request_timeout() {
+        let config = Arc::new(parse_config(minimal_config()).unwrap());
+        let issue = test_issue();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: Path::new("."),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            timeout_ms: 3210,
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        assert_eq!(effective_request_timeout_ms(&request), 3210);
     }
 
     #[tokio::test]
