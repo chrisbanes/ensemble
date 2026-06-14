@@ -2030,6 +2030,19 @@ impl Orchestrator {
             run.step_failed(step, reason.clone());
         }
 
+        let step_failed_transition = Self::transition_input_for_run(
+            &state,
+            issue_id,
+            state
+                .running
+                .get(issue_id)
+                .map(|entry| entry.identifier.as_str())
+                .unwrap_or(issue_id),
+            PipelineTransitionKind::StepFailed,
+            Some(step.to_string()),
+            Some(reason.clone()),
+            None,
+        );
         let completed_at = Utc::now();
         let mut final_failure = false;
         let mut history_record = None;
@@ -2037,6 +2050,9 @@ impl Orchestrator {
         let mut rejection_comment = None;
         let mut history_run_id = None;
         let mut post_failure_transitions = Vec::new();
+        if let Some(input) = step_failed_transition {
+            post_failure_transitions.push(input);
+        }
         let step_name = step.to_string();
         let runtime_step = state
             .get_pipeline_run(issue_id)
@@ -6423,6 +6439,25 @@ agent:
             .expect("retry should be scheduled");
         assert_eq!(retry.retry_from_step.as_deref(), Some("build"));
         assert_eq!(retry.error.as_deref(), Some("turn timeout after 100ms"));
+        drop(state);
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.kind == PipelineTransitionKind::StepFailed),
+            "timeout should record the initial step failure transition"
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| record.kind == PipelineTransitionKind::StepRetryScheduled),
+            "timeout should record the follow-up step retry transition"
+        );
     }
 
     #[tokio::test]

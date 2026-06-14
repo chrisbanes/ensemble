@@ -1478,7 +1478,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error, .. }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
         ));
     }
@@ -1539,7 +1542,13 @@ agent:
 
         let result = detect_worker_result(workspace.path(), "build").await;
 
-        assert!(matches!(result, WorkerResult::Failed { .. }));
+        assert!(matches!(
+            result,
+            WorkerResult::Failed {
+                kind: WorkerFailureKind::Runtime,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1551,7 +1560,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error, .. }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("failed to parse .ensemble/approval-request.json")
         ));
     }
@@ -1565,7 +1577,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error, .. }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("failed to parse .ensemble/interaction-request.json")
         ));
     }
@@ -1591,7 +1606,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error, .. }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
         ));
     }
