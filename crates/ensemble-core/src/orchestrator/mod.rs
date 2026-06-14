@@ -22,7 +22,8 @@ use crate::agent::cancellation::{
     CancellationRegistry,
 };
 use crate::agent::events::{
-    AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
+    AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerFailureKind,
+    WorkerResult,
 };
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
@@ -1927,7 +1928,19 @@ impl Orchestrator {
                     state.remove_pipeline_run(issue_id);
                 }
             }
-            WorkerResult::Failed { error } => {
+            WorkerResult::Failed { error, kind } => {
+                if kind == WorkerFailureKind::Timeout {
+                    warn!(
+                        issue_id = %issue_id,
+                        step = step_name,
+                        error = %error,
+                        "worker exited with timeout"
+                    );
+                    self.handle_pipeline_step_failure(issue_id, step_name, error)
+                        .await;
+                    return;
+                }
+
                 let config = self.config.read().await;
                 let mut state = self.state.write().await;
                 warn!(
@@ -2005,6 +2018,337 @@ impl Orchestrator {
                             .await;
                     }
                 }
+            }
+        }
+    }
+
+    async fn handle_pipeline_step_failure(&self, issue_id: &str, step: &str, reason: String) {
+        let config = self.config.read().await;
+        let mut state = self.state.write().await;
+
+        if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+            run.step_failed(step, reason.clone());
+        }
+
+        let completed_at = Utc::now();
+        let mut final_failure = false;
+        let mut history_record = None;
+        let mut completed_identifier = None;
+        let mut rejection_comment = None;
+        let mut history_run_id = None;
+        let mut post_failure_transitions = Vec::new();
+        let step_name = step.to_string();
+        let runtime_step = state
+            .get_pipeline_run(issue_id)
+            .and_then(|run| run.step(step))
+            .cloned();
+        let step_config = config.steps.iter().find(|s| s.name == step);
+        let on_failure = runtime_step
+            .as_ref()
+            .map(|s| s.on_failure)
+            .or_else(|| step_config.map(|s| s.on_failure))
+            .unwrap_or_default();
+
+        match on_failure {
+            OnFailure::RetryStep => {
+                if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                    run.retry_from_step(step);
+                }
+                if let Some(entry) = state.remove_running(issue_id) {
+                    state.add_runtime_seconds(&entry);
+                    completed_identifier = Some(entry.identifier.clone());
+                    history_run_id = entry.run_id.clone();
+                    let attempt = next_attempt(entry.retry_attempt);
+                    let retry_scheduled = schedule_failure_retry(
+                        &mut state,
+                        FailureRetryRequest {
+                            issue_id,
+                            identifier: &entry.identifier,
+                            attempt,
+                            max_backoff_ms: config.agent.max_retry_backoff_ms,
+                            max_cycles: config.max_cycles,
+                            error: &reason,
+                            retry_from_step: Some(step_name.clone()),
+                            with_fixup: false,
+                        },
+                    );
+                    final_failure = retry_scheduled.is_none();
+                    if final_failure {
+                        history_record = state.get_pipeline_run(issue_id).map(|run| {
+                            rejection_comment = Self::rejection_comment_for_step(run, step);
+                            self.build_history_record(
+                                issue_id,
+                                HISTORY_OUTCOME_FAILED,
+                                Some(reason.clone()),
+                                &entry,
+                                run,
+                                completed_at,
+                            )
+                        });
+                    }
+                    if retry_scheduled.is_none() && self.tracker.supports_writes() {
+                        if let Err(e) = self
+                            .tracker
+                            .set_issue_state(issue_id, &config.on_failure)
+                            .await
+                        {
+                            warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                        }
+                    }
+                    if let Some(due_at_ms) = retry_scheduled {
+                        if let Some(input) = Self::transition_input_for_run(
+                            &state,
+                            issue_id,
+                            &entry.identifier,
+                            PipelineTransitionKind::StepRetryScheduled,
+                            Some(step_name.clone()),
+                            Some(reason.clone()),
+                            Some(RetryEntry {
+                                issue_id: issue_id.to_string(),
+                                identifier: entry.identifier.clone(),
+                                attempt,
+                                due_at_ms,
+                                error: Some(reason.clone()),
+                                retry_from_step: Some(step_name.clone()),
+                                with_fixup: false,
+                            }),
+                        ) {
+                            post_failure_transitions.push(input);
+                        }
+                    } else if let Some(input) = Self::transition_input_for_run(
+                        &state,
+                        issue_id,
+                        &entry.identifier,
+                        PipelineTransitionKind::PipelineFailed,
+                        Some(step_name.clone()),
+                        Some(reason.clone()),
+                        None,
+                    ) {
+                        post_failure_transitions.push(input);
+                    }
+                }
+            }
+            OnFailure::Fixup => {
+                let fixup_agent = runtime_step
+                    .as_ref()
+                    .and_then(|s| s.fixup_agent.as_deref())
+                    .or_else(|| step_config.and_then(|s| s.fixup_agent.as_deref()));
+                let Some(fixup_agent) = fixup_agent else {
+                    error!(
+                        issue_id = %issue_id,
+                        step = %step,
+                        "fixup step missing fixup_agent after config validation"
+                    );
+                    if let Some(entry) = state.remove_running(issue_id) {
+                        state.add_runtime_seconds(&entry);
+                    }
+                    state.remove_pipeline_run(issue_id);
+                    return;
+                };
+
+                if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                    run.retry_from_step_with_fixup(step, fixup_agent);
+                }
+                if let Some(entry) = state.remove_running(issue_id) {
+                    state.add_runtime_seconds(&entry);
+                    completed_identifier = Some(entry.identifier.clone());
+                    history_run_id = entry.run_id.clone();
+                    let attempt = next_attempt(entry.retry_attempt);
+                    let retry_scheduled = schedule_failure_retry(
+                        &mut state,
+                        FailureRetryRequest {
+                            issue_id,
+                            identifier: &entry.identifier,
+                            attempt,
+                            max_backoff_ms: config.agent.max_retry_backoff_ms,
+                            max_cycles: config.max_cycles,
+                            error: &reason,
+                            retry_from_step: Some(step_name.clone()),
+                            with_fixup: true,
+                        },
+                    );
+                    final_failure = retry_scheduled.is_none();
+                    if final_failure {
+                        history_record = state.get_pipeline_run(issue_id).map(|run| {
+                            rejection_comment = Self::rejection_comment_for_step(run, step);
+                            self.build_history_record(
+                                issue_id,
+                                HISTORY_OUTCOME_FAILED,
+                                Some(reason.clone()),
+                                &entry,
+                                run,
+                                completed_at,
+                            )
+                        });
+                    }
+                    if retry_scheduled.is_none() && self.tracker.supports_writes() {
+                        if let Err(e) = self
+                            .tracker
+                            .set_issue_state(issue_id, &config.on_failure)
+                            .await
+                        {
+                            warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                        }
+                    }
+                    if let Some(due_at_ms) = retry_scheduled {
+                        if let Some(input) = Self::transition_input_for_run(
+                            &state,
+                            issue_id,
+                            &entry.identifier,
+                            PipelineTransitionKind::FixupRetryScheduled,
+                            Some(step_name.clone()),
+                            Some(reason.clone()),
+                            Some(RetryEntry {
+                                issue_id: issue_id.to_string(),
+                                identifier: entry.identifier.clone(),
+                                attempt,
+                                due_at_ms,
+                                error: Some(reason.clone()),
+                                retry_from_step: Some(step_name.clone()),
+                                with_fixup: true,
+                            }),
+                        ) {
+                            post_failure_transitions.push(input);
+                        }
+                    } else if let Some(input) = Self::transition_input_for_run(
+                        &state,
+                        issue_id,
+                        &entry.identifier,
+                        PipelineTransitionKind::PipelineFailed,
+                        Some(step_name.clone()),
+                        Some(reason.clone()),
+                        None,
+                    ) {
+                        post_failure_transitions.push(input);
+                    }
+                }
+            }
+            OnFailure::Halt => {
+                warn!(
+                    issue_id = %issue_id,
+                    step = %step,
+                    reason = %reason,
+                    "pipeline halted, waiting for manual intervention"
+                );
+                if let Some(entry) = state.remove_running(issue_id) {
+                    state.add_runtime_seconds(&entry);
+                    let agent_name = runtime_step
+                        .as_ref()
+                        .map(|s| s.agent.clone())
+                        .or_else(|| step_config.map(|s| s.agent.clone()))
+                        .unwrap_or_default();
+                    state.add_waiting_on_human(WaitingOnHumanEntry {
+                        issue_id: issue_id.to_string(),
+                        identifier: entry.identifier.clone(),
+                        interaction_request_id: format!("halted:{issue_id}:{step}"),
+                        step_name: step_name.clone(),
+                        kind: InteractionKind::Handoff,
+                        prompt: reason.clone(),
+                        agent_name,
+                        retry_attempt: entry.retry_attempt,
+                        started_at: Some(entry.started_at),
+                        agent_input_tokens: entry.agent_input_tokens,
+                        agent_output_tokens: entry.agent_output_tokens,
+                        agent_total_tokens: entry.agent_total_tokens,
+                        requested_at: Utc::now(),
+                        run_id: entry.run_id.clone(),
+                        issue: Some(entry.issue.clone()),
+                    });
+                    if let Some(input) = Self::transition_input_for_run(
+                        &state,
+                        issue_id,
+                        &entry.identifier,
+                        PipelineTransitionKind::PipelineHalted,
+                        Some(step_name.clone()),
+                        Some(reason.clone()),
+                        None,
+                    ) {
+                        post_failure_transitions.push(input);
+                    }
+                }
+            }
+            OnFailure::RetryIssue => {
+                if let Some(entry) = state.remove_running(issue_id) {
+                    state.add_runtime_seconds(&entry);
+                    completed_identifier = Some(entry.identifier.clone());
+                    history_run_id = entry.run_id.clone();
+                    let attempt = next_attempt(entry.retry_attempt);
+                    let retry_scheduled = schedule_failure_retry(
+                        &mut state,
+                        FailureRetryRequest {
+                            issue_id,
+                            identifier: &entry.identifier,
+                            attempt,
+                            max_backoff_ms: config.agent.max_retry_backoff_ms,
+                            max_cycles: config.max_cycles,
+                            error: &reason,
+                            retry_from_step: None,
+                            with_fixup: false,
+                        },
+                    );
+                    final_failure = retry_scheduled.is_none();
+                    if final_failure {
+                        history_record = state.get_pipeline_run(issue_id).map(|run| {
+                            rejection_comment = Self::rejection_comment_for_step(run, step);
+                            self.build_history_record(
+                                issue_id,
+                                HISTORY_OUTCOME_FAILED,
+                                Some(reason.clone()),
+                                &entry,
+                                run,
+                                completed_at,
+                            )
+                        });
+                    }
+                    if retry_scheduled.is_none() && self.tracker.supports_writes() {
+                        if let Err(e) = self
+                            .tracker
+                            .set_issue_state(issue_id, &config.on_failure)
+                            .await
+                        {
+                            warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
+                        }
+                    }
+                    if final_failure {
+                        if let Some(input) = Self::transition_input_for_run(
+                            &state,
+                            issue_id,
+                            &entry.identifier,
+                            PipelineTransitionKind::PipelineFailed,
+                            Some(step_name.clone()),
+                            Some(reason.clone()),
+                            None,
+                        ) {
+                            post_failure_transitions.push(input);
+                        }
+                    }
+                }
+                state.remove_pipeline_run(issue_id);
+            }
+        }
+
+        if final_failure {
+            if let Some(identifier) = completed_identifier {
+                state.add_completed(
+                    issue_id.to_string(),
+                    identifier,
+                    "completed_failed".to_string(),
+                );
+            }
+        }
+
+        drop(state);
+        for input in post_failure_transitions {
+            self.append_pipeline_transition(input).await;
+        }
+        if final_failure {
+            if let Some((step_name, summary)) = rejection_comment {
+                self.post_rejection_summary_comment(issue_id, &step_name, &summary)
+                    .await;
+            }
+            if let Some(record) = history_record {
+                self.append_history_record(history_run_id.as_deref(), record)
+                    .await;
             }
         }
     }
@@ -4363,13 +4707,22 @@ where
 {
     match AssertUnwindSafe(fut).catch_unwind().await {
         Ok(Ok(result)) => result,
-        Ok(Err(e)) => WorkerResult::Failed {
-            error: e.to_string(),
-        },
+        Ok(Err(e)) => {
+            let kind = if matches!(e, AgentError::TurnTimeout { .. }) {
+                WorkerFailureKind::Timeout
+            } else {
+                WorkerFailureKind::Runtime
+            };
+            WorkerResult::Failed {
+                error: e.to_string(),
+                kind,
+            }
+        }
         Err(_) => {
             warn!(issue_id, step = step_name, "worker task panicked");
             WorkerResult::Failed {
                 error: "worker task panicked".to_string(),
+                kind: WorkerFailureKind::Runtime,
             }
         }
     }
@@ -6017,6 +6370,62 @@ agent:
     }
 
     #[tokio::test]
+    async fn timeout_failure_uses_step_retry_policy() {
+        let config = Arc::new(RwLock::new(make_retry_step_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("issue-timeout-retry", "Todo");
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new(issue.id.clone(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "build",
+                WorkerResult::Failed {
+                    error: "turn timeout after 100ms".to_string(),
+                    kind: WorkerFailureKind::Timeout,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let retry = state
+            .retry_attempts
+            .get(&issue.id)
+            .expect("retry should be scheduled");
+        assert_eq!(retry.retry_from_step.as_deref(), Some("build"));
+        assert_eq!(retry.error.as_deref(), Some("turn timeout after 100ms"));
+    }
+
+    #[tokio::test]
     async fn synthetic_fixup_failure_halts_for_manual_intervention() {
         let config = Arc::new(RwLock::new(make_fixup_config()));
         let issues = Arc::new(RwLock::new(vec![]));
@@ -6412,6 +6821,7 @@ agent:
                 "build",
                 WorkerResult::Failed {
                     error: "agent crashed".to_string(),
+                    kind: WorkerFailureKind::Runtime,
                 },
             )
             .await;
@@ -6477,6 +6887,7 @@ agent:
                 "build",
                 WorkerResult::Failed {
                     error: "temporary agent crash".to_string(),
+                    kind: WorkerFailureKind::Runtime,
                 },
             )
             .await;
@@ -6532,6 +6943,7 @@ agent:
                 "build",
                 WorkerResult::Failed {
                     error: "agent crashed".to_string(),
+                    kind: WorkerFailureKind::Runtime,
                 },
             )
             .await;

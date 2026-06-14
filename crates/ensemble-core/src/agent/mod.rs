@@ -24,7 +24,9 @@ use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
 use async_trait::async_trait;
-use events::{InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult};
+use events::{
+    InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerFailureKind, WorkerResult,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -466,6 +468,7 @@ pub(super) async fn detect_worker_result_with_output(
             Err(error) => {
                 return WorkerResult::Failed {
                     error: format!("failed to parse .ensemble/interaction-request.json: {error}"),
+                    kind: WorkerFailureKind::Runtime,
                 }
             }
         },
@@ -473,6 +476,7 @@ pub(super) async fn detect_worker_result_with_output(
         Err(error) => {
             return WorkerResult::Failed {
                 error: format!("failed to read .ensemble/interaction-request.json: {error}"),
+                kind: WorkerFailureKind::Runtime,
             }
         }
     };
@@ -483,6 +487,7 @@ pub(super) async fn detect_worker_result_with_output(
             Err(error) => {
                 return WorkerResult::Failed {
                     error: format!("failed to parse .ensemble/approval-request.json: {error}"),
+                    kind: WorkerFailureKind::Runtime,
                 }
             }
         },
@@ -490,6 +495,7 @@ pub(super) async fn detect_worker_result_with_output(
         Err(error) => {
             return WorkerResult::Failed {
                 error: format!("failed to read .ensemble/approval-request.json: {error}"),
+                kind: WorkerFailureKind::Runtime,
             }
         }
     };
@@ -509,11 +515,13 @@ pub(super) async fn detect_worker_result_with_output(
         Some(_) if approval_request.is_some() => WorkerResult::Failed {
             error: "agent produced both .ensemble/interaction-request.json and .ensemble/approval-request.json"
                 .to_string(),
+            kind: WorkerFailureKind::Runtime,
         },
         Some(_) if verdict_exists => WorkerResult::Failed {
             error:
                 "agent produced both .ensemble/interaction-request.json and .ensemble/verdict.json"
                     .to_string(),
+            kind: WorkerFailureKind::Runtime,
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
         None => WorkerResult::Success {
@@ -1470,7 +1478,7 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed { error, .. }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
         ));
     }
@@ -1543,7 +1551,7 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed { error, .. }
                 if error.contains("failed to parse .ensemble/approval-request.json")
         ));
     }
@@ -1557,7 +1565,7 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed { error, .. }
                 if error.contains("failed to parse .ensemble/interaction-request.json")
         ));
     }
@@ -1583,7 +1591,7 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed { error, .. }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
         ));
     }
