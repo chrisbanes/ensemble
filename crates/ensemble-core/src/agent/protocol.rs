@@ -7,6 +7,23 @@ pub struct PermissionRequest {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum TranscriptBlockKind {
+    AssistantMessage,
+    Reasoning,
+    ToolCall,
+    ToolResult,
+    PermissionRequest,
+    TurnComplete,
+    Raw,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptBlock {
+    pub kind: TranscriptBlockKind,
+    pub payload: serde_json::Value,
+}
+
 /// Normalized data extracted from ACP `session/update` payloads.
 ///
 /// `permission_request` is currently consumed by the acpx runtime path when
@@ -19,6 +36,7 @@ pub struct ParsedSessionUpdate {
     pub stop_reason: Option<StopReason>,
     pub permission_request: Option<PermissionRequest>,
     pub verdict: Option<serde_json::Value>,
+    pub transcript_blocks: Vec<TranscriptBlock>,
 }
 
 /// Parse one stdout line as a JSON-RPC message.
@@ -71,6 +89,7 @@ pub fn parse_session_update(value: &serde_json::Value) -> Option<ParsedSessionUp
     let stop_reason = extract_stop_reason(params, update);
     let permission_request = extract_permission_request(params, update);
     let verdict = extract_verdict(params, update);
+    let transcript_blocks = extract_transcript_blocks(params, update, output_text.as_deref());
 
     let parsed = ParsedSessionUpdate {
         output_text,
@@ -78,6 +97,7 @@ pub fn parse_session_update(value: &serde_json::Value) -> Option<ParsedSessionUp
         stop_reason,
         permission_request,
         verdict,
+        transcript_blocks,
     };
 
     if parsed.output_text.is_none()
@@ -85,6 +105,7 @@ pub fn parse_session_update(value: &serde_json::Value) -> Option<ParsedSessionUp
         && parsed.stop_reason.is_none()
         && parsed.permission_request.is_none()
         && parsed.verdict.is_none()
+        && parsed.transcript_blocks.is_empty()
     {
         return None;
     }
@@ -121,6 +142,74 @@ fn content_text(value: &serde_json::Value) -> Option<String> {
         .get("text")
         .and_then(|v| v.as_str())
         .map(ToString::to_string)
+}
+
+fn extract_transcript_blocks(
+    params: &serde_json::Value,
+    update: Option<&serde_json::Value>,
+    output_text: Option<&str>,
+) -> Vec<TranscriptBlock> {
+    let source = update.unwrap_or(params);
+    let session_update = source
+        .get("sessionUpdate")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let content = source.get("content").or_else(|| params.get("content"));
+
+    if session_update.contains("reasoning") {
+        if let Some(text) = content.and_then(content_text) {
+            return vec![TranscriptBlock {
+                kind: TranscriptBlockKind::Reasoning,
+                payload: serde_json::json!({"text": text}),
+            }];
+        }
+    }
+
+    if session_update == "tool_call_update" {
+        let tool_call_id = source
+            .get("toolCallId")
+            .or_else(|| source.get("tool_call_id"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let name = content
+            .and_then(|value| value.get("name"))
+            .cloned()
+            .or_else(|| source.get("name").cloned())
+            .unwrap_or(serde_json::Value::Null);
+        let arguments = content
+            .and_then(|value| value.get("arguments"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        return vec![TranscriptBlock {
+            kind: TranscriptBlockKind::ToolCall,
+            payload: serde_json::json!({
+                "tool_call_id": tool_call_id,
+                "name": name,
+                "arguments": arguments,
+                "status": source.get("status").cloned().unwrap_or(serde_json::Value::Null),
+                "title": source.get("title").cloned().unwrap_or(serde_json::Value::Null)
+            }),
+        }];
+    }
+
+    if session_update.contains("tool_result") || session_update.contains("tool_output") {
+        return vec![TranscriptBlock {
+            kind: TranscriptBlockKind::ToolResult,
+            payload: serde_json::json!({
+                "tool_call_id": source.get("toolCallId").or_else(|| source.get("tool_call_id")).cloned(),
+                "content": content.cloned().unwrap_or(serde_json::Value::Null)
+            }),
+        }];
+    }
+
+    if let Some(text) = output_text {
+        return vec![TranscriptBlock {
+            kind: TranscriptBlockKind::AssistantMessage,
+            payload: serde_json::json!({"text": text}),
+        }];
+    }
+
+    vec![]
 }
 
 fn extract_usage(
@@ -214,6 +303,143 @@ mod tests {
 
         let parsed = parse_session_update(&line).unwrap();
         assert_eq!(parsed.output_text.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn parse_session_update_extracts_transcript_tool_call() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "call-1",
+                    "title": "Read file",
+                    "kind": "read",
+                    "status": "pending",
+                    "content": {
+                        "type": "tool_call",
+                        "name": "read_file",
+                        "arguments": {"path": "Cargo.toml"}
+                    }
+                }
+            }
+        });
+
+        let parsed = parse_session_update(&line).unwrap();
+        assert_eq!(parsed.transcript_blocks.len(), 1);
+        assert_eq!(
+            parsed.transcript_blocks[0].kind,
+            TranscriptBlockKind::ToolCall
+        );
+        assert_eq!(
+            parsed.transcript_blocks[0].payload["tool_call_id"],
+            "call-1"
+        );
+        assert_eq!(parsed.transcript_blocks[0].payload["name"], "read_file");
+    }
+
+    #[test]
+    fn parse_session_update_extracts_tool_result_block() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_result",
+                    "toolCallId": "call-1",
+                    "content": {"type": "text", "text": "Cargo.toml contents"}
+                }
+            }
+        });
+
+        let parsed = parse_session_update(&line).unwrap();
+        assert_eq!(parsed.output_text.as_deref(), Some("Cargo.toml contents"));
+        assert_eq!(parsed.transcript_blocks.len(), 1);
+        assert_eq!(
+            parsed.transcript_blocks[0].kind,
+            TranscriptBlockKind::ToolResult
+        );
+        assert_eq!(
+            parsed.transcript_blocks[0].payload["tool_call_id"],
+            "call-1"
+        );
+        assert_eq!(
+            parsed.transcript_blocks[0].payload["content"],
+            json!({"type": "text", "text": "Cargo.toml contents"})
+        );
+    }
+
+    #[test]
+    fn parse_session_update_extracts_reasoning_block() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "reasoning_chunk",
+                    "content": {"type": "reasoning", "text": "thinking"}
+                }
+            }
+        });
+
+        let parsed = parse_session_update(&line).unwrap();
+        assert_eq!(parsed.transcript_blocks.len(), 1);
+        assert_eq!(
+            parsed.transcript_blocks[0].kind,
+            TranscriptBlockKind::Reasoning
+        );
+        assert_eq!(parsed.transcript_blocks[0].payload["text"], "thinking");
+    }
+
+    #[test]
+    fn parse_session_update_preserves_output_text_for_reasoning_block() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "reasoning_chunk",
+                    "content": {"type": "reasoning", "text": "thinking"}
+                }
+            }
+        });
+
+        let parsed = parse_session_update(&line).unwrap();
+        assert_eq!(parsed.output_text.as_deref(), Some("thinking"));
+        assert_eq!(parsed.transcript_blocks.len(), 1);
+        assert_eq!(
+            parsed.transcript_blocks[0].kind,
+            TranscriptBlockKind::Reasoning
+        );
+        assert_eq!(parsed.transcript_blocks[0].payload["text"], "thinking");
+    }
+
+    #[test]
+    fn parse_session_update_keeps_assistant_text_as_transcript_block() {
+        let line = json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "hello"}
+                }
+            }
+        });
+
+        let parsed = parse_session_update(&line).unwrap();
+        assert_eq!(parsed.output_text.as_deref(), Some("hello"));
+        assert_eq!(
+            parsed.transcript_blocks[0].kind,
+            TranscriptBlockKind::AssistantMessage
+        );
+        assert_eq!(parsed.transcript_blocks[0].payload["text"], "hello");
     }
 
     #[test]
