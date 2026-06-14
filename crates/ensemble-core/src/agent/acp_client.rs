@@ -27,6 +27,7 @@ use super::events::{
     AgentEvent, AgentPermissionOption, AgentPermissionOptionKind, AgentPermissionOutcome,
     RuntimeStream, TokenUsage, WorkerEvent,
 };
+use super::protocol::{self, TranscriptBlock};
 use super::ResolvedCommand;
 
 /// Build an `AcpAgent` from a structured `ResolvedCommand`. The SDK's
@@ -374,14 +375,39 @@ struct ParsedSdkDispatch {
     output_text: Option<String>,
     usage: Option<TokenUsage>,
     verdict: Option<serde_json::Value>,
+    transcript_blocks: Vec<TranscriptBlock>,
 }
 
 fn parse_session_notification(notification: SessionNotification) -> ParsedSdkDispatch {
+    let update_value = serde_json::to_value(&notification.update).ok();
+    let transcript_blocks = update_value
+        .as_ref()
+        .and_then(|update| protocol::parse_session_update(&serde_json::json!({ "update": update })))
+        .map(|parsed| parsed.transcript_blocks)
+        .unwrap_or_default();
+
     match notification.update {
-        SessionUpdate::AgentMessageChunk(chunk) => ParsedSdkDispatch {
-            output_text: text_from_content(&chunk.content),
-            ..ParsedSdkDispatch::default()
-        },
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            let output_text = text_from_content(&chunk.content);
+            let transcript_blocks = if transcript_blocks.is_empty() {
+                output_text
+                    .as_ref()
+                    .map(|text| {
+                        vec![TranscriptBlock {
+                            kind: protocol::TranscriptBlockKind::AssistantMessage,
+                            payload: serde_json::json!({ "text": text }),
+                        }]
+                    })
+                    .unwrap_or_default()
+            } else {
+                transcript_blocks
+            };
+            ParsedSdkDispatch {
+                output_text,
+                transcript_blocks,
+                ..ParsedSdkDispatch::default()
+            }
+        }
         update => {
             let value = serde_json::to_value(update).ok();
             ParsedSdkDispatch {
@@ -392,6 +418,7 @@ fn parse_session_notification(notification: SessionNotification) -> ParsedSdkDis
                     .and_then(token_usage_from_value),
                 verdict: value.as_ref().and_then(runtime_verdict_from_value),
                 output_text: None,
+                transcript_blocks,
             }
         }
     }
@@ -847,6 +874,20 @@ pub async fn run_acp_session(
                                     .await
                                     .map_err(|e| e.to_string())?
                                 {
+                                    for block in parsed.transcript_blocks.clone() {
+                                        if visible {
+                                            emit_event(
+                                                event_tx,
+                                                issue_id,
+                                                step_name,
+                                                AgentEvent::TranscriptBlock {
+                                                    kind: block.kind,
+                                                    payload: block.payload,
+                                                },
+                                            )
+                                            .await;
+                                        }
+                                    }
                                     if let Some(usage) = parsed.usage {
                                         last_usage = Some(usage);
                                     }

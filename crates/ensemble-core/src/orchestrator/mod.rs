@@ -56,6 +56,8 @@ use crate::pipeline::verdict::StepResult;
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::{Issue, RetryEntry};
 use crate::tracker::IssueTracker;
+use crate::transcript::model::TranscriptRecordKind;
+use crate::transcript::persistence::{TranscriptPersistRequest, TranscriptPersistence};
 use crate::workspace::finalize::FinalizeMode;
 use crate::workspace::manager::WorkspaceManager;
 
@@ -115,6 +117,7 @@ pub struct Orchestrator {
     pipeline_journal: PipelineRunJournal,
     event_bus: EventBus,
     timeline_persistence: Option<TimelinePersistence>,
+    transcript_persistence: Option<TranscriptPersistence>,
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
@@ -208,7 +211,8 @@ impl Orchestrator {
             .ok(),
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             event_bus: parts.event_bus,
-            timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root)),
+            timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root.clone())),
+            transcript_persistence: Some(TranscriptPersistence::new(parts.workspace_root)),
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -327,6 +331,11 @@ impl Orchestrator {
             persistence.flush().await;
         }
         info!("timeline persistence flushed");
+        info!("orchestrator stopped, flushing transcript persistence");
+        if let Some(mut persistence) = self.transcript_persistence.take() {
+            persistence.flush().await;
+        }
+        info!("transcript persistence flushed");
 
         info!("orchestrator stopped");
     }
@@ -1135,7 +1144,22 @@ impl Orchestrator {
             .get(issue_id)
             .map(|entry| entry.identifier.clone())
             .unwrap_or_else(|| issue_id.to_string());
-        let (run_id, sequence, attempt_num) = Self::run_context_for_issue(&mut state, issue_id);
+        let (run_id, attempt_num) = Self::run_metadata_for_issue(&state, issue_id);
+        let transcript_request = match &event {
+            AgentEvent::TranscriptBlock { kind, payload } => {
+                run_id.as_ref().map(|run_id| TranscriptPersistRequest {
+                    run_id: run_id.clone(),
+                    issue_identifier: issue_identifier.clone(),
+                    step_name: step_name.to_string(),
+                    attempt: attempt_num,
+                    timestamp,
+                    kind: transcript_kind_from_agent_kind(*kind),
+                    payload: payload.clone(),
+                    truncated: None,
+                })
+            }
+            _ => None,
+        };
         let mut pipeline_event: Option<PipelineEvent> = None;
 
         // Handle special cases
@@ -1201,6 +1225,11 @@ impl Orchestrator {
             _ => {}
         }
 
+        let sequence = pipeline_event
+            .as_ref()
+            .and_then(|_| run_id.as_ref())
+            .map(|run_id| state.next_timeline_sequence(run_id));
+
         // Common path: update agent event
         state.update_agent_event(
             issue_id,
@@ -1209,6 +1238,12 @@ impl Orchestrator {
             timestamp,
         );
         drop(state);
+
+        if let Some(request) = transcript_request {
+            if let Some(ref persistence) = self.transcript_persistence {
+                persistence.send(request);
+            }
+        }
 
         if let Some(event) = pipeline_event {
             self.publish_pipeline_event(run_id, sequence, attempt_num, event)
@@ -4701,19 +4736,24 @@ impl Orchestrator {
         state: &mut OrchestratorState,
         issue_id: &str,
     ) -> (Option<String>, Option<u64>, u32) {
+        let (run_id, attempt) = Self::run_metadata_for_issue(state, issue_id);
+        let sequence = run_id
+            .as_ref()
+            .map(|run_id| state.next_timeline_sequence(run_id));
+        (run_id, sequence, attempt)
+    }
+
+    fn run_metadata_for_issue(state: &OrchestratorState, issue_id: &str) -> (Option<String>, u32) {
         let run_id = state
             .running
             .get(issue_id)
             .and_then(|entry| entry.run_id.clone());
-        let sequence = run_id
-            .as_ref()
-            .map(|run_id| state.next_timeline_sequence(run_id));
         let attempt = state
             .running
             .get(issue_id)
             .and_then(|entry| entry.retry_attempt)
             .unwrap_or(1);
-        (run_id, sequence, attempt)
+        (run_id, attempt)
     }
 }
 
@@ -4741,6 +4781,26 @@ where
                 kind: WorkerFailureKind::Runtime,
             }
         }
+    }
+}
+
+fn transcript_kind_from_agent_kind(
+    kind: crate::agent::protocol::TranscriptBlockKind,
+) -> TranscriptRecordKind {
+    match kind {
+        crate::agent::protocol::TranscriptBlockKind::AssistantMessage => {
+            TranscriptRecordKind::AssistantMessage
+        }
+        crate::agent::protocol::TranscriptBlockKind::Reasoning => TranscriptRecordKind::Reasoning,
+        crate::agent::protocol::TranscriptBlockKind::ToolCall => TranscriptRecordKind::ToolCall,
+        crate::agent::protocol::TranscriptBlockKind::ToolResult => TranscriptRecordKind::ToolResult,
+        crate::agent::protocol::TranscriptBlockKind::PermissionRequest => {
+            TranscriptRecordKind::PermissionRequest
+        }
+        crate::agent::protocol::TranscriptBlockKind::TurnComplete => {
+            TranscriptRecordKind::TurnComplete
+        }
+        crate::agent::protocol::TranscriptBlockKind::Raw => TranscriptRecordKind::Raw,
     }
 }
 
@@ -10541,6 +10601,138 @@ agent:
         assert_eq!(record.attempt, 3);
         assert_eq!(record.event_type, "output");
         assert_eq!(record.step_name.as_deref(), Some("build"));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_update_persists_transcript_block() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let mut orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("issue-1", "Todo"), None);
+            let entry = state.running.get_mut("issue-1").unwrap();
+            entry.identifier = "repo#1".to_string();
+            entry.run_id = Some("run-1".to_string());
+        }
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::TranscriptBlock {
+                    kind: crate::agent::protocol::TranscriptBlockKind::AssistantMessage,
+                    payload: serde_json::json!({"text": "hello"}),
+                },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        if let Some(ref mut persistence) = orchestrator.transcript_persistence {
+            persistence.flush().await;
+        }
+
+        let contents = tokio::fs::read_to_string(
+            dir.path()
+                .join(".ensemble/runs/run-1/steps/build/transcript.jsonl"),
+        )
+        .await
+        .unwrap();
+        assert!(contents.contains("\"assistant_message\""));
+        assert!(contents.contains("\"hello\""));
+    }
+
+    #[tokio::test]
+    async fn transcript_block_does_not_advance_timeline_sequence() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let mut orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("issue-1", "Todo"), None);
+            let entry = state.running.get_mut("issue-1").unwrap();
+            entry.identifier = "repo#1".to_string();
+            entry.run_id = Some("run-1".to_string());
+        }
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::TranscriptBlock {
+                    kind: crate::agent::protocol::TranscriptBlockKind::AssistantMessage,
+                    payload: serde_json::json!({"text": "hello"}),
+                },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        if let Some(ref mut persistence) = orchestrator.transcript_persistence {
+            persistence.flush().await;
+        }
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::OutputChunk {
+                    stream: crate::agent::events::RuntimeStream::Stdout,
+                    content: "visible output".to_string(),
+                },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        if let Some(ref mut persistence) = orchestrator.timeline_persistence {
+            persistence.flush().await;
+        }
+
+        let contents =
+            tokio::fs::read_to_string(dir.path().join(".ensemble/runs/run-1/events.jsonl"))
+                .await
+                .unwrap();
+        let record: crate::timeline::model::TimelineEventRecord =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(record.sequence, 1);
+        assert_eq!(record.event_type, "output");
     }
 
     #[tokio::test]
