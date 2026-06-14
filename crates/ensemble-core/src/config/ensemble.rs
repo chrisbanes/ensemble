@@ -398,6 +398,8 @@ pub struct StepConfig {
     pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<StepApprovalConfig>,
     #[serde(default, skip_serializing_if = "OnFailure::is_default")]
     pub on_failure: OnFailure,
@@ -1014,6 +1016,12 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 name: step.agent.clone(),
             });
         }
+        if step.timeout_ms == Some(0) {
+            return Err(PipelineError::InvalidStepConfig {
+                step: step.name.clone(),
+                reason: "timeout_ms must be greater than 0".to_string(),
+            });
+        }
         if step.on_failure == OnFailure::Fixup {
             let Some(fixup_agent) = step.fixup_agent.as_deref() else {
                 return Err(PipelineError::InvalidStepConfig {
@@ -1397,6 +1405,64 @@ on_failure: Failed
         let debug = format!("{:?}", config.tracker);
         assert!(!debug.contains("secret-notion-token"));
         assert!(debug.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_parse_step_timeout_ms() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build it
+steps:
+  - name: build
+    agent: builder
+    timeout_ms: 120000
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+
+        assert_eq!(config.steps[0].timeout_ms, Some(120_000));
+    }
+
+    #[test]
+    fn test_parse_step_timeout_ms_defaults_to_none() {
+        let config = parse_config(&minimal_yaml()).unwrap();
+
+        assert_eq!(config.steps[0].timeout_ms, None);
+    }
+
+    #[test]
+    fn test_step_timeout_ms_zero_is_invalid() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build it
+steps:
+  - name: build
+    agent: builder
+    timeout_ms: 0
+on_success: Done
+on_failure: Failed
+"#;
+
+        let config = parse_config(yaml).unwrap();
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(matches!(
+            error,
+            PipelineError::InvalidStepConfig { ref step, ref reason }
+                if step == "build" && reason == "timeout_ms must be greater than 0"
+        ));
     }
 
     #[test]

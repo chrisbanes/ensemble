@@ -927,6 +927,7 @@ mod tests {
             agent: "build".to_string(),
             depends: None,
             tracker_state: None,
+            timeout_ms: None,
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
