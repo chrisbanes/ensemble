@@ -1,5 +1,5 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -307,12 +307,14 @@ impl AcpxRuntime {
         &self,
         request: &AgentRunRequest<'_>,
         prompt_request: RuntimePromptRequest<'_>,
-        on_event: F,
+        mut on_event: F,
     ) -> Result<super::acpx_cli::PromptOutcome, AgentError>
     where
         F: FnMut(AgentEvent) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
+        let suppress_prompt_events = Arc::new(AtomicBool::new(false));
+        let suppress_events_for_prompt = Arc::clone(&suppress_prompt_events);
         let run_prompt = self.cli.run_prompt(
             AcpxPromptRequest {
                 agent: prompt_request.acpx_agent,
@@ -322,7 +324,18 @@ impl AcpxRuntime {
                 options: prompt_request.command_options,
                 visibility: prompt_request.visibility,
             },
-            on_event,
+            move |event| {
+                let fut = if suppress_events_for_prompt.load(Ordering::Relaxed) {
+                    None
+                } else {
+                    Some(on_event(event))
+                };
+                async move {
+                    if let Some(fut) = fut {
+                        fut.await;
+                    }
+                }
+            },
         );
         tokio::pin!(run_prompt);
 
@@ -360,6 +373,7 @@ impl AcpxRuntime {
                             .await;
                         }
 
+                        suppress_prompt_events.store(true, Ordering::Relaxed);
                         let _ = tokio::time::timeout(Duration::from_secs(5), run_prompt).await;
 
                         Err(AgentError::TurnTimeout {
@@ -505,6 +519,8 @@ mod tests {
     use crate::pipeline::engine::StepOutputTemplateContext;
     use crate::tracker::model::test_helpers::test_issue;
 
+    const TEST_TIMEOUT_MS: u64 = 5_000;
+
     fn test_config() -> Arc<crate::config::ensemble::EnsembleConfig> {
         Arc::new(
             parse_config(
@@ -570,7 +586,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -649,7 +665,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -717,7 +733,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -796,7 +812,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -891,7 +907,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -986,7 +1002,7 @@ on_failure: Failed
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1045,7 +1061,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1102,7 +1118,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1161,7 +1177,7 @@ exit 1
             step_name: "build/review",
             step_kind: StepKind::Agent,
             attempt: Some(2),
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1220,7 +1236,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1292,7 +1308,7 @@ exit 1
         );
 
         let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let issue = test_issue("issue-1", "Todo");
         let config = test_config();
         let request = AgentRunRequest {
@@ -1319,6 +1335,24 @@ exit 1
         let args = std::fs::read_to_string(args_path).unwrap();
         assert!(args.contains("cancel --session"));
         assert!(args.contains("sessions close"));
+
+        let mut run_failed_reasons = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate {
+                event: AgentEvent::RunFailed { reason, .. },
+                ..
+            } = event
+            {
+                run_failed_reasons.push(reason);
+            }
+        }
+        assert_eq!(
+            run_failed_reasons,
+            vec!["turn timeout after 100ms".to_string()]
+        );
+        assert!(!run_failed_reasons
+            .iter()
+            .any(|reason| reason == "stop reason: cancelled"));
     }
 
     #[test]
@@ -1396,7 +1430,7 @@ exit 1
             step_name: &long_step,
             step_kind: StepKind::Agent,
             attempt: Some(99),
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1468,7 +1502,7 @@ exit 1
             step_name: "$%^",
             step_kind: StepKind::Agent,
             attempt: None,
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1531,7 +1565,7 @@ exit 1
             step_name: &bad_chars,
             step_kind: StepKind::Agent,
             attempt: Some(1),
-            timeout_ms: 100,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
