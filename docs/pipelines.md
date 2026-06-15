@@ -205,6 +205,18 @@ POST /api/v1/{identifier}/retry?step=review
 
 Without `step`, the retry endpoint keeps its whole-issue behavior: it releases the retry claim so the next poll can pick the issue up fresh.
 
+## Step transcripts
+
+Each run step writes a drill-down transcript to:
+
+```text
+.ensemble/runs/{run_id}/steps/{step_name}/transcript.jsonl
+```
+
+Use the timeline to understand step state transitions. Use the step transcript when you need the
+agent conversation details: assistant output, exposed reasoning, tool activity, permission events,
+and turn completion records.
+
 ## Example: build + review pipeline
 
 A common pattern: one agent implements, another reviews.

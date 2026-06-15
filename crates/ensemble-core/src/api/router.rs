@@ -66,8 +66,8 @@ pub struct AppState {
 /// - `POST /api/v1/refresh` — trigger immediate poll+reconcile
 /// - `GET /api/v1/history` — query history records
 /// - `GET /api/v1/{identifier}` — issue-specific detail
-/// - `GET /api/v1/{identifier}/conversation` — paginated conversation
-/// - `GET /api/v1/{identifier}/conversation/{index}` — single conversation message
+/// - `GET /api/v1/{identifier}/runs/{run_id}/steps/{step_name}/conversation` — paginated step transcript records
+/// - `GET /api/v1/{identifier}/runs/{run_id}/steps/{step_name}/conversation/{sequence}` — single transcript record
 /// - `POST /api/v1/{identifier}/stop` — stop a running agent
 /// - `POST /api/v1/{identifier}/retry` — retry a failed issue
 /// - `GET /ws/events/{identifier}` — WebSocket live event stream
@@ -140,11 +140,11 @@ pub fn create_api_router(state: AppState) -> Router {
             post(config_edit_handler::save_guided_form),
         )
         .route(
-            "/{identifier}/conversation",
+            "/{identifier}/runs/{run_id}/steps/{step_name}/conversation",
             get(conversation::get_conversation),
         )
         .route(
-            "/{identifier}/conversation/{index}",
+            "/{identifier}/runs/{run_id}/steps/{step_name}/conversation/{sequence}",
             get(conversation::get_conversation_message),
         )
         .route(

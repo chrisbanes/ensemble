@@ -438,6 +438,66 @@ fn build_empty_app_state() -> (AppState, TempDir) {
     (app_state, temp_dir)
 }
 
+async fn test_app_with_workspace_root(workspace_root: &std::path::Path) -> String {
+    let (mut app_state, _temp_dir) = build_empty_app_state();
+    app_state.workspace_root = workspace_root.display().to_string();
+    start_test_server(app_state).await
+}
+
+#[tokio::test]
+async fn get_step_conversation_returns_transcript_records() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let base_url = test_app_with_workspace_root(temp.path()).await;
+    let transcript_dir = temp.path().join(".ensemble/runs/run-1/steps/build");
+    tokio::fs::create_dir_all(&transcript_dir).await.unwrap();
+    tokio::fs::write(
+        transcript_dir.join("transcript.jsonl"),
+        r#"{"schema_version":1,"run_id":"run-1","issue_identifier":"repo#1","step_name":"build","attempt":1,"sequence":1,"timestamp":"2026-06-14T00:00:00Z","kind":"assistant_message","payload":{"text":"hello"}}"#,
+    )
+    .await
+    .unwrap();
+
+    let response = reqwest::get(format!(
+        "{base_url}/api/v1/repo%231/runs/run-1/steps/build/conversation"
+    ))
+    .await
+    .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["records"][0]["kind"], "assistant_message");
+    assert_eq!(body["records"][0]["payload"]["text"], "hello");
+}
+
+#[tokio::test]
+async fn old_issue_conversation_route_is_removed() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let base_url = test_app_with_workspace_root(temp.path()).await;
+
+    let response = reqwest::get(format!("{base_url}/api/v1/repo%231/conversation"))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_step_conversation_record_returns_not_found_for_missing_sequence() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let base_url = test_app_with_workspace_root(temp.path()).await;
+
+    let response = reqwest::get(format!(
+        "{base_url}/api/v1/repo%231/runs/run-1/steps/build/conversation/99"
+    ))
+    .await
+    .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "transcript_record_not_found");
+}
+
 #[tokio::test]
 async fn test_api_unknown_route_returns_json_404() {
     let (app_state, _temp_dir) = build_empty_app_state();

@@ -1,45 +1,62 @@
 import { useState } from "react";
-import { useConversationQuery } from "@/hooks";
-import type { ConversationMessage } from "@/generated/models";
+import { useStepConversationQuery } from "@/hooks";
+import type { TranscriptRecord } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface ConversationViewerProps {
   identifier: string;
+  runId: string;
+  stepName: string;
   scrollToIndex?: number;
 }
 
-function MessageBubble({ msg, highlight }: { msg: ConversationMessage; highlight?: boolean }) {
+function recordText(record: TranscriptRecord): string {
+  if (typeof record.payload === "object" && record.payload != null && "text" in record.payload) {
+    return String((record.payload as { text?: unknown }).text ?? "");
+  }
+  return JSON.stringify(record.payload);
+}
+
+function MessageBubble({ record, highlight }: { record: TranscriptRecord; highlight?: boolean }) {
   return (
     <div
-      id={`msg-${msg.index}`}
+      id={`msg-${record.sequence}`}
       className={cn(
         "rounded-lg p-3 border bg-card",
         highlight && "ring-2 ring-primary",
       )}
     >
       <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
-        <span className="font-medium capitalize">{msg.role}</span>
-        <span>#{msg.index}</span>
+        <span className="font-medium capitalize">{record.kind.replace(/_/g, " ")}</span>
+        <span>#{record.sequence}</span>
       </div>
-      <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-      {msg.tool_calls != null && (
+      <p className="text-sm whitespace-pre-wrap">{recordText(record)}</p>
+      {record.payload != null && record.kind !== "assistant_message" ? (
         <details className="mt-2">
           <summary className="text-xs text-muted-foreground cursor-pointer hover:underline">
-            Tool calls
+            Payload
           </summary>
           <pre className="mt-1 text-xs bg-muted rounded p-2 overflow-x-auto whitespace-pre-wrap">
-            {JSON.stringify(msg.tool_calls, null, 2)}
+            {JSON.stringify(record.payload, null, 2)}
           </pre>
         </details>
-      )}
+      ) : null}
     </div>
   );
 }
 
-export default function ConversationViewer({ identifier, scrollToIndex }: ConversationViewerProps) {
+export default function ConversationViewer({
+  identifier,
+  runId,
+  stepName,
+  scrollToIndex,
+}: ConversationViewerProps) {
   const [cursor, setCursor] = useState<string | undefined>();
-  const { data, isLoading, isError } = useConversationQuery(identifier, cursor);
+  const { data, isLoading, isError } = useStepConversationQuery(identifier, runId, stepName, {
+    cursor: cursor ? Number(cursor) : undefined,
+    limit: 50,
+  });
 
   if (isLoading) {
     return <div className="text-center py-8 text-muted-foreground">Loading conversation...</div>;
@@ -49,17 +66,17 @@ export default function ConversationViewer({ identifier, scrollToIndex }: Conver
     return <div className="text-center py-8 text-destructive">Failed to load conversation.</div>;
   }
 
-  if (!data || data.messages.length === 0) {
+  if (!data || data.records.length === 0) {
     return <div className="text-center py-8 text-muted-foreground">No conversation data.</div>;
   }
 
   return (
     <div className="space-y-3">
-      {data.messages.map((msg) => (
+      {data.records.map((record) => (
         <MessageBubble
-          key={msg.index}
-          msg={msg}
-          highlight={scrollToIndex === msg.index}
+          key={record.sequence}
+          record={record}
+          highlight={scrollToIndex === record.sequence}
         />
       ))}
 

@@ -274,6 +274,15 @@ impl AcpxCli {
             };
 
             if let Some(update) = update {
+                for block in update.transcript_blocks.clone() {
+                    if visible {
+                        on_event(AgentEvent::TranscriptBlock {
+                            kind: block.kind,
+                            payload: block.payload,
+                        })
+                        .await;
+                    }
+                }
                 if let Some(usage) = update.usage {
                     last_usage = Some(usage);
                 }
@@ -678,8 +687,12 @@ JSON
             .unwrap();
         let events = events.lock().unwrap();
 
-        assert!(matches!(events[0], AgentEvent::OutputChunk { .. }));
-        assert!(matches!(events[1], AgentEvent::RunCompleted { .. }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::OutputChunk { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RunCompleted { .. })));
     }
 
     #[tokio::test]
@@ -711,8 +724,50 @@ JSON
             .unwrap();
         let events = events.lock().unwrap();
 
-        assert!(matches!(events[0], AgentEvent::OutputChunk { .. }));
-        assert!(matches!(events[1], AgentEvent::RunCompleted { .. }));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::OutputChunk { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, AgentEvent::RunCompleted { .. })));
+    }
+
+    #[tokio::test]
+    async fn prompt_emits_transcript_blocks_for_visible_updates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let script = write_mock_acpx_script(
+            dir.path(),
+            r#"#!/usr/bin/env bash
+cat <<'JSON'
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"turn_complete","stopReason":"end_turn"}}}
+JSON
+"#,
+        );
+
+        let client = AcpxCli::new(script);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        client
+            .run_prompt(
+                prompt_request(dir.path(), "hi", PromptVisibility::Visible),
+                |event| {
+                    let events = Arc::clone(&events);
+                    async move {
+                        events.lock().unwrap().push(event);
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        let events = events.lock().unwrap();
+
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AgentEvent::TranscriptBlock {
+                kind: crate::agent::protocol::TranscriptBlockKind::AssistantMessage,
+                ..
+            }
+        )));
     }
 
     #[tokio::test]

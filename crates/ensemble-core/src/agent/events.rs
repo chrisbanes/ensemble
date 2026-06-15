@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::protocol::TranscriptBlockKind;
 use crate::interaction::InteractionKind;
 use crate::pipeline::verdict::StepOutput;
 
@@ -133,6 +134,10 @@ pub enum AgentEvent {
         selected_option_kind: Option<AgentPermissionOptionKind>,
         allowed: bool,
     },
+    TranscriptBlock {
+        kind: TranscriptBlockKind,
+        payload: serde_json::Value,
+    },
     Notification {
         message: String,
     },
@@ -161,6 +166,7 @@ impl AgentEvent {
             AgentEvent::TurnFailed { .. } => "turn_failed",
             AgentEvent::PermissionRequested { .. } => "permission_requested",
             AgentEvent::PermissionResolved { .. } => "permission_resolved",
+            AgentEvent::TranscriptBlock { .. } => "transcript_block",
             AgentEvent::Notification { .. } => "notification",
             AgentEvent::OtherMessage { .. } => "other_message",
             AgentEvent::Malformed { .. } => "malformed",
@@ -187,6 +193,10 @@ impl AgentEvent {
                 Some(option_id) => format!("permission {outcome:?}: {option_id}"),
                 None => format!("permission {outcome:?}"),
             })),
+            AgentEvent::TranscriptBlock { payload, .. } => payload
+                .get("text")
+                .and_then(|value| value.as_str())
+                .map(truncate_for_state),
             AgentEvent::Notification { message } => Some(truncate_for_state(message)),
             AgentEvent::OtherMessage { raw } => Some(truncate_for_state(raw)),
             AgentEvent::Malformed { line } => Some(truncate_for_state(line)),
@@ -354,6 +364,17 @@ mod tests {
         assert!(StopReason::MaxTurnRequests.is_failure());
         assert!(!StopReason::MaxTokens.is_success());
         assert!(!StopReason::MaxTokens.is_failure());
+    }
+
+    #[test]
+    fn transcript_block_event_has_stable_name() {
+        let event = AgentEvent::TranscriptBlock {
+            kind: crate::agent::protocol::TranscriptBlockKind::AssistantMessage,
+            payload: serde_json::json!({"text": "hello"}),
+        };
+
+        assert_eq!(event.event_name(), "transcript_block");
+        assert_eq!(event.message_for_state().as_deref(), Some("hello"));
     }
 
     #[test]

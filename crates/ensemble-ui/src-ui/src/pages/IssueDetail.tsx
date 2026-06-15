@@ -3,11 +3,11 @@ import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import {
   useCancelInteractionMutation,
-  useConversationQuery,
   useInteractionDetailQuery,
   useIssueDetailQuery,
   useIssueInputMutation,
   useRetryMutation,
+  useStepConversationQuery,
   useStopMutation,
   useTimelineQuery,
 } from "@/hooks";
@@ -57,7 +57,6 @@ export default function IssueDetail() {
     data?.current_interaction?.interaction_request_id ??
     "";
   const { data: interaction } = useInteractionDetailQuery(interactionId);
-  const conversationQuery = useConversationQuery(identifier);
   const stopMutation = useStopMutation();
   const retryMutation = useRetryMutation();
   const inputMutation = useIssueInputMutation(identifier, interactionId);
@@ -68,9 +67,11 @@ export default function IssueDetail() {
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
   const [lastKnownRunId, setLastKnownRunId] = useState("");
+  const [lastKnownStepName, setLastKnownStepName] = useState("");
 
   const isLiveRun = data?.running != null;
   const currentRunId = (data?.running as { run_id?: string } | undefined)?.run_id;
+  const currentStepName = data?.running?.step_name ?? null;
 
   useEffect(() => {
     if (currentRunId) {
@@ -80,8 +81,20 @@ export default function IssueDetail() {
     }
   }, [currentRunId]);
 
+  useEffect(() => {
+    if (currentStepName) {
+      setLastKnownStepName((previousStepName) =>
+        previousStepName === currentStepName ? previousStepName : currentStepName,
+      );
+    }
+  }, [currentStepName]);
+
   const effectiveRunId = currentRunId ?? lastKnownRunId;
-  const transcriptSessionKey = `${identifier}:${effectiveRunId || "no-run"}`;
+  const activeStepName = currentStepName ?? lastKnownStepName;
+  const transcriptQuery = useStepConversationQuery(identifier, effectiveRunId, activeStepName ?? "", {
+    limit: 200,
+  });
+  const transcriptSessionKey = `${identifier}:${effectiveRunId || "no-run"}:${activeStepName ?? "no-step"}`;
   const activeEntrySessionKeyRef = useRef(transcriptSessionKey);
   const timelineQuery = useTimelineQuery(identifier, effectiveRunId);
   const persistedEvents = useMemo(
@@ -166,7 +179,8 @@ export default function IssueDetail() {
         : undefined;
 
     const nextEntries = reconcileGroupedTranscriptEntries(previousEntries, {
-      conversation: conversationQuery.data?.messages ?? [],
+      conversation: [],
+      transcriptRecords: transcriptQuery.data?.records ?? [],
       interactions: interaction ? [interaction] : [],
       events,
     });
@@ -175,7 +189,12 @@ export default function IssueDetail() {
     transcriptEntriesSessionKeyRef.current = transcriptSessionKey;
 
     return nextEntries;
-  }, [conversationQuery.data?.messages, interaction, events, transcriptSessionKey]);
+  }, [transcriptQuery.data?.records, interaction, events, transcriptSessionKey]);
+
+  const transcriptEntryIdForConversationIndex = (index: number) =>
+    activeStepName
+      ? `transcript:${effectiveRunId}:${activeStepName}:${index}`
+      : `message:${index}`;
 
   useEffect(() => {
     activeEntrySessionKeyRef.current = transcriptSessionKey;
@@ -252,7 +271,7 @@ export default function IssueDetail() {
         live={isLiveRun}
         onViewConversation={(index) => {
         activeEntrySessionKeyRef.current = transcriptSessionKey;
-        setActiveEntryId(`message:${index}`);
+        setActiveEntryId(transcriptEntryIdForConversationIndex(index));
       }}
       />
     </div>
@@ -262,7 +281,7 @@ export default function IssueDetail() {
       live={isLiveRun}
       onViewConversation={(index) => {
         activeEntrySessionKeyRef.current = transcriptSessionKey;
-        setActiveEntryId(`message:${index}`);
+        setActiveEntryId(transcriptEntryIdForConversationIndex(index));
       }}
     />
   );

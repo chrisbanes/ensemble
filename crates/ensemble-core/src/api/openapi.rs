@@ -125,8 +125,10 @@ use utoipa::OpenApi;
         crate::timeline::model::TimelineEventRecord,
         crate::timeline::TimelineResponse,
         // Conversation types
-        crate::api::conversation::ConversationResponse,
-        crate::api::conversation::ConversationMessage,
+        crate::transcript::reader::TranscriptResponse,
+        crate::transcript::model::TranscriptRecord,
+        crate::transcript::model::TranscriptRecordKind,
+        crate::transcript::model::TranscriptTruncation,
         // Filesystem types
         crate::api::fs_handler::ListResponse,
         crate::api::fs_handler::FsEntry,

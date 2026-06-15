@@ -85,6 +85,106 @@ describe("buildTranscriptEntries", () => {
     });
   });
 
+  it("maps transcript records into agent and tool activity entries", () => {
+    const entries = buildTranscriptEntries({
+      conversation: [],
+      transcriptRecords: [
+        {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "repo#1",
+          step_name: "build",
+          attempt: 1,
+          sequence: 1,
+          timestamp: "2026-06-14T00:00:00Z",
+          kind: "assistant_message",
+          payload: { text: "hello" },
+        },
+        {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "repo#1",
+          step_name: "build",
+          attempt: 1,
+          sequence: 2,
+          timestamp: "2026-06-14T00:00:01Z",
+          kind: "tool_call",
+          payload: { name: "read_file", arguments: { path: "Cargo.toml" } },
+        },
+      ],
+      interactions: [],
+      events: [],
+    });
+
+    expect(entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "agent_message" }),
+        expect.objectContaining({ kind: "tool_activity" }),
+      ]),
+    );
+  });
+
+  it("maps non-message transcript records into visible entries", () => {
+    const entries = buildTranscriptEntries({
+      conversation: [],
+      transcriptRecords: [
+        {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "repo#1",
+          step_name: "build",
+          attempt: 1,
+          sequence: 1,
+          timestamp: "2026-06-14T00:00:00Z",
+          kind: "error",
+          payload: { text: "tool failed" },
+        },
+        {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "repo#1",
+          step_name: "build",
+          attempt: 1,
+          sequence: 2,
+          timestamp: "2026-06-14T00:00:01Z",
+          kind: "permission_request",
+          payload: { text: "May I write files?" },
+        },
+        {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "repo#1",
+          step_name: "build",
+          attempt: 1,
+          sequence: 3,
+          timestamp: "2026-06-14T00:00:02Z",
+          kind: "turn_complete",
+          payload: { text: "turn finished" },
+        },
+      ],
+      interactions: [],
+      events: [],
+    });
+
+    expect(entries).toEqual([
+      expect.objectContaining({ kind: "error", message: "tool failed" }),
+      expect.objectContaining({
+        kind: "tool_activity",
+        event: expect.objectContaining({
+          type: "permission_request",
+          detail: "May I write files?",
+        }),
+      }),
+      expect.objectContaining({
+        kind: "workflow_event",
+        event: expect.objectContaining({
+          type: "turn_complete",
+          detail: "turn finished",
+        }),
+      }),
+    ]);
+  });
+
   it("classifies workflow and error events distinctly", () => {
     const source: TranscriptSource = {
       conversation: [],

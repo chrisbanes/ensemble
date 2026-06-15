@@ -68,10 +68,20 @@ const hooksMock = vi.hoisted(() => {
       },
     })),
     useTimelineQuery: vi.fn(() => ({ data: { events: [] }, isError: false })),
-    useConversationQuery: vi.fn(() => ({
+    useStepConversationQuery: vi.fn(() => ({
       data: {
-        messages: [
-          { index: 1, role: "assistant", content: "I am ready", tool_calls: null },
+        records: [
+          {
+            schema_version: 1,
+            run_id: "run-1",
+            issue_identifier: "todo-1",
+            step_name: "deploy",
+            attempt: 1,
+            sequence: 1,
+            timestamp: "2026-04-14T10:00:01Z",
+            kind: "assistant_message",
+            payload: { text: "I am ready" },
+          },
         ],
       },
       isLoading: false,
@@ -255,13 +265,18 @@ describe("IssueDetail", () => {
     const user = userEvent.setup();
     const connectWsMock = vi.mocked(connectWs);
 
-    hooksMock.useConversationQuery.mockImplementation(() => ({
+    hooksMock.useStepConversationQuery.mockImplementation(() => ({
       data: {
-        messages: Array.from({ length: 55 }, (_, index) => ({
-          index: index + 1,
-          role: "user",
-          content: `history message ${index + 1}`,
-          tool_calls: null,
+        records: Array.from({ length: 55 }, (_, index) => ({
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "todo-1",
+          step_name: "deploy",
+          attempt: 1,
+          sequence: index + 1,
+          timestamp: `2026-04-14T10:${String(index).padStart(2, "0")}:00Z`,
+          kind: "assistant_message",
+          payload: { text: `history message ${index + 1}` },
         })),
       },
       isLoading: false,
@@ -336,13 +351,18 @@ describe("IssueDetail", () => {
       error: null,
     }));
 
-    hooksMock.useConversationQuery.mockImplementation(() => ({
+    hooksMock.useStepConversationQuery.mockImplementation(() => ({
       data: {
-        messages: Array.from({ length: 55 }, (_, index) => ({
-          index: index + 1,
-          role: "user",
-          content: `${currentPrefix} message ${index + 1}`,
-          tool_calls: null,
+        records: Array.from({ length: 55 }, (_, index) => ({
+          schema_version: 1,
+          run_id: currentRunId,
+          issue_identifier: "todo-1",
+          step_name: "deploy",
+          attempt: 1,
+          sequence: index + 1,
+          timestamp: `2026-04-14T10:${String(index).padStart(2, "0")}:00Z`,
+          kind: "assistant_message",
+          payload: { text: `${currentPrefix} message ${index + 1}` },
         })),
       },
       isLoading: false,
@@ -401,5 +421,195 @@ describe("IssueDetail", () => {
     expect(screen.getByRole("button", { name: "Load older activity" })).toBeInTheDocument();
     expect(screen.queryByText("session two message 5")).not.toBeInTheDocument();
     expect(screen.getByText("session two message 55")).toBeInTheDocument();
+  });
+
+  it("resets transcript history after rerendering with a different step in the same run", async () => {
+    const user = userEvent.setup();
+    let currentStepName = "build";
+
+    hooksMock.useIssueDetailQuery.mockImplementation(() => ({
+      data: {
+        issue_identifier: "todo-1",
+        status: "running",
+        running: {
+          step_name: currentStepName,
+          turn_count: 2,
+          tokens: { total_tokens: 100 },
+          run_id: "run-1",
+        },
+        attempts: { restart_count: 0 },
+        retry: null,
+        last_error: null,
+        issue: { title: "Deploy feature", labels: [] },
+        workspace: { path: "/tmp/workspace" },
+        workflow_steps: [
+          {
+            name: currentStepName,
+            agent: "builder",
+            dependencies: [],
+            state: "running",
+            can_navigate: true,
+          },
+        ],
+        pending_input: { ask_id: "ask-1" },
+        current_interaction: { interaction_request_id: "ask-1" },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    }));
+
+    hooksMock.useStepConversationQuery.mockImplementation(() => ({
+      data: {
+        records: Array.from({ length: 55 }, (_, index) => ({
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "todo-1",
+          step_name: currentStepName,
+          attempt: 1,
+          sequence: index + 1,
+          timestamp: `2026-04-14T10:${String(index).padStart(2, "0")}:00Z`,
+          kind: "assistant_message",
+          payload: { text: `${currentStepName} message ${index + 1}` },
+        })),
+      },
+      isLoading: false,
+      isError: false,
+    }));
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/issue/todo-1"]}>{children}</MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    const view = render(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { wrapper },
+    );
+
+    expect(screen.queryByText("build message 1")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Load older activity" }));
+    expect(screen.getByText("build message 1")).toBeInTheDocument();
+
+    currentStepName = "review";
+
+    view.rerender(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+    );
+
+    expect(screen.getByRole("button", { name: "Load older activity" })).toBeInTheDocument();
+    expect(screen.queryByText("review message 1")).not.toBeInTheDocument();
+    expect(screen.getByText("review message 55")).toBeInTheDocument();
+  });
+
+  it("keeps querying the last running step after the run completes", () => {
+    let isRunning = true;
+
+    hooksMock.useIssueDetailQuery.mockImplementation(() => ({
+      data: {
+        issue_identifier: "todo-1",
+        status: isRunning ? "running" : "completed",
+        running: isRunning
+          ? {
+              step_name: "build",
+              turn_count: 2,
+              tokens: { total_tokens: 100 },
+              run_id: "run-1",
+            }
+          : null,
+        attempts: { restart_count: 0 },
+        retry: null,
+        last_error: null,
+        issue: { title: "Deploy feature", labels: [] },
+        workspace: { path: "/tmp/workspace" },
+        workflow_steps: [
+          {
+            name: "build",
+            agent: "builder",
+            dependencies: [],
+            state: isRunning ? "running" : "completed",
+            can_navigate: true,
+          },
+        ],
+        pending_input: { ask_id: "ask-1" },
+        current_interaction: { interaction_request_id: "ask-1" },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+    }) as ReturnType<typeof hooksMock.useIssueDetailQuery>);
+
+    hooksMock.useStepConversationQuery.mockImplementation(((
+      _identifier: string,
+      _runId: string,
+      stepName: string,
+    ) => ({
+      data: {
+        records:
+          stepName === "build"
+            ? [
+                {
+                  schema_version: 1,
+                  run_id: "run-1",
+                  issue_identifier: "todo-1",
+                  step_name: "build",
+                  attempt: 1,
+                  sequence: 1,
+                  timestamp: "2026-04-14T10:00:01Z",
+                  kind: "assistant_message",
+                  payload: { text: isRunning ? "running build record" : "completed build record" },
+                },
+              ]
+            : [],
+      },
+      isLoading: false,
+      isError: false,
+    })) as () => ReturnType<typeof hooksMock.useStepConversationQuery>);
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/issue/todo-1"]}>{children}</MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    const view = render(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { wrapper },
+    );
+
+    expect(screen.getByText("running build record")).toBeInTheDocument();
+
+    isRunning = false;
+
+    view.rerender(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+    );
+
+    expect(hooksMock.useStepConversationQuery).toHaveBeenLastCalledWith(
+      "todo-1",
+      "run-1",
+      "build",
+      { limit: 200 },
+    );
+    expect(screen.getByText("completed build record")).toBeInTheDocument();
   });
 });

@@ -11,6 +11,7 @@ pub mod orchestrator;
 pub mod pipeline;
 pub mod timeline;
 pub mod tracker;
+pub mod transcript;
 pub mod ui;
 pub mod workspace;
 
