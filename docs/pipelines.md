@@ -217,6 +217,10 @@ Use the timeline to understand step state transitions. Use the step transcript w
 agent conversation details: assistant output, exposed reasoning, tool activity, permission events,
 and turn completion records.
 
+While a step is running, newly persisted transcript records are streamed over the issue WebSocket as
+`transcript_record` messages. The live stream is best-effort; the step conversation API remains the
+source of truth for reconnect replay and historical inspection.
+
 ## Example: build + review pipeline
 
 A common pattern: one agent implements, another reviews.

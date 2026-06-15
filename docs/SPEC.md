@@ -1450,6 +1450,17 @@ Large tool results are truncated with head and tail retention. Adjacent assistan
 deltas may be coalesced before persistence. Transcript persistence failures are logged and do not
 fail the agent step.
 
+The issue WebSocket at `/ws/events/{identifier}` emits three message kinds:
+
+- `snapshot`: current issue detail snapshot sent when the socket connects.
+- `event`: coarse pipeline event used by the run timeline.
+- `transcript_record`: a persisted per-step transcript record, emitted after the same record has
+  been appended to `.ensemble/runs/{run_id}/steps/{step_name}/transcript.jsonl`.
+
+Clients should treat transcript files and the step conversation API as the replay source. On
+reconnect, clients should refetch the active step conversation and then merge subsequent
+`transcript_record` messages by `(run_id, step_name, sequence)`.
+
 ### 10.5 Emitted Runtime Events (Upstream to Orchestrator)
 
 The active runtime emits structured events to the orchestrator callback. Each event should
