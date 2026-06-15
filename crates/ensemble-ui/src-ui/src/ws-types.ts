@@ -1,10 +1,8 @@
 export type {
   WsEventData,
   WsEventMessage,
+  WsMessage,
   WsPipelineEvent,
   WsSnapshotMessage,
+  WsTranscriptRecordMessage,
 } from "./ws-events";
-
-import type { WsEventMessage, WsSnapshotMessage } from "./ws-events";
-
-export type WsMessage = WsSnapshotMessage | WsEventMessage;

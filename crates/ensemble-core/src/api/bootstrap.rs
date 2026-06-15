@@ -9,6 +9,7 @@ use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
 use crate::orchestrator::{Orchestrator, OrchestratorRuntimeParts};
 use crate::tracker::{create_tracker, IssueTracker};
+use crate::transcript::events::TranscriptEventBus;
 use crate::workspace::manager::WorkspaceManager;
 use std::path::Path;
 use std::path::PathBuf;
@@ -129,6 +130,7 @@ pub fn build_app_state(
             None
         }
     };
+    let transcript_event_bus = TranscriptEventBus::new();
 
     let app_state = AppState {
         orchestrator_state: orchestrator_state_from_document(&document_state),
@@ -139,6 +141,7 @@ pub fn build_app_state(
         history_db_path,
         history_store,
         event_bus,
+        transcript_event_bus,
         config_runtime: ConfigRuntime {
             config_path,
             document_state: Arc::new(RwLock::new(document_state)),
@@ -211,6 +214,7 @@ async fn prepare_orchestrator_runtime(
             refresh_requested: Arc::clone(&app_state.refresh_requested),
             cancellation_registry: Arc::clone(&app_state.cancellation_registry),
             event_bus: app_state.event_bus.clone(),
+            transcript_event_bus: app_state.transcript_event_bus.clone(),
             workspace_root: PathBuf::from(&app_state.workspace_root),
         },
         &config_dir,

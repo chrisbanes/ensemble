@@ -1,4 +1,4 @@
-import type { IssueDetailSnapshot } from "./generated/models";
+import type { IssueDetailSnapshot, TranscriptRecord } from "./generated/models";
 import type { TimelineEventRecord } from "./hooks";
 
 export interface WsPipelineEvent {
@@ -23,6 +23,13 @@ export interface WsEventMessage {
   type: "event";
   data: WsPipelineEvent;
 }
+
+export interface WsTranscriptRecordMessage {
+  type: "transcript_record";
+  data: TranscriptRecord;
+}
+
+export type WsMessage = WsSnapshotMessage | WsEventMessage | WsTranscriptRecordMessage;
 
 export interface WsEventData {
   type: string;
@@ -84,4 +91,8 @@ export function timelineRecordToEventData(event: TimelineEventRecord): WsEventDa
 
 export function isCompletionEvent(event: WsPipelineEvent): boolean {
   return event.event_type === "complete";
+}
+
+export function transcriptRecordKey(record: TranscriptRecord): string {
+  return `${record.run_id}:${record.step_name}:${record.sequence}`;
 }
