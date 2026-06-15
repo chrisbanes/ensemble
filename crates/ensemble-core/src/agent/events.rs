@@ -234,7 +234,14 @@ pub enum WorkerResult {
     },
     Failed {
         error: String,
+        kind: WorkerFailureKind,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerFailureKind {
+    Timeout,
+    Runtime,
 }
 
 impl WorkerResult {
@@ -373,7 +380,8 @@ mod tests {
         }
         .is_success());
         assert!(!WorkerResult::Failed {
-            error: "boom".to_string()
+            error: "boom".to_string(),
+            kind: WorkerFailureKind::Runtime,
         }
         .is_success());
     }

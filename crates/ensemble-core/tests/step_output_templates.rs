@@ -34,6 +34,7 @@ fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
             Some(depends.iter().map(|s| s.to_string()).collect())
         },
         tracker_state: None,
+        timeout_ms: None,
         approval: None,
         on_failure: OnFailure::RetryIssue,
         fixup_agent: None,

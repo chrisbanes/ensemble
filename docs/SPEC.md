@@ -235,6 +235,10 @@ Pipeline step definition:
   implicitly depends on the step directly before it in the list. The first step has no implicit
   dependency. Explicit `depends` overrides the implicit rule.
 - `tracker_state` (string, optional) — tracker state to write on step entry.
+- `timeout_ms` (integer, optional)
+  - Maximum time in milliseconds for each runtime prompt or turn associated with this step.
+  - Defaults to `agent.turn_timeout_ms` when omitted.
+  - Must be greater than `0` when present.
 - `approval` (StepApprovalConfig, optional) — post-step approval gate:
 
   - `mode` (string) — `always` or `when_requested_by_agent`. The latter waits for the agent to
@@ -1567,6 +1571,8 @@ Timeouts:
 - `agent.read_timeout_ms`: request/response timeout during startup and sync requests
 - `agent.turn_timeout_ms`: total turn stream timeout
 - `agent.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `steps[].timeout_ms`: optional per-step override for `agent.turn_timeout_ms`; enforced per
+  runtime prompt or turn, including hidden extraction and repair turns for that step.
 
 Error mapping (recommended normalized categories):
 

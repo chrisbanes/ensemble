@@ -51,6 +51,8 @@ pub struct DispatchRequest {
     pub step_kind: StepKind,
     /// Optional tracker state to set while the step is running.
     pub tracker_state: Option<String>,
+    /// Optional per-step turn timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
 }
 
 /// The action the orchestrator should take after a state transition.
@@ -441,6 +443,7 @@ impl PipelineRun {
                         agent: fixup_agent.to_string(),
                         kind: StepKind::Agent,
                         tracker_state: None,
+                        timeout_ms: None,
                         approval: None,
                         on_failure: OnFailure::Halt,
                         fixup_agent: None,
@@ -594,6 +597,7 @@ impl PipelineRun {
                 agent_name: s.agent.clone(),
                 step_kind: s.kind,
                 tracker_state: s.tracker_state.clone(),
+                timeout_ms: s.timeout_ms,
             })
             .collect();
 
@@ -741,6 +745,7 @@ mod tests {
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
+            timeout_ms: None,
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
@@ -754,6 +759,7 @@ mod tests {
             agent: agent.to_string(),
             depends,
             tracker_state: None,
+            timeout_ms: None,
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
@@ -794,6 +800,22 @@ mod tests {
             restored.step("review").unwrap().depends,
             vec!["fixup-review".to_string()]
         );
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_defaults_missing_dag_step_timeout() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+
+        let mut value = serde_json::to_value(run.to_snapshot()).unwrap();
+        let dag_steps = value["dag_steps"].as_array_mut().unwrap();
+        dag_steps[0].as_object_mut().unwrap().remove("timeout_ms");
+
+        let decoded: PipelineRunSnapshot = serde_json::from_value(value).unwrap();
+        let restored = PipelineRun::from_snapshot(decoded).unwrap();
+
+        assert_eq!(restored.step("build").unwrap().timeout_ms, None);
     }
 
     #[test]
@@ -898,6 +920,28 @@ mod tests {
         assert!(err.to_string().contains("cycle"));
     }
 
+    #[test]
+    fn dispatch_request_carries_step_timeout_ms() {
+        let steps = vec![StepConfig {
+            name: "build".to_string(),
+            kind: StepKind::Agent,
+            agent: "builder".to_string(),
+            depends: Some(vec![]),
+            tracker_state: None,
+            timeout_ms: Some(90_000),
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+        }];
+        let run = make_run(&steps);
+
+        let PipelineAction::Dispatch(requests) = run.start() else {
+            panic!("expected dispatch action");
+        };
+
+        assert_eq!(requests[0].timeout_ms, Some(90_000));
+    }
+
     fn make_step_with_state(
         name: &str,
         agent: &str,
@@ -915,6 +959,7 @@ mod tests {
             agent: agent.to_string(),
             depends: deps,
             tracker_state: Some(tracker_state.to_string()),
+            timeout_ms: None,
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
@@ -939,6 +984,7 @@ mod tests {
             agent: agent.to_string(),
             depends: deps,
             tracker_state: None,
+            timeout_ms: None,
             approval: Some(StepApprovalConfig {
                 mode,
                 state: state.map(|value| value.to_string()),
@@ -1685,6 +1731,7 @@ mod tests {
                 agent: "reviewer".to_string(),
                 depends: Some(vec![]),
                 tracker_state: None,
+                timeout_ms: None,
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,
@@ -1695,6 +1742,7 @@ mod tests {
                 agent: "synth".to_string(),
                 depends: Some(vec!["review-a".to_string()]),
                 tracker_state: None,
+                timeout_ms: None,
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,

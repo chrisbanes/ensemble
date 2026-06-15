@@ -24,7 +24,9 @@ use crate::interaction::InteractionResponse;
 use crate::tracker::model::Issue;
 use crate::workspace::hooks::{run_hook, run_hook_best_effort};
 use async_trait::async_trait;
-use events::{InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult};
+use events::{
+    InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerFailureKind, WorkerResult,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -91,6 +93,8 @@ pub struct AgentRunRequest<'a> {
     pub step_name: &'a str,
     pub step_kind: StepKind,
     pub attempt: Option<u32>,
+    /// Effective per-step turn timeout in milliseconds.
+    pub timeout_ms: u64,
     pub(crate) interaction_response: Option<InteractionResponseEnvelope>,
     pub workspace_path: &'a Path,
     pub event_tx: mpsc::Sender<WorkerEvent>,
@@ -464,6 +468,7 @@ pub(super) async fn detect_worker_result_with_output(
             Err(error) => {
                 return WorkerResult::Failed {
                     error: format!("failed to parse .ensemble/interaction-request.json: {error}"),
+                    kind: WorkerFailureKind::Runtime,
                 }
             }
         },
@@ -471,6 +476,7 @@ pub(super) async fn detect_worker_result_with_output(
         Err(error) => {
             return WorkerResult::Failed {
                 error: format!("failed to read .ensemble/interaction-request.json: {error}"),
+                kind: WorkerFailureKind::Runtime,
             }
         }
     };
@@ -481,6 +487,7 @@ pub(super) async fn detect_worker_result_with_output(
             Err(error) => {
                 return WorkerResult::Failed {
                     error: format!("failed to parse .ensemble/approval-request.json: {error}"),
+                    kind: WorkerFailureKind::Runtime,
                 }
             }
         },
@@ -488,6 +495,7 @@ pub(super) async fn detect_worker_result_with_output(
         Err(error) => {
             return WorkerResult::Failed {
                 error: format!("failed to read .ensemble/approval-request.json: {error}"),
+                kind: WorkerFailureKind::Runtime,
             }
         }
     };
@@ -507,11 +515,13 @@ pub(super) async fn detect_worker_result_with_output(
         Some(_) if approval_request.is_some() => WorkerResult::Failed {
             error: "agent produced both .ensemble/interaction-request.json and .ensemble/approval-request.json"
                 .to_string(),
+            kind: WorkerFailureKind::Runtime,
         },
         Some(_) if verdict_exists => WorkerResult::Failed {
             error:
                 "agent produced both .ensemble/interaction-request.json and .ensemble/verdict.json"
                     .to_string(),
+            kind: WorkerFailureKind::Runtime,
         },
         Some(request) => WorkerResult::BlockedOnHuman { request },
         None => WorkerResult::Success {
@@ -726,7 +736,7 @@ impl AcpAgentRunner {
             session_mode,
             permission_request_policy: config.agent.permission_request_policy.clone(),
             read_timeout_ms: config.agent.read_timeout_ms,
-            turn_timeout_ms: config.agent.turn_timeout_ms,
+            turn_timeout_ms: request.timeout_ms,
             cancel_token: request.cancel_token.clone(),
         };
 
@@ -784,6 +794,11 @@ impl AcpAgentRunner {
         )
         .await)
     }
+}
+
+#[cfg(test)]
+fn effective_request_timeout_ms(request: &AgentRunRequest<'_>) -> u64 {
+    request.timeout_ms
 }
 
 #[cfg(test)]
@@ -928,6 +943,27 @@ on_failure: Todo
         )
     }
 
+    fn minimal_config() -> &'static str {
+        r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo"]
+  terminal_states: ["Done"]
+agents:
+  builder:
+    prompt: hi
+steps:
+  - name: build
+    agent: builder
+workspace:
+  root: /tmp/test
+agent:
+  command: echo test
+on_success: Done
+on_failure: Todo
+"#
+    }
+
     fn test_acpx_config() -> Arc<EnsembleConfig> {
         Arc::new(
             parse_config(
@@ -955,6 +991,29 @@ on_failure: Todo
 
     fn test_runner() -> AcpAgentRunner {
         AcpAgentRunner::new(Arc::new(RwLock::new(test_config().as_ref().clone())))
+    }
+
+    #[test]
+    fn direct_runtime_uses_agent_run_request_timeout() {
+        let config = Arc::new(parse_config(minimal_config()).unwrap());
+        let issue = test_issue();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: Path::new("."),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            timeout_ms: 3210,
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        assert_eq!(effective_request_timeout_ms(&request), 3210);
     }
 
     #[tokio::test]
@@ -1085,6 +1144,7 @@ on_failure: Todo
                 step_name: "build",
                 step_kind: StepKind::Agent,
                 attempt: None,
+                timeout_ms: 100,
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
@@ -1132,6 +1192,7 @@ on_failure: Todo
                 step_name: "build",
                 step_kind: StepKind::Agent,
                 attempt: None,
+                timeout_ms: 100,
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
@@ -1195,6 +1256,7 @@ exit 1
                 step_name: "build",
                 step_kind: StepKind::Agent,
                 attempt: None,
+                timeout_ms: 100,
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
@@ -1266,6 +1328,7 @@ exit 0
                 step_name: "build",
                 step_kind: StepKind::Agent,
                 attempt: None,
+                timeout_ms: 100,
                 interaction_response: None,
                 workspace_path: workspace.path(),
                 event_tx: tx,
@@ -1415,7 +1478,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
         ));
     }
@@ -1476,7 +1542,13 @@ agent:
 
         let result = detect_worker_result(workspace.path(), "build").await;
 
-        assert!(matches!(result, WorkerResult::Failed { .. }));
+        assert!(matches!(
+            result,
+            WorkerResult::Failed {
+                kind: WorkerFailureKind::Runtime,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1488,7 +1560,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("failed to parse .ensemble/approval-request.json")
         ));
     }
@@ -1502,7 +1577,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("failed to parse .ensemble/interaction-request.json")
         ));
     }
@@ -1528,7 +1606,10 @@ agent:
 
         assert!(matches!(
             result,
-            WorkerResult::Failed { error }
+            WorkerResult::Failed {
+                error,
+                kind: WorkerFailureKind::Runtime,
+            }
                 if error.contains("both .ensemble/interaction-request.json and .ensemble/verdict.json")
         ));
     }

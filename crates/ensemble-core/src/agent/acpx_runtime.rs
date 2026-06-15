@@ -1,6 +1,7 @@
 use std::future::Future;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
@@ -306,12 +307,14 @@ impl AcpxRuntime {
         &self,
         request: &AgentRunRequest<'_>,
         prompt_request: RuntimePromptRequest<'_>,
-        on_event: F,
+        mut on_event: F,
     ) -> Result<super::acpx_cli::PromptOutcome, AgentError>
     where
         F: FnMut(AgentEvent) -> Fut,
         Fut: Future<Output = ()> + Send,
     {
+        let suppress_prompt_events = Arc::new(AtomicBool::new(false));
+        let suppress_events_for_prompt = Arc::clone(&suppress_prompt_events);
         let run_prompt = self.cli.run_prompt(
             AcpxPromptRequest {
                 agent: prompt_request.acpx_agent,
@@ -321,12 +324,75 @@ impl AcpxRuntime {
                 options: prompt_request.command_options,
                 visibility: prompt_request.visibility,
             },
-            on_event,
+            move |event| {
+                let fut = if suppress_events_for_prompt.load(Ordering::Relaxed) {
+                    None
+                } else {
+                    Some(on_event(event))
+                };
+                async move {
+                    if let Some(fut) = fut {
+                        fut.await;
+                    }
+                }
+            },
         );
         tokio::pin!(run_prompt);
 
         tokio::select! {
-            result = &mut run_prompt => result,
+            result = tokio::time::timeout(Duration::from_millis(request.timeout_ms), &mut run_prompt) => {
+                match result {
+                    Ok(result) => result,
+                    Err(_) => {
+                        debug!(
+                            issue_id = %request.issue.id,
+                            step = request.step_name,
+                            prompt_request.session_name,
+                            timeout_ms = request.timeout_ms,
+                            "timing out acpx prompt"
+                        );
+                        if let Err(error) = self
+                            .cli
+                            .cancel(
+                                prompt_request.acpx_agent,
+                                prompt_request.session_name,
+                                request.workspace_path,
+                                prompt_request.command_options,
+                            )
+                            .await
+                        {
+                            warn!(
+                                issue_id = %request.issue.id,
+                                step = request.step_name,
+                                prompt_request.session_name,
+                                timeout_ms = request.timeout_ms,
+                                %error,
+                                "failed to cancel acpx prompt after timeout"
+                            );
+                        }
+
+                        if prompt_request.visibility == PromptVisibility::Visible {
+                            emit_event(
+                                &request.event_tx,
+                                &request.issue.id,
+                                request.step_name,
+                                AgentEvent::RunFailed {
+                                    reason: format!("turn timeout after {}ms", request.timeout_ms),
+                                    usage: None,
+                                },
+                            )
+                            .await;
+                        }
+
+                        suppress_prompt_events.store(true, Ordering::Relaxed);
+                        let _ = tokio::time::timeout(Duration::from_secs(5), run_prompt).await;
+
+                        Err(AgentError::TurnTimeout {
+                            timeout_ms: request.timeout_ms,
+                        })
+                    }
+                }
+            },
             _ = request.cancel_token.cancelled() => {
                 debug!(
                     issue_id = %request.issue.id,
@@ -355,7 +421,7 @@ impl AcpxRuntime {
                     .await;
                 }
 
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), run_prompt).await;
+                let _ = tokio::time::timeout(Duration::from_secs(5), run_prompt).await;
 
                 Err(AgentError::TurnCancelled)
             }
@@ -464,6 +530,8 @@ mod tests {
     use crate::pipeline::engine::StepOutputTemplateContext;
     use crate::tracker::model::test_helpers::test_issue;
 
+    const TEST_TIMEOUT_MS: u64 = 5_000;
+
     fn test_config() -> Arc<crate::config::ensemble::EnsembleConfig> {
         Arc::new(
             parse_config(
@@ -529,6 +597,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -607,6 +676,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -674,6 +744,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -752,6 +823,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -846,6 +918,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -940,6 +1013,7 @@ on_failure: Failed
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -998,6 +1072,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1054,6 +1129,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1112,6 +1188,7 @@ exit 1
             step_name: "build/review",
             step_kind: StepKind::Agent,
             attempt: Some(2),
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1170,6 +1247,7 @@ exit 1
             step_name: "build",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1202,6 +1280,166 @@ exit 1
 
         assert!(saw_cancelled);
         assert!(workspace.path().join("cancelled.flag").exists());
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_times_out_prompt_with_graceful_cancel() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    while [ ! -f "{}/cancelled.flag" ]; do
+      /bin/sleep 0.05
+    done
+    printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"cancelled"}}}}'
+    exit 0
+    ;;
+  *" cancel --session "*)
+    : > "{}/cancelled.flag"
+    exit 0
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display(),
+                workspace.path().display(),
+                workspace.path().display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            timeout_ms: 100,
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let result = runner.run_step(&request, "finish the task").await;
+
+        assert!(matches!(
+            result,
+            Err(AgentError::TurnTimeout { timeout_ms: 100 })
+        ));
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("cancel --session"));
+        assert!(args.contains("sessions close"));
+
+        let mut run_failed_reasons = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate {
+                event: AgentEvent::RunFailed { reason, .. },
+                ..
+            } = event
+            {
+                run_failed_reasons.push(reason);
+            }
+        }
+        assert_eq!(
+            run_failed_reasons,
+            vec!["turn timeout after 100ms".to_string()]
+        );
+        assert!(!run_failed_reasons
+            .iter()
+            .any(|reason| reason == "stop reason: cancelled"));
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_preserves_timeout_when_cancel_fails() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let args_path = workspace.path().join("args.txt");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*)
+    exit 0
+    ;;
+  *" prompt --session "*)
+    /bin/sleep 2
+    printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+    exit 0
+    ;;
+  *" cancel --session "*)
+    exit 1
+    ;;
+  *" sessions close "*)
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                args_path.display()
+            ),
+        );
+
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config();
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            timeout_ms: 100,
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let result = runner.run_step(&request, "finish the task").await;
+
+        assert!(matches!(
+            result,
+            Err(AgentError::TurnTimeout { timeout_ms: 100 })
+        ));
+        let args = std::fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("cancel --session"));
+        assert!(args.contains("sessions close"));
+
+        let mut run_failed_reasons = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let WorkerEvent::AgentUpdate {
+                event: AgentEvent::RunFailed { reason, .. },
+                ..
+            } = event
+            {
+                run_failed_reasons.push(reason);
+            }
+        }
+        assert_eq!(
+            run_failed_reasons,
+            vec!["turn timeout after 100ms".to_string()]
+        );
     }
 
     #[test]
@@ -1279,6 +1517,7 @@ exit 1
             step_name: &long_step,
             step_kind: StepKind::Agent,
             attempt: Some(99),
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1350,6 +1589,7 @@ exit 1
             step_name: "$%^",
             step_kind: StepKind::Agent,
             attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
@@ -1412,6 +1652,7 @@ exit 1
             step_name: &bad_chars,
             step_kind: StepKind::Agent,
             attempt: Some(1),
+            timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
             workspace_path: workspace.path(),
             event_tx: tx,
