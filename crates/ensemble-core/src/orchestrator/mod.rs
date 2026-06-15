@@ -1160,6 +1160,20 @@ impl Orchestrator {
             }
             _ => None,
         };
+        let flush_transcript_step = matches!(
+            &event,
+            AgentEvent::RunCompleted { .. }
+                | AgentEvent::RunFailed { .. }
+                | AgentEvent::TurnCompleted { .. }
+                | AgentEvent::TurnFailed { .. }
+                | AgentEvent::Cancelled { .. }
+        )
+        .then(|| {
+            run_id
+                .as_ref()
+                .map(|run_id| (run_id.clone(), step_name.to_string()))
+        })
+        .flatten();
         let mut pipeline_event: Option<PipelineEvent> = None;
 
         // Handle special cases
@@ -1242,6 +1256,11 @@ impl Orchestrator {
         if let Some(request) = transcript_request {
             if let Some(ref persistence) = self.transcript_persistence {
                 persistence.send(request);
+            }
+        }
+        if let Some((run_id, step_name)) = flush_transcript_step {
+            if let Some(ref persistence) = self.transcript_persistence {
+                persistence.flush_step(run_id, step_name);
             }
         }
 
@@ -10657,6 +10676,74 @@ agent:
         )
         .await
         .unwrap();
+        assert!(contents.contains("\"assistant_message\""));
+        assert!(contents.contains("\"hello\""));
+    }
+
+    #[tokio::test]
+    async fn run_completed_flushes_coalesced_transcript_block() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("issue-1", "Todo"), None);
+            let entry = state.running.get_mut("issue-1").unwrap();
+            entry.identifier = "repo#1".to_string();
+            entry.run_id = Some("run-1".to_string());
+        }
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::TranscriptBlock {
+                    kind: crate::agent::protocol::TranscriptBlockKind::AssistantMessage,
+                    payload: serde_json::json!({"text": "hello"}),
+                },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::RunCompleted { usage: None },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        let transcript_path = dir
+            .path()
+            .join(".ensemble/runs/run-1/steps/build/transcript.jsonl");
+        for _ in 0..20 {
+            if transcript_path.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let contents = tokio::fs::read_to_string(transcript_path).await.unwrap();
         assert!(contents.contains("\"assistant_message\""));
         assert!(contents.contains("\"hello\""));
     }

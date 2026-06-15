@@ -1,6 +1,5 @@
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
-use crate::tracker::model::sanitize_workspace_key;
 use crate::transcript::model::TranscriptRecord;
 use crate::transcript::reader::{read_transcript_page, read_transcript_record, TranscriptResponse};
 use axum::extract::{Path, Query, State};
@@ -8,22 +7,12 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::Path as FsPath;
 
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
 pub struct ConversationQuery {
     pub cursor: Option<usize>,
     pub limit: Option<usize>,
-}
-
-fn workspace_path(workspace_root: &str, identifier: &str) -> Result<PathBuf, ApiError> {
-    let workspace_key = sanitize_workspace_key(identifier).ok_or_else(|| {
-        ApiError::new(
-            "invalid_identifier",
-            "identifier cannot be sanitized to a workspace key",
-        )
-    })?;
-    Ok(PathBuf::from(workspace_root).join(workspace_key))
 }
 
 #[utoipa::path(
@@ -44,16 +33,11 @@ fn workspace_path(workspace_root: &str, identifier: &str) -> Result<PathBuf, Api
 )]
 pub async fn get_conversation(
     State(state): State<AppState>,
-    Path((identifier, run_id, step_name)): Path<(String, String, String)>,
+    Path((_identifier, run_id, step_name)): Path<(String, String, String)>,
     Query(query): Query<ConversationQuery>,
 ) -> impl IntoResponse {
-    let workspace_path = match workspace_path(&state.workspace_root, &identifier) {
-        Ok(path) => path,
-        Err(error) => return (StatusCode::BAD_REQUEST, Json(error)).into_response(),
-    };
-
     match read_transcript_page(
-        &workspace_path,
+        FsPath::new(&state.workspace_root),
         &run_id,
         &step_name,
         query.cursor,
@@ -103,14 +87,16 @@ pub async fn get_conversation(
 )]
 pub async fn get_conversation_message(
     State(state): State<AppState>,
-    Path((identifier, run_id, step_name, sequence)): Path<(String, String, String, u64)>,
+    Path((_identifier, run_id, step_name, sequence)): Path<(String, String, String, u64)>,
 ) -> impl IntoResponse {
-    let workspace_path = match workspace_path(&state.workspace_root, &identifier) {
-        Ok(path) => path,
-        Err(error) => return (StatusCode::BAD_REQUEST, Json(error)).into_response(),
-    };
-
-    match read_transcript_record(&workspace_path, &run_id, &step_name, sequence).await {
+    match read_transcript_record(
+        FsPath::new(&state.workspace_root),
+        &run_id,
+        &step_name,
+        sequence,
+    )
+    .await
+    {
         Ok(Some(record)) => (StatusCode::OK, Json(record)).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,

@@ -29,19 +29,26 @@ pub struct TranscriptPersistRequest {
 }
 
 pub struct TranscriptPersistence {
-    sender: Option<mpsc::Sender<TranscriptPersistRequest>>,
+    sender: Option<mpsc::Sender<TranscriptPersistCommand>>,
     handle: Option<JoinHandle<()>>,
 }
 
 impl TranscriptPersistence {
     pub fn new(workspace_root: PathBuf) -> Self {
         let writer = TranscriptWriter::new(workspace_root);
-        let (sender, mut receiver) = mpsc::channel::<TranscriptPersistRequest>(10_000);
+        let (sender, mut receiver) = mpsc::channel::<TranscriptPersistCommand>(10_000);
 
         let handle = tokio::spawn(async move {
             let mut state = PersistState::default();
-            while let Some(req) = receiver.recv().await {
-                state.write_request(&writer, req).await;
+            while let Some(command) = receiver.recv().await {
+                match command {
+                    TranscriptPersistCommand::Record(req) => {
+                        state.write_request(&writer, req).await;
+                    }
+                    TranscriptPersistCommand::FlushStep { run_id, step_name } => {
+                        state.flush_step(&writer, &run_id, &step_name).await;
+                    }
+                }
             }
             state.flush_all(&writer).await;
         });
@@ -53,8 +60,16 @@ impl TranscriptPersistence {
     }
 
     pub fn send(&self, request: TranscriptPersistRequest) {
+        self.send_command(TranscriptPersistCommand::Record(request));
+    }
+
+    pub fn flush_step(&self, run_id: String, step_name: String) {
+        self.send_command(TranscriptPersistCommand::FlushStep { run_id, step_name });
+    }
+
+    fn send_command(&self, command: TranscriptPersistCommand) {
         if let Some(sender) = &self.sender {
-            match sender.try_send(request) {
+            match sender.try_send(command) {
                 Ok(()) => {}
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     warn!("transcript persist channel full; transcript record dropped");
@@ -74,6 +89,11 @@ impl TranscriptPersistence {
             let _ = handle.await;
         }
     }
+}
+
+enum TranscriptPersistCommand {
+    Record(TranscriptPersistRequest),
+    FlushStep { run_id: String, step_name: String },
 }
 
 impl Drop for TranscriptPersistence {
@@ -223,7 +243,11 @@ fn is_text_only_payload(payload: &serde_json::Value) -> bool {
 pub fn truncate_tool_result_payload(
     payload: serde_json::Value,
 ) -> (serde_json::Value, Option<TranscriptTruncation>) {
-    let text = match payload.get("text").and_then(|value| value.as_str()) {
+    let text_path = match tool_result_text_path(&payload) {
+        Some(path) => path,
+        None => return (payload, None),
+    };
+    let text = match text_path.get(&payload) {
         Some(text) => text,
         None => return (payload, None),
     };
@@ -243,8 +267,52 @@ pub fn truncate_tool_result_payload(
     };
 
     let mut wrapper = payload;
-    wrapper["text"] = serde_json::Value::String(retained);
+    text_path.set(&mut wrapper, retained);
     (wrapper, Some(truncation))
+}
+
+#[derive(Clone, Copy)]
+enum ToolResultTextPath {
+    TopLevel,
+    Content,
+}
+
+impl ToolResultTextPath {
+    fn get<'a>(&self, payload: &'a serde_json::Value) -> Option<&'a str> {
+        match self {
+            Self::TopLevel => payload.get("text").and_then(|value| value.as_str()),
+            Self::Content => payload
+                .get("content")
+                .and_then(|content| content.get("text"))
+                .and_then(|value| value.as_str()),
+        }
+    }
+
+    fn set(&self, payload: &mut serde_json::Value, text: String) {
+        match self {
+            Self::TopLevel => payload["text"] = serde_json::Value::String(text),
+            Self::Content => payload["content"]["text"] = serde_json::Value::String(text),
+        }
+    }
+}
+
+fn tool_result_text_path(payload: &serde_json::Value) -> Option<ToolResultTextPath> {
+    if payload
+        .get("text")
+        .and_then(|value| value.as_str())
+        .is_some()
+    {
+        return Some(ToolResultTextPath::TopLevel);
+    }
+    if payload
+        .get("content")
+        .and_then(|content| content.get("text"))
+        .and_then(|value| value.as_str())
+        .is_some()
+    {
+        return Some(ToolResultTextPath::Content);
+    }
+    None
 }
 
 fn floor_char_boundary(value: &str, mut index: usize) -> usize {
@@ -322,6 +390,24 @@ mod tests {
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].payload["text"], "hello");
+    }
+
+    #[tokio::test]
+    async fn flush_step_persists_coalesced_message_without_closing_worker() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut persistence = TranscriptPersistence::new(temp_dir.path().to_path_buf());
+
+        persistence.send(request(TranscriptRecordKind::AssistantMessage, "hello"));
+        persistence.flush_step("run-1".to_string(), "build".to_string());
+        persistence.send(request(TranscriptRecordKind::ToolCall, "tool"));
+        persistence.flush().await;
+
+        let records = read_records(&temp_dir).await;
+
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, TranscriptRecordKind::AssistantMessage);
+        assert_eq!(records[0].payload["text"], "hello");
+        assert_eq!(records[1].kind, TranscriptRecordKind::ToolCall);
     }
 
     #[tokio::test]
@@ -431,5 +517,25 @@ mod tests {
         assert!(payload["text"].as_str().unwrap().ends_with("bbbb"));
         assert!(truncation.original_bytes > truncation.retained_head_bytes);
         assert_eq!(truncation.retained_tail_bytes, TOOL_RESULT_TAIL_BYTES);
+    }
+
+    #[test]
+    fn truncate_large_nested_content_payload_keeps_shape() {
+        let input = "a".repeat(96 * 1024) + &"b".repeat(64 * 1024);
+        let (payload, truncation) = truncate_tool_result_payload(serde_json::json!({
+            "tool_call_id": "call-1",
+            "content": {
+                "type": "text",
+                "text": input
+            }
+        }));
+
+        let truncation = truncation.expect("large nested payload should be truncated");
+        let text = payload["content"]["text"].as_str().unwrap();
+        assert!(text.starts_with("aaaa"));
+        assert!(text.contains("[truncated]"));
+        assert!(text.ends_with("bbbb"));
+        assert_eq!(payload["content"]["type"], "text");
+        assert_eq!(truncation.original_bytes, 160 * 1024);
     }
 }

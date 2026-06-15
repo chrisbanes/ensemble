@@ -448,11 +448,7 @@ async fn test_app_with_workspace_root(workspace_root: &std::path::Path) -> Strin
 async fn get_step_conversation_returns_transcript_records() {
     let temp = tempfile::TempDir::new().unwrap();
     let base_url = test_app_with_workspace_root(temp.path()).await;
-    let workspace_key = ensemble_core::tracker::model::sanitize_workspace_key("repo#1").unwrap();
-    let transcript_dir = temp
-        .path()
-        .join(workspace_key)
-        .join(".ensemble/runs/run-1/steps/build");
+    let transcript_dir = temp.path().join(".ensemble/runs/run-1/steps/build");
     tokio::fs::create_dir_all(&transcript_dir).await.unwrap();
     tokio::fs::write(
         transcript_dir.join("transcript.jsonl"),
