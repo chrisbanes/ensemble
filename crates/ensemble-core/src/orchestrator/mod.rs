@@ -56,6 +56,7 @@ use crate::pipeline::verdict::StepResult;
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::{Issue, RetryEntry};
 use crate::tracker::IssueTracker;
+use crate::transcript::events::TranscriptEventBus;
 use crate::transcript::model::TranscriptRecordKind;
 use crate::transcript::persistence::{TranscriptPersistRequest, TranscriptPersistence};
 use crate::workspace::finalize::FinalizeMode;
@@ -135,6 +136,7 @@ pub struct OrchestratorRuntimeParts {
     pub refresh_requested: Arc<tokio::sync::Notify>,
     pub cancellation_registry: CancellationRegistry,
     pub event_bus: EventBus,
+    pub transcript_event_bus: TranscriptEventBus,
     pub workspace_root: std::path::PathBuf,
 }
 
@@ -173,6 +175,7 @@ impl Orchestrator {
                 refresh_requested,
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: config_dir.to_path_buf(),
             },
             config_dir,
@@ -212,7 +215,10 @@ impl Orchestrator {
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             event_bus: parts.event_bus,
             timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root.clone())),
-            transcript_persistence: Some(TranscriptPersistence::new(parts.workspace_root)),
+            transcript_persistence: Some(TranscriptPersistence::new_with_event_bus(
+                parts.workspace_root,
+                parts.transcript_event_bus,
+            )),
             worker_tx,
             worker_rx,
             shutdown_rx,
@@ -5491,6 +5497,7 @@ agent:
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
             },
             temp.path(),
@@ -5556,6 +5563,7 @@ agent:
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
             },
             temp.path(),
@@ -5635,6 +5643,7 @@ agent:
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
             },
             temp.path(),
@@ -5705,6 +5714,7 @@ agent:
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
             },
             temp.path(),
@@ -5801,6 +5811,7 @@ agent:
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
             },
             temp.path(),
@@ -5923,6 +5934,7 @@ agent:
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
             },
             temp.path(),
@@ -7368,6 +7380,7 @@ agent:
                 refresh_requested: Arc::clone(&refresh_requested),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: dir.path().to_path_buf(),
             },
             dir.path(),
@@ -7441,6 +7454,7 @@ agent:
                 refresh_requested,
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: dir.path().to_path_buf(),
             },
             dir.path(),
@@ -10679,6 +10693,83 @@ agent:
         .unwrap();
         assert!(contents.contains("\"assistant_message\""));
         assert!(contents.contains("\"hello\""));
+    }
+
+    #[tokio::test]
+    async fn handle_agent_update_broadcasts_persisted_transcript_record() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let transcript_event_bus = crate::transcript::events::TranscriptEventBus::new();
+        let mut rx = transcript_event_bus.subscribe();
+
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::new(RwLock::new(OrchestratorState::new(
+                    30_000,
+                    &ConcurrencyConfig::default(),
+                ))),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr,
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus,
+                workspace_root: dir.path().to_path_buf(),
+            },
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("issue-1", "Todo"), None);
+            let entry = state.running.get_mut("issue-1").unwrap();
+            entry.identifier = "repo#1".to_string();
+            entry.run_id = Some("run-1".to_string());
+        }
+
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::TranscriptBlock {
+                    kind: crate::agent::protocol::TranscriptBlockKind::AssistantMessage,
+                    payload: serde_json::json!({"text": "hello"}),
+                },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+        orchestrator
+            .handle_worker_event(WorkerEvent::AgentUpdate {
+                issue_id: "issue-1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::RunCompleted { usage: None },
+                timestamp: chrono::Utc::now(),
+            })
+            .await;
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(received.issue_identifier, "repo#1");
+        assert_eq!(received.run_id, "run-1");
+        assert_eq!(received.step_name, "build");
+        assert_eq!(received.payload["text"], "hello");
     }
 
     #[tokio::test]

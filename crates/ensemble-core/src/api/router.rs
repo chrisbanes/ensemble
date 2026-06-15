@@ -8,6 +8,7 @@ use crate::config::draft::ConfigDocumentState;
 use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
+use crate::transcript::events::TranscriptEventBus;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
@@ -53,6 +54,8 @@ pub struct AppState {
     pub history_store: Option<HistoryStore>,
     /// Event bus for pipeline event broadcasting.
     pub event_bus: EventBus,
+    /// Event bus for persisted step transcript records.
+    pub transcript_event_bus: TranscriptEventBus,
     /// Runtime configuration store with document state.
     pub config_runtime: ConfigRuntime,
     /// Per-issue cancellation handles for active worker runs.

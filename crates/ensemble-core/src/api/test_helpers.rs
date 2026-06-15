@@ -7,6 +7,7 @@ use crate::config::ensemble::ConcurrencyConfig;
 use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
+use crate::transcript::events::TranscriptEventBus;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -40,6 +41,7 @@ pub(crate) fn app_state_with_document_state(document_state: ConfigDocumentState)
         history_db_path: PathBuf::from("/tmp/.ensemble/history.db"),
         history_store: HistoryStore::new_blocking(PathBuf::from("/tmp/.ensemble/history.db")).ok(),
         event_bus: EventBus::new(),
+        transcript_event_bus: TranscriptEventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
@@ -65,6 +67,7 @@ pub(crate) fn app_state_with_missing_config(
         history_db_path: PathBuf::from("/tmp/.ensemble/history.db"),
         history_store: HistoryStore::new_blocking(PathBuf::from("/tmp/.ensemble/history.db")).ok(),
         event_bus: EventBus::new(),
+        transcript_event_bus: TranscriptEventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: config_path.clone(),
             document_state: Arc::new(RwLock::new(missing_config_state(config_path))),

@@ -15,6 +15,7 @@ use ensemble_core::interaction::store::InteractionStore;
 use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
+use ensemble_core::transcript::events::TranscriptEventBus;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -53,6 +54,7 @@ fn build_app_state(
         history_db_path: history_db_path.clone(),
         history_store: HistoryStore::new_blocking(history_db_path).ok(),
         event_bus: EventBus::new(),
+        transcript_event_bus: TranscriptEventBus::new(),
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
