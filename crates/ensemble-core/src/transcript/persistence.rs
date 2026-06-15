@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use super::events::TranscriptEventBus;
 use super::model::{
     TranscriptRecord, TranscriptRecordKind, TranscriptTruncation, TRANSCRIPT_SCHEMA_VERSION,
 };
@@ -35,6 +36,14 @@ pub struct TranscriptPersistence {
 
 impl TranscriptPersistence {
     pub fn new(workspace_root: PathBuf) -> Self {
+        Self::new_internal(workspace_root, None)
+    }
+
+    pub fn new_with_event_bus(workspace_root: PathBuf, event_bus: TranscriptEventBus) -> Self {
+        Self::new_internal(workspace_root, Some(event_bus))
+    }
+
+    fn new_internal(workspace_root: PathBuf, event_bus: Option<TranscriptEventBus>) -> Self {
         let writer = TranscriptWriter::new(workspace_root);
         let (sender, mut receiver) = mpsc::channel::<TranscriptPersistCommand>(10_000);
 
@@ -43,14 +52,18 @@ impl TranscriptPersistence {
             while let Some(command) = receiver.recv().await {
                 match command {
                     TranscriptPersistCommand::Record(req) => {
-                        state.write_request(&writer, req).await;
+                        state
+                            .write_request(&writer, req, event_bus.as_ref())
+                            .await;
                     }
                     TranscriptPersistCommand::FlushStep { run_id, step_name } => {
-                        state.flush_step(&writer, &run_id, &step_name).await;
+                        state
+                            .flush_step(&writer, &run_id, &step_name, event_bus.as_ref())
+                            .await;
                     }
                 }
             }
-            state.flush_all(&writer).await;
+            state.flush_all(&writer, event_bus.as_ref()).await;
         });
 
         Self {
@@ -118,6 +131,7 @@ impl PersistState {
         &mut self,
         writer: &TranscriptWriter,
         mut req: TranscriptPersistRequest,
+        event_bus: Option<&TranscriptEventBus>,
     ) {
         if should_coalesce(req.kind) {
             let key = (req.run_id.clone(), req.step_name.clone());
@@ -128,27 +142,39 @@ impl PersistState {
                     return;
                 }
             }
-            self.flush_key(writer, key.clone()).await;
+            self.flush_key(writer, key.clone(), event_bus).await;
             self.coalesced.insert(key, req);
             return;
         }
 
-        self.flush_step(writer, &req.run_id, &req.step_name).await;
+        self.flush_step(writer, &req.run_id, &req.step_name, event_bus)
+            .await;
         if req.kind == TranscriptRecordKind::ToolResult {
             let (payload, truncation) = truncate_tool_result_payload(req.payload);
             req.payload = payload;
             req.truncated = req.truncated.or(truncation);
         }
-        self.append(writer, req).await;
+        self.append(writer, req, event_bus).await;
     }
 
-    async fn flush_key(&mut self, writer: &TranscriptWriter, key: (String, String)) {
+    async fn flush_key(
+        &mut self,
+        writer: &TranscriptWriter,
+        key: (String, String),
+        event_bus: Option<&TranscriptEventBus>,
+    ) {
         if let Some(req) = self.coalesced.remove(&key) {
-            self.append(writer, req).await;
+            self.append(writer, req, event_bus).await;
         }
     }
 
-    async fn flush_step(&mut self, writer: &TranscriptWriter, run_id: &str, step_name: &str) {
+    async fn flush_step(
+        &mut self,
+        writer: &TranscriptWriter,
+        run_id: &str,
+        step_name: &str,
+        event_bus: Option<&TranscriptEventBus>,
+    ) {
         let keys: Vec<_> = self
             .coalesced
             .keys()
@@ -156,18 +182,27 @@ impl PersistState {
             .cloned()
             .collect();
         for key in keys {
-            self.flush_key(writer, key).await;
+            self.flush_key(writer, key, event_bus).await;
         }
     }
 
-    async fn flush_all(&mut self, writer: &TranscriptWriter) {
+    async fn flush_all(
+        &mut self,
+        writer: &TranscriptWriter,
+        event_bus: Option<&TranscriptEventBus>,
+    ) {
         let keys: Vec<_> = self.coalesced.keys().cloned().collect();
         for key in keys {
-            self.flush_key(writer, key).await;
+            self.flush_key(writer, key, event_bus).await;
         }
     }
 
-    async fn append(&mut self, writer: &TranscriptWriter, req: TranscriptPersistRequest) {
+    async fn append(
+        &mut self,
+        writer: &TranscriptWriter,
+        req: TranscriptPersistRequest,
+        event_bus: Option<&TranscriptEventBus>,
+    ) {
         let sequence_key = (req.run_id.clone(), req.step_name.clone());
         let sequence = self.sequences.entry(sequence_key).or_insert(0);
         *sequence += 1;
@@ -185,14 +220,21 @@ impl PersistState {
             truncated: req.truncated,
         };
 
-        if let Err(error) = writer.append(&record).await {
-            warn!(
-                event = "transcript_persist_failed",
-                run_id = %record.run_id,
-                step_name = %record.step_name,
-                error = %error,
-                "failed to persist transcript record"
-            );
+        match writer.append(&record).await {
+            Ok(()) => {
+                if let Some(event_bus) = event_bus {
+                    event_bus.publish(record);
+                }
+            }
+            Err(error) => {
+                warn!(
+                    event = "transcript_persist_failed",
+                    run_id = %record.run_id,
+                    step_name = %record.step_name,
+                    error = %error,
+                    "failed to persist transcript record"
+                );
+            }
         }
     }
 }
@@ -408,6 +450,69 @@ mod tests {
         assert_eq!(records[0].kind, TranscriptRecordKind::AssistantMessage);
         assert_eq!(records[0].payload["text"], "hello");
         assert_eq!(records[1].kind, TranscriptRecordKind::ToolCall);
+    }
+
+    #[tokio::test]
+    async fn persistence_publishes_after_successful_append() {
+        let temp_dir = TempDir::new().unwrap();
+        let bus = crate::transcript::events::TranscriptEventBus::new();
+        let mut rx = bus.subscribe();
+        let mut persistence =
+            TranscriptPersistence::new_with_event_bus(temp_dir.path().to_path_buf(), bus);
+
+        persistence.send(TranscriptPersistRequest {
+            run_id: "run-1".to_string(),
+            issue_identifier: "repo#1".to_string(),
+            step_name: "build".to_string(),
+            attempt: 1,
+            timestamp: Utc::now(),
+            kind: TranscriptRecordKind::ToolCall,
+            payload: serde_json::json!({"name": "read_file"}),
+            truncated: None,
+        });
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        persistence.flush().await;
+
+        assert_eq!(received.run_id, "run-1");
+        assert_eq!(received.step_name, "build");
+        assert_eq!(received.sequence, 1);
+        assert_eq!(received.payload["name"], "read_file");
+    }
+
+    #[tokio::test]
+    async fn persistence_publishes_coalesced_record_on_flush() {
+        let temp_dir = TempDir::new().unwrap();
+        let bus = crate::transcript::events::TranscriptEventBus::new();
+        let mut rx = bus.subscribe();
+        let mut persistence =
+            TranscriptPersistence::new_with_event_bus(temp_dir.path().to_path_buf(), bus);
+
+        for text in ["hel", "lo"] {
+            persistence.send(TranscriptPersistRequest {
+                run_id: "run-1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                step_name: "build".to_string(),
+                attempt: 1,
+                timestamp: Utc::now(),
+                kind: TranscriptRecordKind::AssistantMessage,
+                payload: serde_json::json!({"text": text}),
+                truncated: None,
+            });
+        }
+        persistence.flush_step("run-1".to_string(), "build".to_string());
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        persistence.flush().await;
+
+        assert_eq!(received.sequence, 1);
+        assert_eq!(received.payload["text"], "hello");
     }
 
     #[tokio::test]
