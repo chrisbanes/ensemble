@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -259,6 +259,100 @@ describe("IssueDetail", () => {
     expect(screen.getByText("I am ready")).toBeInTheDocument();
     expect(screen.getByLabelText("Reply")).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "Workflow" })).toBeInTheDocument();
+  });
+
+  it("appends live transcript records from the websocket", async () => {
+    let onMessage: Parameters<typeof connectWs>[0]["onMessage"] | null = null;
+    vi.mocked(connectWs).mockImplementation((options) => {
+      onMessage = options.onMessage;
+      return () => {};
+    });
+    hooksMock.useStepConversationQuery.mockImplementation(() => ({
+      data: { records: [] },
+      isLoading: false,
+      isError: false,
+    }));
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { route: "/issue/todo-1" },
+    );
+
+    act(() => {
+      onMessage?.({
+        type: "transcript_record",
+        data: {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "todo-1",
+          step_name: "deploy",
+          attempt: 1,
+          sequence: 2,
+          timestamp: "2026-06-15T10:00:00Z",
+          kind: "assistant_message",
+          payload: { text: "live hello" },
+        },
+      });
+    });
+
+    expect(await screen.findByText("live hello")).toBeInTheDocument();
+  });
+
+  it("dedupes live transcript records against replayed records", async () => {
+    let onMessage: Parameters<typeof connectWs>[0]["onMessage"] | null = null;
+    vi.mocked(connectWs).mockImplementation((options) => {
+      onMessage = options.onMessage;
+      return () => {};
+    });
+    hooksMock.useStepConversationQuery.mockImplementation(() => ({
+      data: {
+        records: [
+          {
+            schema_version: 1,
+            run_id: "run-1",
+            issue_identifier: "todo-1",
+            step_name: "deploy",
+            attempt: 1,
+            sequence: 2,
+            timestamp: "2026-06-15T09:59:59Z",
+            kind: "assistant_message",
+            payload: { text: "stale hello" },
+          },
+        ],
+      },
+      isLoading: false,
+      isError: false,
+    }));
+
+    renderWithProviders(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { route: "/issue/todo-1" },
+    );
+
+    act(() => {
+      onMessage?.({
+        type: "transcript_record",
+        data: {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "todo-1",
+          step_name: "deploy",
+          attempt: 1,
+          sequence: 2,
+          timestamp: "2026-06-15T10:00:00Z",
+          kind: "assistant_message",
+          payload: { text: "live hello" },
+        },
+      });
+    });
+
+    expect(await screen.findByText("live hello")).toBeInTheDocument();
+    expect(screen.queryByText("stale hello")).not.toBeInTheDocument();
+    expect(screen.getAllByText("live hello")).toHaveLength(1);
   });
 
   it("reveals hidden transcript history when a raw event jumps to an older conversation entry", async () => {

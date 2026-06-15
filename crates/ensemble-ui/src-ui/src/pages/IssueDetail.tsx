@@ -14,8 +14,14 @@ import {
 import { connectWs } from "@/ws";
 import type { WsStatus } from "@/ws";
 import type { WsEventData, WsPipelineEvent } from "@/ws-types";
-import { isCompletionEvent, normalizePipelineEvent, timelineRecordToEventData } from "@/ws-events";
+import {
+  isCompletionEvent,
+  normalizePipelineEvent,
+  timelineRecordToEventData,
+  transcriptRecordKey,
+} from "@/ws-events";
 import { addNotification, requestPermissionIfNeeded } from "@/notifications";
+import type { TranscriptRecord } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
@@ -63,6 +69,7 @@ export default function IssueDetail() {
   const cancelMutation = useCancelInteractionMutation(identifier);
 
   const [liveEvents, setLiveEvents] = useState<WsEventData[]>([]);
+  const [liveTranscriptRecords, setLiveTranscriptRecords] = useState<TranscriptRecord[]>([]);
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
   const [showStopConfirm, setShowStopConfirm] = useState(false);
   const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
@@ -94,9 +101,11 @@ export default function IssueDetail() {
   const transcriptQuery = useStepConversationQuery(identifier, effectiveRunId, activeStepName ?? "", {
     limit: 200,
   });
+  const refetchTranscript = transcriptQuery.refetch;
   const transcriptSessionKey = `${identifier}:${effectiveRunId || "no-run"}:${activeStepName ?? "no-step"}`;
   const activeEntrySessionKeyRef = useRef(transcriptSessionKey);
   const timelineQuery = useTimelineQuery(identifier, effectiveRunId);
+  const refetchTimeline = timelineQuery.refetch;
   const persistedEvents = useMemo(
     () => (timelineQuery.data?.events ?? []).map(timelineRecordToEventData),
     [timelineQuery.data?.events],
@@ -147,6 +156,9 @@ export default function IssueDetail() {
       onMessage: (msg) => {
         if (msg.type === "snapshot") {
           setLiveEvents([]);
+          setLiveTranscriptRecords([]);
+          void refetchTranscript?.();
+          void refetchTimeline?.();
         } else if (msg.type === "event") {
           const event = normalizePipelineEvent(msg.data);
           setLiveEvents((prev) => [...prev, event]);
@@ -161,11 +173,29 @@ export default function IssueDetail() {
               identifier,
             );
           }
+        } else if (msg.type === "transcript_record") {
+          setLiveTranscriptRecords((prev) => {
+            const next = new Map(prev.map((record) => [transcriptRecordKey(record), record] as const));
+            next.set(transcriptRecordKey(msg.data), msg.data);
+            return Array.from(next.values()).sort((a, b) => a.sequence - b.sequence);
+          });
         }
       },
       onStatusChange: setWsStatus,
     });
-  }, [identifier, isLiveRun]);
+  }, [identifier, isLiveRun, refetchTimeline, refetchTranscript]);
+
+  const transcriptRecords = useMemo(() => {
+    const byKey = new Map<string, TranscriptRecord>();
+    for (const record of transcriptQuery.data?.records ?? []) {
+      byKey.set(transcriptRecordKey(record), record);
+    }
+    for (const record of liveTranscriptRecords) {
+      if (record.run_id !== effectiveRunId || record.step_name !== activeStepName) continue;
+      byKey.set(transcriptRecordKey(record), record);
+    }
+    return Array.from(byKey.values()).sort((a, b) => a.sequence - b.sequence);
+  }, [activeStepName, effectiveRunId, liveTranscriptRecords, transcriptQuery.data?.records]);
 
   const activeTranscriptEntryId =
     activeEntrySessionKeyRef.current === transcriptSessionKey ? activeEntryId : null;
@@ -180,7 +210,7 @@ export default function IssueDetail() {
 
     const nextEntries = reconcileGroupedTranscriptEntries(previousEntries, {
       conversation: [],
-      transcriptRecords: transcriptQuery.data?.records ?? [],
+      transcriptRecords,
       interactions: interaction ? [interaction] : [],
       events,
     });
@@ -189,7 +219,7 @@ export default function IssueDetail() {
     transcriptEntriesSessionKeyRef.current = transcriptSessionKey;
 
     return nextEntries;
-  }, [transcriptQuery.data?.records, interaction, events, transcriptSessionKey]);
+  }, [transcriptRecords, interaction, events, transcriptSessionKey]);
 
   const transcriptEntryIdForConversationIndex = (index: number) =>
     activeStepName
@@ -199,6 +229,7 @@ export default function IssueDetail() {
   useEffect(() => {
     activeEntrySessionKeyRef.current = transcriptSessionKey;
     setActiveEntryId(null);
+    setLiveTranscriptRecords([]);
   }, [transcriptSessionKey]);
 
   const pendingQuestion = interaction
