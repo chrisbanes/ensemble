@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isCompletionEvent, normalizePipelineEvent } from "./ws-events";
+import { isCompletionEvent, normalizePipelineEvent, transcriptRecordKey } from "./ws-events";
 
 describe("normalizePipelineEvent", () => {
   it("maps turn_completed events into timeline events", () => {
@@ -34,5 +34,21 @@ describe("normalizePipelineEvent", () => {
       detail: "Run succeeded",
     });
     expect(isCompletionEvent(event)).toBe(true);
+  });
+
+  it("builds a stable transcript record key", () => {
+    expect(
+      transcriptRecordKey({
+        schema_version: 1,
+        run_id: "run-1",
+        issue_identifier: "repo#1",
+        step_name: "build",
+        attempt: 1,
+        sequence: 7,
+        timestamp: "2026-06-15T10:00:00Z",
+        kind: "assistant_message",
+        payload: { text: "hello" },
+      }),
+    ).toBe("run-1:build:7");
   });
 });
