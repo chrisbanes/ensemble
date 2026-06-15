@@ -803,6 +803,22 @@ mod tests {
     }
 
     #[test]
+    fn pipeline_run_snapshot_defaults_missing_dag_step_timeout() {
+        let steps = vec![test_step("build", "builder", Some(vec![]))];
+        let dag = crate::pipeline::dag::build_dag(&steps).unwrap();
+        let run = PipelineRun::new("issue-1".to_string(), 1, dag);
+
+        let mut value = serde_json::to_value(run.to_snapshot()).unwrap();
+        let dag_steps = value["dag_steps"].as_array_mut().unwrap();
+        dag_steps[0].as_object_mut().unwrap().remove("timeout_ms");
+
+        let decoded: PipelineRunSnapshot = serde_json::from_value(value).unwrap();
+        let restored = PipelineRun::from_snapshot(decoded).unwrap();
+
+        assert_eq!(restored.step("build").unwrap().timeout_ms, None);
+    }
+
+    #[test]
     fn pipeline_run_snapshot_normalizes_stale_running_steps_to_pending() {
         let steps = vec![test_step("build", "builder", Some(vec![]))];
         let dag = crate::pipeline::dag::build_dag(&steps).unwrap();

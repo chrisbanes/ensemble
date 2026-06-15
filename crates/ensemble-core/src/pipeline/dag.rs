@@ -12,6 +12,7 @@ pub struct DagStep {
     pub agent: String,
     pub kind: StepKind,
     pub tracker_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
     pub approval: Option<StepApprovalConfig>,
     pub on_failure: OnFailure,
