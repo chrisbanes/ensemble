@@ -192,8 +192,8 @@ mod tests {
             truncated: None,
         };
 
-        let value = serde_json::to_value(WsServerMessage::TranscriptRecord { data: &record })
-            .unwrap();
+        let value =
+            serde_json::to_value(WsServerMessage::TranscriptRecord { data: &record }).unwrap();
 
         assert_eq!(value["type"], "transcript_record");
         assert_eq!(value["data"]["issue_identifier"], "repo#1");

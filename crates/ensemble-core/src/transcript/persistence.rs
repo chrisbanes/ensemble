@@ -52,9 +52,7 @@ impl TranscriptPersistence {
             while let Some(command) = receiver.recv().await {
                 match command {
                     TranscriptPersistCommand::Record(req) => {
-                        state
-                            .write_request(&writer, req, event_bus.as_ref())
-                            .await;
+                        state.write_request(&writer, req, event_bus.as_ref()).await;
                     }
                     TranscriptPersistCommand::FlushStep { run_id, step_name } => {
                         state

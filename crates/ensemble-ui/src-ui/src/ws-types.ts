@@ -6,5 +6,3 @@ export type {
   WsSnapshotMessage,
   WsTranscriptRecordMessage,
 } from "./ws-events";
-
-import type { WsMessage } from "./ws-events";
