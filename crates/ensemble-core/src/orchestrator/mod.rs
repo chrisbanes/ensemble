@@ -10631,6 +10631,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -10689,6 +10690,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
@@ -10757,6 +10759,7 @@ agent:
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
+            observed_timeouts: None,
             cancellation_probe: None,
         });
         let dir = tempfile::TempDir::new().unwrap();
