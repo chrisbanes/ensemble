@@ -156,13 +156,21 @@ export function useTimelineQuery(identifier: string, runId?: string, limit = 200
 export interface StepDetailSnapshot {
   issue_identifier: string;
   issue_id: string;
+  run_id?: string | null;
   step_name: string;
   status: string;
   agent: string;
   dependencies: string[];
   can_navigate: boolean;
   verdict: string | null;
+  transcript?: StepTranscriptArtifact | null;
   recent_events: TimelineEventRecord[];
+}
+
+export interface StepTranscriptArtifact {
+  step_name: string;
+  run_id: string;
+  record_count: number;
 }
 
 export function useStepDetailQuery(identifier: string, stepName: string) {

@@ -1,3 +1,4 @@
+use crate::history::artifacts::{RunArtifacts, StepTranscriptArtifact};
 use crate::interaction::store::InteractionStore;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
 use crate::pipeline::engine::{PipelineRun, StepState};
@@ -129,6 +130,7 @@ pub struct IssueDetailSnapshot {
     pub finalize: FinalizeSnapshot,
     pub workflow_steps: Vec<WorkflowStepInfo>,
     pub issue: IssueSummary,
+    pub artifacts: Option<RunArtifacts>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -177,6 +179,8 @@ pub struct StepDetailSnapshot {
     pub dependencies: Vec<String>,
     pub can_navigate: bool,
     pub verdict: Option<String>,
+    pub run_id: Option<String>,
+    pub transcript: Option<StepTranscriptArtifact>,
     pub recent_events: Vec<crate::timeline::model::TimelineEventRecord>,
 }
 
@@ -479,6 +483,8 @@ pub fn build_step_detail_snapshot(
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
         verdict: detail_state.verdict,
+        run_id: detail_state.run_id,
+        transcript: None,
         recent_events,
     })
 }
@@ -632,6 +638,7 @@ pub async fn build_issue_snapshot(
         }
     };
 
+    let artifacts = state.artifacts.get(&issue_id).cloned();
     let pipeline_run = state.pipeline_runs.get(&issue_id);
     let config = state.pipeline_configs.get(&issue_id);
 
@@ -727,6 +734,7 @@ pub async fn build_issue_snapshot(
         finalize,
         workflow_steps,
         issue: issue_summary,
+        artifacts,
     })
 }
 

@@ -83,7 +83,7 @@ const hooksMock = vi.hoisted(() => {
             payload: { text: "I am ready" },
           },
         ],
-      },
+      } as any,
       isLoading: false,
       isError: false,
     })),
@@ -185,7 +185,7 @@ describe("RunTranscript", () => {
             },
           },
         ],
-      },
+      } as any,
     ];
 
     render(
@@ -321,7 +321,7 @@ describe("IssueDetail", () => {
             payload: { text: "stale hello" },
           },
         ],
-      },
+      } as any,
       isLoading: false,
       isError: false,
     }));
@@ -705,5 +705,91 @@ describe("IssueDetail", () => {
       { limit: 200 },
     );
     expect(screen.getByText("completed build record")).toBeInTheDocument();
+  });
+
+  it("renders durable artifacts and keeps workflow steps clickable when can_navigate is false", async () => {
+    const user = userEvent.setup();
+
+    hooksMock.useIssueDetailQuery.mockReturnValue({
+      data: {
+        issue_identifier: "todo-1",
+        issue_id: "NODE_1",
+        status: "completed_succeeded",
+        running: null,
+        attempts: { restart_count: 0, current_retry_attempt: null },
+        retry: null,
+        pending_input: null,
+        current_interaction: null,
+        last_error: null,
+        issue: { title: "Deploy feature", labels: [] },
+        workspace: { path: "/tmp/workspace" },
+        finalize: { status: "not_required", repos: [] },
+        artifacts: {
+          run_id: "run-1",
+          workspace_path: "/tmp/workspace",
+          repos: [
+            {
+              repo: "repo",
+              worktree_path: "/tmp/workspace/repo",
+              base_branch: "main",
+              branch: "ensemble/todo-1",
+              head_sha: "abc123",
+              changed_files: ["src/lib.rs"],
+              finalize_mode: "push_and_pr",
+              finalize_status: "succeeded",
+              pushed_ref: "origin/ensemble/todo-1",
+              pr_url: "https://github.com/acme/repo/pull/1",
+              last_error: null,
+            },
+          ],
+          transcripts: [{ step_name: "deploy", run_id: "run-1", record_count: 4 }],
+        },
+        workflow_steps: [
+          {
+            name: "deploy",
+            agent: "builder",
+            kind: "agent",
+            dependencies: [],
+            state: "passed",
+            can_navigate: false,
+          },
+        ],
+      } as any,
+      isLoading: false,
+      isError: false,
+      error: null,
+    });
+
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false },
+      },
+    });
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/issue/todo-1"]}>{children}</MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    render(
+      <Routes>
+        <Route path="/issue/:identifier" element={<IssueDetail />} />
+      </Routes>,
+      { wrapper },
+    );
+
+    expect(screen.getByRole("link", { name: "deploy" })).toHaveAttribute(
+      "href",
+      "/issue/todo-1/step/deploy",
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Artifacts" }));
+
+    expect(screen.getByText("/tmp/workspace")).toBeInTheDocument();
+    expect(screen.getByText("ensemble/todo-1")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /pull request/i })).toHaveAttribute(
+      "href",
+      "https://github.com/acme/repo/pull/1",
+    );
   });
 });

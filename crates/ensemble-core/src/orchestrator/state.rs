@@ -8,6 +8,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
+use crate::history::artifacts::RunArtifacts;
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
@@ -140,6 +141,8 @@ pub struct OrchestratorState {
     pub pipeline_runs: HashMap<String, PipelineRun>,
     /// Finalization state for issues that have finished pipeline execution.
     pub finalize: HashMap<String, IssueFinalizeState>,
+    /// Durable run artifacts collected before history is written.
+    pub artifacts: HashMap<String, RunArtifacts>,
     /// Immutable config snapshot for each active pipeline run.
     pub pipeline_configs: HashMap<String, std::sync::Arc<EnsembleConfig>>,
     /// Timestamp of the last orchestrator poll tick.
@@ -181,6 +184,7 @@ impl OrchestratorState {
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
             finalize: HashMap::new(),
+            artifacts: HashMap::new(),
             pipeline_configs: HashMap::new(),
             last_tick_at: None,
             active_states_lower: Vec::new(),
@@ -350,6 +354,7 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        self.artifacts.remove(issue_id);
         self.step_states.remove(issue_id);
         if let Some(run_id) = self.issue_run_ids.remove(issue_id) {
             self.timeline_sequences.remove(&run_id);

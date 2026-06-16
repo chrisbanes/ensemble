@@ -49,13 +49,19 @@ impl HistoryStore {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(io::Error::other)?;
+            let artifacts_json = record
+                .artifacts
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(io::Error::other)?;
             tx.execute(
                 r#"
                 INSERT INTO runs (
                     run_id, issue_id, issue_identifier, outcome, steps_traversed, attempts,
                     duration_seconds, started_at, completed_at, last_error, verdict,
-                    workspace_path, input_tokens, output_tokens, total_tokens
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    workspace_path, input_tokens, output_tokens, total_tokens, artifacts
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT(run_id) DO UPDATE SET
                     issue_id = excluded.issue_id,
                     issue_identifier = excluded.issue_identifier,
@@ -70,7 +76,8 @@ impl HistoryStore {
                     workspace_path = excluded.workspace_path,
                     input_tokens = excluded.input_tokens,
                     output_tokens = excluded.output_tokens,
-                    total_tokens = excluded.total_tokens
+                    total_tokens = excluded.total_tokens,
+                    artifacts = excluded.artifacts
                 "#,
                 params![
                     run_id,
@@ -88,6 +95,7 @@ impl HistoryStore {
                     record.tokens.input_tokens,
                     record.tokens.output_tokens,
                     record.tokens.total_tokens,
+                    artifacts_json,
                 ],
             )
             .map_err(io::Error::other)?;
@@ -182,7 +190,7 @@ impl HistoryStore {
             })?;
 
             let page_sql = format!(
-                "SELECT issue_id, issue_identifier, outcome, steps_traversed, attempts, duration_seconds, started_at, completed_at, last_error, verdict, workspace_path, input_tokens, output_tokens, total_tokens FROM runs{where_sql} ORDER BY completed_at DESC LIMIT ? OFFSET ?"
+                "SELECT issue_id, issue_identifier, outcome, steps_traversed, attempts, duration_seconds, started_at, completed_at, last_error, verdict, workspace_path, input_tokens, output_tokens, total_tokens, artifacts FROM runs{where_sql} ORDER BY completed_at DESC LIMIT ? OFFSET ?"
             );
             let mut page_params = base_params;
             page_params.push(Value::from(limit_i64));
@@ -311,6 +319,7 @@ mod tests {
             last_error: None,
             verdict: Some("approved".into()),
             workspace_path: format!("/tmp/{identifier}"),
+            artifacts: None,
         }
     }
 
@@ -344,6 +353,47 @@ mod tests {
         let response = store.read_history(&HistoryQuery::default()).await.unwrap();
         assert_eq!(response.total, 1);
         assert_eq!(response.records[0].issue_identifier, "repo#1");
+    }
+
+    #[tokio::test]
+    async fn append_history_record_round_trips_artifacts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
+        let mut record = sample_history("repo#1");
+        record.artifacts = Some(crate::history::artifacts::RunArtifacts {
+            run_id: "run-1".into(),
+            workspace_path: "/tmp/repo-1".into(),
+            repos: vec![crate::history::artifacts::RepoArtifact {
+                repo: "repo".into(),
+                worktree_path: "/tmp/repo-1/repo".into(),
+                base_branch: "main".into(),
+                branch: "ensemble/repo-1".into(),
+                head_sha: Some("abc123".into()),
+                changed_files: vec!["Cargo.toml".into()],
+                finalize_mode: "push_and_pr".into(),
+                finalize_status: "succeeded".into(),
+                pushed_ref: Some("origin/ensemble/repo-1".into()),
+                pr_url: Some("https://github.com/acme/repo/pull/12".into()),
+                last_error: None,
+            }],
+            transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
+                step_name: "build".into(),
+                run_id: "run-1".into(),
+                record_count: 2,
+            }],
+        });
+
+        store.append_history_record("run-1", &record).await.unwrap();
+
+        let response = store.read_history(&HistoryQuery::default()).await.unwrap();
+        let artifacts = response.records[0].artifacts.as_ref().unwrap();
+        assert_eq!(
+            artifacts.repos[0].pr_url.as_deref(),
+            Some("https://github.com/acme/repo/pull/12")
+        );
+        assert_eq!(artifacts.transcripts[0].step_name, "build");
     }
 
     #[tokio::test]

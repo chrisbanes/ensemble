@@ -28,6 +28,7 @@ use crate::agent::events::{
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
 use crate::error::{AgentError, EnsembleError};
+use crate::history::artifacts::{FinalizeActionOutput, RunArtifacts};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
 use crate::history_store::store::HistoryStore;
@@ -138,6 +139,26 @@ pub struct OrchestratorRuntimeParts {
     pub event_bus: EventBus,
     pub transcript_event_bus: TranscriptEventBus,
     pub workspace_root: std::path::PathBuf,
+}
+
+struct RunningHistoryRecordInput<'a> {
+    issue_id: &'a str,
+    outcome: &'a str,
+    last_error: Option<String>,
+    running_entry: &'a crate::tracker::model::RunningEntry,
+    run: &'a PipelineRun,
+    completed_at: chrono::DateTime<Utc>,
+    artifacts: Option<RunArtifacts>,
+}
+
+struct WaitingHistoryRecordInput<'a> {
+    issue_id: &'a str,
+    outcome: &'a str,
+    last_error: Option<String>,
+    waiting_entry: &'a WaitingOnHumanEntry,
+    run: &'a PipelineRun,
+    completed_at: chrono::DateTime<Utc>,
+    artifacts: Option<RunArtifacts>,
 }
 
 impl Orchestrator {
@@ -453,14 +474,15 @@ impl Orchestrator {
                     }
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
-                            self.build_history_record(
-                                &issue.id,
-                                HISTORY_OUTCOME_STOPPED,
-                                None,
-                                entry,
+                            self.build_history_record(RunningHistoryRecordInput {
+                                issue_id: &issue.id,
+                                outcome: HISTORY_OUTCOME_STOPPED,
+                                last_error: None,
+                                running_entry: entry,
                                 run,
-                                Utc::now(),
-                            )
+                                completed_at: Utc::now(),
+                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                            })
                         })
                     });
                     let waiting_entry = state.waiting_on_human.get(&issue.id).cloned();
@@ -509,14 +531,15 @@ impl Orchestrator {
                     }
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
-                            self.build_history_record(
-                                &issue.id,
-                                HISTORY_OUTCOME_STOPPED,
-                                None,
-                                entry,
+                            self.build_history_record(RunningHistoryRecordInput {
+                                issue_id: &issue.id,
+                                outcome: HISTORY_OUTCOME_STOPPED,
+                                last_error: None,
+                                running_entry: entry,
                                 run,
-                                Utc::now(),
-                            )
+                                completed_at: Utc::now(),
+                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                            })
                         })
                     });
                     let interaction_request_id = state
@@ -670,7 +693,7 @@ impl Orchestrator {
                             "restored pipeline already succeeded"
                         );
                         let finalize_state = self
-                            .run_finalize_phase(&issue.identifier, &config_snapshot)
+                            .run_finalize_phase(&issue.id, &issue.identifier, &config_snapshot)
                             .await;
                         let completed_at = Utc::now();
                         let (history_record, history_run_id, release_run_id, should_release) = {
@@ -680,14 +703,15 @@ impl Orchestrator {
                                 .get(&issue.id)
                                 .zip(state.get_pipeline_run(&issue.id))
                                 .map(|(entry, run)| {
-                                    self.build_history_record(
-                                        &issue.id,
-                                        HISTORY_OUTCOME_SUCCEEDED,
-                                        None,
-                                        entry,
+                                    self.build_history_record(RunningHistoryRecordInput {
+                                        issue_id: &issue.id,
+                                        outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                        last_error: None,
+                                        running_entry: entry,
                                         run,
                                         completed_at,
-                                    )
+                                        artifacts: state.artifacts.get(&issue.id).cloned(),
+                                    })
                                 });
                             let running_entry = state.get_running(&issue.id).cloned();
                             let history_run_id = running_entry
@@ -1437,8 +1461,9 @@ impl Orchestrator {
                                 .as_ref()
                                 .map(|issue| issue.identifier.clone())
                                 .unwrap_or_else(|| issue_id.to_string());
-                            let finalize_state =
-                                self.run_finalize_phase(&issue_identifier, &config).await;
+                            let finalize_state = self
+                                .run_finalize_phase(issue_id, &issue_identifier, &config)
+                                .await;
 
                             let completed_at = Utc::now();
                             let history_record = state
@@ -1446,14 +1471,15 @@ impl Orchestrator {
                                 .get(issue_id)
                                 .zip(state.get_pipeline_run(issue_id))
                                 .map(|(entry, run)| {
-                                    self.build_history_record(
+                                    self.build_history_record(RunningHistoryRecordInput {
                                         issue_id,
-                                        HISTORY_OUTCOME_SUCCEEDED,
-                                        None,
-                                        entry,
+                                        outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                        last_error: None,
+                                        running_entry: entry,
                                         run,
                                         completed_at,
-                                    )
+                                        artifacts: state.artifacts.get(issue_id).cloned(),
+                                    })
                                 });
 
                             // Get running entry data before removing
@@ -1590,12 +1616,18 @@ impl Orchestrator {
                                                             run, &step,
                                                         );
                                                     self.build_history_record(
-                                                        issue_id,
-                                                        HISTORY_OUTCOME_FAILED,
-                                                        Some(reason.clone()),
-                                                        &entry,
-                                                        run,
-                                                        completed_at,
+                                                        RunningHistoryRecordInput {
+                                                            issue_id,
+                                                            outcome: HISTORY_OUTCOME_FAILED,
+                                                            last_error: Some(reason.clone()),
+                                                            running_entry: &entry,
+                                                            run,
+                                                            completed_at,
+                                                            artifacts: state
+                                                                .artifacts
+                                                                .get(issue_id)
+                                                                .cloned(),
+                                                        },
                                                     )
                                                 });
                                         }
@@ -1693,12 +1725,18 @@ impl Orchestrator {
                                                             run, &step,
                                                         );
                                                     self.build_history_record(
-                                                        issue_id,
-                                                        HISTORY_OUTCOME_FAILED,
-                                                        Some(reason.clone()),
-                                                        &entry,
-                                                        run,
-                                                        completed_at,
+                                                        RunningHistoryRecordInput {
+                                                            issue_id,
+                                                            outcome: HISTORY_OUTCOME_FAILED,
+                                                            last_error: Some(reason.clone()),
+                                                            running_entry: &entry,
+                                                            run,
+                                                            completed_at,
+                                                            artifacts: state
+                                                                .artifacts
+                                                                .get(issue_id)
+                                                                .cloned(),
+                                                        },
                                                     )
                                                 });
                                         }
@@ -1820,12 +1858,18 @@ impl Orchestrator {
                                                             run, &step,
                                                         );
                                                     self.build_history_record(
-                                                        issue_id,
-                                                        HISTORY_OUTCOME_FAILED,
-                                                        Some(reason.clone()),
-                                                        &entry,
-                                                        run,
-                                                        completed_at,
+                                                        RunningHistoryRecordInput {
+                                                            issue_id,
+                                                            outcome: HISTORY_OUTCOME_FAILED,
+                                                            last_error: Some(reason.clone()),
+                                                            running_entry: &entry,
+                                                            run,
+                                                            completed_at,
+                                                            artifacts: state
+                                                                .artifacts
+                                                                .get(issue_id)
+                                                                .cloned(),
+                                                        },
                                                     )
                                                 });
                                         }
@@ -2043,14 +2087,15 @@ impl Orchestrator {
                     final_failure = retry_scheduled.is_none();
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(error.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(error.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if final_failure {
@@ -2152,14 +2197,15 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(reason.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(reason.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -2247,14 +2293,15 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(reason.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(reason.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -2366,14 +2413,15 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(reason.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(reason.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -3390,6 +3438,7 @@ impl Orchestrator {
 
     async fn run_finalize_phase(
         &self,
+        issue_id: &str,
         issue_identifier: &str,
         _config: &EnsembleConfig,
     ) -> IssueFinalizeState {
@@ -3446,9 +3495,11 @@ impl Orchestrator {
                     repo: repo_name.clone(),
                     mode: mode_name,
                     approval_required: true,
-                    status,
+                    status: status.clone(),
                     last_error: None,
                 });
+                self.update_repo_artifact_finalize_status(issue_id, repo_name, status, None)
+                    .await;
                 continue;
             }
 
@@ -3465,6 +3516,13 @@ impl Orchestrator {
                     status: FinalizeStatus::Failed,
                     last_error: Some("worktree not found for repo".to_string()),
                 });
+                self.update_repo_artifact_finalize_status(
+                    issue_id,
+                    repo_name,
+                    FinalizeStatus::Failed,
+                    Some("worktree not found for repo".to_string()),
+                )
+                .await;
                 continue;
             };
 
@@ -3478,20 +3536,33 @@ impl Orchestrator {
                 .await;
 
             match finalize_result {
-                Ok(()) => repos.push(RepoFinalizeState {
-                    repo: repo_name.clone(),
-                    mode: mode_name,
-                    approval_required: false,
-                    status: FinalizeStatus::Succeeded,
-                    last_error: None,
-                }),
-                Err(error) => repos.push(RepoFinalizeState {
-                    repo: repo_name.clone(),
-                    mode: mode_name,
-                    approval_required: false,
-                    status: FinalizeStatus::Failed,
-                    last_error: Some(error),
-                }),
+                Ok(output) => {
+                    repos.push(RepoFinalizeState {
+                        repo: repo_name.clone(),
+                        mode: mode_name,
+                        approval_required: false,
+                        status: FinalizeStatus::Succeeded,
+                        last_error: None,
+                    });
+                    self.update_repo_artifact_finalize_output(issue_id, repo_name, output)
+                        .await;
+                }
+                Err(error) => {
+                    repos.push(RepoFinalizeState {
+                        repo: repo_name.clone(),
+                        mode: mode_name,
+                        approval_required: false,
+                        status: FinalizeStatus::Failed,
+                        last_error: Some(error.clone()),
+                    });
+                    self.update_repo_artifact_finalize_status(
+                        issue_id,
+                        repo_name,
+                        FinalizeStatus::Failed,
+                        Some(error),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -3587,7 +3658,7 @@ impl Orchestrator {
         };
 
         let repo_configs = self.workspace_mgr.repos().clone();
-        let mut outcomes: HashMap<String, Result<(), String>> = HashMap::new();
+        let mut outcomes: HashMap<String, Result<FinalizeActionOutput, String>> = HashMap::new();
 
         for repo_name in &retry_repo_names {
             let Some(repo_config) = repo_configs.get(repo_name) else {
@@ -3626,7 +3697,7 @@ impl Orchestrator {
                 for repo in &mut finalize.repos {
                     if let Some(result) = outcomes.get(&repo.repo) {
                         match result {
-                            Ok(()) => {
+                            Ok(_) => {
                                 repo.status = FinalizeStatus::Succeeded;
                                 repo.last_error = None;
                             }
@@ -3691,6 +3762,25 @@ impl Orchestrator {
                 }
             }
 
+            if let Some(artifacts) = state.artifacts.get_mut(issue_id) {
+                for repo_artifact in &mut artifacts.repos {
+                    if let Some(result) = outcomes.get(&repo_artifact.repo) {
+                        match result {
+                            Ok(output) => {
+                                repo_artifact.finalize_status = "succeeded".to_string();
+                                repo_artifact.pushed_ref = output.pushed_ref.clone();
+                                repo_artifact.pr_url = output.pr_url.clone();
+                                repo_artifact.last_error = None;
+                            }
+                            Err(error) => {
+                                repo_artifact.finalize_status = "failed".to_string();
+                                repo_artifact.last_error = Some(error.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             (final_status, should_complete, last_error)
         };
 
@@ -3725,7 +3815,7 @@ impl Orchestrator {
         remote: &str,
         base_branch: &str,
         mode: &FinalizeMode,
-    ) -> Result<(), String> {
+    ) -> Result<FinalizeActionOutput, String> {
         let push_output = tokio::process::Command::new("git")
             .arg("push")
             .arg(remote)
@@ -3748,23 +3838,13 @@ impl Orchestrator {
             ));
         }
 
-        if matches!(mode, FinalizeMode::PushAndPr) {
-            let branch_output = tokio::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(repo_path)
-                .output()
-                .await
-                .map_err(|error| format!("failed to resolve branch: {error}"))?;
-            if !branch_output.status.success() {
-                return Err(format!(
-                    "failed to resolve current branch: {}",
-                    String::from_utf8_lossy(&branch_output.stderr)
-                ));
-            }
-            let current_branch = String::from_utf8_lossy(&branch_output.stdout)
-                .trim()
-                .to_string();
+        let current_branch = Self::current_branch(repo_path).await?;
+        let mut output = FinalizeActionOutput {
+            pushed_ref: Some(format!("{remote}/{current_branch}")),
+            pr_url: None,
+        };
 
+        if matches!(mode, FinalizeMode::PushAndPr) {
             let pr_output = tokio::process::Command::new("gh")
                 .args([
                     "pr",
@@ -3818,17 +3898,106 @@ impl Orchestrator {
 
                     if pr_lookup_output.status.success() {
                         let pr_lookup_stdout = String::from_utf8_lossy(&pr_lookup_output.stdout);
-                        if pr_lookup_stdout.trim() != "[]" {
-                            return Ok(());
+                        if let Some(pr_url) = Self::parse_first_pr_url(&pr_lookup_stdout) {
+                            output.pr_url = Some(pr_url);
+                            return Ok(output);
                         }
                     }
                 }
 
                 return Err(format!("gh pr create failed: {pr_create_stderr}"));
             }
+
+            output.pr_url = Self::parse_first_pr_url(&String::from_utf8_lossy(&pr_output.stdout));
         }
 
-        Ok(())
+        Ok(output)
+    }
+
+    async fn current_branch(repo_path: &std::path::Path) -> Result<String, String> {
+        let branch_output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(repo_path)
+            .output()
+            .await
+            .map_err(|error| format!("failed to resolve branch: {error}"))?;
+        if !branch_output.status.success() {
+            return Err(format!(
+                "failed to resolve current branch: {}",
+                String::from_utf8_lossy(&branch_output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string())
+    }
+
+    fn parse_first_pr_url(stdout: &str) -> Option<String> {
+        let trimmed = stdout.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return Some(trimmed.lines().next().unwrap_or(trimmed).trim().to_string());
+        }
+        serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
+            .ok()
+            .and_then(|values| {
+                values
+                    .first()
+                    .and_then(|value| value.get("url"))
+                    .and_then(|url| url.as_str())
+                    .map(ToString::to_string)
+            })
+    }
+
+    async fn update_repo_artifact_finalize_output(
+        &self,
+        issue_id: &str,
+        repo_name: &str,
+        output: FinalizeActionOutput,
+    ) {
+        let mut state = self.state.write().await;
+        if let Some(artifacts) = state.artifacts.get_mut(issue_id) {
+            if let Some(repo_artifact) = artifacts
+                .repos
+                .iter_mut()
+                .find(|artifact| artifact.repo == repo_name)
+            {
+                repo_artifact.finalize_status = "succeeded".to_string();
+                repo_artifact.pushed_ref = output.pushed_ref;
+                repo_artifact.pr_url = output.pr_url;
+                repo_artifact.last_error = None;
+            }
+        }
+    }
+
+    async fn update_repo_artifact_finalize_status(
+        &self,
+        issue_id: &str,
+        repo_name: &str,
+        status: FinalizeStatus,
+        last_error: Option<String>,
+    ) {
+        let mut state = self.state.write().await;
+        if let Some(artifacts) = state.artifacts.get_mut(issue_id) {
+            if let Some(repo_artifact) = artifacts
+                .repos
+                .iter_mut()
+                .find(|artifact| artifact.repo == repo_name)
+            {
+                repo_artifact.finalize_status = Self::finalize_status_name(&status).to_string();
+                repo_artifact.last_error = last_error;
+            }
+        }
+    }
+
+    fn finalize_status_name(status: &FinalizeStatus) -> &'static str {
+        match status {
+            FinalizeStatus::NotRequired => "not_required",
+            FinalizeStatus::PendingApproval => "pending_approval",
+            FinalizeStatus::InProgress => "in_progress",
+            FinalizeStatus::Succeeded => "succeeded",
+            FinalizeStatus::Failed => "failed",
+            FinalizeStatus::SkippedHeadless => "skipped_headless",
+        }
     }
 
     fn pipeline_has_running_steps(run: &PipelineRun) -> bool {
@@ -3837,88 +4006,80 @@ impl Orchestrator {
             .any(|step_state| matches!(step_state, StepState::Running { .. }))
     }
 
-    fn build_history_record(
-        &self,
-        issue_id: &str,
-        outcome: &str,
-        last_error: Option<String>,
-        running_entry: &crate::tracker::model::RunningEntry,
-        run: &PipelineRun,
-        completed_at: chrono::DateTime<Utc>,
-    ) -> HistoryRecord {
-        let steps_traversed = run.traversed_steps_in_order();
+    fn build_history_record(&self, input: RunningHistoryRecordInput<'_>) -> HistoryRecord {
+        let steps_traversed = input.run.traversed_steps_in_order();
 
-        let duration_seconds = completed_at
-            .signed_duration_since(running_entry.started_at)
+        let duration_seconds = input
+            .completed_at
+            .signed_duration_since(input.running_entry.started_at)
             .num_seconds()
             .max(0) as u64;
 
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(&running_entry.identifier)
+            .workspace_path(&input.running_entry.identifier)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
 
         HistoryRecord {
-            issue_identifier: running_entry.identifier.clone(),
-            issue_id: issue_id.to_string(),
-            outcome: outcome.to_string(),
+            issue_identifier: input.running_entry.identifier.clone(),
+            issue_id: input.issue_id.to_string(),
+            outcome: input.outcome.to_string(),
             steps_traversed,
-            attempts: running_entry.retry_attempt.unwrap_or(1),
+            attempts: input.running_entry.retry_attempt.unwrap_or(1),
             tokens: TokenTotals {
-                input_tokens: running_entry.agent_input_tokens,
-                output_tokens: running_entry.agent_output_tokens,
-                total_tokens: running_entry.agent_total_tokens,
+                input_tokens: input.running_entry.agent_input_tokens,
+                output_tokens: input.running_entry.agent_output_tokens,
+                total_tokens: input.running_entry.agent_total_tokens,
             },
             duration_seconds,
-            started_at: running_entry.started_at,
-            completed_at,
-            last_error,
-            verdict: Self::history_verdict(run),
+            started_at: input.running_entry.started_at,
+            completed_at: input.completed_at,
+            last_error: input.last_error,
+            verdict: Self::history_verdict(input.run),
             workspace_path,
+            artifacts: input.artifacts,
         }
     }
 
     fn build_history_record_from_waiting(
         &self,
-        issue_id: &str,
-        outcome: &str,
-        last_error: Option<String>,
-        waiting_entry: &WaitingOnHumanEntry,
-        run: &PipelineRun,
-        completed_at: chrono::DateTime<Utc>,
+        input: WaitingHistoryRecordInput<'_>,
     ) -> HistoryRecord {
-        let steps_traversed = run.traversed_steps_in_order();
-        let started_at = waiting_entry
+        let steps_traversed = input.run.traversed_steps_in_order();
+        let started_at = input
+            .waiting_entry
             .started_at
-            .unwrap_or(waiting_entry.requested_at);
-        let duration_seconds = completed_at
+            .unwrap_or(input.waiting_entry.requested_at);
+        let duration_seconds = input
+            .completed_at
             .signed_duration_since(started_at)
             .num_seconds()
             .max(0) as u64;
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(&waiting_entry.identifier)
+            .workspace_path(&input.waiting_entry.identifier)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
 
         HistoryRecord {
-            issue_identifier: waiting_entry.identifier.clone(),
-            issue_id: issue_id.to_string(),
-            outcome: outcome.to_string(),
+            issue_identifier: input.waiting_entry.identifier.clone(),
+            issue_id: input.issue_id.to_string(),
+            outcome: input.outcome.to_string(),
             steps_traversed,
-            attempts: waiting_entry.retry_attempt.unwrap_or(1),
+            attempts: input.waiting_entry.retry_attempt.unwrap_or(1),
             tokens: TokenTotals {
-                input_tokens: waiting_entry.agent_input_tokens,
-                output_tokens: waiting_entry.agent_output_tokens,
-                total_tokens: waiting_entry.agent_total_tokens,
+                input_tokens: input.waiting_entry.agent_input_tokens,
+                output_tokens: input.waiting_entry.agent_output_tokens,
+                total_tokens: input.waiting_entry.agent_total_tokens,
             },
             duration_seconds,
             started_at,
-            completed_at,
-            last_error,
-            verdict: Self::history_verdict(run),
+            completed_at: input.completed_at,
+            last_error: input.last_error,
+            verdict: Self::history_verdict(input.run),
             workspace_path,
+            artifacts: input.artifacts,
         }
     }
 
@@ -4423,7 +4584,7 @@ impl Orchestrator {
                     }
                     PipelineAction::Succeeded => {
                         let finalize_state = self
-                            .run_finalize_phase(&issue.identifier, &current_config)
+                            .run_finalize_phase(&issue.id, &issue.identifier, &current_config)
                             .await;
                         let completed_at = Utc::now();
                         let (tracker_state, history_record, tracker_error_message) = {
@@ -4432,12 +4593,15 @@ impl Orchestrator {
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
                                         self.build_history_record_from_waiting(
-                                            &issue.id,
-                                            HISTORY_OUTCOME_SUCCEEDED,
-                                            None,
-                                            entry,
-                                            run,
-                                            completed_at,
+                                            WaitingHistoryRecordInput {
+                                                issue_id: &issue.id,
+                                                outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                                last_error: None,
+                                                waiting_entry: entry,
+                                                run,
+                                                completed_at,
+                                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                                            },
                                         )
                                     })
                                 });
@@ -4508,12 +4672,15 @@ impl Orchestrator {
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
                                         self.build_history_record_from_waiting(
-                                            &issue.id,
-                                            HISTORY_OUTCOME_FAILED,
-                                            Some(reason.clone()),
-                                            entry,
-                                            run,
-                                            completed_at,
+                                            WaitingHistoryRecordInput {
+                                                issue_id: &issue.id,
+                                                outcome: HISTORY_OUTCOME_FAILED,
+                                                last_error: Some(reason.clone()),
+                                                waiting_entry: entry,
+                                                run,
+                                                completed_at,
+                                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                                            },
                                         )
                                     })
                                 });
@@ -10083,13 +10250,79 @@ agent:
         let entry = state.running.get("1").unwrap().clone();
         drop(state);
 
-        let record =
-            orchestrator.build_history_record("1", "succeeded", None, &entry, &run, Utc::now());
+        let record = orchestrator.build_history_record(RunningHistoryRecordInput {
+            issue_id: "1",
+            outcome: "succeeded",
+            last_error: None,
+            running_entry: &entry,
+            run: &run,
+            completed_at: Utc::now(),
+            artifacts: None,
+        });
 
         assert_eq!(
             record.steps_traversed,
             vec!["z-build".to_string(), "a-review".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn build_history_record_preserves_run_artifacts() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let cfg = config.read().await;
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new("1".to_string(), 1, dag);
+        run.step_states.insert(
+            "build".to_string(),
+            crate::pipeline::engine::StepState::Passed,
+        );
+        let artifacts = RunArtifacts {
+            run_id: "run-1".to_string(),
+            workspace_path: dir.path().display().to_string(),
+            repos: Vec::new(),
+            transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
+                step_name: "build".to_string(),
+                run_id: "run-1".to_string(),
+                record_count: 3,
+            }],
+        };
+        let mut state = orchestrator.state.write().await;
+        state.add_running(&test_issue("1", "Todo"), None);
+        let entry = state.running.get("1").unwrap().clone();
+        drop(state);
+
+        let record = orchestrator.build_history_record(RunningHistoryRecordInput {
+            issue_id: "1",
+            outcome: "succeeded",
+            last_error: None,
+            running_entry: &entry,
+            run: &run,
+            completed_at: Utc::now(),
+            artifacts: Some(artifacts.clone()),
+        });
+
+        assert_eq!(record.artifacts, Some(artifacts));
     }
 
     #[tokio::test]
