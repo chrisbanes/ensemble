@@ -219,9 +219,7 @@ fn issue_snapshot_from_history_record(
 
     let workspace_path = if record.workspace_path.is_empty() {
         let key = sanitize_workspace_key(identifier);
-        let Some(key) = key else {
-            return None;
-        };
+        let key = key?;
         format!("{}/{}", workspace_root, key)
     } else {
         record.workspace_path.clone()

@@ -141,6 +141,26 @@ pub struct OrchestratorRuntimeParts {
     pub workspace_root: std::path::PathBuf,
 }
 
+struct RunningHistoryRecordInput<'a> {
+    issue_id: &'a str,
+    outcome: &'a str,
+    last_error: Option<String>,
+    running_entry: &'a crate::tracker::model::RunningEntry,
+    run: &'a PipelineRun,
+    completed_at: chrono::DateTime<Utc>,
+    artifacts: Option<RunArtifacts>,
+}
+
+struct WaitingHistoryRecordInput<'a> {
+    issue_id: &'a str,
+    outcome: &'a str,
+    last_error: Option<String>,
+    waiting_entry: &'a WaitingOnHumanEntry,
+    run: &'a PipelineRun,
+    completed_at: chrono::DateTime<Utc>,
+    artifacts: Option<RunArtifacts>,
+}
+
 impl Orchestrator {
     fn effective_step_timeout_ms(timeout_ms: Option<u64>, config: &EnsembleConfig) -> u64 {
         timeout_ms.unwrap_or(config.agent.turn_timeout_ms)
@@ -452,15 +472,15 @@ impl Orchestrator {
                     }
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
-                            self.build_history_record(
-                                &issue.id,
-                                HISTORY_OUTCOME_STOPPED,
-                                None,
-                                entry,
+                            self.build_history_record(RunningHistoryRecordInput {
+                                issue_id: &issue.id,
+                                outcome: HISTORY_OUTCOME_STOPPED,
+                                last_error: None,
+                                running_entry: entry,
                                 run,
-                                Utc::now(),
-                                state.artifacts.get(&issue.id).cloned(),
-                            )
+                                completed_at: Utc::now(),
+                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                            })
                         })
                     });
                     let waiting_entry = state.waiting_on_human.get(&issue.id).cloned();
@@ -509,15 +529,15 @@ impl Orchestrator {
                     }
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(&issue.id).map(|run| {
-                            self.build_history_record(
-                                &issue.id,
-                                HISTORY_OUTCOME_STOPPED,
-                                None,
-                                entry,
+                            self.build_history_record(RunningHistoryRecordInput {
+                                issue_id: &issue.id,
+                                outcome: HISTORY_OUTCOME_STOPPED,
+                                last_error: None,
+                                running_entry: entry,
                                 run,
-                                Utc::now(),
-                                state.artifacts.get(&issue.id).cloned(),
-                            )
+                                completed_at: Utc::now(),
+                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                            })
                         })
                     });
                     let interaction_request_id = state
@@ -681,15 +701,15 @@ impl Orchestrator {
                                 .get(&issue.id)
                                 .zip(state.get_pipeline_run(&issue.id))
                                 .map(|(entry, run)| {
-                                    self.build_history_record(
-                                        &issue.id,
-                                        HISTORY_OUTCOME_SUCCEEDED,
-                                        None,
-                                        entry,
+                                    self.build_history_record(RunningHistoryRecordInput {
+                                        issue_id: &issue.id,
+                                        outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                        last_error: None,
+                                        running_entry: entry,
                                         run,
                                         completed_at,
-                                        state.artifacts.get(&issue.id).cloned(),
-                                    )
+                                        artifacts: state.artifacts.get(&issue.id).cloned(),
+                                    })
                                 });
                             let running_entry = state.get_running(&issue.id).cloned();
                             let history_run_id = running_entry
@@ -1449,15 +1469,15 @@ impl Orchestrator {
                                 .get(issue_id)
                                 .zip(state.get_pipeline_run(issue_id))
                                 .map(|(entry, run)| {
-                                    self.build_history_record(
+                                    self.build_history_record(RunningHistoryRecordInput {
                                         issue_id,
-                                        HISTORY_OUTCOME_SUCCEEDED,
-                                        None,
-                                        entry,
+                                        outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                        last_error: None,
+                                        running_entry: entry,
                                         run,
                                         completed_at,
-                                        state.artifacts.get(issue_id).cloned(),
-                                    )
+                                        artifacts: state.artifacts.get(issue_id).cloned(),
+                                    })
                                 });
 
                             // Get running entry data before removing
@@ -1594,13 +1614,18 @@ impl Orchestrator {
                                                             run, &step,
                                                         );
                                                     self.build_history_record(
-                                                        issue_id,
-                                                        HISTORY_OUTCOME_FAILED,
-                                                        Some(reason.clone()),
-                                                        &entry,
-                                                        run,
-                                                        completed_at,
-                                                        state.artifacts.get(issue_id).cloned(),
+                                                        RunningHistoryRecordInput {
+                                                            issue_id,
+                                                            outcome: HISTORY_OUTCOME_FAILED,
+                                                            last_error: Some(reason.clone()),
+                                                            running_entry: &entry,
+                                                            run,
+                                                            completed_at,
+                                                            artifacts: state
+                                                                .artifacts
+                                                                .get(issue_id)
+                                                                .cloned(),
+                                                        },
                                                     )
                                                 });
                                         }
@@ -1698,13 +1723,18 @@ impl Orchestrator {
                                                             run, &step,
                                                         );
                                                     self.build_history_record(
-                                                        issue_id,
-                                                        HISTORY_OUTCOME_FAILED,
-                                                        Some(reason.clone()),
-                                                        &entry,
-                                                        run,
-                                                        completed_at,
-                                                        state.artifacts.get(issue_id).cloned(),
+                                                        RunningHistoryRecordInput {
+                                                            issue_id,
+                                                            outcome: HISTORY_OUTCOME_FAILED,
+                                                            last_error: Some(reason.clone()),
+                                                            running_entry: &entry,
+                                                            run,
+                                                            completed_at,
+                                                            artifacts: state
+                                                                .artifacts
+                                                                .get(issue_id)
+                                                                .cloned(),
+                                                        },
                                                     )
                                                 });
                                         }
@@ -1826,13 +1856,18 @@ impl Orchestrator {
                                                             run, &step,
                                                         );
                                                     self.build_history_record(
-                                                        issue_id,
-                                                        HISTORY_OUTCOME_FAILED,
-                                                        Some(reason.clone()),
-                                                        &entry,
-                                                        run,
-                                                        completed_at,
-                                                        state.artifacts.get(issue_id).cloned(),
+                                                        RunningHistoryRecordInput {
+                                                            issue_id,
+                                                            outcome: HISTORY_OUTCOME_FAILED,
+                                                            last_error: Some(reason.clone()),
+                                                            running_entry: &entry,
+                                                            run,
+                                                            completed_at,
+                                                            artifacts: state
+                                                                .artifacts
+                                                                .get(issue_id)
+                                                                .cloned(),
+                                                        },
                                                     )
                                                 });
                                         }
@@ -2049,15 +2084,15 @@ impl Orchestrator {
                     final_failure = retry_scheduled.is_none();
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(error.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(error.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                                state.artifacts.get(issue_id).cloned(),
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -2162,15 +2197,15 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(reason.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(reason.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                                state.artifacts.get(issue_id).cloned(),
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -2258,15 +2293,15 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(reason.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(reason.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                                state.artifacts.get(issue_id).cloned(),
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -2378,15 +2413,15 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
-                            self.build_history_record(
+                            self.build_history_record(RunningHistoryRecordInput {
                                 issue_id,
-                                HISTORY_OUTCOME_FAILED,
-                                Some(reason.clone()),
-                                &entry,
+                                outcome: HISTORY_OUTCOME_FAILED,
+                                last_error: Some(reason.clone()),
+                                running_entry: &entry,
                                 run,
                                 completed_at,
-                                state.artifacts.get(issue_id).cloned(),
-                            )
+                                artifacts: state.artifacts.get(issue_id).cloned(),
+                            })
                         });
                     }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
@@ -3971,92 +4006,80 @@ impl Orchestrator {
             .any(|step_state| matches!(step_state, StepState::Running { .. }))
     }
 
-    fn build_history_record(
-        &self,
-        issue_id: &str,
-        outcome: &str,
-        last_error: Option<String>,
-        running_entry: &crate::tracker::model::RunningEntry,
-        run: &PipelineRun,
-        completed_at: chrono::DateTime<Utc>,
-        artifacts: Option<RunArtifacts>,
-    ) -> HistoryRecord {
-        let steps_traversed = run.traversed_steps_in_order();
+    fn build_history_record(&self, input: RunningHistoryRecordInput<'_>) -> HistoryRecord {
+        let steps_traversed = input.run.traversed_steps_in_order();
 
-        let duration_seconds = completed_at
-            .signed_duration_since(running_entry.started_at)
+        let duration_seconds = input
+            .completed_at
+            .signed_duration_since(input.running_entry.started_at)
             .num_seconds()
             .max(0) as u64;
 
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(&running_entry.identifier)
+            .workspace_path(&input.running_entry.identifier)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
 
         HistoryRecord {
-            issue_identifier: running_entry.identifier.clone(),
-            issue_id: issue_id.to_string(),
-            outcome: outcome.to_string(),
+            issue_identifier: input.running_entry.identifier.clone(),
+            issue_id: input.issue_id.to_string(),
+            outcome: input.outcome.to_string(),
             steps_traversed,
-            attempts: running_entry.retry_attempt.unwrap_or(1),
+            attempts: input.running_entry.retry_attempt.unwrap_or(1),
             tokens: TokenTotals {
-                input_tokens: running_entry.agent_input_tokens,
-                output_tokens: running_entry.agent_output_tokens,
-                total_tokens: running_entry.agent_total_tokens,
+                input_tokens: input.running_entry.agent_input_tokens,
+                output_tokens: input.running_entry.agent_output_tokens,
+                total_tokens: input.running_entry.agent_total_tokens,
             },
             duration_seconds,
-            started_at: running_entry.started_at,
-            completed_at,
-            last_error,
-            verdict: Self::history_verdict(run),
+            started_at: input.running_entry.started_at,
+            completed_at: input.completed_at,
+            last_error: input.last_error,
+            verdict: Self::history_verdict(input.run),
             workspace_path,
-            artifacts,
+            artifacts: input.artifacts,
         }
     }
 
     fn build_history_record_from_waiting(
         &self,
-        issue_id: &str,
-        outcome: &str,
-        last_error: Option<String>,
-        waiting_entry: &WaitingOnHumanEntry,
-        run: &PipelineRun,
-        completed_at: chrono::DateTime<Utc>,
-        artifacts: Option<RunArtifacts>,
+        input: WaitingHistoryRecordInput<'_>,
     ) -> HistoryRecord {
-        let steps_traversed = run.traversed_steps_in_order();
-        let started_at = waiting_entry
+        let steps_traversed = input.run.traversed_steps_in_order();
+        let started_at = input
+            .waiting_entry
             .started_at
-            .unwrap_or(waiting_entry.requested_at);
-        let duration_seconds = completed_at
+            .unwrap_or(input.waiting_entry.requested_at);
+        let duration_seconds = input
+            .completed_at
             .signed_duration_since(started_at)
             .num_seconds()
             .max(0) as u64;
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(&waiting_entry.identifier)
+            .workspace_path(&input.waiting_entry.identifier)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
 
         HistoryRecord {
-            issue_identifier: waiting_entry.identifier.clone(),
-            issue_id: issue_id.to_string(),
-            outcome: outcome.to_string(),
+            issue_identifier: input.waiting_entry.identifier.clone(),
+            issue_id: input.issue_id.to_string(),
+            outcome: input.outcome.to_string(),
             steps_traversed,
-            attempts: waiting_entry.retry_attempt.unwrap_or(1),
+            attempts: input.waiting_entry.retry_attempt.unwrap_or(1),
             tokens: TokenTotals {
-                input_tokens: waiting_entry.agent_input_tokens,
-                output_tokens: waiting_entry.agent_output_tokens,
-                total_tokens: waiting_entry.agent_total_tokens,
+                input_tokens: input.waiting_entry.agent_input_tokens,
+                output_tokens: input.waiting_entry.agent_output_tokens,
+                total_tokens: input.waiting_entry.agent_total_tokens,
             },
             duration_seconds,
             started_at,
-            completed_at,
-            last_error,
-            verdict: Self::history_verdict(run),
+            completed_at: input.completed_at,
+            last_error: input.last_error,
+            verdict: Self::history_verdict(input.run),
             workspace_path,
-            artifacts,
+            artifacts: input.artifacts,
         }
     }
 
@@ -4570,13 +4593,15 @@ impl Orchestrator {
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
                                         self.build_history_record_from_waiting(
-                                            &issue.id,
-                                            HISTORY_OUTCOME_SUCCEEDED,
-                                            None,
-                                            entry,
-                                            run,
-                                            completed_at,
-                                            state.artifacts.get(&issue.id).cloned(),
+                                            WaitingHistoryRecordInput {
+                                                issue_id: &issue.id,
+                                                outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                                last_error: None,
+                                                waiting_entry: entry,
+                                                run,
+                                                completed_at,
+                                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                                            },
                                         )
                                     })
                                 });
@@ -4647,13 +4672,15 @@ impl Orchestrator {
                                 state.waiting_on_human.get(&issue.id).and_then(|entry| {
                                     state.get_pipeline_run(&issue.id).map(|run| {
                                         self.build_history_record_from_waiting(
-                                            &issue.id,
-                                            HISTORY_OUTCOME_FAILED,
-                                            Some(reason.clone()),
-                                            entry,
-                                            run,
-                                            completed_at,
-                                            state.artifacts.get(&issue.id).cloned(),
+                                            WaitingHistoryRecordInput {
+                                                issue_id: &issue.id,
+                                                outcome: HISTORY_OUTCOME_FAILED,
+                                                last_error: Some(reason.clone()),
+                                                waiting_entry: entry,
+                                                run,
+                                                completed_at,
+                                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                                            },
                                         )
                                     })
                                 });
@@ -10073,15 +10100,15 @@ agent:
         let entry = state.running.get("1").unwrap().clone();
         drop(state);
 
-        let record = orchestrator.build_history_record(
-            "1",
-            "succeeded",
-            None,
-            &entry,
-            &run,
-            Utc::now(),
-            None,
-        );
+        let record = orchestrator.build_history_record(RunningHistoryRecordInput {
+            issue_id: "1",
+            outcome: "succeeded",
+            last_error: None,
+            running_entry: &entry,
+            run: &run,
+            completed_at: Utc::now(),
+            artifacts: None,
+        });
 
         assert_eq!(
             record.steps_traversed,
@@ -10135,15 +10162,15 @@ agent:
         let entry = state.running.get("1").unwrap().clone();
         drop(state);
 
-        let record = orchestrator.build_history_record(
-            "1",
-            "succeeded",
-            None,
-            &entry,
-            &run,
-            Utc::now(),
-            Some(artifacts.clone()),
-        );
+        let record = orchestrator.build_history_record(RunningHistoryRecordInput {
+            issue_id: "1",
+            outcome: "succeeded",
+            last_error: None,
+            running_entry: &entry,
+            run: &run,
+            completed_at: Utc::now(),
+            artifacts: Some(artifacts.clone()),
+        });
 
         assert_eq!(record.artifacts, Some(artifacts));
     }
