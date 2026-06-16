@@ -5,6 +5,7 @@ import { useStepDetailQuery } from "@/hooks";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
 import EventTimeline from "@/components/EventTimeline";
+import ConversationViewer from "@/components/ConversationViewer";
 import { timelineRecordToEventData } from "@/ws-events";
 
 export default function StepDetail() {
@@ -80,6 +81,23 @@ export default function StepDetail() {
         <h2 className="text-lg font-semibold mb-3">Recent Events</h2>
         <Card className="p-4 max-h-[600px] overflow-y-auto">
           <EventTimeline events={events} live={false} />
+        </Card>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold mb-3">Transcript</h2>
+        <Card className="p-4">
+          {data.run_id && data.transcript ? (
+            <ConversationViewer
+              identifier={identifier}
+              runId={data.run_id}
+              stepName={data.step_name}
+            />
+          ) : (
+            <div className="py-8 text-center text-sm text-muted-foreground">
+              No transcript recorded for this step yet.
+            </div>
+          )}
         </Card>
       </section>
     </div>
