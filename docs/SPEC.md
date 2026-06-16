@@ -1124,6 +1124,12 @@ Tick sequence:
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
 
+Reconciliation uses a broader active-state set than candidate dispatch. In addition to
+`tracker.active_states`, any non-terminal `steps[].tracker_state` and approval `state` written by
+the workflow are considered active for already-running or waiting issues. This prevents the
+orchestrator from abandoning a run just because it moved the tracker item into a workflow-owned
+intermediate state such as `Review` or `Plan Review`.
+
 ### 8.2 Candidate Selection Rules
 
 An issue is dispatch-eligible only if all are true:
@@ -1174,6 +1180,8 @@ Backoff formula:
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
 - Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
+- Deterministic configuration/runtime capability failures may be treated as terminal immediately
+  instead of retrying, because another attempt cannot change the configured agent capabilities.
 
 Retry handling behavior:
 
@@ -1622,7 +1630,8 @@ Behavior:
 2. Build prompt from workflow template.
 3. Start ACP session (`initialize` + `session/new`).
 4. Forward ACP `session/update` events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+5. On any error, fail the worker attempt. The orchestrator decides whether the failure is
+   retryable or terminal.
 
 Note:
 
@@ -1767,6 +1776,8 @@ Orchestrator-driven writes:
 
 - **Step entry**: When a pipeline step begins, the orchestrator writes the step's `tracker_state`
   to the tracker (for example "In Progress", "In Review").
+  Non-terminal step-entry and approval states are treated as active for reconciliation of existing
+  runs, but they do not automatically make new issues dispatch-eligible.
 - **Pipeline success**: When all steps pass, the orchestrator writes `on_success` (for example
   "Done").
 - **Pipeline failure/rejection**: When any step fails or returns a failed result, the orchestrator
@@ -2390,7 +2401,7 @@ function reconcile_running_issues(state):
   for issue in refreshed:
     if issue.state in terminal_states:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
-    else if issue.state in active_states:
+    else if issue.state in reconciliation_active_states:
       state.running[issue.id].issue = issue
     else:
       state = terminate_running_issue(state, issue.id, cleanup_workspace=false)

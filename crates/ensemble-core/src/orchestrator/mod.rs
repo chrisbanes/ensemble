@@ -4,7 +4,7 @@ pub mod retry;
 pub mod scheduler;
 pub mod state;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -379,10 +379,12 @@ impl Orchestrator {
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
-        let (active_lower, terminal_lower) = {
+        let (active_lower, reconcile_active_lower, terminal_lower) = {
             let state = self.state.read().await;
+            let config = self.config.read().await;
             (
                 state.active_states_lower.clone(),
+                build_reconcile_active_states_lower(&config),
                 state.terminal_states_lower.clone(),
             )
         };
@@ -426,7 +428,7 @@ impl Orchestrator {
             let reconcile_result = reconcile_tracker_states(
                 &state,
                 self.tracker.as_ref(),
-                &active_lower,
+                &reconcile_active_lower,
                 &terminal_lower,
             )
             .await;
@@ -2017,26 +2019,27 @@ impl Orchestrator {
                 let completed_at = Utc::now();
                 let mut final_failure = false;
                 let mut history_record = None;
-                let mut completed_identifier = None;
                 let mut history_run_id = None;
 
-                if let Some(entry) = state.remove_running(issue_id) {
-                    completed_identifier = Some(entry.identifier.clone());
+                if let Some(entry) = state.running.get(issue_id).cloned() {
                     history_run_id = entry.run_id.clone();
-                    state.add_runtime_seconds(&entry);
-                    let retry_scheduled = schedule_failure_retry(
-                        &mut state,
-                        FailureRetryRequest {
-                            issue_id,
-                            identifier: &entry.identifier,
-                            attempt: next_attempt(entry.retry_attempt),
-                            max_backoff_ms: config.agent.max_retry_backoff_ms,
-                            max_cycles: config.max_cycles,
-                            error: &error,
-                            retry_from_step: None,
-                            with_fixup: false,
-                        },
-                    );
+                    let retry_scheduled = if retry::is_non_retryable_failure(&error) {
+                        None
+                    } else {
+                        schedule_failure_retry(
+                            &mut state,
+                            FailureRetryRequest {
+                                issue_id,
+                                identifier: &entry.identifier,
+                                attempt: next_attempt(entry.retry_attempt),
+                                max_backoff_ms: config.agent.max_retry_backoff_ms,
+                                max_cycles: config.max_cycles,
+                                error: &error,
+                                retry_from_step: None,
+                                with_fixup: false,
+                            },
+                        )
+                    };
                     final_failure = retry_scheduled.is_none();
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
@@ -2050,6 +2053,9 @@ impl Orchestrator {
                             )
                         });
                     }
+                    if final_failure {
+                        state.complete_issue(issue_id, Some("completed_failed".to_string()), None);
+                    }
                     if retry_scheduled.is_none() && self.tracker.supports_writes() {
                         if let Err(e) = self
                             .tracker
@@ -2059,17 +2065,11 @@ impl Orchestrator {
                             warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state");
                         }
                     }
-                }
-                state.remove_pipeline_run(issue_id);
-                if final_failure {
-                    if let Some(identifier) = completed_identifier {
-                        state.add_completed(
-                            issue_id.to_string(),
-                            identifier,
-                            "completed_failed".to_string(),
-                        );
+                    if let Some(entry) = state.remove_running(issue_id) {
+                        state.add_runtime_seconds(&entry);
                     }
                 }
+                state.remove_pipeline_run(issue_id);
 
                 drop(state);
                 if final_failure {
@@ -4829,6 +4829,45 @@ fn transcript_kind_from_agent_kind(
     }
 }
 
+fn build_reconcile_active_states_lower(config: &EnsembleConfig) -> Vec<String> {
+    let terminal: HashSet<String> = config
+        .tracker
+        .terminal_states
+        .iter()
+        .map(|state| state.to_lowercase())
+        .collect();
+    let mut states = HashSet::new();
+
+    for state in &config.tracker.active_states {
+        let state = state.to_lowercase();
+        if !terminal.contains(&state) {
+            states.insert(state);
+        }
+    }
+
+    for step in &config.steps {
+        if let Some(state) = step.tracker_state.as_deref() {
+            let state = state.to_lowercase();
+            if !terminal.contains(&state) {
+                states.insert(state);
+            }
+        }
+
+        if let Some(state) = step
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.state.as_deref())
+        {
+            let state = state.to_lowercase();
+            if !terminal.contains(&state) {
+                states.insert(state);
+            }
+        }
+    }
+
+    states.into_iter().collect()
+}
+
 fn new_run_id() -> String {
     let millis = Utc::now().timestamp_millis();
     let seq = RUN_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -6069,6 +6108,46 @@ agent:
         parse_config(yaml).unwrap()
     }
 
+    #[test]
+    fn reconciliation_active_states_include_workflow_managed_tracker_states() {
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo", "In Progress"]
+  terminal_states: ["Done", "Paused"]
+agents:
+  builder:
+    executor: claude
+    model: opus
+    prompt: "Work on {{ issue.identifier }}."
+steps:
+  - name: implement
+    agent: builder
+  - name: review
+    agent: builder
+    tracker_state: Review
+  - name: plan
+    agent: builder
+    tracker_state: Planning
+    approval:
+      mode: when_requested_by_agent
+      state: Plan Review
+on_success: Done
+on_failure: Paused
+"#;
+        let config = parse_config(yaml).unwrap();
+
+        let states = build_reconcile_active_states_lower(&config);
+
+        assert!(states.contains(&"todo".to_string()));
+        assert!(states.contains(&"in progress".to_string()));
+        assert!(states.contains(&"review".to_string()));
+        assert!(states.contains(&"planning".to_string()));
+        assert!(states.contains(&"plan review".to_string()));
+        assert!(!states.contains(&"done".to_string()));
+        assert!(!states.contains(&"paused".to_string()));
+    }
+
     fn make_parallel_resume_config() -> EnsembleConfig {
         let yaml = r#"
 tracker:
@@ -7022,6 +7101,77 @@ agent:
         assert!(
             tokio::fs::read_to_string(&history_path).await.is_err(),
             "retryable failure should not append history"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_orchestrator_does_not_retry_acpx_unsupported_model_failure() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut raw_config = make_config();
+        raw_config.workspace.root = Some(dir.path().display().to_string());
+        raw_config.max_cycles = 3;
+
+        let config = Arc::new(RwLock::new(raw_config));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), Some(1));
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        let unsupported_model_error = "acpx command failed: sessions ensure — exit status: 1; stderr: ; stdout: {\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"Cannot apply --model \\\"opencode-go/kimi-k2.5\\\": the ACP agent did not advertise model support. Generic model selection requires ACP models plus session/set_model support, or an adapter-specific startup model flag.\",\"data\":{\"acpxCode\":\"RUNTIME\",\"origin\":\"cli\",\"sessionId\":\"unknown\"}}}".to_string();
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Failed {
+                    error: unsupported_model_error.clone(),
+                    kind: WorkerFailureKind::Runtime,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.retry_attempts.contains_key("1"));
+        assert!(state.completed.contains_key("1"));
+        drop(state);
+
+        let history_path = dir.path().join("ensemble_history.jsonl");
+        let contents = tokio::fs::read_to_string(&history_path).await.unwrap();
+        let record = contents
+            .lines()
+            .map(|line| serde_json::from_str::<crate::history::model::HistoryRecord>(line).unwrap())
+            .next()
+            .unwrap();
+        assert_eq!(
+            record.last_error.as_deref(),
+            Some(unsupported_model_error.as_str())
         );
     }
 
