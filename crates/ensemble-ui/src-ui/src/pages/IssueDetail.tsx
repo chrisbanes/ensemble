@@ -29,6 +29,7 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import EventTimeline from "@/components/EventTimeline";
 import IssueInfoSection from "@/components/IssueInfoSection";
 import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
+import ArtifactsPanel from "@/components/ArtifactsPanel";
 import { IssueComposer } from "@/components/issue-detail/IssueComposer";
 import { IssueContextPanel } from "@/components/issue-detail/IssueContextPanel";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
@@ -283,11 +284,12 @@ export default function IssueDetail() {
   );
 
   const artifactsPanel = (
-    <div className="space-y-3 text-sm">
-      <div className="rounded-lg border bg-muted/20 p-3">
-        <div className="font-medium">Workspace</div>
-        <code className="mt-2 block rounded bg-background px-2 py-1 text-xs">{data.workspace.path}</code>
-      </div>
+    <div className="space-y-3">
+      <ArtifactsPanel
+        identifier={identifier}
+        workspacePath={data.workspace.path}
+        artifacts={data.artifacts ?? null}
+      />
       {data.issue ? <IssueInfoSection issue={data.issue} /> : null}
     </div>
   );

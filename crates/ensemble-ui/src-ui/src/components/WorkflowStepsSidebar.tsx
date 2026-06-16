@@ -53,16 +53,12 @@ export default function WorkflowStepsSidebar({
           return (
             <div key={step.name} className="flex items-center gap-2">
               <span className={`text-lg ${color}`}>{icon}</span>
-              {step.can_navigate ? (
-                <Link
-                  to={`/issue/${encodeURIComponent(issueIdentifier)}/step/${encodeURIComponent(step.name)}`}
-                  className={`text-sm hover:underline ${isActive ? 'font-semibold text-primary' : 'text-muted-foreground'}`}
-                >
-                  {step.name}
-                </Link>
-              ) : (
-                <span className="text-sm text-muted-foreground">{step.name}</span>
-              )}
+              <Link
+                to={`/issue/${encodeURIComponent(issueIdentifier)}/step/${encodeURIComponent(step.name)}`}
+                className={`text-sm hover:underline ${isActive ? 'font-semibold text-primary' : 'text-muted-foreground'}`}
+              >
+                {step.name}
+              </Link>
               <Badge variant="outline" className="text-xs ml-auto">
                 {step.agent}
               </Badge>
