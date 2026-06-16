@@ -86,6 +86,13 @@ struct StepDispatchContext<'a> {
     step_outputs: StepOutputTemplateContext,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateRestoreOutcome {
+    NotRestored,
+    ReadyForDispatch,
+    Parked,
+}
+
 struct InteractionRequestContext {
     step_name: String,
     agent_name: String,
@@ -604,15 +611,34 @@ impl Orchestrator {
 
             let restored_pipeline_ready = {
                 let state = self.state.read().await;
-                state.get_pipeline_run(&issue.id).is_some()
-                    && state.is_claimed(&issue.id)
-                    && !state.is_running(&issue.id)
-                    && !state.is_waiting_on_human(&issue.id)
-                    && !state.retry_attempts.contains_key(&issue.id)
+                Self::restored_pipeline_ready_for_dispatch(&state, &issue.id)
             };
 
-            if eligible.is_none() || restored_pipeline_ready {
+            if restored_pipeline_ready {
                 self.dispatch_issue(issue, None).await;
+                continue;
+            }
+
+            if eligible.is_some() {
+                continue;
+            }
+
+            match self.restore_pipeline_run_for_candidate(issue).await {
+                Ok(
+                    CandidateRestoreOutcome::NotRestored
+                    | CandidateRestoreOutcome::ReadyForDispatch,
+                ) => {
+                    self.dispatch_issue(issue, None).await;
+                }
+                Ok(CandidateRestoreOutcome::Parked) => {}
+                Err(error) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        identifier = %issue.identifier,
+                        error = %error,
+                        "failed to restore live pipeline journal before dispatch"
+                    );
+                }
             }
         }
 
@@ -621,6 +647,81 @@ impl Orchestrator {
             duration_ms = elapsed_ms(tick_started_at),
             "orchestrator tick finished"
         );
+    }
+
+    async fn restore_pipeline_run_for_candidate(
+        &self,
+        issue: &Issue,
+    ) -> Result<CandidateRestoreOutcome, EnsembleError> {
+        {
+            let state = self.state.read().await;
+            if Self::restored_pipeline_ready_for_dispatch(&state, &issue.id) {
+                return Ok(CandidateRestoreOutcome::ReadyForDispatch);
+            }
+            if state.get_pipeline_run(&issue.id).is_some()
+                || state.is_running(&issue.id)
+                || state.is_claimed(&issue.id)
+            {
+                return Ok(CandidateRestoreOutcome::Parked);
+            }
+        }
+
+        let record = self
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .map_err(|error| AgentError::IoError {
+                reason: format!(
+                    "failed to read pipeline transition journal for issue '{}': {error}",
+                    issue.id
+                ),
+            })?;
+
+        let Some(record) = record else {
+            return Ok(CandidateRestoreOutcome::NotRestored);
+        };
+
+        let config_snapshot = {
+            let config = self.config.read().await;
+            Arc::new(config.clone())
+        };
+        let issues_by_id = HashMap::from([(issue.id.clone(), issue.clone())]);
+        self.restore_pipeline_run_record(&record, config_snapshot, &issues_by_id)
+            .await?;
+
+        let state = self.state.read().await;
+        if Self::restored_pipeline_ready_for_dispatch(&state, &issue.id) {
+            Ok(CandidateRestoreOutcome::ReadyForDispatch)
+        } else if state.get_pipeline_run(&issue.id).is_some()
+            || state.is_claimed(&issue.id)
+            || state.is_waiting_on_human(&issue.id)
+            || state.retry_attempts.contains_key(&issue.id)
+        {
+            Ok(CandidateRestoreOutcome::Parked)
+        } else {
+            Ok(CandidateRestoreOutcome::NotRestored)
+        }
+    }
+
+    fn restored_pipeline_ready_for_dispatch(state: &OrchestratorState, issue_id: &str) -> bool {
+        let Some(run) = state.get_pipeline_run(issue_id) else {
+            return false;
+        };
+
+        state.is_claimed(issue_id)
+            && !state.is_running(issue_id)
+            && !state.is_waiting_on_human(issue_id)
+            && !state.retry_attempts.contains_key(issue_id)
+            && !Self::pipeline_has_waiting_step(run)
+    }
+
+    fn pipeline_has_waiting_step(run: &PipelineRun) -> bool {
+        run.step_states.values().any(|state| {
+            matches!(
+                state,
+                StepState::BlockedOnHuman { .. } | StepState::AwaitingApproval { .. }
+            )
+        })
     }
 
     /// Dispatch a single issue: build DAG, create PipelineRun, dispatch initial steps.
@@ -632,18 +733,25 @@ impl Orchestrator {
             if state.get_pipeline_run(&issue.id).is_some() {
                 drop(state);
 
-                let (config_snapshot, action) = {
+                let (config_snapshot, action, effective_cycle, effective_attempt) = {
                     let mut state = self.state.write().await;
-                    state.add_running(issue, attempt);
+                    let existing_cycle = state
+                        .get_pipeline_run(&issue.id)
+                        .map(|run| run.cycle)
+                        .unwrap_or(cycle);
+                    let effective_cycle = attempt.unwrap_or(existing_cycle);
+                    let effective_attempt =
+                        attempt.or_else(|| (effective_cycle > 1).then_some(effective_cycle));
+                    state.add_running(issue, effective_attempt);
                     let config = state.get_pipeline_config(&issue.id).cloned();
                     let action = state
                         .get_pipeline_run_mut(&issue.id)
                         .map(|run| {
-                            run.cycle = cycle;
+                            run.cycle = effective_cycle;
                             run.start()
                         })
                         .unwrap_or(PipelineAction::Waiting);
-                    (config, action)
+                    (config, action, effective_cycle, effective_attempt)
                 };
 
                 let Some(config_snapshot) = config_snapshot else {
@@ -659,7 +767,7 @@ impl Orchestrator {
                     event = ISSUE_DISPATCH_STARTED,
                     issue_id = %issue.id,
                     identifier = %issue.identifier,
-                    cycle = cycle,
+                    cycle = effective_cycle,
                     "resuming with existing pipeline"
                 );
 
@@ -802,7 +910,7 @@ impl Orchestrator {
                                         agent_name: &req.agent_name,
                                         step_kind: req.step_kind,
                                         tracker_state: req.tracker_state.as_deref(),
-                                        attempt,
+                                        attempt: effective_attempt,
                                         timeout_ms: Self::effective_step_timeout_ms(
                                             req.timeout_ms,
                                             &config_snapshot,
@@ -825,7 +933,7 @@ impl Orchestrator {
                     event = ISSUE_DISPATCH_COMPLETED,
                     issue_id = %issue.id,
                     identifier = %issue.identifier,
-                    cycle = cycle,
+                    cycle = effective_cycle,
                     "existing pipeline dispatch setup completed"
                 );
                 return;
@@ -5651,6 +5759,170 @@ agent:
     }
 
     #[tokio::test]
+    async fn handle_tick_restores_step_retry_journal_without_dispatching() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_retry_step_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.retry_from_step("build");
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: 2,
+            due_at_ms: current_time_ms().saturating_add(60_000),
+            error: Some("retry later".to_string()),
+            retry_from_step: Some("build".to_string()),
+            with_fixup: false,
+        };
+        let retry_record = orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRetryScheduled,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("retry later".to_string()),
+                retry: Some(retry),
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(lock.retry_attempts.contains_key(&issue.id));
+        assert!(!lock.is_running(&issue.id));
+        drop(lock);
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert!(!records.iter().any(|record| {
+            record.seq > retry_record.seq && record.kind == PipelineTransitionKind::StepRunning
+        }));
+    }
+
+    #[tokio::test]
+    async fn handle_tick_restores_blocked_live_journal_without_dispatching() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_retry_step_config();
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_states.insert(
+            "build".to_string(),
+            StepState::BlockedOnHuman {
+                interaction_request_id: "ask-1".to_string(),
+            },
+        );
+        let blocked_record = orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepBlockedOnHuman,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("need input".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(lock.get_pipeline_run(&issue.id).is_some());
+        assert!(!lock.is_running(&issue.id));
+        drop(lock);
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert!(!records.iter().any(|record| {
+            record.seq > blocked_record.seq && record.kind == PipelineTransitionKind::StepRunning
+        }));
+    }
+
+    #[tokio::test]
     async fn restored_live_pipeline_run_dispatches_on_next_tick() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = make_config();
@@ -5719,6 +5991,136 @@ agent:
                 .and_then(|run| run.step_states.get("build")),
             Some(StepState::Running { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn handle_tick_rehydrates_live_journal_before_fresh_dispatch() {
+        let temp = tempfile::tempdir().unwrap();
+        let yaml = r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo", "In Progress"]
+  terminal_states: ["Done", "Closed"]
+agents:
+  builder:
+    executor: claude
+    model: opus
+    prompt: "Work on {{ issue.identifier }}."
+steps:
+  - name: implement
+    agent: builder
+  - name: review
+    agent: builder
+    depends: ["implement"]
+max_cycles: 10
+on_success: Done
+on_failure: Todo
+concurrency:
+  max_concurrent_agents: 5
+polling:
+  interval_ms: 100
+workspace:
+  root: /tmp/ensemble-test
+agent:
+  max_turns: 3
+  command: "echo test"
+  session_mode: code
+"#;
+        let cfg = parse_config(yaml).unwrap();
+        let issue = test_issue("1", "In Progress");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 2, dag);
+        run.step_completed("implement", succeeded_step_output(), false);
+        run.mark_running("review", "stale-review-session".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-existing".to_string()),
+                cycle: 2,
+                step: Some("review".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(lock.is_running(&issue.id));
+        assert_eq!(
+            lock.issue_run_ids.get(&issue.id).map(String::as_str),
+            Some("run-existing")
+        );
+        let restored_run = lock.get_pipeline_run(&issue.id).unwrap();
+        assert_eq!(restored_run.cycle, 2);
+        assert_eq!(
+            restored_run.step_states.get("implement"),
+            Some(&StepState::Passed)
+        );
+        assert!(matches!(
+            restored_run.step_states.get("review"),
+            Some(StepState::Running { session_id }) if session_id != "stale-review-session"
+        ));
+        assert_eq!(
+            lock.get_running(&issue.id)
+                .and_then(|entry| entry.retry_attempt),
+            Some(2)
+        );
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| record.kind == PipelineTransitionKind::RunStarted)
+                .count(),
+            0
+        );
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::StepRunning && record.seq == 2));
     }
 
     #[tokio::test]

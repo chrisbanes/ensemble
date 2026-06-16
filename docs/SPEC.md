@@ -291,8 +291,14 @@ Pipeline run recovery:
 - Each recoverable transition includes a full `PipelineRun` snapshot.
 - On orchestrator startup, Ensemble restores the latest non-released snapshot for each issue before
   the first poll tick.
+- During normal tick dispatch, before starting a candidate as a fresh pipeline, Ensemble checks that
+  issue's latest journal record. If it is live and contains a snapshot, Ensemble restores that run
+  instead of appending a new `run_started` record.
+- Dispatch-time restore never creates new candidates; it only applies to issues already returned by
+  the tracker as dispatch-eligible candidates.
+- Restored retry and waiting records stay parked until their normal resume or retry path.
 - Stale `Running` steps from a previous process are normalized to `Pending`; agent processes are not
-  recovered across orchestrator restarts.
+  recovered across orchestrator restarts or in-process journal rehydration.
 - A `released` transition prevents older snapshots for the issue from being restored after
   completion, stop, terminal reconciliation, or whole-issue retry.
 
@@ -2229,8 +2235,10 @@ After restart:
 - No retry timers are restored from prior process memory.
 - No running sessions are assumed recoverable.
 - Service recovers by:
+  - startup restoration of live pipeline journal snapshots
   - startup terminal workspace cleanup
   - fresh polling of active issues
+  - dispatch-time restoration of live journal snapshots for already eligible candidates
   - re-dispatching eligible work
 
 ### 14.4 Operator Intervention Points
