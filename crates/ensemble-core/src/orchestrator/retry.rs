@@ -123,6 +123,13 @@ pub fn schedule_failure_retry(
     Some(due_at_ms)
 }
 
+/// Identify deterministic agent/runtime configuration failures that another
+/// retry cannot fix.
+pub fn is_non_retryable_failure(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("cannot apply --model") && reason.contains("did not advertise model support")
+}
+
 /// Determine the next attempt number from a running entry.
 /// If the entry had a retry_attempt, increment it; otherwise start at 1.
 pub fn next_attempt(current: Option<u32>) -> u32 {
@@ -179,6 +186,18 @@ mod tests {
     fn retry_reason_is_non_empty() {
         let reason = normalize_reason("");
         assert_eq!(reason, "unknown");
+    }
+
+    #[test]
+    fn unsupported_acpx_model_capability_failure_is_not_retryable() {
+        assert!(is_non_retryable_failure(
+            "acpx command failed: sessions ensure — exit status: 1; stdout: {\"message\":\"Cannot apply --model \\\"opencode-go/kimi-k2.5\\\": the ACP agent did not advertise model support.\"}"
+        ));
+    }
+
+    #[test]
+    fn ordinary_agent_failure_is_retryable() {
+        assert!(!is_non_retryable_failure("temporary agent crash"));
     }
 
     #[test]
