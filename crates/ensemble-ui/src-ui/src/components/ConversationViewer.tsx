@@ -3,19 +3,13 @@ import { useStepConversationQuery } from "@/hooks";
 import type { TranscriptRecord } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { transcriptRecordDetail } from "@/components/transcript/transcript-model";
 
 interface ConversationViewerProps {
   identifier: string;
   runId: string;
   stepName: string;
   scrollToIndex?: number;
-}
-
-function recordText(record: TranscriptRecord): string {
-  if (typeof record.payload === "object" && record.payload != null && "text" in record.payload) {
-    return String((record.payload as { text?: unknown }).text ?? "");
-  }
-  return JSON.stringify(record.payload);
 }
 
 function MessageBubble({ record, highlight }: { record: TranscriptRecord; highlight?: boolean }) {
@@ -31,7 +25,7 @@ function MessageBubble({ record, highlight }: { record: TranscriptRecord; highli
         <span className="font-medium capitalize">{record.kind.replace(/_/g, " ")}</span>
         <span>#{record.sequence}</span>
       </div>
-      <p className="text-sm whitespace-pre-wrap">{recordText(record)}</p>
+      <p className="text-sm whitespace-pre-wrap break-words">{transcriptRecordDetail(record)}</p>
       {record.payload != null && record.kind !== "assistant_message" ? (
         <details className="mt-2">
           <summary className="text-xs text-muted-foreground cursor-pointer hover:underline">

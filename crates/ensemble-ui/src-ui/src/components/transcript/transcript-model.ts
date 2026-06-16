@@ -140,12 +140,61 @@ function interactionSequence(index: number): number {
   return index;
 }
 
+function objectPayload(payload: unknown): Record<string, unknown> | null {
+  if (typeof payload === "object" && payload != null) {
+    return payload as Record<string, unknown>;
+  }
+  return null;
+}
+
+function stringPayloadValue(payload: Record<string, unknown>, key: string): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function compactJson(value: unknown): string {
+  const json = JSON.stringify(value);
+  return json ?? String(value);
+}
+
 function payloadText(payload: unknown): string {
   if (typeof payload === "object" && payload != null && "text" in payload) {
     return String((payload as { text?: unknown }).text ?? "");
   }
   const json = JSON.stringify(payload);
   return json ?? "";
+}
+
+export function transcriptRecordDetail(record: TranscriptRecord): string {
+  if (record.kind !== "tool_call") {
+    return payloadText(record.payload);
+  }
+
+  const payload = objectPayload(record.payload);
+  if (!payload) {
+    return payloadText(record.payload);
+  }
+
+  const label =
+    stringPayloadValue(payload, "title") ??
+    stringPayloadValue(payload, "name") ??
+    "Tool call";
+  const toolCallId = stringPayloadValue(payload, "tool_call_id");
+  const status = stringPayloadValue(payload, "status");
+  const args = payload.arguments;
+
+  const parts = [label];
+  if (toolCallId && !label.includes(toolCallId)) {
+    parts.push(toolCallId);
+  }
+  if (status) {
+    parts.push(status);
+  }
+  if (args != null) {
+    parts.push(compactJson(args));
+  }
+
+  return parts.join(" ");
 }
 
 function transcriptRecordEvent(record: TranscriptRecord, detail: string): WsEventData {
@@ -163,7 +212,7 @@ function transcriptRecordEvent(record: TranscriptRecord, detail: string): WsEven
 function entryFromTranscriptRecord(record: TranscriptRecord): TranscriptEntry | null {
   const timestamp = record.timestamp;
   const id = `transcript:${record.run_id}:${record.step_name}:${record.sequence}`;
-  const text = payloadText(record.payload);
+  const text = transcriptRecordDetail(record);
 
   if (record.kind === "assistant_message") {
     return {
