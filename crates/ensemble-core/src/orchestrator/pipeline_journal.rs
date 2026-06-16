@@ -163,10 +163,7 @@ impl PipelineRunJournal {
                 continue;
             }
             if let Some(record) = self.read_last_valid_record(&path).await? {
-                if record.schema_version == SCHEMA_VERSION
-                    && !record.kind.is_terminal()
-                    && record.snapshot.is_some()
-                {
+                if is_live_restore_record(&record) {
                     records.push(record);
                 }
             }
@@ -174,6 +171,16 @@ impl PipelineRunJournal {
 
         records.sort_by(|left, right| left.issue_id.cmp(&right.issue_id));
         Ok(records)
+    }
+
+    pub async fn latest_live_record_for_issue(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<PipelineTransitionRecord>, std::io::Error> {
+        let record = self
+            .read_last_valid_record(&self.path_for_issue(issue_id))
+            .await?;
+        Ok(record.filter(is_live_restore_record))
     }
 
     async fn read_last_valid_record(
@@ -288,6 +295,12 @@ fn hex_value(byte: u8) -> Result<u8, std::io::Error> {
 
 fn invalid_data(reason: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, reason.into())
+}
+
+fn is_live_restore_record(record: &PipelineTransitionRecord) -> bool {
+    record.schema_version == SCHEMA_VERSION
+        && !record.kind.is_terminal()
+        && record.snapshot.is_some()
 }
 
 #[cfg(test)]
@@ -412,6 +425,83 @@ mod tests {
 
         let live = journal.latest_live_records().await.unwrap();
         assert!(live.is_empty());
+    }
+
+    #[tokio::test]
+    async fn latest_live_record_for_issue_returns_latest_non_terminal_snapshot() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::RunStarted,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(snapshot()),
+            })
+            .await
+            .unwrap();
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(snapshot()),
+            })
+            .await
+            .unwrap();
+
+        let live = journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(live.seq, 2);
+        assert_eq!(live.kind, PipelineTransitionKind::StepRunning);
+        assert_eq!(live.run_id.as_deref(), Some("run-1"));
+    }
+
+    #[tokio::test]
+    async fn latest_live_record_for_issue_returns_none_for_terminal_record() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::RunStarted,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(snapshot()),
+            })
+            .await
+            .unwrap();
+        journal
+            .append_released("issue/1", "repo#1", Some("run-1".to_string()), "completed")
+            .await
+            .unwrap();
+
+        let live = journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap();
+
+        assert!(live.is_none());
     }
 
     #[tokio::test]
