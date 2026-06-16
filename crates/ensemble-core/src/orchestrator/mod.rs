@@ -28,6 +28,7 @@ use crate::agent::events::{
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
 use crate::error::{AgentError, EnsembleError};
+use crate::history::artifacts::FinalizeActionOutput;
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
 use crate::history_store::store::HistoryStore;
@@ -668,7 +669,7 @@ impl Orchestrator {
                             "restored pipeline already succeeded"
                         );
                         let finalize_state = self
-                            .run_finalize_phase(&issue.identifier, &config_snapshot)
+                            .run_finalize_phase(&issue.id, &issue.identifier, &config_snapshot)
                             .await;
                         let completed_at = Utc::now();
                         let (history_record, history_run_id, release_run_id, should_release) = {
@@ -1435,8 +1436,9 @@ impl Orchestrator {
                                 .as_ref()
                                 .map(|issue| issue.identifier.clone())
                                 .unwrap_or_else(|| issue_id.to_string());
-                            let finalize_state =
-                                self.run_finalize_phase(&issue_identifier, &config).await;
+                            let finalize_state = self
+                                .run_finalize_phase(issue_id, &issue_identifier, &config)
+                                .await;
 
                             let completed_at = Utc::now();
                             let history_record = state
@@ -3390,6 +3392,7 @@ impl Orchestrator {
 
     async fn run_finalize_phase(
         &self,
+        issue_id: &str,
         issue_identifier: &str,
         _config: &EnsembleConfig,
     ) -> IssueFinalizeState {
@@ -3446,9 +3449,11 @@ impl Orchestrator {
                     repo: repo_name.clone(),
                     mode: mode_name,
                     approval_required: true,
-                    status,
+                    status: status.clone(),
                     last_error: None,
                 });
+                self.update_repo_artifact_finalize_status(issue_id, repo_name, status, None)
+                    .await;
                 continue;
             }
 
@@ -3465,6 +3470,13 @@ impl Orchestrator {
                     status: FinalizeStatus::Failed,
                     last_error: Some("worktree not found for repo".to_string()),
                 });
+                self.update_repo_artifact_finalize_status(
+                    issue_id,
+                    repo_name,
+                    FinalizeStatus::Failed,
+                    Some("worktree not found for repo".to_string()),
+                )
+                .await;
                 continue;
             };
 
@@ -3478,20 +3490,33 @@ impl Orchestrator {
                 .await;
 
             match finalize_result {
-                Ok(()) => repos.push(RepoFinalizeState {
-                    repo: repo_name.clone(),
-                    mode: mode_name,
-                    approval_required: false,
-                    status: FinalizeStatus::Succeeded,
-                    last_error: None,
-                }),
-                Err(error) => repos.push(RepoFinalizeState {
-                    repo: repo_name.clone(),
-                    mode: mode_name,
-                    approval_required: false,
-                    status: FinalizeStatus::Failed,
-                    last_error: Some(error),
-                }),
+                Ok(output) => {
+                    repos.push(RepoFinalizeState {
+                        repo: repo_name.clone(),
+                        mode: mode_name,
+                        approval_required: false,
+                        status: FinalizeStatus::Succeeded,
+                        last_error: None,
+                    });
+                    self.update_repo_artifact_finalize_output(issue_id, repo_name, output)
+                        .await;
+                }
+                Err(error) => {
+                    repos.push(RepoFinalizeState {
+                        repo: repo_name.clone(),
+                        mode: mode_name,
+                        approval_required: false,
+                        status: FinalizeStatus::Failed,
+                        last_error: Some(error.clone()),
+                    });
+                    self.update_repo_artifact_finalize_status(
+                        issue_id,
+                        repo_name,
+                        FinalizeStatus::Failed,
+                        Some(error),
+                    )
+                    .await;
+                }
             }
         }
 
@@ -3587,7 +3612,7 @@ impl Orchestrator {
         };
 
         let repo_configs = self.workspace_mgr.repos().clone();
-        let mut outcomes: HashMap<String, Result<(), String>> = HashMap::new();
+        let mut outcomes: HashMap<String, Result<FinalizeActionOutput, String>> = HashMap::new();
 
         for repo_name in &retry_repo_names {
             let Some(repo_config) = repo_configs.get(repo_name) else {
@@ -3626,7 +3651,7 @@ impl Orchestrator {
                 for repo in &mut finalize.repos {
                     if let Some(result) = outcomes.get(&repo.repo) {
                         match result {
-                            Ok(()) => {
+                            Ok(_) => {
                                 repo.status = FinalizeStatus::Succeeded;
                                 repo.last_error = None;
                             }
@@ -3691,6 +3716,25 @@ impl Orchestrator {
                 }
             }
 
+            if let Some(artifacts) = state.artifacts.get_mut(issue_id) {
+                for repo_artifact in &mut artifacts.repos {
+                    if let Some(result) = outcomes.get(&repo_artifact.repo) {
+                        match result {
+                            Ok(output) => {
+                                repo_artifact.finalize_status = "succeeded".to_string();
+                                repo_artifact.pushed_ref = output.pushed_ref.clone();
+                                repo_artifact.pr_url = output.pr_url.clone();
+                                repo_artifact.last_error = None;
+                            }
+                            Err(error) => {
+                                repo_artifact.finalize_status = "failed".to_string();
+                                repo_artifact.last_error = Some(error.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             (final_status, should_complete, last_error)
         };
 
@@ -3725,7 +3769,7 @@ impl Orchestrator {
         remote: &str,
         base_branch: &str,
         mode: &FinalizeMode,
-    ) -> Result<(), String> {
+    ) -> Result<FinalizeActionOutput, String> {
         let push_output = tokio::process::Command::new("git")
             .arg("push")
             .arg(remote)
@@ -3748,23 +3792,13 @@ impl Orchestrator {
             ));
         }
 
-        if matches!(mode, FinalizeMode::PushAndPr) {
-            let branch_output = tokio::process::Command::new("git")
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(repo_path)
-                .output()
-                .await
-                .map_err(|error| format!("failed to resolve branch: {error}"))?;
-            if !branch_output.status.success() {
-                return Err(format!(
-                    "failed to resolve current branch: {}",
-                    String::from_utf8_lossy(&branch_output.stderr)
-                ));
-            }
-            let current_branch = String::from_utf8_lossy(&branch_output.stdout)
-                .trim()
-                .to_string();
+        let current_branch = Self::current_branch(repo_path).await?;
+        let mut output = FinalizeActionOutput {
+            pushed_ref: Some(format!("{remote}/{current_branch}")),
+            pr_url: None,
+        };
 
+        if matches!(mode, FinalizeMode::PushAndPr) {
             let pr_output = tokio::process::Command::new("gh")
                 .args([
                     "pr",
@@ -3818,17 +3852,106 @@ impl Orchestrator {
 
                     if pr_lookup_output.status.success() {
                         let pr_lookup_stdout = String::from_utf8_lossy(&pr_lookup_output.stdout);
-                        if pr_lookup_stdout.trim() != "[]" {
-                            return Ok(());
+                        if let Some(pr_url) = Self::parse_first_pr_url(&pr_lookup_stdout) {
+                            output.pr_url = Some(pr_url);
+                            return Ok(output);
                         }
                     }
                 }
 
                 return Err(format!("gh pr create failed: {pr_create_stderr}"));
             }
+
+            output.pr_url = Self::parse_first_pr_url(&String::from_utf8_lossy(&pr_output.stdout));
         }
 
-        Ok(())
+        Ok(output)
+    }
+
+    async fn current_branch(repo_path: &std::path::Path) -> Result<String, String> {
+        let branch_output = tokio::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(repo_path)
+            .output()
+            .await
+            .map_err(|error| format!("failed to resolve branch: {error}"))?;
+        if !branch_output.status.success() {
+            return Err(format!(
+                "failed to resolve current branch: {}",
+                String::from_utf8_lossy(&branch_output.stderr)
+            ));
+        }
+        Ok(String::from_utf8_lossy(&branch_output.stdout)
+            .trim()
+            .to_string())
+    }
+
+    fn parse_first_pr_url(stdout: &str) -> Option<String> {
+        let trimmed = stdout.trim();
+        if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            return Some(trimmed.lines().next().unwrap_or(trimmed).trim().to_string());
+        }
+        serde_json::from_str::<Vec<serde_json::Value>>(trimmed)
+            .ok()
+            .and_then(|values| {
+                values
+                    .first()
+                    .and_then(|value| value.get("url"))
+                    .and_then(|url| url.as_str())
+                    .map(ToString::to_string)
+            })
+    }
+
+    async fn update_repo_artifact_finalize_output(
+        &self,
+        issue_id: &str,
+        repo_name: &str,
+        output: FinalizeActionOutput,
+    ) {
+        let mut state = self.state.write().await;
+        if let Some(artifacts) = state.artifacts.get_mut(issue_id) {
+            if let Some(repo_artifact) = artifacts
+                .repos
+                .iter_mut()
+                .find(|artifact| artifact.repo == repo_name)
+            {
+                repo_artifact.finalize_status = "succeeded".to_string();
+                repo_artifact.pushed_ref = output.pushed_ref;
+                repo_artifact.pr_url = output.pr_url;
+                repo_artifact.last_error = None;
+            }
+        }
+    }
+
+    async fn update_repo_artifact_finalize_status(
+        &self,
+        issue_id: &str,
+        repo_name: &str,
+        status: FinalizeStatus,
+        last_error: Option<String>,
+    ) {
+        let mut state = self.state.write().await;
+        if let Some(artifacts) = state.artifacts.get_mut(issue_id) {
+            if let Some(repo_artifact) = artifacts
+                .repos
+                .iter_mut()
+                .find(|artifact| artifact.repo == repo_name)
+            {
+                repo_artifact.finalize_status = Self::finalize_status_name(&status).to_string();
+                repo_artifact.last_error = last_error;
+            }
+        }
+    }
+
+    fn finalize_status_name(status: &FinalizeStatus) -> &'static str {
+        match status {
+            FinalizeStatus::NotRequired => "not_required",
+            FinalizeStatus::PendingApproval => "pending_approval",
+            FinalizeStatus::InProgress => "in_progress",
+            FinalizeStatus::Succeeded => "succeeded",
+            FinalizeStatus::Failed => "failed",
+            FinalizeStatus::SkippedHeadless => "skipped_headless",
+        }
     }
 
     fn pipeline_has_running_steps(run: &PipelineRun) -> bool {
@@ -4425,7 +4548,7 @@ impl Orchestrator {
                     }
                     PipelineAction::Succeeded => {
                         let finalize_state = self
-                            .run_finalize_phase(&issue.identifier, &current_config)
+                            .run_finalize_phase(&issue.id, &issue.identifier, &current_config)
                             .await;
                         let completed_at = Utc::now();
                         let (tracker_state, history_record, tracker_error_message) = {
