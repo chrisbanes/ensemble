@@ -620,6 +620,32 @@ fn resolve_agent_command(
 /// Deliberately omits the `permission_mode` flag — discovery only needs the
 /// agent process to start and report `configOptions`; the real run will
 /// re-invoke the agent with the full command built by `resolve_agent_command`.
+fn resolve_acpx_discovery_command(acpx_name: &str, model: Option<&str>) -> ResolvedCommand {
+    if acpx_name == "opencode" && model.is_some() {
+        return ResolvedCommand {
+            program: PathBuf::from("opencode"),
+            args: vec![
+                "--model".to_string(),
+                model.expect("checked is_some above").to_string(),
+                "acp".to_string(),
+            ],
+            env: Vec::new(),
+        };
+    }
+
+    let mut args = vec!["--agent".to_string(), acpx_name.to_string()];
+    if let Some(model) = model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+
+    ResolvedCommand {
+        program: PathBuf::from("acpx"),
+        args,
+        env: Vec::new(),
+    }
+}
+
 fn resolve_acpx_acp_command(
     agent_config: &crate::config::ensemble::AgentConfig,
 ) -> Result<ResolvedCommand, AgentError> {
@@ -631,16 +657,10 @@ fn resolve_acpx_acp_command(
                 command: "<acpx capability discovery>".to_string(),
                 reason: "agent is missing acpx_agent".to_string(),
             })?;
-    let mut args = vec!["--agent".to_string(), acpx_name.clone()];
-    if let Some(ref model) = agent_config.model {
-        args.push("--model".to_string());
-        args.push(model.clone());
-    }
-    Ok(ResolvedCommand {
-        program: PathBuf::from("acpx"),
-        args,
-        env: Vec::new(),
-    })
+    Ok(resolve_acpx_discovery_command(
+        acpx_name,
+        agent_config.model.as_deref(),
+    ))
 }
 
 #[async_trait]
@@ -2019,6 +2039,33 @@ on_failure: Failed
                 "codex".to_string(),
                 "--model".to_string(),
                 "gpt-5".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_acpx_acp_command_uses_opencode_startup_model_command() {
+        let resolved = resolve_acpx_acp_command(&crate::config::ensemble::AgentConfig {
+            runtime: Some("acpx".to_string()),
+            executor: None,
+            model: Some("opencode-go/kimi-k2.5".to_string()),
+            acpx_agent: Some("opencode".to_string()),
+            permission_mode: None,
+            prompt: Some("Build it.".to_string()),
+            prompt_template: None,
+            reasoning_level: None,
+            available_models: Vec::new(),
+            available_modes: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(resolved.program, PathBuf::from("opencode"));
+        assert_eq!(
+            resolved.args,
+            vec![
+                "--model".to_string(),
+                "opencode-go/kimi-k2.5".to_string(),
+                "acp".to_string(),
             ]
         );
     }
