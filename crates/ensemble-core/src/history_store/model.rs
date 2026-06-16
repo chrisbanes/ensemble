@@ -37,6 +37,7 @@ pub(crate) fn row_to_history_record(row: &Row<'_>) -> rusqlite::Result<HistoryRe
         last_error: row.get("last_error")?,
         verdict: row.get("verdict")?,
         workspace_path: row.get("workspace_path")?,
+        artifacts: None,
     })
 }
 

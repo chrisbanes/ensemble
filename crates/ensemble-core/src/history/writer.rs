@@ -60,6 +60,7 @@ mod tests {
             last_error: None,
             verdict: Some("approved".into()),
             workspace_path: "/tmp/ensemble_workspaces/MT-648".into(),
+            artifacts: None,
         }
     }
 
@@ -89,5 +90,45 @@ mod tests {
         writer.append(&r2).await.unwrap();
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(contents.lines().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_round_trips_optional_artifacts() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+        let writer = HistoryWriter::new(path.clone());
+        let mut record = sample_record();
+        record.artifacts = Some(crate::history::artifacts::RunArtifacts {
+            run_id: "run-1".into(),
+            workspace_path: "/tmp/workspace/repo-1".into(),
+            repos: vec![crate::history::artifacts::RepoArtifact {
+                repo: "repo".into(),
+                worktree_path: "/tmp/workspace/repo-1/repo".into(),
+                base_branch: "main".into(),
+                branch: "ensemble/repo-1".into(),
+                head_sha: Some("abc123".into()),
+                changed_files: vec!["src/lib.rs".into()],
+                finalize_mode: "none".into(),
+                finalize_status: "not_required".into(),
+                pushed_ref: None,
+                pr_url: None,
+                last_error: None,
+            }],
+            transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
+                step_name: "build".into(),
+                run_id: "run-1".into(),
+                record_count: 3,
+            }],
+        });
+
+        writer.append(&record).await.unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let parsed: HistoryRecord = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        let artifacts = parsed.artifacts.unwrap();
+        assert_eq!(artifacts.run_id, "run-1");
+        assert_eq!(artifacts.repos[0].finalize_mode, "none");
+        assert_eq!(artifacts.transcripts[0].record_count, 3);
     }
 }

@@ -79,6 +79,7 @@ mod tests {
             last_error: None,
             verdict: None,
             workspace_path: format!("/tmp/{}", identifier),
+            artifacts: None,
         }
     }
 

@@ -3876,6 +3876,7 @@ impl Orchestrator {
             last_error,
             verdict: Self::history_verdict(run),
             workspace_path,
+            artifacts: None,
         }
     }
 
@@ -3919,6 +3920,7 @@ impl Orchestrator {
             last_error,
             verdict: Self::history_verdict(run),
             workspace_path,
+            artifacts: None,
         }
     }
 

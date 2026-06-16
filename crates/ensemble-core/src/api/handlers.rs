@@ -622,6 +622,7 @@ mod tests {
                 last_error: Some("agent crashed".to_string()),
                 verdict: Some("failed".to_string()),
                 workspace_path: "/tmp/workspaces/todo-0".to_string(),
+                artifacts: None,
             })
             .await
             .unwrap();
@@ -673,6 +674,7 @@ mod tests {
                 last_error: Some("agent crashed".to_string()),
                 verdict: Some("failed".to_string()),
                 workspace_path: String::new(),
+                artifacts: None,
             })
             .await
             .unwrap();
@@ -757,6 +759,7 @@ on_failure: Failed
                 last_error: None,
                 verdict: Some("approved".to_string()),
                 workspace_path: "/tmp/workspaces/synth-1".to_string(),
+                artifacts: None,
             })
             .await
             .unwrap();

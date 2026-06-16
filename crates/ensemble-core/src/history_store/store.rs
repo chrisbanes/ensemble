@@ -311,6 +311,7 @@ mod tests {
             last_error: None,
             verdict: Some("approved".into()),
             workspace_path: format!("/tmp/{identifier}"),
+            artifacts: None,
         }
     }
 
