@@ -739,6 +739,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_session_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .close_session(
+                "opencode",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: Some("opencode-go/kimi-k2.5"),
+                    reasoning_level: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["sessions", "close", "build-session"]));
+    }
+
+    #[tokio::test]
+    async fn run_prompt_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\ndd bs=1 count=2 of=/dev/null 2>/dev/null\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"stopReason\":\"end_turn\"}}}}'\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .run_prompt(
+                AcpxPromptRequest {
+                    agent: "opencode",
+                    session_name: "build-session",
+                    cwd: dir.path(),
+                    prompt: "hi",
+                    options: AcpxCommandOptions {
+                        model: Some("opencode-go/kimi-k2.5"),
+                        reasoning_level: None,
+                    },
+                    visibility: PromptVisibility::Hidden,
+                },
+                |_| async {},
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["prompt", "--session", "build-session", "--file", "-"]));
+    }
+
+    #[tokio::test]
     async fn opencode_startup_model_quotes_shell_sensitive_model() {
         assert_eq!(
             AcpxAgentInvocation::for_agent("opencode", Some("provider/model with space")),
