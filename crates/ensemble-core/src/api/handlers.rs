@@ -1,6 +1,7 @@
 use crate::api::router::AppState;
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{EnsembleConfig, StepKind};
+use crate::history::artifacts::StepTranscriptArtifact;
 use crate::history::model::HistoryRecord;
 use crate::interaction::store::InteractionStore;
 use crate::observability::snapshot::{
@@ -228,10 +229,11 @@ async fn build_issue_snapshot_from_history(
                 } else {
                     "passed".to_string()
                 },
-                can_navigate: false,
+                can_navigate: true,
             })
             .collect()
     };
+    let artifacts = record.artifacts.clone();
 
     Ok(Some(IssueDetailSnapshot {
         issue_identifier: record.issue_identifier.clone(),
@@ -261,6 +263,7 @@ async fn build_issue_snapshot_from_history(
             priority: None,
             url: None,
         },
+        artifacts,
     }))
 }
 
@@ -330,6 +333,27 @@ pub async fn get_step_detail(
         vec![]
     };
 
+    let transcript = if let Some(ref run_id) = detail_state.run_id {
+        match crate::transcript::reader::read_transcript_page(
+            FsPath::new(&state.workspace_root),
+            run_id,
+            &step_name,
+            None,
+            Some(1),
+        )
+        .await
+        {
+            Ok(response) if response.total > 0 => Some(StepTranscriptArtifact {
+                step_name: step_name.clone(),
+                run_id: run_id.clone(),
+                record_count: response.total,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+
     let detail = StepDetailSnapshot {
         issue_identifier: identifier,
         issue_id: detail_state.issue_id,
@@ -340,6 +364,8 @@ pub async fn get_step_detail(
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
         verdict: detail_state.verdict,
+        run_id: detail_state.run_id,
+        transcript,
         recent_events,
     };
 
@@ -789,6 +815,57 @@ on_failure: Failed
             kinds.get("synthesize").map(String::as_str),
             Some("synthesis")
         );
+    }
+
+    #[tokio::test]
+    async fn history_backed_issue_detail_includes_artifacts_and_navigable_steps() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let history_path = tmp.path().join("ensemble_history.jsonl");
+        let writer = HistoryWriter::new(history_path.clone());
+        writer
+            .append(&HistoryRecord {
+                issue_identifier: "repo#77".into(),
+                issue_id: "NODE_77".into(),
+                outcome: "succeeded".into(),
+                steps_traversed: vec!["build".into()],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                },
+                duration_seconds: 10,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: None,
+                verdict: Some("approved".into()),
+                workspace_path: tmp.path().join("repo-77").display().to_string(),
+                artifacts: Some(crate::history::artifacts::RunArtifacts {
+                    run_id: "run-77".into(),
+                    workspace_path: tmp.path().join("repo-77").display().to_string(),
+                    repos: Vec::new(),
+                    transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
+                        step_name: "build".into(),
+                        run_id: "run-77".into(),
+                        record_count: 5,
+                    }],
+                }),
+            })
+            .await
+            .unwrap();
+
+        let mut app_state = build_empty_state();
+        app_state.history_path = history_path;
+        app_state.workspace_root = tmp.path().display().to_string();
+
+        let response = get_issue_detail(State(app_state), Path("repo#77".to_string())).await;
+        let body = axum::body::to_bytes(response.into_response().into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(detail["artifacts"]["run_id"].as_str(), Some("run-77"));
+        assert_eq!(detail["workflow_steps"][0]["can_navigate"], true);
     }
 
     #[tokio::test]
