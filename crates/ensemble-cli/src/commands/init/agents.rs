@@ -180,6 +180,28 @@ pub async fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<Ag
     Ok(agents)
 }
 
+fn supports_adapter_startup_model(agent_name: &str) -> bool {
+    agent_name == "opencode"
+}
+
+fn should_offer_model_selection(_agent_name: &str, caps: &AgentCapabilities) -> bool {
+    caps.available_models.len() > 1
+}
+
+fn retained_existing_model<'a>(
+    agent_name: &str,
+    caps: &AgentCapabilities,
+    existing_model: Option<&'a str>,
+) -> Option<&'a str> {
+    if should_offer_model_selection(agent_name, caps) {
+        None
+    } else if supports_adapter_startup_model(agent_name) {
+        existing_model
+    } else {
+        None
+    }
+}
+
 fn ask_roles(
     selected: Vec<String>,
     capabilities: &HashMap<String, AgentCapabilities>,
@@ -236,8 +258,7 @@ fn ask_roles(
 
         let existing_model = existing_entry.and_then(|(_, _, model)| *model);
 
-        // Ask for model if capabilities show >1 model available
-        let model = if caps.available_models.len() > 1 {
+        let model = if should_offer_model_selection(agent_name, &caps) {
             let model_default = existing_model.unwrap_or("default");
             let default_idx = caps
                 .available_models
@@ -259,7 +280,7 @@ fn ask_roles(
                 Some(chosen)
             }
         } else {
-            None
+            retained_existing_model(agent_name, &caps, existing_model).map(str::to_string)
         };
 
         agents.push(AgentEntry {
@@ -275,6 +296,37 @@ fn ask_roles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn should_offer_model_selection_for_multiple_discovered_models() {
+        let caps = AgentCapabilities {
+            available_models: vec!["default".to_string(), "sonnet".to_string()],
+            ..Default::default()
+        };
+
+        assert!(should_offer_model_selection("codex", &caps));
+    }
+
+    #[test]
+    fn should_not_offer_model_selection_without_discovered_models() {
+        let caps = AgentCapabilities::default();
+
+        assert!(!should_offer_model_selection("codex", &caps));
+    }
+
+    #[test]
+    fn should_preserve_existing_model_only_for_startup_model_agents() {
+        let caps = AgentCapabilities::default();
+
+        assert_eq!(
+            retained_existing_model("opencode", &caps, Some("opencode-go/kimi-k2.5")),
+            Some("opencode-go/kimi-k2.5")
+        );
+        assert_eq!(
+            retained_existing_model("codex", &caps, Some("gpt-5.4/medium")),
+            None
+        );
+    }
 
     #[test]
     fn install_command_npm() {
