@@ -175,21 +175,41 @@ async fn build_issue_snapshot_from_history(
     identifier: &str,
     step_kinds: HashMap<String, StepKind>,
 ) -> Result<Option<IssueDetailSnapshot>, std::io::Error> {
+    let Some(record) = latest_history_record(history_path, identifier).await? else {
+        return Ok(None);
+    };
+
+    Ok(issue_snapshot_from_history_record(
+        &record,
+        workspace_root,
+        identifier,
+        step_kinds,
+    ))
+}
+
+async fn latest_history_record(
+    history_path: &FsPath,
+    identifier: &str,
+) -> Result<Option<HistoryRecord>, std::io::Error> {
     let contents = match tokio::fs::read_to_string(history_path).await {
         Ok(contents) => contents,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     };
 
-    let record = contents.lines().rev().find_map(|line| {
+    Ok(contents.lines().rev().find_map(|line| {
         serde_json::from_str::<HistoryRecord>(line)
             .ok()
             .filter(|entry| entry.issue_identifier == identifier)
-    });
-    let Some(record) = record else {
-        return Ok(None);
-    };
+    }))
+}
 
+fn issue_snapshot_from_history_record(
+    record: &HistoryRecord,
+    workspace_root: &str,
+    identifier: &str,
+    step_kinds: HashMap<String, StepKind>,
+) -> Option<IssueDetailSnapshot> {
     let status = match record.outcome.as_str() {
         "succeeded" => "completed_succeeded".to_string(),
         "failed" => "completed_failed".to_string(),
@@ -200,7 +220,7 @@ async fn build_issue_snapshot_from_history(
     let workspace_path = if record.workspace_path.is_empty() {
         let key = sanitize_workspace_key(identifier);
         let Some(key) = key else {
-            return Ok(None);
+            return None;
         };
         format!("{}/{}", workspace_root, key)
     } else {
@@ -235,7 +255,7 @@ async fn build_issue_snapshot_from_history(
     };
     let artifacts = record.artifacts.clone();
 
-    Ok(Some(IssueDetailSnapshot {
+    Some(IssueDetailSnapshot {
         issue_identifier: record.issue_identifier.clone(),
         issue_id: record.issue_id.clone(),
         status,
@@ -264,7 +284,146 @@ async fn build_issue_snapshot_from_history(
             url: None,
         },
         artifacts,
+    })
+}
+
+async fn build_step_detail_from_history(
+    history_path: &FsPath,
+    workspace_root: &str,
+    identifier: &str,
+    step_name: &str,
+    step_kinds: HashMap<String, StepKind>,
+) -> Result<Option<StepDetailSnapshot>, std::io::Error> {
+    let Some(record) = latest_history_record(history_path, identifier).await? else {
+        return Ok(None);
+    };
+
+    let step_idx = record
+        .steps_traversed
+        .iter()
+        .position(|name| name == step_name);
+    let transcript = record
+        .artifacts
+        .as_ref()
+        .and_then(|artifacts| {
+            artifacts
+                .transcripts
+                .iter()
+                .find(|artifact| artifact.step_name == step_name)
+        })
+        .cloned();
+
+    if step_idx.is_none() && transcript.is_none() {
+        return Ok(None);
+    }
+
+    let run_id = transcript
+        .as_ref()
+        .map(|artifact| artifact.run_id.clone())
+        .or_else(|| {
+            record
+                .artifacts
+                .as_ref()
+                .map(|artifacts| artifacts.run_id.clone())
+        });
+    let recent_events = if let Some(run_id) = run_id.as_deref() {
+        read_recent_step_events(workspace_root, run_id, identifier, step_name).await
+    } else {
+        Vec::new()
+    };
+    let transcript = if let Some(transcript) = transcript {
+        Some(transcript)
+    } else if let Some(run_id) = run_id.as_deref() {
+        read_transcript_metadata(workspace_root, run_id, step_name).await
+    } else {
+        None
+    };
+
+    let last_idx = record.steps_traversed.len().saturating_sub(1);
+    let status = match record.outcome.as_str() {
+        "failed" if step_idx == Some(last_idx) => "failed",
+        "stopped" if step_idx == Some(last_idx) => "stopped",
+        _ => "passed",
+    }
+    .to_string();
+
+    Ok(Some(StepDetailSnapshot {
+        issue_identifier: record.issue_identifier,
+        issue_id: record.issue_id,
+        step_name: step_name.to_string(),
+        status,
+        agent: "unknown".to_string(),
+        kind: step_kinds
+            .get(step_name)
+            .copied()
+            .unwrap_or(StepKind::Agent)
+            .to_string(),
+        dependencies: Vec::new(),
+        can_navigate: true,
+        verdict: if step_idx == Some(last_idx) {
+            record.verdict
+        } else {
+            None
+        },
+        run_id,
+        transcript,
+        recent_events,
     }))
+}
+
+async fn read_recent_step_events(
+    workspace_root: &str,
+    run_id: &str,
+    identifier: &str,
+    step_name: &str,
+) -> Vec<crate::timeline::model::TimelineEventRecord> {
+    let timeline_path = std::path::PathBuf::from(workspace_root)
+        .join(".ensemble")
+        .join("runs")
+        .join(run_id)
+        .join("events.jsonl");
+    tokio::fs::read_to_string(&timeline_path)
+        .await
+        .ok()
+        .map(|contents| {
+            contents
+                .lines()
+                .rev()
+                .filter_map(|line| {
+                    serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line).ok()
+                })
+                .filter(|event| event.issue_identifier == identifier)
+                .filter(|event| event.step_name.as_deref() == Some(step_name))
+                .take(50)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn read_transcript_metadata(
+    workspace_root: &str,
+    run_id: &str,
+    step_name: &str,
+) -> Option<StepTranscriptArtifact> {
+    match crate::transcript::reader::read_transcript_page(
+        FsPath::new(workspace_root),
+        run_id,
+        step_name,
+        None,
+        Some(1),
+    )
+    .await
+    {
+        Ok(response) if response.total > 0 => Some(StepTranscriptArtifact {
+            step_name: step_name.to_string(),
+            run_id: run_id.to_string(),
+            record_count: response.total,
+        }),
+        _ => None,
+    }
 }
 
 /// GET /api/v1/{identifier}/step/{step_name}
@@ -295,61 +454,42 @@ pub async fn get_step_detail(
     };
 
     let Some(detail_state) = detail_state else {
-        let error = ApiError::new(
-            "step_not_found",
-            &format!("no issue '{}' or step '{}' found", identifier, step_name),
-        );
-        return (StatusCode::NOT_FOUND, Json(error)).into_response();
+        return match build_step_detail_from_history(
+            &state.history_path,
+            &state.workspace_root,
+            &identifier,
+            &step_name,
+            step_kind_lookup(&state.config_runtime.document_state).await,
+        )
+        .await
+        {
+            Ok(Some(detail)) => (StatusCode::OK, Json(detail)).into_response(),
+            Ok(None) => {
+                let error = ApiError::new(
+                    "step_not_found",
+                    &format!("no issue '{}' or step '{}' found", identifier, step_name),
+                );
+                (StatusCode::NOT_FOUND, Json(error)).into_response()
+            }
+            Err(error) => {
+                let error = ApiError::new(
+                    "history_read_error",
+                    &format!("failed to read history: {}", error),
+                );
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response()
+            }
+        };
     };
 
     // Do I/O outside the state lock using tokio::fs
     let recent_events = if let Some(ref run_id) = detail_state.run_id {
-        let timeline_path = std::path::PathBuf::from(&state.workspace_root)
-            .join(".ensemble")
-            .join("runs")
-            .join(run_id)
-            .join("events.jsonl");
-        tokio::fs::read_to_string(&timeline_path)
-            .await
-            .ok()
-            .map(|contents| {
-                contents
-                    .lines()
-                    .rev()
-                    .filter_map(|line| {
-                        serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line)
-                            .ok()
-                    })
-                    .filter(|event| event.issue_identifier == identifier)
-                    .filter(|event| event.step_name.as_deref() == Some(&step_name))
-                    .take(50)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect()
-            })
-            .unwrap_or_default()
+        read_recent_step_events(&state.workspace_root, run_id, &identifier, &step_name).await
     } else {
         vec![]
     };
 
     let transcript = if let Some(ref run_id) = detail_state.run_id {
-        match crate::transcript::reader::read_transcript_page(
-            FsPath::new(&state.workspace_root),
-            run_id,
-            &step_name,
-            None,
-            Some(1),
-        )
-        .await
-        {
-            Ok(response) if response.total > 0 => Some(StepTranscriptArtifact {
-                step_name: step_name.clone(),
-                run_id: run_id.clone(),
-                record_count: response.total,
-            }),
-            _ => None,
-        }
+        read_transcript_metadata(&state.workspace_root, run_id, &step_name).await
     } else {
         None
     };
@@ -866,6 +1006,64 @@ on_failure: Failed
 
         assert_eq!(detail["artifacts"]["run_id"].as_str(), Some("run-77"));
         assert_eq!(detail["workflow_steps"][0]["can_navigate"], true);
+    }
+
+    #[tokio::test]
+    async fn history_backed_step_detail_resolves_transcript_metadata() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let history_path = tmp.path().join("ensemble_history.jsonl");
+        let writer = HistoryWriter::new(history_path.clone());
+        writer
+            .append(&HistoryRecord {
+                issue_identifier: "repo#77".into(),
+                issue_id: "NODE_77".into(),
+                outcome: "succeeded".into(),
+                steps_traversed: vec!["build".into()],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    total_tokens: 3,
+                },
+                duration_seconds: 10,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: None,
+                verdict: Some("approved".into()),
+                workspace_path: tmp.path().join("repo-77").display().to_string(),
+                artifacts: Some(crate::history::artifacts::RunArtifacts {
+                    run_id: "run-77".into(),
+                    workspace_path: tmp.path().join("repo-77").display().to_string(),
+                    repos: Vec::new(),
+                    transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
+                        step_name: "build".into(),
+                        run_id: "run-77".into(),
+                        record_count: 5,
+                    }],
+                }),
+            })
+            .await
+            .unwrap();
+
+        let mut app_state = build_empty_state();
+        app_state.history_path = history_path;
+        app_state.workspace_root = tmp.path().display().to_string();
+
+        let response = get_step_detail(
+            State(app_state),
+            Path(("repo#77".to_string(), "build".to_string())),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(detail["run_id"].as_str(), Some("run-77"));
+        assert_eq!(detail["transcript"]["record_count"].as_u64(), Some(5));
+        assert_eq!(detail["can_navigate"], true);
     }
 
     #[tokio::test]

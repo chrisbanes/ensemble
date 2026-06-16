@@ -28,7 +28,7 @@ use crate::agent::events::{
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
 use crate::error::{AgentError, EnsembleError};
-use crate::history::artifacts::FinalizeActionOutput;
+use crate::history::artifacts::{FinalizeActionOutput, RunArtifacts};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::history::writer::HistoryWriter;
 use crate::history_store::store::HistoryStore;
@@ -459,6 +459,7 @@ impl Orchestrator {
                                 entry,
                                 run,
                                 Utc::now(),
+                                state.artifacts.get(&issue.id).cloned(),
                             )
                         })
                     });
@@ -515,6 +516,7 @@ impl Orchestrator {
                                 entry,
                                 run,
                                 Utc::now(),
+                                state.artifacts.get(&issue.id).cloned(),
                             )
                         })
                     });
@@ -686,6 +688,7 @@ impl Orchestrator {
                                         entry,
                                         run,
                                         completed_at,
+                                        state.artifacts.get(&issue.id).cloned(),
                                     )
                                 });
                             let running_entry = state.get_running(&issue.id).cloned();
@@ -1453,6 +1456,7 @@ impl Orchestrator {
                                         entry,
                                         run,
                                         completed_at,
+                                        state.artifacts.get(issue_id).cloned(),
                                     )
                                 });
 
@@ -1596,6 +1600,7 @@ impl Orchestrator {
                                                         &entry,
                                                         run,
                                                         completed_at,
+                                                        state.artifacts.get(issue_id).cloned(),
                                                     )
                                                 });
                                         }
@@ -1699,6 +1704,7 @@ impl Orchestrator {
                                                         &entry,
                                                         run,
                                                         completed_at,
+                                                        state.artifacts.get(issue_id).cloned(),
                                                     )
                                                 });
                                         }
@@ -1826,6 +1832,7 @@ impl Orchestrator {
                                                         &entry,
                                                         run,
                                                         completed_at,
+                                                        state.artifacts.get(issue_id).cloned(),
                                                     )
                                                 });
                                         }
@@ -2049,6 +2056,7 @@ impl Orchestrator {
                                 &entry,
                                 run,
                                 completed_at,
+                                state.artifacts.get(issue_id).cloned(),
                             )
                         });
                     }
@@ -2161,6 +2169,7 @@ impl Orchestrator {
                                 &entry,
                                 run,
                                 completed_at,
+                                state.artifacts.get(issue_id).cloned(),
                             )
                         });
                     }
@@ -2256,6 +2265,7 @@ impl Orchestrator {
                                 &entry,
                                 run,
                                 completed_at,
+                                state.artifacts.get(issue_id).cloned(),
                             )
                         });
                     }
@@ -2375,6 +2385,7 @@ impl Orchestrator {
                                 &entry,
                                 run,
                                 completed_at,
+                                state.artifacts.get(issue_id).cloned(),
                             )
                         });
                     }
@@ -3968,6 +3979,7 @@ impl Orchestrator {
         running_entry: &crate::tracker::model::RunningEntry,
         run: &PipelineRun,
         completed_at: chrono::DateTime<Utc>,
+        artifacts: Option<RunArtifacts>,
     ) -> HistoryRecord {
         let steps_traversed = run.traversed_steps_in_order();
 
@@ -3999,7 +4011,7 @@ impl Orchestrator {
             last_error,
             verdict: Self::history_verdict(run),
             workspace_path,
-            artifacts: None,
+            artifacts,
         }
     }
 
@@ -4011,6 +4023,7 @@ impl Orchestrator {
         waiting_entry: &WaitingOnHumanEntry,
         run: &PipelineRun,
         completed_at: chrono::DateTime<Utc>,
+        artifacts: Option<RunArtifacts>,
     ) -> HistoryRecord {
         let steps_traversed = run.traversed_steps_in_order();
         let started_at = waiting_entry
@@ -4043,7 +4056,7 @@ impl Orchestrator {
             last_error,
             verdict: Self::history_verdict(run),
             workspace_path,
-            artifacts: None,
+            artifacts,
         }
     }
 
@@ -4563,6 +4576,7 @@ impl Orchestrator {
                                             entry,
                                             run,
                                             completed_at,
+                                            state.artifacts.get(&issue.id).cloned(),
                                         )
                                     })
                                 });
@@ -4639,6 +4653,7 @@ impl Orchestrator {
                                             entry,
                                             run,
                                             completed_at,
+                                            state.artifacts.get(&issue.id).cloned(),
                                         )
                                     })
                                 });
@@ -10058,13 +10073,79 @@ agent:
         let entry = state.running.get("1").unwrap().clone();
         drop(state);
 
-        let record =
-            orchestrator.build_history_record("1", "succeeded", None, &entry, &run, Utc::now());
+        let record = orchestrator.build_history_record(
+            "1",
+            "succeeded",
+            None,
+            &entry,
+            &run,
+            Utc::now(),
+            None,
+        );
 
         assert_eq!(
             record.steps_traversed,
             vec!["z-build".to_string(), "a-review".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn build_history_record_preserves_run_artifacts() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let cfg = config.read().await;
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new("1".to_string(), 1, dag);
+        run.step_states.insert(
+            "build".to_string(),
+            crate::pipeline::engine::StepState::Passed,
+        );
+        let artifacts = RunArtifacts {
+            run_id: "run-1".to_string(),
+            workspace_path: dir.path().display().to_string(),
+            repos: Vec::new(),
+            transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
+                step_name: "build".to_string(),
+                run_id: "run-1".to_string(),
+                record_count: 3,
+            }],
+        };
+        let mut state = orchestrator.state.write().await;
+        state.add_running(&test_issue("1", "Todo"), None);
+        let entry = state.running.get("1").unwrap().clone();
+        drop(state);
+
+        let record = orchestrator.build_history_record(
+            "1",
+            "succeeded",
+            None,
+            &entry,
+            &run,
+            Utc::now(),
+            Some(artifacts.clone()),
+        );
+
+        assert_eq!(record.artifacts, Some(artifacts));
     }
 
     #[tokio::test]
