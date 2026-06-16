@@ -25,7 +25,8 @@ pub fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
             workspace_path TEXT NOT NULL,
             input_tokens INTEGER NOT NULL,
             output_tokens INTEGER NOT NULL,
-            total_tokens INTEGER NOT NULL
+            total_tokens INTEGER NOT NULL,
+            artifacts TEXT
         );
 
         CREATE TABLE IF NOT EXISTS run_events (
@@ -46,7 +47,29 @@ pub fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_runs_identifier_completed_at ON runs(issue_identifier, completed_at);
         CREATE INDEX IF NOT EXISTS idx_runs_outcome_completed_at ON runs(outcome, completed_at);
         "#,
-    )
+    )?;
+    add_column_if_missing(conn, "runs", "artifacts", "TEXT")?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
+        [],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -88,5 +111,43 @@ mod tests {
             .unwrap();
 
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn bootstrap_adds_artifacts_column_to_existing_runs_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+        CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY,
+            issue_id TEXT NOT NULL,
+            issue_identifier TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            steps_traversed TEXT NOT NULL,
+            attempts INTEGER NOT NULL,
+            duration_seconds INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            last_error TEXT,
+            verdict TEXT,
+            workspace_path TEXT NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            total_tokens INTEGER NOT NULL
+        );
+        "#,
+        )
+        .unwrap();
+
+        bootstrap_schema(&conn).unwrap();
+
+        let artifacts_column_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'artifacts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(artifacts_column_count, 1);
     }
 }
