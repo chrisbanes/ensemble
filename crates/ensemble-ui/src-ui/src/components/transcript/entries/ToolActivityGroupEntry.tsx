@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Wrench } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import type { GroupedTranscriptEntry } from "../transcript-model";
@@ -16,7 +17,10 @@ export function ToolActivityGroupEntry({ entry, isActive }: ToolActivityGroupEnt
       className={cn("border-dashed border-slate-300 bg-slate-100/40 p-4", isActive && "ring-2 ring-primary")}
       data-active={isActive ? "true" : "false"}
     >
-      <div className="text-xs font-medium uppercase text-slate-700">Tool activity</div>
+      <div className="flex items-center gap-1.5 text-xs font-medium uppercase text-slate-700">
+        <Wrench data-testid="tool-activity-icon" aria-hidden="true" className="size-3.5" />
+        <span>Tool activity</span>
+      </div>
       <p className="mt-1 text-sm">{entry.count} low-level activities</p>
       <button
         type="button"

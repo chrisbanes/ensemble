@@ -124,6 +124,42 @@ describe("buildTranscriptEntries", () => {
     );
   });
 
+  it("formats sparse tool-call transcript payloads as readable activity", () => {
+    const entries = buildTranscriptEntries({
+      conversation: [],
+      transcriptRecords: [
+        {
+          schema_version: 1,
+          run_id: "run-1",
+          issue_identifier: "repo#1",
+          step_name: "build",
+          attempt: 1,
+          sequence: 1,
+          timestamp: "2026-06-14T00:00:00Z",
+          kind: "tool_call",
+          payload: {
+            arguments: null,
+            name: null,
+            status: "completed",
+            title: null,
+            tool_call_id: "call_MW2une4H5kusBk7wSwUglCyS",
+          },
+        },
+      ],
+      interactions: [],
+      events: [],
+    });
+
+    expect(entries).toEqual([
+      expect.objectContaining({
+        kind: "tool_activity",
+        event: expect.objectContaining({
+          detail: "Tool call call_MW2une4H5kusBk7wSwUglCyS completed",
+        }),
+      }),
+    ]);
+  });
+
   it("maps non-message transcript records into visible entries", () => {
     const entries = buildTranscriptEntries({
       conversation: [],

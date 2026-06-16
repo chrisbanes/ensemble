@@ -153,4 +153,49 @@ describe("RunTranscript", () => {
     expect(screen.getByText("message 4")).toBeInTheDocument();
     expect(humanMessageRender.fn).toHaveBeenCalledTimes(4);
   });
+
+  it("renders tool activity entries with an icon", () => {
+    const entries: GroupedTranscriptEntry[] = [
+      {
+        kind: "tool_activity",
+        id: "tool-1",
+        timestamp: "2026-04-14T10:00:00Z",
+        event: {
+          type: "tool_call",
+          timestamp: "2026-04-14T10:00:00Z",
+          detail: "Tool call call_123 completed",
+        },
+      },
+      {
+        kind: "tool_activity_group",
+        id: "tool-group-1",
+        timestamp: "2026-04-14T10:00:01Z",
+        count: 2,
+        defaultExpanded: false,
+        entries: [
+          {
+            kind: "tool_activity",
+            id: "tool-2",
+            timestamp: "2026-04-14T10:00:01Z",
+            event: {
+              type: "tool_call",
+              timestamp: "2026-04-14T10:00:01Z",
+              detail: "Tool call call_456 completed",
+            },
+          },
+        ],
+      },
+    ];
+
+    render(
+      <RunTranscript
+        entries={entries}
+        activeEntryId={null}
+        onJumpToEntry={() => {}}
+        transcriptSessionKey="session-1"
+      />,
+    );
+
+    expect(screen.getAllByTestId("tool-activity-icon")).toHaveLength(2);
+  });
 });
