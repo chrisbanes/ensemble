@@ -188,6 +188,12 @@ fn should_offer_model_selection(_agent_name: &str, caps: &AgentCapabilities) -> 
     caps.available_models.len() > 1
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ModelSelection {
+    Prompt { default_idx: usize },
+    Preserve(Option<String>),
+}
+
 fn retained_existing_model<'a>(
     agent_name: &str,
     caps: &AgentCapabilities,
@@ -199,6 +205,27 @@ fn retained_existing_model<'a>(
         existing_model
     } else {
         None
+    }
+}
+
+fn model_selection_for_agent(
+    agent_name: &str,
+    caps: &AgentCapabilities,
+    existing_model: Option<&str>,
+) -> ModelSelection {
+    if should_offer_model_selection(agent_name, caps) {
+        let model_default = existing_model.unwrap_or("default");
+        let default_idx = caps
+            .available_models
+            .iter()
+            .position(|m| m == model_default)
+            .unwrap_or(0);
+
+        ModelSelection::Prompt { default_idx }
+    } else {
+        ModelSelection::Preserve(
+            retained_existing_model(agent_name, caps, existing_model).map(str::to_string),
+        )
     }
 }
 
@@ -258,29 +285,23 @@ fn ask_roles(
 
         let existing_model = existing_entry.and_then(|(_, _, model)| *model);
 
-        let model = if should_offer_model_selection(agent_name, &caps) {
-            let model_default = existing_model.unwrap_or("default");
-            let default_idx = caps
-                .available_models
-                .iter()
-                .position(|m| m == model_default)
-                .unwrap_or(0);
+        let model = match model_selection_for_agent(agent_name, &caps, existing_model) {
+            ModelSelection::Prompt { default_idx } => {
+                let chosen = inquire::Select::new(
+                    &format!("  {agent_name} → model"),
+                    caps.available_models.clone(),
+                )
+                .with_starting_cursor(default_idx)
+                .prompt()
+                .map_err(|e| e.to_string())?;
 
-            let chosen = inquire::Select::new(
-                &format!("  {agent_name} → model"),
-                caps.available_models.clone(),
-            )
-            .with_starting_cursor(default_idx)
-            .prompt()
-            .map_err(|e| e.to_string())?;
-
-            if chosen == "default" {
-                None
-            } else {
-                Some(chosen)
+                if chosen == "default" {
+                    None
+                } else {
+                    Some(chosen)
+                }
             }
-        } else {
-            retained_existing_model(agent_name, &caps, existing_model).map(str::to_string)
+            ModelSelection::Preserve(model) => model,
         };
 
         agents.push(AgentEntry {
@@ -325,6 +346,49 @@ mod tests {
         assert_eq!(
             retained_existing_model("codex", &caps, Some("gpt-5.4/medium")),
             None
+        );
+    }
+
+    #[test]
+    fn model_selection_for_agent_preserves_none_on_fresh_init_without_choices() {
+        let caps = AgentCapabilities::default();
+
+        assert_eq!(
+            model_selection_for_agent("codex", &caps, None),
+            ModelSelection::Preserve(None)
+        );
+    }
+
+    #[test]
+    fn model_selection_for_agent_preserves_existing_opencode_model_without_choices() {
+        let caps = AgentCapabilities::default();
+
+        assert_eq!(
+            model_selection_for_agent("opencode", &caps, Some("opencode-go/kimi-k2.5")),
+            ModelSelection::Preserve(Some("opencode-go/kimi-k2.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn model_selection_for_agent_clears_stale_non_opencode_model_without_choices() {
+        let caps = AgentCapabilities::default();
+
+        assert_eq!(
+            model_selection_for_agent("codex", &caps, Some("gpt-5.4/medium")),
+            ModelSelection::Preserve(None)
+        );
+    }
+
+    #[test]
+    fn model_selection_for_agent_prompts_when_multiple_models_are_available() {
+        let caps = AgentCapabilities {
+            available_models: vec!["default".to_string(), "sonnet".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            model_selection_for_agent("codex", &caps, Some("sonnet")),
+            ModelSelection::Prompt { default_idx: 1 }
         );
     }
 
