@@ -105,6 +105,8 @@ Important boundary:
    - Runs workspace lifecycle hooks.
    - Cleans workspaces and worktrees for terminal issues.
    - Per-repo `finalize` settings control branch publication behavior after pipeline success.
+     Finalization defaults to `none`; durable run artifacts are still recorded even when no branch
+     is pushed and no pull request is opened.
 
 7. `Agent Runner`
    - Creates workspace.
@@ -1450,6 +1452,10 @@ Large tool results are truncated with head and tail retention. Adjacent assistan
 deltas may be coalesced before persistence. Transcript persistence failures are logged and do not
 fail the agent step.
 
+When a run is recorded in durable history, the history record should include per-step transcript
+metadata so clients can link to completed step logs from issue detail and step detail views after the
+run is no longer active.
+
 The issue WebSocket at `/ws/events/{identifier}` emits three message kinds:
 
 - `snapshot`: current issue detail snapshot sent when the socket connects.
@@ -2045,6 +2051,11 @@ Minimum endpoints:
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information
     the implementation tracks that is useful for debugging.
+  - Workflow steps should remain navigable from the issue detail response whenever the server can
+    resolve the issue from active state or durable history. Completed runs should include durable
+    artifacts such as workspace path, repo branch/HEAD/change metadata, transcript metadata, and
+    finalize output. These artifacts are independent of finalize mode; `finalize.mode: none` still
+    records the workspace, repo, and transcript metadata.
   - Suggested response shape:
 
     ```json

@@ -259,6 +259,11 @@ List of repositories for workspace setup. Paths can be absolute or relative to t
 | `finalize.mode` | string | `none` | Finalization action: `none`, `push`, or `push_and_pr` |
 | `finalize.approval_required` | bool | `false` | Requires explicit approval from web/desktop UI before finalize runs |
 
+`finalize.mode` defaults to `none`, so Ensemble does not push branches or open pull requests unless
+you opt in per repo. Ensemble still records durable run artifacts for each completed issue,
+including workspace paths, repo branch/HEAD/change metadata, per-step transcript metadata, and any
+finalize output such as pushed refs or PR URLs when finalization runs.
+
 **Headless behavior:** if `finalize.approval_required: true` and Ensemble is running headless, startup emits a warning and finalize is skipped for that repo.
 
 **Migration note:** top-level `push_strategy` has been removed. Configure `repos[].finalize` instead.
