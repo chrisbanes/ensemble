@@ -650,6 +650,10 @@ Named agent definitions. Each key is the agent role name, each value is an objec
 - `model` (string, optional)
   - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
   - Required for `direct` runtime.
+  - For `acpx_agent` entries, Ensemble applies the model through the adapter's supported startup
+    path. Generic acpx agents use acpx model selection; `acpx_agent: opencode` uses
+    `opencode --model <model> acp` because opencode does not advertise ACP generic model
+    selection.
   - When omitted for other runtimes, the agent uses its default model.
 - `permission_mode` (string, optional)
   - Optional acpx launch-time permission mode for `acpx_agent`.
@@ -970,7 +974,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agents.<name>.acpx_agent`: string, optional; acpx agent identifier (alternative to executor)
 - `agents.<name>.runtime`: string, optional; `acpx` or `direct` runtime override
 - `agents.<name>.executor`: string, required for direct runtime; ACP-compatible agent executable identifier
-- `agents.<name>.model`: string, optional; model identifier, including for `acpx_agent` entries
+- `agents.<name>.model`: string, optional; model identifier, including for `acpx_agent` entries.
+  Opencode acpx agents apply this through `opencode --model <model> acp`.
 - `agents.<name>.prompt`: string, optional; inline prompt (mutually exclusive with prompt_template)
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier
@@ -2702,6 +2707,9 @@ The `ensemble` binary supports the following subcommands:
 - **acpx** must be installed and on PATH. If missing, the command prints install instructions and
   exits.
 - At least one agent must be discoverable via acpx.
+- When model choices are not discoverable, the wizard does not write a new `model` value. During
+  reconfiguration it may preserve an existing `opencode` model because opencode supports startup
+  model selection outside ACP generic model discovery.
 - The wizard produces:
   - `config.yaml` — generated configuration
   - `templates/*.liquid` — prompt templates for each pipeline step
