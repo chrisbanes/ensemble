@@ -568,7 +568,9 @@ mod tests {
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
-    use super::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
+    use super::{
+        AcpxAgentInvocation, AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility,
+    };
 
     fn prompt_request<'a>(
         cwd: &'a Path,
@@ -696,6 +698,54 @@ mod tests {
             "generic --model must not be passed to acpx for opencode: {argv:?}"
         );
         assert!(argv.ends_with(&["sessions", "ensure", "--name", "build-session"]));
+    }
+
+    #[tokio::test]
+    async fn cancel_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .cancel(
+                "opencode",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: Some("opencode-go/kimi-k2.5"),
+                    reasoning_level: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["cancel", "--session", "build-session"]));
+    }
+
+    #[tokio::test]
+    async fn opencode_startup_model_quotes_shell_sensitive_model() {
+        assert_eq!(
+            AcpxAgentInvocation::for_agent("opencode", Some("provider/model with space")),
+            AcpxAgentInvocation::RawCommand(
+                "opencode --model 'provider/model with space' acp".to_string()
+            )
+        );
     }
 
     #[tokio::test]
