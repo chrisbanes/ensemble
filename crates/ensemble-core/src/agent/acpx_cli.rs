@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 
 use crate::error::AgentError;
 
+use super::acpx_adapter::{AcpxAgentAdapter, AcpxAgentInvocation};
 use super::events::{AgentEvent, RuntimeStream, StopReason, TokenUsage};
 use super::protocol;
 
@@ -18,6 +19,29 @@ pub struct AcpxCli {
 pub struct AcpxCommandOptions<'a> {
     pub model: Option<&'a str>,
     pub reasoning_level: Option<&'a str>,
+}
+
+fn append_global_args(
+    adapter: &AcpxAgentAdapter<'_>,
+    invocation: &AcpxAgentInvocation,
+    command: &mut Command,
+    options: AcpxCommandOptions<'_>,
+) {
+    if let Some(raw_command) = invocation.raw_command() {
+        command.args(["--agent", raw_command]);
+    } else if let Some(model) = adapter.generic_model_arg(options.model) {
+        command.args(["--model", model]);
+    }
+
+    if let Some(reasoning_level) = options.reasoning_level {
+        command.args(["--reasoning-level", reasoning_level]);
+    }
+}
+
+fn append_agent_command(invocation: &AcpxAgentInvocation, command: &mut Command) {
+    if let Some(agent) = invocation.built_in_agent() {
+        command.arg(agent);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,18 +80,16 @@ impl AcpxCli {
     ) -> Result<(), AgentError> {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
-        if let Some(model) = options.model {
-            command.args(["--model", model]);
-        }
-        if let Some(reasoning_level) = options.reasoning_level {
-            command.args(["--reasoning-level", reasoning_level]);
-        }
-        command
-            .arg("--cwd")
-            .arg(cwd.display().to_string())
-            .args(["--format", "json", "--json-strict"])
-            .arg(agent)
-            .args(["sessions", "ensure", "--name", session_name]);
+        let adapter = AcpxAgentAdapter::for_name(agent);
+        let invocation = adapter.invocation_for_cwd(options.model, cwd);
+        append_global_args(&adapter, &invocation, &mut command, options);
+        command.arg("--cwd").arg(cwd.display().to_string()).args([
+            "--format",
+            "json",
+            "--json-strict",
+        ]);
+        append_agent_command(&invocation, &mut command);
+        command.args(["sessions", "ensure", "--name", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), model = options.model, reasoning_level = options.reasoning_level, "running acpx sessions ensure");
 
         let output = spawn_with_etxtbsy_retry(command)
@@ -443,17 +465,15 @@ impl AcpxCli {
     fn base_command(&self, agent: &str, cwd: &Path, options: AcpxCommandOptions<'_>) -> Command {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
-        if let Some(model) = options.model {
-            command.args(["--model", model]);
-        }
-        if let Some(reasoning_level) = options.reasoning_level {
-            command.args(["--reasoning-level", reasoning_level]);
-        }
-        command
-            .arg("--cwd")
-            .arg(cwd.display().to_string())
-            .args(["--format", "json", "--json-strict"])
-            .arg(agent);
+        let adapter = AcpxAgentAdapter::for_name(agent);
+        let invocation = adapter.invocation_for_cwd(options.model, cwd);
+        append_global_args(&adapter, &invocation, &mut command, options);
+        command.arg("--cwd").arg(cwd.display().to_string()).args([
+            "--format",
+            "json",
+            "--json-strict",
+        ]);
+        append_agent_command(&invocation, &mut command);
         command
     }
 }
@@ -526,6 +546,7 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
+    use crate::agent::acpx_adapter::{AcpxAgentAdapter, AcpxAgentInvocation};
     use crate::agent::events::{AgentEvent, TokenUsage};
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
@@ -585,13 +606,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_session_puts_model_before_agent() {
+    async fn ensure_session_puts_generic_model_before_non_opencode_agent() {
         let dir = tempfile::TempDir::new().unwrap();
         let args_path = dir.path().join("args.txt");
         let script = write_mock_acpx_script(
             dir.path(),
             &format!(
-                "#!/usr/bin/env bash\nprintf '%s\\n' \"$*\" > \"{}\"\n",
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\n",
                 args_path.display()
             ),
         );
@@ -611,12 +632,193 @@ mod tests {
             .unwrap();
 
         let args = std::fs::read_to_string(args_path).unwrap();
-        let model_pos = args.find("--model").expect("--model should be present");
-        let agent_pos = args.find("codex").expect("codex agent should be present");
+        let argv: Vec<&str> = args.lines().collect();
+        let model_pos = argv.iter().position(|arg| *arg == "--model").unwrap();
+        let agent_pos = argv.iter().position(|arg| *arg == "codex").unwrap();
         assert!(
             model_pos < agent_pos,
-            "--model must come BEFORE agent; got: {}",
-            args
+            "--model must come BEFORE agent; got: {:?}",
+            argv
+        );
+        assert_eq!(argv[model_pos + 1], "gpt-5.4/medium");
+    }
+
+    #[tokio::test]
+    async fn ensure_session_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .ensure_session(
+                "opencode",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: Some("opencode-go/kimi-k2.5"),
+                    reasoning_level: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["sessions", "ensure", "--name", "build-session"]));
+    }
+
+    #[tokio::test]
+    async fn cancel_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .cancel(
+                "opencode",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: Some("opencode-go/kimi-k2.5"),
+                    reasoning_level: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["cancel", "--session", "build-session"]));
+    }
+
+    #[tokio::test]
+    async fn close_session_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .close_session(
+                "opencode",
+                "build-session",
+                dir.path(),
+                AcpxCommandOptions {
+                    model: Some("opencode-go/kimi-k2.5"),
+                    reasoning_level: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["sessions", "close", "build-session"]));
+    }
+
+    #[tokio::test]
+    async fn run_prompt_uses_opencode_startup_model_command() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let args_path = dir.path().join("args.txt");
+        let script = write_mock_acpx_script(
+            dir.path(),
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"{}\"\ndd bs=1 count=2 of=/dev/null 2>/dev/null\nprintf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"stopReason\":\"end_turn\"}}}}'\n",
+                args_path.display()
+            ),
+        );
+
+        let client = AcpxCli::new(script);
+        client
+            .run_prompt(
+                AcpxPromptRequest {
+                    agent: "opencode",
+                    session_name: "build-session",
+                    cwd: dir.path(),
+                    prompt: "hi",
+                    options: AcpxCommandOptions {
+                        model: Some("opencode-go/kimi-k2.5"),
+                        reasoning_level: None,
+                    },
+                    visibility: PromptVisibility::Hidden,
+                },
+                |_| async {},
+            )
+            .await
+            .unwrap();
+
+        let args = std::fs::read_to_string(args_path).unwrap();
+        let argv: Vec<&str> = args.lines().collect();
+
+        assert_eq!(argv[0], "--agent");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
+        assert!(
+            !argv.iter().any(|arg| *arg == "--model"),
+            "generic --model must not be passed to acpx for opencode: {argv:?}"
+        );
+        assert!(argv.ends_with(&["prompt", "--session", "build-session", "--file", "-"]));
+    }
+
+    #[tokio::test]
+    async fn opencode_startup_model_quotes_shell_sensitive_model() {
+        assert_eq!(
+            AcpxAgentAdapter::for_name("opencode").invocation(Some("provider/model with space")),
+            AcpxAgentInvocation::RawCommand(
+                "npx -y opencode-ai --model 'provider/model with space' acp".to_string()
+            )
         );
     }
 
