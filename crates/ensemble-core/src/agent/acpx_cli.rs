@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 
 use crate::error::AgentError;
 
+use super::acpx_adapter::{AcpxAgentAdapter, AcpxAgentInvocation};
 use super::events::{AgentEvent, RuntimeStream, StopReason, TokenUsage};
 use super::protocol;
 
@@ -20,47 +21,26 @@ pub struct AcpxCommandOptions<'a> {
     pub reasoning_level: Option<&'a str>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AcpxAgentInvocation {
-    BuiltIn(String),
-    RawCommand(String),
+fn append_global_args(
+    adapter: &AcpxAgentAdapter<'_>,
+    invocation: &AcpxAgentInvocation,
+    command: &mut Command,
+    options: AcpxCommandOptions<'_>,
+) {
+    if let Some(raw_command) = invocation.raw_command() {
+        command.args(["--agent", raw_command]);
+    } else if let Some(model) = adapter.generic_model_arg(options.model) {
+        command.args(["--model", model]);
+    }
+
+    if let Some(reasoning_level) = options.reasoning_level {
+        command.args(["--reasoning-level", reasoning_level]);
+    }
 }
 
-impl AcpxAgentInvocation {
-    fn for_agent(agent: &str, model: Option<&str>) -> Self {
-        if agent == "opencode" {
-            if let Some(model) = model {
-                return Self::RawCommand(format!(
-                    "opencode --model {} acp",
-                    shell_words::quote(model)
-                ));
-            }
-        }
-
-        Self::BuiltIn(agent.to_string())
-    }
-
-    fn append_global_args(&self, command: &mut Command, options: AcpxCommandOptions<'_>) {
-        match self {
-            Self::BuiltIn(_) => {
-                if let Some(model) = options.model {
-                    command.args(["--model", model]);
-                }
-            }
-            Self::RawCommand(raw_command) => {
-                command.args(["--agent", raw_command]);
-            }
-        }
-
-        if let Some(reasoning_level) = options.reasoning_level {
-            command.args(["--reasoning-level", reasoning_level]);
-        }
-    }
-
-    fn append_agent_command(&self, command: &mut Command) {
-        if let Self::BuiltIn(agent) = self {
-            command.arg(agent);
-        }
+fn append_agent_command(invocation: &AcpxAgentInvocation, command: &mut Command) {
+    if let Some(agent) = invocation.built_in_agent() {
+        command.arg(agent);
     }
 }
 
@@ -100,14 +80,15 @@ impl AcpxCli {
     ) -> Result<(), AgentError> {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
-        let invocation = AcpxAgentInvocation::for_agent(agent, options.model);
-        invocation.append_global_args(&mut command, options);
+        let adapter = AcpxAgentAdapter::for_name(agent);
+        let invocation = adapter.invocation(options.model);
+        append_global_args(&adapter, &invocation, &mut command, options);
         command.arg("--cwd").arg(cwd.display().to_string()).args([
             "--format",
             "json",
             "--json-strict",
         ]);
-        invocation.append_agent_command(&mut command);
+        append_agent_command(&invocation, &mut command);
         command.args(["sessions", "ensure", "--name", session_name]);
         debug!(agent, session_name, cwd = %cwd.display(), model = options.model, reasoning_level = options.reasoning_level, "running acpx sessions ensure");
 
@@ -484,14 +465,15 @@ impl AcpxCli {
     fn base_command(&self, agent: &str, cwd: &Path, options: AcpxCommandOptions<'_>) -> Command {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
-        let invocation = AcpxAgentInvocation::for_agent(agent, options.model);
-        invocation.append_global_args(&mut command, options);
+        let adapter = AcpxAgentAdapter::for_name(agent);
+        let invocation = adapter.invocation(options.model);
+        append_global_args(&adapter, &invocation, &mut command, options);
         command.arg("--cwd").arg(cwd.display().to_string()).args([
             "--format",
             "json",
             "--json-strict",
         ]);
-        invocation.append_agent_command(&mut command);
+        append_agent_command(&invocation, &mut command);
         command
     }
 }
@@ -564,13 +546,12 @@ mod tests {
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
+    use crate::agent::acpx_adapter::{AcpxAgentAdapter, AcpxAgentInvocation};
     use crate::agent::events::{AgentEvent, TokenUsage};
     use crate::agent::test_support::write_mock_acpx_script;
     use crate::error::AgentError;
 
-    use super::{
-        AcpxAgentInvocation, AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility,
-    };
+    use super::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
 
     fn prompt_request<'a>(
         cwd: &'a Path,
@@ -822,7 +803,7 @@ mod tests {
     #[tokio::test]
     async fn opencode_startup_model_quotes_shell_sensitive_model() {
         assert_eq!(
-            AcpxAgentInvocation::for_agent("opencode", Some("provider/model with space")),
+            AcpxAgentAdapter::for_name("opencode").invocation(Some("provider/model with space")),
             AcpxAgentInvocation::RawCommand(
                 "opencode --model 'provider/model with space' acp".to_string()
             )

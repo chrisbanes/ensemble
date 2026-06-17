@@ -1,4 +1,5 @@
 pub mod acp_client;
+pub mod acpx_adapter;
 pub mod acpx_cli;
 pub mod acpx_runtime;
 pub mod cancellation;
@@ -36,6 +37,7 @@ use acp_client::{
     discover_capabilities, run_acp_session, AcpCapabilityDiscoveryConfig, AcpSessionConfig,
     ExtractionContext, SessionTurn, TurnPurpose, TurnResult, TurnVisibility,
 };
+use acpx_adapter::AcpxAgentAdapter;
 use acpx_runtime::AcpxRuntime;
 
 /// Fully-resolved description of how to spawn an agent subprocess.
@@ -621,29 +623,7 @@ fn resolve_agent_command(
 /// agent process to start and report `configOptions`; the real run will
 /// re-invoke the agent with the full command built by `resolve_agent_command`.
 fn resolve_acpx_discovery_command(acpx_name: &str, model: Option<&str>) -> ResolvedCommand {
-    if acpx_name == "opencode" && model.is_some() {
-        return ResolvedCommand {
-            program: PathBuf::from("opencode"),
-            args: vec![
-                "--model".to_string(),
-                model.expect("checked is_some above").to_string(),
-                "acp".to_string(),
-            ],
-            env: Vec::new(),
-        };
-    }
-
-    let mut args = vec!["--agent".to_string(), acpx_name.to_string()];
-    if let Some(model) = model {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
-
-    ResolvedCommand {
-        program: PathBuf::from("acpx"),
-        args,
-        env: Vec::new(),
-    }
+    AcpxAgentAdapter::for_name(acpx_name).discovery_command(model)
 }
 
 fn resolve_acpx_acp_command(

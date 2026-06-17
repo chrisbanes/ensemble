@@ -1,3 +1,4 @@
+use ensemble_core::agent::acpx_adapter::AcpxAgentAdapter;
 use ensemble_core::config::ensemble::EnsembleConfig;
 use ensemble_core::config::setup::{
     discover_agent_capabilities, discover_available_agents, AgentCapabilities,
@@ -181,7 +182,7 @@ pub async fn discover_agents(existing: Option<&EnsembleConfig>) -> Result<Vec<Ag
 }
 
 fn supports_adapter_startup_model(agent_name: &str) -> bool {
-    agent_name == "opencode"
+    AcpxAgentAdapter::for_name(agent_name).supports_startup_model()
 }
 
 fn should_offer_model_selection(_agent_name: &str, caps: &AgentCapabilities) -> bool {
