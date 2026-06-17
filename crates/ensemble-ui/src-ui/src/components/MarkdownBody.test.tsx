@@ -50,4 +50,15 @@ describe("MarkdownBody", () => {
     expect(container.querySelector("script")).toBeNull();
     expect(container.querySelector("img")).toBeNull();
   });
+
+  it("does not create image DOM nodes from Markdown image syntax", () => {
+    const { container } = render(
+      <MarkdownBody>
+        {"before ![tracking pixel](https://attacker.example/pixel) after"}
+      </MarkdownBody>,
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText(/before/)).toHaveTextContent("before after");
+  });
 });

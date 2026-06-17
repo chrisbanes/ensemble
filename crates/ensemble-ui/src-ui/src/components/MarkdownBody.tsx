@@ -70,6 +70,9 @@ const components: Components = {
       </h3>
     );
   },
+  img() {
+    return null;
+  },
   li({ children }) {
     return <li className="pl-1">{children}</li>;
   },
