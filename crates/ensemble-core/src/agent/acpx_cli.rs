@@ -81,7 +81,7 @@ impl AcpxCli {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
         let adapter = AcpxAgentAdapter::for_name(agent);
-        let invocation = adapter.invocation(options.model);
+        let invocation = adapter.invocation_for_cwd(options.model, cwd);
         append_global_args(&adapter, &invocation, &mut command, options);
         command.arg("--cwd").arg(cwd.display().to_string()).args([
             "--format",
@@ -466,7 +466,7 @@ impl AcpxCli {
         let mut command = Command::new(&self.executable);
         command.kill_on_drop(true);
         let adapter = AcpxAgentAdapter::for_name(agent);
-        let invocation = adapter.invocation(options.model);
+        let invocation = adapter.invocation_for_cwd(options.model, cwd);
         append_global_args(&adapter, &invocation, &mut command, options);
         command.arg("--cwd").arg(cwd.display().to_string()).args([
             "--format",
@@ -673,7 +673,10 @@ mod tests {
         let argv: Vec<&str> = args.lines().collect();
 
         assert_eq!(argv[0], "--agent");
-        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
         assert!(
             !argv.iter().any(|arg| *arg == "--model"),
             "generic --model must not be passed to acpx for opencode: {argv:?}"
@@ -711,7 +714,10 @@ mod tests {
         let argv: Vec<&str> = args.lines().collect();
 
         assert_eq!(argv[0], "--agent");
-        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
         assert!(
             !argv.iter().any(|arg| *arg == "--model"),
             "generic --model must not be passed to acpx for opencode: {argv:?}"
@@ -749,7 +755,10 @@ mod tests {
         let argv: Vec<&str> = args.lines().collect();
 
         assert_eq!(argv[0], "--agent");
-        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
         assert!(
             !argv.iter().any(|arg| *arg == "--model"),
             "generic --model must not be passed to acpx for opencode: {argv:?}"
@@ -792,7 +801,10 @@ mod tests {
         let argv: Vec<&str> = args.lines().collect();
 
         assert_eq!(argv[0], "--agent");
-        assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+        assert_eq!(
+            argv[1],
+            "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp"
+        );
         assert!(
             !argv.iter().any(|arg| *arg == "--model"),
             "generic --model must not be passed to acpx for opencode: {argv:?}"
@@ -805,7 +817,7 @@ mod tests {
         assert_eq!(
             AcpxAgentAdapter::for_name("opencode").invocation(Some("provider/model with space")),
             AcpxAgentInvocation::RawCommand(
-                "opencode --model 'provider/model with space' acp".to_string()
+                "npx -y opencode-ai --model 'provider/model with space' acp".to_string()
             )
         );
     }

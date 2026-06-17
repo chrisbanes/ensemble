@@ -204,7 +204,7 @@ impl AcpAgentRunner {
         if agent_config.acpx_agent.is_none() {
             return Ok(());
         }
-        let command = resolve_acpx_acp_command(agent_config)?;
+        let command = resolve_acpx_acp_command_for_cwd(agent_config, request.workspace_path)?;
 
         let capabilities = discover_capabilities(AcpCapabilityDiscoveryConfig {
             command,
@@ -622,10 +622,20 @@ fn resolve_agent_command(
 /// Deliberately omits the `permission_mode` flag — discovery only needs the
 /// agent process to start and report `configOptions`; the real run will
 /// re-invoke the agent with the full command built by `resolve_agent_command`.
+#[cfg(test)]
 fn resolve_acpx_discovery_command(acpx_name: &str, model: Option<&str>) -> ResolvedCommand {
     AcpxAgentAdapter::for_name(acpx_name).discovery_command(model)
 }
 
+fn resolve_acpx_discovery_command_for_cwd(
+    acpx_name: &str,
+    model: Option<&str>,
+    cwd: &Path,
+) -> ResolvedCommand {
+    AcpxAgentAdapter::for_name(acpx_name).discovery_command_for_cwd(model, cwd)
+}
+
+#[cfg(test)]
 fn resolve_acpx_acp_command(
     agent_config: &crate::config::ensemble::AgentConfig,
 ) -> Result<ResolvedCommand, AgentError> {
@@ -640,6 +650,25 @@ fn resolve_acpx_acp_command(
     Ok(resolve_acpx_discovery_command(
         acpx_name,
         agent_config.model.as_deref(),
+    ))
+}
+
+fn resolve_acpx_acp_command_for_cwd(
+    agent_config: &crate::config::ensemble::AgentConfig,
+    cwd: &Path,
+) -> Result<ResolvedCommand, AgentError> {
+    let acpx_name =
+        agent_config
+            .acpx_agent
+            .as_ref()
+            .ok_or_else(|| AgentError::InvalidAgentCommand {
+                command: "<acpx capability discovery>".to_string(),
+                reason: "agent is missing acpx_agent".to_string(),
+            })?;
+    Ok(resolve_acpx_discovery_command_for_cwd(
+        acpx_name,
+        agent_config.model.as_deref(),
+        cwd,
     ))
 }
 
@@ -2039,10 +2068,12 @@ on_failure: Failed
         })
         .unwrap();
 
-        assert_eq!(resolved.program, PathBuf::from("opencode"));
+        assert_eq!(resolved.program, PathBuf::from("npx"));
         assert_eq!(
             resolved.args,
             vec![
+                "-y".to_string(),
+                "opencode-ai".to_string(),
                 "--model".to_string(),
                 "opencode-go/kimi-k2.5".to_string(),
                 "acp".to_string(),

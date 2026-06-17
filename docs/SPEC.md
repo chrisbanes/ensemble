@@ -651,9 +651,10 @@ Named agent definitions. Each key is the agent role name, each value is an objec
   - Model identifier for the agent (for example `sonnet-4`, `opus-4`).
   - Required for `direct` runtime.
   - For `acpx_agent` entries, Ensemble applies the model through the adapter's supported startup
-    path. Generic acpx agents use acpx model selection; `acpx_agent: opencode` uses
-    `opencode --model <model> acp` because opencode does not advertise ACP generic model
-    selection.
+    path. Generic acpx agents use acpx model selection; `acpx_agent: opencode` inserts
+    `--model <model>` into opencode's ACP startup command before `acp` because opencode does not
+    advertise ACP generic model selection. Runtime launches preserve acpx opencode adapter command
+    overrides from `.acpxrc.json` or `~/.acpx/config.json`.
   - When omitted for other runtimes, the agent uses its default model.
 - `permission_mode` (string, optional)
   - Optional acpx launch-time permission mode for `acpx_agent`.
@@ -975,7 +976,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agents.<name>.runtime`: string, optional; `acpx` or `direct` runtime override
 - `agents.<name>.executor`: string, required for direct runtime; ACP-compatible agent executable identifier
 - `agents.<name>.model`: string, optional; model identifier, including for `acpx_agent` entries.
-  Opencode acpx agents apply this through `opencode --model <model> acp`.
+  Opencode acpx agents apply this by inserting `--model <model>` into the opencode ACP startup
+  command before `acp`.
 - `agents.<name>.prompt`: string, optional; inline prompt (mutually exclusive with prompt_template)
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier

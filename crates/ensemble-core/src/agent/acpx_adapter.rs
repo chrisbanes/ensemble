@@ -1,6 +1,9 @@
+use std::path::Path;
 use std::path::PathBuf;
 
 use super::ResolvedCommand;
+
+const OPENCODE_DEFAULT_COMMAND: &str = "npx -y opencode-ai acp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcpxAgentAdapter<'a> {
@@ -44,12 +47,24 @@ impl<'a> AcpxAgentAdapter<'a> {
     }
 
     pub fn invocation(&self, model: Option<&str>) -> AcpxAgentInvocation {
+        self.invocation_from_command(model, None)
+    }
+
+    pub fn invocation_for_cwd(&self, model: Option<&str>, cwd: &Path) -> AcpxAgentInvocation {
+        self.invocation_from_command(model, opencode_command_from_config(cwd).as_deref())
+    }
+
+    fn invocation_from_command(
+        &self,
+        model: Option<&str>,
+        opencode_command: Option<&str>,
+    ) -> AcpxAgentInvocation {
         match self {
             Self::Opencode => {
                 if let Some(model) = model {
-                    return AcpxAgentInvocation::RawCommand(format!(
-                        "opencode --model {} acp",
-                        shell_words::quote(model)
+                    return AcpxAgentInvocation::RawCommand(opencode_startup_command(
+                        opencode_command.unwrap_or(OPENCODE_DEFAULT_COMMAND),
+                        model,
                     ));
                 }
 
@@ -68,13 +83,24 @@ impl<'a> AcpxAgentAdapter<'a> {
     }
 
     pub fn discovery_command(&self, model: Option<&str>) -> ResolvedCommand {
+        self.discovery_command_from_command(model, None)
+    }
+
+    pub fn discovery_command_for_cwd(&self, model: Option<&str>, cwd: &Path) -> ResolvedCommand {
+        self.discovery_command_from_command(model, opencode_command_from_config(cwd).as_deref())
+    }
+
+    fn discovery_command_from_command(
+        &self,
+        model: Option<&str>,
+        opencode_command: Option<&str>,
+    ) -> ResolvedCommand {
         if matches!(self, Self::Opencode) {
             if let Some(model) = model {
-                return ResolvedCommand {
-                    program: PathBuf::from("opencode"),
-                    args: vec!["--model".to_string(), model.to_string(), "acp".to_string()],
-                    env: Vec::new(),
-                };
+                return command_tokens_to_resolved(opencode_startup_tokens(
+                    opencode_command.unwrap_or(OPENCODE_DEFAULT_COMMAND),
+                    model,
+                ));
             }
         }
 
@@ -96,6 +122,78 @@ impl<'a> AcpxAgentAdapter<'a> {
             Self::Generic { name } => name,
             Self::Opencode => "opencode",
         }
+    }
+}
+
+fn opencode_startup_command(base_command: &str, model: &str) -> String {
+    opencode_startup_tokens(base_command, model)
+        .into_iter()
+        .map(|part| shell_words::quote(&part).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn opencode_startup_tokens(base_command: &str, model: &str) -> Vec<String> {
+    let mut tokens = shell_words::split(base_command)
+        .unwrap_or_else(|_| shell_words::split(OPENCODE_DEFAULT_COMMAND).expect("valid default"));
+    let insert_at = tokens
+        .iter()
+        .position(|arg| arg == "acp")
+        .unwrap_or(tokens.len());
+    tokens.splice(
+        insert_at..insert_at,
+        ["--model".to_string(), model.to_string()],
+    );
+    tokens
+}
+
+fn command_tokens_to_resolved(tokens: Vec<String>) -> ResolvedCommand {
+    let mut iter = tokens.into_iter();
+    let program = iter
+        .next()
+        .map(PathBuf::from)
+        .expect("opencode startup command is non-empty");
+    ResolvedCommand {
+        program,
+        args: iter.collect(),
+        env: Vec::new(),
+    }
+}
+
+fn opencode_command_from_config(cwd: &Path) -> Option<String> {
+    let global = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .and_then(|home| {
+            opencode_command_from_config_file(&home.join(".acpx").join("config.json"))
+        });
+    let project = opencode_command_from_config_file(&cwd.join(".acpxrc.json"));
+    project.or(global)
+}
+
+fn opencode_command_from_config_file(path: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let agent = json.get("agents")?.get("opencode")?;
+    let command = agent.get("command")?.as_str()?.trim();
+    if command.is_empty() {
+        return None;
+    }
+
+    let args = agent
+        .get("args")
+        .and_then(|args| args.as_array())
+        .map(|args| {
+            args.iter()
+                .filter_map(|arg| arg.as_str())
+                .map(|arg| shell_words::quote(arg).into_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if args.is_empty() {
+        Some(command.to_string())
+    } else {
+        Some(format!("{command} {}", args.join(" ")))
     }
 }
 
@@ -124,7 +222,7 @@ mod tests {
         assert_eq!(
             adapter.invocation(Some("opencode-go/kimi-k2.5")),
             AcpxAgentInvocation::RawCommand(
-                "opencode --model opencode-go/kimi-k2.5 acp".to_string()
+                "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp".to_string()
             )
         );
         assert_eq!(
@@ -141,7 +239,33 @@ mod tests {
         assert_eq!(
             adapter.invocation(Some("provider/model with space")),
             AcpxAgentInvocation::RawCommand(
-                "opencode --model 'provider/model with space' acp".to_string()
+                "npx -y opencode-ai --model 'provider/model with space' acp".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn opencode_startup_model_honors_project_acpx_override() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".acpxrc.json"),
+            r#"{
+              "agents": {
+                "opencode": {
+                  "command": "/custom/opencode",
+                  "args": ["acp"]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let adapter = AcpxAgentAdapter::for_name("opencode");
+
+        assert_eq!(
+            adapter.invocation_for_cwd(Some("provider/model with space"), dir.path()),
+            AcpxAgentInvocation::RawCommand(
+                "/custom/opencode --model 'provider/model with space' acp".to_string()
             )
         );
     }
@@ -162,7 +286,39 @@ mod tests {
         let adapter = AcpxAgentAdapter::for_name("opencode");
         let command = adapter.discovery_command(Some("opencode-go/kimi-k2.5"));
 
-        assert_eq!(command.program, PathBuf::from("opencode"));
+        assert_eq!(command.program, PathBuf::from("npx"));
+        assert_eq!(
+            command.args,
+            vec![
+                "-y".to_string(),
+                "opencode-ai".to_string(),
+                "--model".to_string(),
+                "opencode-go/kimi-k2.5".to_string(),
+                "acp".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn discovery_command_honors_project_opencode_override() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".acpxrc.json"),
+            r#"{
+              "agents": {
+                "opencode": {
+                  "command": "/custom/opencode",
+                  "args": ["acp"]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let adapter = AcpxAgentAdapter::for_name("opencode");
+        let command = adapter.discovery_command_for_cwd(Some("opencode-go/kimi-k2.5"), dir.path());
+
+        assert_eq!(command.program, PathBuf::from("/custom/opencode"));
         assert_eq!(
             command.args,
             vec![

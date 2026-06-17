@@ -4,7 +4,7 @@
 
 **Goal:** Make `acpx_agent: opencode` with `model: provider/model` launch opencode through its startup model flag instead of ACP generic `--model`.
 
-**Architecture:** Add a small model-application strategy for acpx-backed agents. Existing agents keep using acpx's generic top-level `--model`; opencode with a configured model uses the raw ACP command path `opencode --model <model> acp` so model selection happens before the ACP session starts. Reuse that strategy for the direct acpx CLI runtime and the ACP capability-discovery command so discovery does not retry a known unsupported generic model path.
+**Architecture:** Add a small model-application strategy for acpx-backed agents. Existing agents keep using acpx's generic top-level `--model`; opencode with a configured model inserts `--model <model>` into opencode's ACP startup command before `acp` so model selection happens before the ACP session starts. Reuse that strategy for the direct acpx CLI runtime and the ACP capability-discovery command so discovery does not retry a known unsupported generic model path.
 
 **Tech Stack:** Rust 2021, tokio process tests, existing `shell_words` command parsing/quoting, serde YAML setup generation, existing acpx runtime and init wizard tests.
 
@@ -101,7 +101,7 @@ async fn ensure_session_uses_opencode_startup_model_command() {
     let argv: Vec<&str> = args.lines().collect();
 
     assert_eq!(argv[0], "--agent");
-    assert_eq!(argv[1], "opencode --model opencode-go/kimi-k2.5 acp");
+    assert_eq!(argv[1], "npx -y opencode-ai --model opencode-go/kimi-k2.5 acp");
     assert!(
         !argv.iter().any(|arg| *arg == "--model"),
         "generic --model must not be passed to acpx for opencode: {argv:?}"
@@ -136,7 +136,7 @@ impl AcpxAgentInvocation {
         if agent == "opencode" {
             if let Some(model) = model {
                 return Self::RawCommand(format!(
-                    "opencode --model {} acp",
+                    "npx -y opencode-ai --model {} acp",
                     shell_words::quote(model)
                 ));
             }
@@ -244,10 +244,12 @@ fn resolve_acpx_acp_command_uses_opencode_startup_model_command() {
     })
     .unwrap();
 
-    assert_eq!(resolved.program, PathBuf::from("opencode"));
+    assert_eq!(resolved.program, PathBuf::from("npx"));
     assert_eq!(
         resolved.args,
         vec![
+            "-y".to_string(),
+            "opencode-ai".to_string(),
             "--model".to_string(),
             "opencode-go/kimi-k2.5".to_string(),
             "acp".to_string(),
@@ -485,7 +487,7 @@ In `docs/configuration.md`, under the agent fields table or immediately after it
 ```markdown
 For `acpx_agent` entries, `model` normally maps to acpx's generic model selection.
 Some adapters require startup-time model selection instead. `acpx_agent: opencode`
-uses opencode's startup command (`opencode --model <provider/model> acp`) so
+uses opencode's startup command (`<opencode-adapter-command> --model <provider/model> acp`) so
 `model: provider/model` remains valid even when opencode does not advertise ACP
 generic model switching.
 ```

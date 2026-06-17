@@ -281,9 +281,11 @@ This section configures per-agent launch settings. Runtime ACP callback handling
 | `prompt_template` | string | — | Path to a Liquid template file (config-relative) |
 
 For `acpx_agent` entries, `model` is passed through the adapter's supported startup path. Most
-agents use acpx's generic model flag; `acpx_agent: opencode` uses opencode's own startup model
-argument (`opencode --model <model> acp`) because opencode does not advertise ACP generic model
-selection.
+agents use acpx's generic model flag. `acpx_agent: opencode` inserts `--model <model>` into
+opencode's ACP startup command before `acp` because opencode does not advertise ACP generic model
+selection. Runtime launches use acpx's configured opencode adapter command, including supported
+overrides from `.acpxrc.json` or `~/.acpx/config.json`; capability discovery uses acpx's default
+opencode adapter command.
 
 **Validation rules:**
 - Omit `runtime` to infer it automatically: `acpx_agent` => `acpx`, otherwise `direct`.
