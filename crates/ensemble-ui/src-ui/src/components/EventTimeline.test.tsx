@@ -1,4 +1,6 @@
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
+import EventTimeline from "./EventTimeline";
 import { aggregateOutputEvents } from "./EventTimeline";
 import type { WsEventData } from "@/ws-types";
 
@@ -121,5 +123,63 @@ describe("aggregateOutputEvents", () => {
     const result = aggregateOutputEvents(events);
 
     expect(result).toHaveLength(2);
+  });
+});
+
+describe("EventTimeline Markdown rendering", () => {
+  it("renders aggregated output event detail as Markdown", () => {
+    render(
+      <EventTimeline
+        live={false}
+        events={[
+          makeEvent({
+            type: "output",
+            detail: "- finding one\n- run `cargo test`\n\n```text\nPASS\n```",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("finding one").closest("ul")).toHaveClass(
+      "list-disc",
+    );
+    expect(screen.getByText("cargo test").tagName).toBe("CODE");
+    expect(screen.getByText("PASS").closest("pre")).toHaveClass(
+      "overflow-x-auto",
+    );
+  });
+
+  it("does not render non-output event details as Markdown", () => {
+    render(
+      <EventTimeline
+        live={false}
+        events={[
+          makeEvent({
+            type: "step_started",
+            detail: "- plain step text",
+          }),
+        ]}
+      />,
+    );
+
+    expect(screen.getByText("- plain step text")).toBeInTheDocument();
+    expect(screen.queryByText("plain step text")).not.toBeInTheDocument();
+  });
+
+  it("does not create script or image DOM nodes from unsafe output HTML", () => {
+    const { container } = render(
+      <EventTimeline
+        live={false}
+        events={[
+          makeEvent({
+            type: "output",
+            detail: "<script>alert('xss')</script><img src=x onerror=alert('xss') />",
+          }),
+        ]}
+      />,
+    );
+
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.querySelector("img")).toBeNull();
   });
 });
