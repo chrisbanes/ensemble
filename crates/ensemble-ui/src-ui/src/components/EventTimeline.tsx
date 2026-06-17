@@ -1,5 +1,6 @@
 import type { WsEventData } from "@/ws-types";
 import { cn } from "@/lib/utils";
+import { MarkdownBody } from "@/components/MarkdownBody";
 import { Badge } from "@/components/ui/badge";
 
 interface EventTimelineProps {
@@ -77,6 +78,10 @@ function flushOutputBuffer(buffer: WsEventData[]): AggregatedEvent {
   };
 }
 
+function shouldRenderMarkdown(event: WsEventData): boolean {
+  return event.type === "output";
+}
+
 export default function EventTimeline({ events, live, onViewConversation }: EventTimelineProps) {
   const aggregatedEvents = aggregateOutputEvents(events);
   if (events.length === 0) {
@@ -130,7 +135,11 @@ export default function EventTimeline({ events, live, onViewConversation }: Even
                         )}
                         <span className="ml-2 text-muted-foreground text-xs">{formatTime(event.timestamp)}</span>
                       </div>
-                      <p className="mt-0.5 text-sm text-muted-foreground">{event.detail}</p>
+                      {shouldRenderMarkdown(event) ? (
+                        <MarkdownBody className="mt-0.5">{event.detail}</MarkdownBody>
+                      ) : (
+                        <p className="mt-0.5 text-sm text-muted-foreground">{event.detail}</p>
+                      )}
                       {event.aggregatedCount && (
                         <Badge variant="outline" className="text-xs">
                           {event.aggregatedCount} chunks
