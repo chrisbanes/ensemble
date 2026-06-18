@@ -9,7 +9,7 @@ rust-version.workspace = true
 ensemble-core = { path = "../ensemble-core" }
 tokio = { workspace = true }
 tracing = { workspace = true }
-tauri = { version = "2.11.2", features = [] }
+tauri = { version = "2.11.3", features = [] }
 rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,11 +19,11 @@ url = "2.5.8"
 thiserror = { workspace = true }
 
 [dev-dependencies]
-tauri = { version = "2.11.2", features = ["test"] }
+tauri = { version = "2.11.3", features = ["test"] }
 tempfile = { workspace = true }
 
 [build-dependencies]
-tauri-build = { version = "2.6.2", features = [] }
+tauri-build = { version = "2.6.3", features = [] }
 
 [package.metadata.release]
 pre-release-replacements = [
