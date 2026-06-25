@@ -58,7 +58,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 24.16.0
+          node-version: 24.18.0
           cache: pnpm
           cache-dependency-path: crates/ensemble-ui/src-ui/pnpm-lock.yaml
 
@@ -178,7 +178,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: 24.16.0
+          node-version: 24.18.0
 
       - name: Install Tauri CLI
         run: pnpm install -g @tauri-apps/cli
