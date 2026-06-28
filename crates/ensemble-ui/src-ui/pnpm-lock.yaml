@@ -1101,16 +1101,16 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@scalar/helpers@0.8.2':
-    resolution: {integrity: sha512-qNbqUjSB3S4Gr4A0oANcm5G1Ip+EqBxICYKhe9YzmnaBpbmW6shxqpiivApTvvuDf+uIhR3uMwWyVQbYcGLsxA==}
+  '@scalar/helpers@0.9.0':
+    resolution: {integrity: sha512-M34CLRCttqC1bXthI/QSzQj0s5C6nrU2PFWf/vOT3RpycbiGDGQbqR+5RfFzpOIQvRqbHfNdcRbeiZBw+vCbkQ==}
     engines: {node: '>=22'}
 
-  '@scalar/json-magic@0.12.16':
-    resolution: {integrity: sha512-w8cDbZhHCzmIblWx92IVWoAXsbI4Fz3m++jiBANTSO1hgphF6UqEPQiCt3wnMPaxaanjMQxjS/iBk1UGXR2EGA==}
+  '@scalar/json-magic@0.12.17':
+    resolution: {integrity: sha512-Vw2nrUDIjhvMP6vxFtkiiFlabJ6SyTtfn1BsOxgnr1hIB+/rkngMguiDzl5em21VjyfFGIoADia+QWKM2hdcdA==}
     engines: {node: '>=22'}
 
-  '@scalar/openapi-parser@0.28.7':
-    resolution: {integrity: sha512-E6beEdTsJxUStxOmY1knQvSNJq6LTiXOsRX2WTrfmU6d/kiATn6IKkAU0kXtAZkaYCGU4UCEmBFHCMmNKn0JLA==}
+  '@scalar/openapi-parser@0.28.8':
+    resolution: {integrity: sha512-BO98D3TLfKNL80UnE1sIAmI6DQRmOaH0AHnlAooTn1sQjNbRDaeHyRO53EEjo7HjFEdHeQtiRzoXmMB4jvt8AA==}
     engines: {node: '>=22'}
 
   '@scalar/openapi-types@0.8.0':
@@ -1760,8 +1760,8 @@ packages:
   ee-first@1.1.1:
     resolution: {integrity: sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow==}
 
-  electron-to-chromium@1.5.378:
-    resolution: {integrity: sha512-VinvOAuuPmdD1guEgGv5f2Qp7/vlfqOrUOMYNnOD4wj3pit8kRsQHzfIf6teyUGWo15Tg5+bOJaRunvyltpVWQ==}
+  electron-to-chromium@1.5.380:
+    resolution: {integrity: sha512-W6d5AbuEoRayO447cqrg6lKJIlscgRnnxOZl/08kfV71BQDoEBC7Wwis68z87LjyK6f4kWyTaubuDbhHKrZkbA==}
 
   emoji-regex@10.6.0:
     resolution: {integrity: sha512-toUI84YS5YmxW219erniWD0CIVOo46xGKColeNQRgOzDorgBi1v4D71/OFzgD9GO2UGKIv1C3Sp8DAn0+j5w7A==}
@@ -2172,6 +2172,10 @@ packages:
 
   js-yaml@4.2.0:
     resolution: {integrity: sha512-ePWsvanv0DWuDRsW8dnt+R4jQ31SCRCQ7hhNcPXZPsoBZiemuZNYGf7adZdqX2D86j6rvKp3RpCxVTSb8WQlOw==}
+    hasBin: true
+
+  js-yaml@4.3.0:
+    resolution: {integrity: sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q==}
     hasBin: true
 
   jsdom@29.1.1:
@@ -2819,8 +2823,8 @@ packages:
     resolution: {integrity: sha512-9u/XQ1pvrQtYyMpZe7DXKv2p5CNvyVwzUB6uhLAnQwHMSgKMBR62lc7AHljaeteeHXn11XTAaLLUVZYVZyuRBQ==}
     engines: {node: '>= 20.19.0'}
 
-  recast@0.23.11:
-    resolution: {integrity: sha512-YTUo+Flmw4ZXiWfQKGcwwc11KnoRAYgzAE2E7mXKCjSviTKShtxBsN6YUUBB2gtaBzKzeKunxhUwNHQuRryhWA==}
+  recast@0.23.12:
+    resolution: {integrity: sha512-dEWRjcINDu/F4l2dYx57ugBtD7HV9KXESyxhzw/MqWLeglJrsjJKqACPyUPg+6AF8mIgm+Zi0dZ3ACoIg+QtpA==}
     engines: {node: '>= 4'}
 
   redent@3.0.0:
@@ -4423,18 +4427,18 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@scalar/helpers@0.8.2': {}
+  '@scalar/helpers@0.9.0': {}
 
-  '@scalar/json-magic@0.12.16':
+  '@scalar/json-magic@0.12.17':
     dependencies:
-      '@scalar/helpers': 0.8.2
+      '@scalar/helpers': 0.9.0
       pathe: 2.0.3
       yaml: 2.9.0
 
-  '@scalar/openapi-parser@0.28.7':
+  '@scalar/openapi-parser@0.28.8':
     dependencies:
-      '@scalar/helpers': 0.8.2
-      '@scalar/json-magic': 0.12.16
+      '@scalar/helpers': 0.9.0
+      '@scalar/json-magic': 0.12.17
       '@scalar/openapi-types': 0.9.1
       '@scalar/openapi-upgrader': 0.2.9
       ajv: 8.20.0
@@ -4810,7 +4814,7 @@ snapshots:
     dependencies:
       baseline-browser-mapping: 2.10.40
       caniuse-lite: 1.0.30001799
-      electron-to-chromium: 1.5.378
+      electron-to-chromium: 1.5.380
       node-releases: 2.0.50
       update-browserslist-db: 1.2.3(browserslist@4.28.4)
 
@@ -4922,7 +4926,7 @@ snapshots:
     dependencies:
       env-paths: 2.2.1
       import-fresh: 3.3.1
-      js-yaml: 4.2.0
+      js-yaml: 4.3.0
       parse-json: 5.2.0
     optionalDependencies:
       typescript: 6.0.3
@@ -5014,7 +5018,7 @@ snapshots:
 
   ee-first@1.1.1: {}
 
-  electron-to-chromium@1.5.378: {}
+  electron-to-chromium@1.5.380: {}
 
   emoji-regex@10.6.0: {}
 
@@ -5433,6 +5437,10 @@ snapshots:
   js-tokens@4.0.0: {}
 
   js-yaml@4.2.0:
+    dependencies:
+      argparse: 2.0.1
+
+  js-yaml@4.3.0:
     dependencies:
       argparse: 2.0.1
 
@@ -6054,8 +6062,8 @@ snapshots:
       '@orval/solid-start': 8.19.0(typescript@6.0.3)
       '@orval/swr': 8.19.0(typescript@6.0.3)
       '@orval/zod': 8.19.0(typescript@6.0.3)
-      '@scalar/json-magic': 0.12.16
-      '@scalar/openapi-parser': 0.28.7
+      '@scalar/json-magic': 0.12.17
+      '@scalar/openapi-parser': 0.28.8
       '@scalar/openapi-types': 0.8.0
       chokidar: 5.0.0
       commander: 15.0.0
@@ -6271,7 +6279,7 @@ snapshots:
 
   readdirp@5.0.0: {}
 
-  recast@0.23.11:
+  recast@0.23.12:
     dependencies:
       ast-types: 0.16.1
       esprima: 4.0.1
@@ -6443,7 +6451,7 @@ snapshots:
       postcss: 8.5.15
       postcss-selector-parser: 7.1.4
       prompts: 2.4.2
-      recast: 0.23.11
+      recast: 0.23.12
       stringify-object: 5.0.0
       tailwind-merge: 3.6.0
       ts-morph: 26.0.0
