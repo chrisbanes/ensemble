@@ -338,14 +338,12 @@ pub fn extract_step_detail_state(
         .find(|(_, finalize)| finalize.issue_identifier == identifier)
     {
         issue_id.clone()
-    } else if let Some(entry) = state
-        .completed
-        .values()
-        .find(|e| e.identifier == identifier)
-    {
-        entry.issue_id.clone()
     } else {
-        return None;
+        let entry = state
+            .completed
+            .values()
+            .find(|e| e.identifier == identifier)?;
+        entry.issue_id.clone()
     };
 
     // Try to get step info from pipeline config/run first
@@ -539,10 +537,9 @@ pub async fn build_issue_snapshot(
         (entry.issue_id.clone(), entry.identifier.clone())
     } else if let Some((issue_id, finalize)) = finalize_entry {
         (issue_id.clone(), finalize.issue_identifier.clone())
-    } else if let Some(entry) = completed_entry {
-        (entry.issue_id.clone(), entry.identifier.clone())
     } else {
-        return None;
+        let entry = completed_entry?;
+        (entry.issue_id.clone(), entry.identifier.clone())
     };
 
     let workspace_key = crate::tracker::model::sanitize_workspace_key(identifier)?;
