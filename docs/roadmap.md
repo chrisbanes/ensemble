@@ -2,10 +2,11 @@
 
 ## What's working today
 
+- **Agent CI orchestration** — tracker-native, config-driven pipelines for autonomous coding agents
 - **Configuration** — `config.yaml` loader with typed config, environment variable resolution, and validation
 - **Trackers** — GitHub Projects v2, GitHub repository labels, Notion, and local TODO file backends
 - **Pipelines** — DAG-based step execution with sequential and parallel steps
-- **Verdicts** — ACP protocol and `.ensemble/verdict.json` file fallback
+- **Step outputs** — hidden-turn extraction of strict `StepOutput` results (`succeeded`, `failed`, or `concern`)
 - **Agents** — ACP client over stdio (JSON-RPC 2.0) for agent communication
 - **Orchestrator** — Poll-dispatch-reconcile loop with state management and retry logic
 - **Workspaces** — Per-issue directory isolation with lifecycle hooks
@@ -19,6 +20,7 @@
 
 - **Release verification** — cut and verify the first public Homebrew release from the tag-driven release workflow
 - **Richer tracker feedback** — continue expanding tracker comments and handoff summaries where the backend supports them
+- **MVP stabilization** — close the `mvp`-labeled issue checklist before calling the web/desktop operator flow ready for normal use
 
 ## Not planned
 

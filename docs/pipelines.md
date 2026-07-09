@@ -1,6 +1,6 @@
 # Pipeline Guide
 
-A pipeline is a directed acyclic graph (DAG) of steps that Ensemble runs for each issue. Each step invokes a named agent, collects a result, and decides what happens next.
+A pipeline is a directed acyclic graph (DAG) of steps that Ensemble runs for each issue. It is the CI contract for autonomous coding agents: each step invokes a named agent in an isolated workspace, collects a structured result, and lets pipeline policy decide what happens next.
 
 ## Steps and agents
 
@@ -23,7 +23,7 @@ When a step runs, Ensemble:
 1. Renders the agent's prompt template with the issue context
 2. Launches the agent in the issue's workspace directory
 3. Waits for the agent to finish
-4. Collects a result (`succeeded`, `failed`, or `concern`)
+4. Collects a structured `StepOutput` result (`succeeded`, `failed`, or `concern`)
 
 ## Clarification request style (batched by default)
 
@@ -105,11 +105,11 @@ Todo → Building → In Review → Done
                             → Failed
 ```
 
-## Results
+## Step Outputs
 
 After an agent finishes its visible working turn, Ensemble runs a hidden extraction turn in the same
-runtime session. The extraction turn produces the step's structured result. Extraction messages are
-not shown in the timeline.
+runtime session. The extraction turn produces the step's structured `StepOutput`. Extraction messages
+are not shown in the timeline.
 
 Every successful agent step must produce:
 

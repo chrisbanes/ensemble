@@ -1,6 +1,6 @@
 # Ensemble
 
-Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects verdicts, and drives tracker state transitions. Configuration lives in a configuration directory containing `config.yaml`.
+Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects strict `StepOutput` results, and drives tracker state transitions. Configuration lives in a configuration directory containing `config.yaml`.
 
 See `docs/SPEC.md` for the full specification. See `docs/superpowers/plans/` for implementation plans.
 
@@ -25,7 +25,7 @@ ensemble/
 │   │   │   │   ├── mod.rs        # re-exports
 │   │   │   │   ├── dag.rs        # DAG construction + validation
 │   │   │   │   ├── engine.rs     # PipelineRun per-issue execution
-│   │   │   │   └── verdict.rs    # Verdict parsing (ACP + file fallback)
+│   │   │   │   └── verdict.rs    # StepOutput parsing and validation
 │   │   │   └── workspace/
 │   │   │       ├── manager.rs    # WorkspaceManager (create/reuse/cleanup directories + worktrees)
 │   │   │       ├── coordinator.rs # WorktreeCoordinator (multi-repo worktree lifecycle)
@@ -107,7 +107,7 @@ cargo install cargo-release
 cargo release <version> --execute   # e.g. cargo release 0.2.0 --execute
 ```
 
-This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and pushes. The tag push triggers `.github/workflows/release.yml` which:
+This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and pushes. The tag push triggers release jobs in `.github/workflows/ci.yml` which:
 1. Builds CLI binaries (macOS aarch64, Linux x86_64, Linux aarch64)
 2. Builds macOS desktop `.dmg` (aarch64, signed + notarized) via Tauri Action
 3. Creates a GitHub Release with all artifacts
@@ -135,7 +135,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 
 ## Documentation maintenance
 
-Before finishing any change, check whether it changes documented behavior. Update the relevant docs in the same branch when you change config schema/defaults, tracker semantics, pipeline behavior, runtime/agent launch behavior, CLI or API contracts, workspace lifecycle, release/build workflow, or user-visible UI behavior. Prefer `docs/SPEC.md` for canonical behavior, `docs/configuration.md` for config reference, `docs/pipelines.md` for pipeline/verdict behavior, and `docs/superpowers/specs/` or `docs/superpowers/plans/` for design/implementation history. If no docs need changes, call that out in the final summary.
+Before finishing any change, check whether it changes documented behavior. Update the relevant docs in the same branch when you change config schema/defaults, tracker semantics, pipeline behavior, runtime/agent launch behavior, CLI or API contracts, workspace lifecycle, release/build workflow, or user-visible UI behavior. Prefer `docs/SPEC.md` for canonical behavior, `docs/configuration.md` for config reference, `docs/pipelines.md` for pipeline/step-output behavior, and `docs/superpowers/specs/` or `docs/superpowers/plans/` for design/implementation history. If no docs need changes, call that out in the final summary.
 
 ## Git policy
 
@@ -145,8 +145,8 @@ Before finishing any change, check whether it changes documented behavior. Updat
 
 - **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core` with read methods and optional write methods (default no-ops). Tracker implementations (GitHub, todo_file) live in `ensemble-core` as sub-modules of `tracker/`.
 - **Config directory based**: All runtime config lives in a configuration directory containing `config.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. The config directory is resolved via `--config-dir`, `ENSEMBLE_CONFIG_DIR`, or platform defaults. Agent definitions, step DAG, and prompt references are all defined in `config.yaml`. Relative paths are resolved from the config directory.
-- **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `ensemble.yaml`.
-- **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects verdicts from review agents.
+- **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `config.yaml`.
+- **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects strict `StepOutput` results from hidden extraction turns.
 - **Shared orchestrator startup**: `ensemble run`, `ensemble web` (when compiled with `web-ui`), and desktop/Tauri should all start the same real orchestrator runtime path. Do not add placeholder poll loops or separate per-frontend orchestrator implementations when the shared bootstrap can be reused.
 - **Manual refresh behavior**: Refresh, retry, and resume controls should signal the orchestrator loop to run a tick; do not implement ad-hoc polling/state mutation in API or UI handlers that bypasses the orchestrator.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.

@@ -2,20 +2,25 @@
 
 Status: Draft v1 (language-agnostic)
 
-Purpose: Define a service that orchestrates coding agents to get project work done.
+Purpose: Define CI for autonomous coding agents: a service that turns issue-tracker work into
+repeatable, observable, config-driven agent pipelines.
 
 ## 1. Problem Statement
 
 Ensemble runs agent workflows for tickets and provides a control room for supervising interactive
-execution. External trackers may provide tickets, but Ensemble owns live execution state.
+execution. External trackers may provide tickets, but Ensemble owns live execution state. The product
+model is closer to CI than to a replacement project-management system: tracker issues are inputs,
+pipeline steps are gates, isolated workspaces are build environments, and structured step outputs
+drive deterministic transitions.
 
 The service solves four operational problems:
 
-- It turns issue execution into a repeatable daemon workflow instead of manual scripts.
+- It turns issue execution into a repeatable daemon workflow instead of manual scripts or one-off
+  agent sessions.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
 - It keeps workflow policy in a configuration directory (`config.yaml` plus prompt templates) so
-  teams can version agent prompts and runtime settings together.
+  teams can version agent prompts, delivery gates, and runtime settings together.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -472,8 +477,8 @@ Note:
   (for example `server`) without changing the core schema above.
 - Extensions should document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
-- Common extension: `server.port` (integer) enables the optional HTTP server described in Section
-  13.7.
+- The current CLI enables the optional HTTP server through the `ensemble web` subcommand, not through
+  a top-level config key.
 
 #### 5.3.1 `tracker` (object)
 
@@ -1017,8 +1022,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agent.turn_timeout_ms`: integer, default `3600000`
 - `agent.read_timeout_ms`: integer, default `5000`
 - `agent.stall_timeout_ms`: integer, default `300000`
-- `server.port` (extension): integer, optional; enables the optional HTTP server, `0` may be used
-  for ephemeral local bind, and the `ensemble web --port` flag overrides it
+- HTTP serving is a CLI mode. Use `ensemble web --port <port>` or the `PORT` environment variable
+  when the web UI feature is available.
 
 ## 7. Orchestration State Machine
 
@@ -1996,18 +2001,16 @@ If implemented:
 
 Enablement (extension):
 
-- Start the HTTP server when the `ensemble web` subcommand is used. The `--port` flag controls
-  the bind port; if omitted, an ephemeral port is assigned.
-- Start the HTTP server when `server.port` is present in `<config_dir>/config.yaml`.
-- `server.port` is extension configuration and is intentionally not part of the core front-matter
-  schema in Section 5.3.
-- Precedence: `ensemble web --port` overrides `server.port` when both are present.
-- `server.port` must be an integer. Positive values bind that port. `0` may be used to request an
-  ephemeral port for local development and tests.
+- Start the HTTP server when the `ensemble web` subcommand is used. The `--port` flag or `PORT`
+  environment variable controls the bind port; if omitted, an ephemeral port is assigned.
+- HTTP listener settings are CLI/runtime settings, not `config.yaml` workflow policy. The config
+  directory still controls tracker, agent, pipeline, workspace, and hook behavior.
+- Positive port values bind that port. `0` may be used to request an ephemeral port for local
+  development and tests.
 - Implementations should bind loopback by default (`127.0.0.1` or host equivalent) unless explicitly
   configured otherwise.
-- Changes to HTTP listener settings (for example `server.port`) do not need to hot-rebind;
-  restart-required behavior is conformant.
+- Changes to HTTP listener settings do not need to hot-rebind; restart-required behavior is
+  conformant.
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
 
@@ -2148,41 +2151,65 @@ Minimum endpoints:
     }
     ```
 
-- `POST /api/v1/issues/{identifier}/input`
-  - Submits human input for an issue that is awaiting input (for example an approval gate or
-    manual decision interaction). The orchestrator processes the response on the next tick.
-  - Request body:
+- `POST /api/v1/interactions/{id}/respond`
+  - Resolves a specific open human interaction. The body is typed by interaction kind.
+  - Question response body:
 
     ```json
     {
-      "response": "Human response text",
-      "outcome": "approve"
+      "kind": "question",
+      "response_schema_version": 1,
+      "text": "Human response text",
+      "selected_option": null
     }
     ```
 
-    The `outcome` field is required for `ApprovalGate` and `ManualDecision` interactions:
-    - For approval gates: `"approve"` or `"reject"`
-    - For manual decisions: `"complete"` or `"pending"`
-
-  - Suggested response (`202 Accepted`) shape:
+  - Approval response body:
 
     ```json
     {
-      "accepted": true,
+      "kind": "approval",
+      "response_schema_version": 1,
+      "approved": true,
+      "reason": "Looks good"
+    }
+    ```
+
+  - Handoff response body:
+
+    ```json
+    {
+      "kind": "handoff",
+      "response_schema_version": 1,
+      "completed": true,
+      "notes": "Ready for the next poll"
+    }
+    ```
+
+  - Suggested response (`200 OK`) shape: the resolved interaction request.
+  - If the interaction is missing or already resolved, return a JSON error with `404` or `409`.
+
+- `POST /api/v1/issues/{identifier}/resume`
+  - Releases a blocked issue after its human interaction has been resolved so the next orchestrator
+    tick can requeue it.
+  - Suggested response (`200 OK`) shape:
+
+    ```json
+    {
+      "resumed": true,
       "issue_identifier": "MT-649",
-      "submitted_at": "2026-02-24T20:15:30Z"
+      "message": "issue resume queued"
     }
     ```
 
-  - If the issue is not awaiting input, return `409 Conflict` with an error response (for example
-    `{"error":{"code":"not_awaiting_input","message":"..."}}`).
+  - If the issue is not resumable, return `409 Conflict` with an error response.
 
 API design notes:
 
 - The JSON shapes above are the recommended baseline for interoperability and debugging ergonomics.
 - Implementations may add fields, but should avoid breaking existing fields within a version.
- - Endpoints should be read-only except for operational control endpoints such as `/refresh` and
-   `/issues/{identifier}/input`.
+- Endpoints should be read-only except for operational control endpoints such as `/refresh`,
+  `/interactions/{id}/respond`, and `/issues/{identifier}/resume`.
 - Unsupported methods on defined routes should return `405 Method Not Allowed`.
 - API errors should use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it should consume this API rather than duplicating state
@@ -2793,8 +2820,8 @@ Use the same validation profiles as Section 17:
 
 ### 18.2 Recommended Extensions (Not Required for Conformance)
 
-- Optional HTTP server honors CLI `--port` over `server.port`, uses a safe default bind host, and
-  exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
+- Optional HTTP server uses `ensemble web`, honors CLI `--port`/`PORT`, uses a safe default bind
+  host, and exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - Optional `github_graphql` client-side tool extension exposes raw GitHub GraphQL access through the
   ACP session using configured Ensemble auth.
 - TODO: Persist retry queue and session metadata across process restarts.
