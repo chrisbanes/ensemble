@@ -124,6 +124,10 @@ query($ids: [ID!]!) {
       }
       projectItems(first: 100) {
         nodes {
+          id
+          project {
+            id
+          }
           fieldValues(first: 20) {
             nodes {
               ... on ProjectV2ItemFieldSingleSelectValue {
@@ -2453,6 +2457,17 @@ mod tests {
         assert_eq!(comments.len(), 1);
         assert_eq!(comments[0].comment_id, "C_2");
         assert_eq!(comments[0].author, "alice");
+    }
+
+    #[test]
+    fn issue_states_query_requests_project_item_identity() {
+        let compact_query = ISSUE_STATES_QUERY
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(compact_query
+            .contains("projectItems(first: 100) { nodes { id project { id } fieldValues"));
     }
 
     #[tokio::test]
