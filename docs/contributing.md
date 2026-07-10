@@ -2,7 +2,12 @@
 
 ## Build and test
 
-Ensemble is a Rust workspace. You need Rust 1.80+ installed.
+Ensemble is a Rust workspace. The minimum supported Rust version (MSRV) is Rust 1.95.
+Normal development and primary CI use the exact Rust 1.97.0 toolchain pinned in
+[`rust-toolchain.toml`](../rust-toolchain.toml); Rustup selects it automatically. The dedicated
+MSRV compatibility job uses Rust 1.95.0.
+
+With Rustup installed, these commands use the pinned normal toolchain:
 
 ```sh
 cargo build --workspace          # compile default targets
@@ -26,7 +31,17 @@ cargo build -p ensemble-cli --features web-ui
 For Rust-only checks that intentionally compile the `web-ui` feature without rebuilding frontend
 assets, set `SKIP_UI_BUILD=1`.
 
-Run all four before pushing — CI enforces them.
+To check MSRV compile compatibility locally, install and use Rust 1.95.0:
+
+```sh
+rustup toolchain install 1.95.0 --profile minimal
+RUSTFLAGS= SKIP_UI_BUILD=1 cargo +1.95.0 check --workspace --all-targets
+```
+
+Run all four normal commands as a recommended local pre-push checklist. CI runs a subset in its
+primary jobs and runs the MSRV check separately.
+Exact Renovate updates to the primary Rust toolchain are review-only; changing the MSRV is a
+separate, intentional compatibility decision.
 
 ## Product E2E
 
@@ -79,10 +94,12 @@ ensemble/
 
 ## CI
 
-GitHub Actions runs on push to `main` and all PRs. The main CI job runs format, clippy,
-default non-desktop Rust tests, the feature-enabled product E2E test, and a CLI
-`web-ui` feature check. Frontend and desktop jobs run separately. All must pass.
-`RUSTFLAGS=-Dwarnings` is set globally.
+GitHub Actions runs on push to `main` and all PRs. A dedicated MSRV job uses Rust 1.95.0 to
+check all workspace targets. Main, normal, frontend, and desktop jobs use the pinned Rust 1.97.0
+toolchain from `rust-toolchain.toml`. The main CI job runs format, clippy, default non-desktop
+Rust tests, the feature-enabled product E2E test, and a CLI `web-ui` feature check. Frontend and
+desktop jobs run separately. All must pass. Primary jobs use `RUSTFLAGS=-Dwarnings`; the MSRV job
+is a compile-compatibility check.
 
 ## Further reading
 
