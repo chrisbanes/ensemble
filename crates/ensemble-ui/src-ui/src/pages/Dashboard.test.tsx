@@ -1,95 +1,64 @@
-import { describe, expect, it } from "vitest";
-import { screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { render } from "@testing-library/react";
-import Dashboard from "./Dashboard";
-import type { RuntimeSnapshot, WaitingInteractionRow } from "@/generated/models";
+import { describe, expect, it } from "vitest";
 
-function mockSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
+import type { RuntimeSnapshot } from "@/generated/models";
+import Dashboard from "./Dashboard";
+
+function mockSnapshot(): RuntimeSnapshot {
   return {
     agent_totals: { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 },
-    counts: { running: 0, retrying: 0, waiting_on_human: 0, completed: 0 },
-    generated_at: "2026-04-14T12:00:00Z",
+    counts: { running: 1, retrying: 0, waiting_on_human: 1, completed: 0 },
+    generated_at: "2026-07-09T09:30:00Z",
+    last_tick_at: "2026-07-09T09:29:58Z",
     poll_interval_ms: 3000,
-    running: [],
+    running: [
+      {
+        issue_id: "issue-running",
+        issue_identifier: "repo#1",
+        last_event: "tool_call",
+        last_event_at: "2026-07-09T09:29:50Z",
+        last_message: "Running tests",
+        session_id: "session-1",
+        started_at: "2026-07-09T09:00:00Z",
+        state: "running",
+        step_name: "build",
+        tokens: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
+        turn_count: 3,
+      },
+    ],
     retrying: [],
-    waiting_on_human: [],
+    waiting_on_human: [
+      {
+        interaction_request_id: "ask-1",
+        issue_id: "issue-waiting",
+        issue_identifier: "repo#2",
+        requested_at: "2026-07-09T09:10:00Z",
+        step_name: "review",
+      },
+    ],
     completed: [],
-    ...overrides,
   } as RuntimeSnapshot;
 }
 
-function waitingInteraction(
-  overrides: Partial<WaitingInteractionRow> = {},
-): WaitingInteractionRow {
-  return {
-    interaction_request_id: "interaction-1",
-    issue_id: "NODE_123",
-    issue_identifier: "my-repo#42",
-    question: "Need clarification",
-    requested_at: "2026-04-14T10:00:00Z",
-    step_name: "review",
-    ...overrides,
-  } as WaitingInteractionRow;
-}
-
-function renderDashboardWithData(data: RuntimeSnapshot) {
-  const queryClient = new QueryClient({
-    defaultOptions: {
-      queries: { retry: false },
-    },
-  });
-  queryClient.setQueryData(["/api/v1/state"], { data });
-
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={["/"]}>
-        <Dashboard />
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
-}
-
 describe("Dashboard", () => {
-  it("renders a Needs attention section ahead of normal execution buckets", () => {
-    const waiting: WaitingInteractionRow[] = [
-      waitingInteraction({ issue_identifier: "org/repo#101" }),
-    ];
-    const snapshot = mockSnapshot({
-      waiting_on_human: waiting,
-      running: [],
-      retrying: [],
-      completed: [],
-    });
+  it("renders Mission Control with attention and operations surfaces", () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["/api/v1/state"], { data: mockSnapshot() });
 
-    renderDashboardWithData(snapshot);
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={["/"]}>
+          <Dashboard />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
 
-    const needsAttention = screen.getByText("Needs attention");
-    expect(needsAttention).toBeInTheDocument();
-  });
-
-  it("shows waiting tickets with issue identifier and blocking step in the queue", () => {
-    const waiting: WaitingInteractionRow[] = [
-      waitingInteraction({
-        issue_identifier: "my-repo#42",
-        step_name: "review",
-        interaction_request_id: "interaction-1",
-      }),
-    ];
-    const snapshot = mockSnapshot({
-      waiting_on_human: waiting,
-      running: [],
-      retrying: [],
-      completed: [],
-    });
-
-    renderDashboardWithData(snapshot);
-
-    expect(screen.getByText("Needs attention")).toBeInTheDocument();
-    const links = screen.getAllByText("my-repo#42");
-    expect(links).toHaveLength(1);
-    expect(links[0]).toHaveAttribute("href", "/issue/my-repo%2342");
-    expect(screen.getByText("review")).toBeInTheDocument();
+    expect(screen.getByText("Mission Control")).toBeInTheDocument();
+    expect(screen.getByText("Needs Attention")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Running" })).toBeInTheDocument();
+    expect(screen.getByText("repo#1")).toBeInTheDocument();
+    expect(screen.getAllByText("repo#2")).toHaveLength(2);
   });
 });

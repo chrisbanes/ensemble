@@ -295,10 +295,12 @@ function sameInteractionDetail(
 ): boolean {
   return (
     a.agent_name === b.agent_name &&
+    a.awaiting_resume === b.awaiting_resume &&
     a.extra_context === b.extra_context &&
     a.id === b.id &&
     a.issue_id === b.issue_id &&
     a.issue_identifier === b.issue_identifier &&
+    a.kind === b.kind &&
     a.question === b.question &&
     a.requested_at === b.requested_at &&
     a.status === b.status &&

@@ -1,31 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
-import {
-  useCancelInteractionMutation,
-  useInteractionDetailQuery,
-  useIssueDetailQuery,
-  useIssueInputMutation,
-  useRetryMutation,
-  useStepConversationQuery,
-  useStopMutation,
-  useTimelineQuery,
-} from "@/hooks";
-import { connectWs } from "@/ws";
-import type { WsStatus } from "@/ws";
-import type { WsEventData, WsPipelineEvent } from "@/ws-types";
-import {
-  isCompletionEvent,
-  normalizePipelineEvent,
-  timelineRecordToEventData,
-  transcriptRecordKey,
-} from "@/ws-events";
-import { addNotification, requestPermissionIfNeeded } from "@/notifications";
-import type { TranscriptRecord } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import StatusBadge from "@/components/StatusBadge";
 import ConfirmDialog from "@/components/ConfirmDialog";
+import FinalizeApprovalDialog from "@/components/FinalizeApprovalDialog";
 import EventTimeline from "@/components/EventTimeline";
 import IssueInfoSection from "@/components/IssueInfoSection";
 import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
@@ -33,22 +13,7 @@ import ArtifactsPanel from "@/components/ArtifactsPanel";
 import { IssueComposer } from "@/components/issue-detail/IssueComposer";
 import { IssueContextPanel } from "@/components/issue-detail/IssueContextPanel";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
-import {
-  reconcileGroupedTranscriptEntries,
-  type GroupedTranscriptEntry,
-} from "@/components/transcript/transcript-model";
-
-function triggerNotification(event: WsPipelineEvent, identifier: string) {
-  const detail = event.detail ?? event.event_type;
-
-  if (event.event_type === "error") {
-    addNotification("failure", "Agent error", detail, identifier);
-  } else if (event.event_type === "retry_scheduled") {
-    addNotification("warning", "Retry scheduled", detail, identifier);
-  } else if (event.event_type === "verdict" && event.verdict) {
-    addNotification("info", `Verdict: ${event.verdict}`, detail, identifier);
-  }
-}
+import { useIssueRuntime } from "./mission-control/useIssueRuntime";
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -56,192 +21,52 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Request failed";
+}
+
 export default function IssueDetail() {
   const { identifier = "" } = useParams<{ identifier: string }>();
-  const { data, isLoading, isError, error } = useIssueDetailQuery(identifier);
-  const interactionId =
-    data?.pending_input?.ask_id ??
-    data?.current_interaction?.interaction_request_id ??
-    "";
-  const { data: interaction } = useInteractionDetailQuery(interactionId);
-  const stopMutation = useStopMutation();
-  const retryMutation = useRetryMutation();
-  const inputMutation = useIssueInputMutation(identifier, interactionId);
-  const cancelMutation = useCancelInteractionMutation(identifier);
 
-  const [liveEvents, setLiveEvents] = useState<WsEventData[]>([]);
-  const [liveTranscriptRecords, setLiveTranscriptRecords] = useState<TranscriptRecord[]>([]);
-  const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
+  return <IssueDetailContent key={identifier} identifier={identifier} />;
+}
+
+function IssueDetailContent({ identifier }: { identifier: string }) {
   const [showStopConfirm, setShowStopConfirm] = useState(false);
-  const [activeEntryId, setActiveEntryId] = useState<string | null>(null);
-  const [lastKnownRunId, setLastKnownRunId] = useState("");
-  const [lastKnownStepName, setLastKnownStepName] = useState("");
-
-  const isLiveRun = data?.running != null;
-  const currentRunId = (data?.running as { run_id?: string } | undefined)?.run_id;
-  const currentStepName = data?.running?.step_name ?? null;
-
-  useEffect(() => {
-    if (currentRunId) {
-      setLastKnownRunId((previousRunId) =>
-        previousRunId === currentRunId ? previousRunId : currentRunId,
-      );
-    }
-  }, [currentRunId]);
-
-  useEffect(() => {
-    if (currentStepName) {
-      setLastKnownStepName((previousStepName) =>
-        previousStepName === currentStepName ? previousStepName : currentStepName,
-      );
-    }
-  }, [currentStepName]);
-
-  const effectiveRunId = currentRunId ?? lastKnownRunId;
-  const activeStepName = currentStepName ?? lastKnownStepName;
-  const transcriptQuery = useStepConversationQuery(identifier, effectiveRunId, activeStepName ?? "", {
-    limit: 200,
-  });
-  const refetchTranscript = transcriptQuery.refetch;
-  const transcriptSessionKey = `${identifier}:${effectiveRunId || "no-run"}:${activeStepName ?? "no-step"}`;
-  const activeEntrySessionKeyRef = useRef(transcriptSessionKey);
-  const timelineQuery = useTimelineQuery(identifier, effectiveRunId);
-  const refetchTimeline = timelineQuery.refetch;
-  const persistedEvents = useMemo(
-    () => (timelineQuery.data?.events ?? []).map(timelineRecordToEventData),
-    [timelineQuery.data?.events],
-  );
-
-  const events = useMemo(() => {
-    const merged = [...persistedEvents, ...liveEvents];
-    const seen = new Set<string>();
-    const deduped: WsEventData[] = [];
-
-    for (const event of merged) {
-      const key =
-        event.runId && event.sequence != null
-          ? `${event.runId}:${event.sequence}`
-          : [
-              event.type,
-              event.timestamp,
-              event.detail,
-              event.stepName ?? "",
-              event.attempt ?? "",
-              event.conversationIndex ?? "",
-            ].join(":");
-
-      if (seen.has(key)) continue;
-      seen.add(key);
-      deduped.push(event);
-    }
-
-    return deduped.sort((a, b) => {
-      if (a.runId && b.runId && a.runId === b.runId && a.sequence != null && b.sequence != null) {
-        return a.sequence - b.sequence;
-      }
-
-      const tsDelta = new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-      if (tsDelta !== 0) {
-        return tsDelta;
-      }
-
-      return (a.sequence ?? 0) - (b.sequence ?? 0);
-    });
-  }, [liveEvents, persistedEvents]);
-
-  useEffect(() => {
-    requestPermissionIfNeeded();
-    return connectWs({
-      identifier,
-      enabled: isLiveRun,
-      onMessage: (msg) => {
-        if (msg.type === "snapshot") {
-          setLiveEvents([]);
-          setLiveTranscriptRecords([]);
-          void refetchTranscript?.();
-          void refetchTimeline?.();
-        } else if (msg.type === "event") {
-          const event = normalizePipelineEvent(msg.data);
-          setLiveEvents((prev) => [...prev, event]);
-          triggerNotification(msg.data, identifier);
-
-          if (isCompletionEvent(msg.data)) {
-            const severity = msg.data.outcome === "succeeded" ? "success" : "failure";
-            addNotification(
-              severity,
-              `Run ${msg.data.outcome}`,
-              `${identifier} ${msg.data.outcome}`,
-              identifier,
-            );
-          }
-        } else if (msg.type === "transcript_record") {
-          setLiveTranscriptRecords((prev) => {
-            const next = new Map(prev.map((record) => [transcriptRecordKey(record), record] as const));
-            next.set(transcriptRecordKey(msg.data), msg.data);
-            return Array.from(next.values()).sort((a, b) => a.sequence - b.sequence);
-          });
-        }
-      },
-      onStatusChange: setWsStatus,
-    });
-  }, [identifier, isLiveRun, refetchTimeline, refetchTranscript]);
-
-  const transcriptRecords = useMemo(() => {
-    const byKey = new Map<string, TranscriptRecord>();
-    for (const record of transcriptQuery.data?.records ?? []) {
-      byKey.set(transcriptRecordKey(record), record);
-    }
-    for (const record of liveTranscriptRecords) {
-      if (record.run_id !== effectiveRunId || record.step_name !== activeStepName) continue;
-      byKey.set(transcriptRecordKey(record), record);
-    }
-    return Array.from(byKey.values()).sort((a, b) => a.sequence - b.sequence);
-  }, [activeStepName, effectiveRunId, liveTranscriptRecords, transcriptQuery.data?.records]);
-
-  const activeTranscriptEntryId =
-    activeEntrySessionKeyRef.current === transcriptSessionKey ? activeEntryId : null;
-
-  const transcriptEntriesRef = useRef<GroupedTranscriptEntry[] | undefined>(undefined);
-  const transcriptEntriesSessionKeyRef = useRef<string | undefined>(undefined);
-  const transcriptEntries = useMemo(() => {
-    const previousEntries =
-      transcriptEntriesSessionKeyRef.current === transcriptSessionKey
-        ? transcriptEntriesRef.current
-        : undefined;
-
-    const nextEntries = reconcileGroupedTranscriptEntries(previousEntries, {
-      conversation: [],
-      transcriptRecords,
-      interactions: interaction ? [interaction] : [],
-      events,
-    });
-
-    transcriptEntriesRef.current = nextEntries;
-    transcriptEntriesSessionKeyRef.current = transcriptSessionKey;
-
-    return nextEntries;
-  }, [transcriptRecords, interaction, events, transcriptSessionKey]);
-
-  const transcriptEntryIdForConversationIndex = (index: number) =>
-    activeStepName
-      ? `transcript:${effectiveRunId}:${activeStepName}:${index}`
-      : `message:${index}`;
-
-  useEffect(() => {
-    activeEntrySessionKeyRef.current = transcriptSessionKey;
-    setActiveEntryId(null);
-    setLiveTranscriptRecords([]);
-  }, [transcriptSessionKey]);
-
-  const pendingQuestion = interaction
-    ? {
-        interactionId: interaction.id,
-        question: interaction.question,
-        whyBlocked: interaction.why_blocked,
-        suggestedAnswer: interaction.suggested_answer ?? null,
-        stepName: interaction.step_name,
-      }
-    : null;
+  const [showFinalizeConfirm, setShowFinalizeConfirm] = useState(false);
+  const runtime = useIssueRuntime(identifier);
+  const {
+    data,
+    isLoading,
+    isError,
+    error,
+    interaction,
+    interactionIsLoading,
+    interactionIsError,
+    interactionError,
+    pendingQuestion,
+    isLiveRun,
+    wsStatus,
+    events,
+    transcriptEntries,
+    activeTranscriptEntryId,
+    transcriptSessionKey,
+    transcriptIsError,
+    timelineIsError,
+    retryMutation,
+    stopMutation,
+    respondMutation,
+    resumeMutation,
+    cancelMutation,
+    finalizeApproveMutation,
+    finalizeRetryMutation,
+    composerError,
+    resumeQueued,
+    submitInteractionReply,
+    resumeInteraction,
+    setActiveEntryIdForConversationIndex,
+    setActiveEntryId,
+  } = runtime;
 
   if (isLoading) {
     return <div className="py-12 text-center text-muted-foreground">Loading...</div>;
@@ -294,7 +119,54 @@ export default function IssueDetail() {
     </div>
   );
 
-  const rawEventsPanel = timelineQuery.isError ? (
+  const finalizeStatus = data.finalize?.status;
+  const actionError = [
+    stopMutation,
+    retryMutation,
+    cancelMutation,
+    finalizeApproveMutation,
+    finalizeRetryMutation,
+  ].find((mutation) => mutation.isError)?.error;
+  const finalizePanel = finalizeStatus ? (
+    <div className="rounded-lg border bg-card p-4 text-sm">
+      {finalizeStatus === "pending_approval" ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="font-medium">Finalize approval required</div>
+            <p className="text-muted-foreground">Approve publishing finalized workspace changes.</p>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => setShowFinalizeConfirm(true)}
+            disabled={finalizeApproveMutation.isPending}
+          >
+            Approve finalize
+          </Button>
+        </div>
+      ) : finalizeStatus === "failed" ? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="font-medium">Finalize failed</div>
+            <p className="text-muted-foreground">Retry finalizing workspace changes.</p>
+          </div>
+          <Button
+            size="sm"
+            onClick={() => finalizeRetryMutation.mutate({ identifier })}
+            disabled={finalizeRetryMutation.isPending}
+          >
+            Retry finalize
+          </Button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="font-medium">Finalize status</div>
+          <div className="text-muted-foreground">{finalizeStatus}</div>
+        </div>
+      )}
+    </div>
+  ) : null;
+
+  const rawEventsPanel = timelineIsError ? (
     <div className="space-y-3">
       <p className="text-sm text-amber-700">
         Couldn&apos;t load saved timeline history; showing live events only.
@@ -302,21 +174,41 @@ export default function IssueDetail() {
       <EventTimeline
         events={events}
         live={isLiveRun}
-        onViewConversation={(index) => {
-        activeEntrySessionKeyRef.current = transcriptSessionKey;
-        setActiveEntryId(transcriptEntryIdForConversationIndex(index));
-      }}
+        onViewConversation={setActiveEntryIdForConversationIndex}
       />
     </div>
   ) : (
     <EventTimeline
       events={events}
       live={isLiveRun}
-      onViewConversation={(index) => {
-        activeEntrySessionKeyRef.current = transcriptSessionKey;
-        setActiveEntryId(transcriptEntryIdForConversationIndex(index));
-      }}
+      onViewConversation={setActiveEntryIdForConversationIndex}
     />
+  );
+  const interactionSubmitting =
+    respondMutation.isPending || resumeMutation.isPending || resumeQueued;
+  const respondPanel = interactionIsLoading ? (
+    <div className="m-4 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+      Loading interaction...
+    </div>
+  ) : interactionIsError ? (
+    <div className="m-4 rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">
+      <div className="font-medium text-destructive">Failed to load interaction</div>
+      <p className="mt-1 text-muted-foreground">{errorMessage(interactionError)}</p>
+    </div>
+  ) : pendingQuestion ? (
+    <IssueComposer
+      key={`${identifier}:${pendingQuestion.interactionId}`}
+      pendingQuestion={pendingQuestion}
+      onSubmitReply={submitInteractionReply}
+      onSubmitFollowUp={() => false}
+      onResumeInteraction={resumeInteraction}
+      isSubmitting={interactionSubmitting}
+      error={composerError}
+    />
+  ) : (
+    <div className="m-4 rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+      No response is currently available. Use Transcript or Steps to inspect the issue.
+    </div>
   );
 
   return (
@@ -367,6 +259,12 @@ export default function IssueDetail() {
         </div>
       </div>
 
+      {actionError ? (
+        <p role="alert" className="text-sm text-destructive">
+          {errorMessage(actionError)}
+        </p>
+      ) : null}
+
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4">
@@ -396,27 +294,34 @@ export default function IssueDetail() {
         </Card>
       </div>
 
+      {finalizePanel}
+
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
         <div className="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card">
           <div className="min-h-0 flex-1 overflow-auto p-4">
-            <RunTranscript
-              entries={transcriptEntries}
-              activeEntryId={activeTranscriptEntryId}
-              onJumpToEntry={(entryId) => {
-                activeEntrySessionKeyRef.current = transcriptSessionKey;
-                setActiveEntryId(entryId);
-              }}
-              transcriptSessionKey={transcriptSessionKey}
-            />
+            {transcriptIsError && transcriptEntries.length === 0 ? (
+              <div className="rounded-lg border border-amber-300/70 bg-amber-50/60 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/20 dark:text-amber-100">
+                Could not load saved transcript history.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {transcriptIsError ? (
+                  <p className="text-sm text-amber-700 dark:text-amber-400">
+                    Could not load saved transcript history; showing live activity only.
+                  </p>
+                ) : null}
+                <RunTranscript
+                  entries={transcriptEntries}
+                  activeEntryId={activeTranscriptEntryId}
+                  onJumpToEntry={setActiveEntryId}
+                  transcriptSessionKey={transcriptSessionKey}
+                />
+              </div>
+            )}
           </div>
           <div className="border-t bg-background">
-            <IssueComposer
-              pendingQuestion={pendingQuestion}
-              onSubmitReply={(value) => inputMutation.mutate(value)}
-              onSubmitFollowUp={(value) => inputMutation.mutate(value)}
-              isSubmitting={inputMutation.isPending}
-            />
-            {interaction && interaction.status !== "resolved" ? (
+            {respondPanel}
+            {!interactionIsLoading && !interactionIsError && interaction?.status === "open" ? (
               <div className="px-4 pb-4">
                 <Button
                   variant="outline"
@@ -463,6 +368,17 @@ export default function IssueDetail() {
           setShowStopConfirm(false);
         }}
         onCancel={() => setShowStopConfirm(false)}
+      />
+      <FinalizeApprovalDialog
+        open={showFinalizeConfirm}
+        status={data.finalize?.status ?? "not_required"}
+        repos={data.finalize?.repos ?? []}
+        isPending={finalizeApproveMutation.isPending}
+        onConfirm={() => {
+          finalizeApproveMutation.mutate({ identifier });
+          setShowFinalizeConfirm(false);
+        }}
+        onCancel={() => setShowFinalizeConfirm(false)}
       />
     </div>
   );

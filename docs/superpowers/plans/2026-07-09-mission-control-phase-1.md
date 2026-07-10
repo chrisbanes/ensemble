@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the current simple dashboard with a Mission Control workspace that shows active work, attention items, board/list views, and an inline selected issue command panel.
+**Goal:** Replace the current simple dashboard with a Mission Control workspace that shows active work, attention items, board/list views, and an inline selected issue command panel, while first fixing MVP UI action blockers that Mission Control would otherwise inherit.
 
-**Architecture:** Keep backend contracts unchanged for Phase 1. Add pure frontend normalization helpers that turn `RuntimeSnapshot` into Mission Control summaries, reuse existing issue-detail queries/components inside a new command panel, and keep `/issue/:identifier` as a deep-link detail route. The implementation should be incremental: first build tested data helpers, then presentation components, then wire the dashboard route.
+**Architecture:** Phase 1 does not require the new Phase 2 capability DTOs or global-stream APIs. It does add the required additive `InteractionDetail.kind` and `InteractionDetail.awaiting_resume` fields, with explicit interaction status typing, so the frontend can implement the corrected respond/resume flow. Regenerate the OpenAPI specification and generated client from these compatible additions rather than editing generated files. First fix frontend/API-client correctness for encoded issue identifiers, interaction respond/resume, and minimal finalize approve/retry controls. Then add pure frontend normalization helpers that turn `RuntimeSnapshot` into Mission Control summaries, reuse existing issue-detail queries/components inside a new command panel, and keep `/issue/:identifier` as a deep-link detail route.
 
 **Tech Stack:** React 19, TypeScript, Vite, TanStack Query, React Router, Tailwind 4, shadcn-style local UI primitives, Vitest, Testing Library.
 
@@ -41,10 +41,14 @@ Create these files:
 
 Modify these files:
 
+- `crates/ensemble-ui/src-ui/src/hooks.ts`  
+  Replace stale issue input flow, add or fix encoded wrappers for issue-scoped generated clients, and expose finalize approve/retry mutations.
 - `crates/ensemble-ui/src-ui/src/pages/Dashboard.tsx`  
   Replace implementation with a wrapper that renders `MissionControl`.
 - `crates/ensemble-ui/src-ui/src/pages/IssueDetail.tsx`  
-  Replace duplicated runtime/query/WebSocket logic with `useIssueRuntime`; preserve the existing route and layout.
+  Replace stale reply behavior, add minimal finalize controls, then replace duplicated runtime/query/WebSocket logic with `useIssueRuntime`; preserve the existing route and layout.
+- Existing hook/API tests under `crates/ensemble-ui/src-ui/src/`  
+  Add focused coverage for encoded issue identifiers, interaction reply/resume, and finalize approve/retry actions.
 - `crates/ensemble-ui/src-ui/src/components/Layout.tsx`  
   Update shell styling to better support the full-width Mission Control page and use theme tokens instead of hard-coded gray nav colors.
 - `crates/ensemble-ui/src-ui/src/pages/Dashboard.test.tsx`  
@@ -53,6 +57,119 @@ Modify these files:
 Do not modify generated files under `crates/ensemble-ui/src-ui/src/generated/` manually.
 
 Do not commit during implementation unless the user explicitly asks for commits.
+
+---
+
+### Task 0: Fix MVP Issue Action Foundations
+
+**Files:**
+- Modify: `crates/ensemble-ui/src-ui/src/hooks.ts`
+- Modify: `crates/ensemble-ui/src-ui/src/pages/IssueDetail.tsx`
+- Modify/Create: focused frontend tests for hooks and `IssueDetail`
+
+This task folds in #305, #306, and the minimal UI portion of #307. It must be completed before extracting `useIssueRuntime`, otherwise Mission Control will share stale reply and action behavior.
+
+- [ ] **Step 1: Add failing tests for encoded issue identifiers**
+
+Add focused frontend tests around the hook/client layer that verify UI request dispatch URL-encodes issue identifiers and step names before calling issue-scoped endpoints.
+
+Cover at least these examples:
+
+- issue identifier `repo#42`
+- issue identifier `org/repo#42`
+- step name with a slash or space if the existing step-detail/conversation path accepts arbitrary step names
+
+The tested paths must include the endpoints the UI uses for:
+
+- issue detail
+- stop
+- retry
+- resume
+- finalize approve
+- finalize retry
+- timeline
+- step detail
+- step conversation/transcript
+
+Expected before the fix: at least one generated or wrapped client call leaves `#` or `/` unencoded in a path segment.
+
+- [ ] **Step 2: Fix encoded issue and step path handling without manually editing generated files**
+
+Do not edit `crates/ensemble-ui/src-ui/src/generated/` manually.
+
+Use one of these implementation routes, choosing the smallest one that survives codegen:
+
+- configure/fix the OpenAPI/codegen input so generated path parameters are encoded, then regenerate; or
+- add handwritten wrapper functions in `hooks.ts` or a small adjacent API helper that use `customFetch` with `encodeURIComponent` for issue-scoped routes, and route UI hooks through those wrappers.
+
+The fix must ensure `repo#42` does not become a URL fragment and `org/repo#42` does not become multiple path segments.
+
+- [ ] **Step 3: Add failing tests for interaction reply/resume**
+
+Update `IssueDetail` tests to cover answering a blocked issue from the composer.
+
+The expected behavior is:
+
+- submit calls `respondToInteraction` or the hook wrapping `POST /api/v1/interactions/{id}/respond`
+- question replies send the correct interaction response body for the current interaction type
+- after a successful response, the UI queues/resumes the issue with `POST /api/v1/issues/{identifier}/resume` when the interaction flow requires resume
+- the stale `/api/v1/issues/{identifier}/input` route is not called
+- failed reply or resume keeps the composer context visible and exposes an inline error
+
+Expected before the fix: the test observes `useIssueInputMutation` or the stale issue-scoped input path.
+
+- [ ] **Step 4: Replace stale issue input flow with interaction respond/resume**
+
+Remove `useIssueInputMutation` from `IssueDetail` usage. Prefer removing the hook entirely if no callers remain; otherwise leave it only if another concrete current caller still needs it.
+
+Use the existing `useRespondToInteractionMutation(identifier)` and `useResumeIssueMutation(identifier)` hooks, or replace them with a combined helper if that makes error handling clearer.
+
+Implementation rules:
+
+- derive the active interaction id from `pending_input.ask_id` or `current_interaction.interaction_request_id`
+- fetch interaction detail with `useInteractionDetailQuery(interactionId)` as today
+- map composer replies to the generated `InteractionResponseBody` shape expected by the interaction type
+- after successful response, call resume for the same encoded issue identifier when the interaction state requires `awaiting_resume` or when the current backend contract requires explicit resume after response
+- invalidate state, open interactions, and issue detail queries after response/resume
+- do not post to `/api/v1/issues/{identifier}/input`
+
+- [ ] **Step 5: Add failing tests for minimal finalize controls**
+
+Add `IssueDetail` tests for finalize states exposed in `IssueDetailSnapshot`.
+
+Cover:
+
+- `pending_approval` renders an approval panel/button and calls finalize approve
+- `failed` renders a retry panel/button and calls finalize retry
+- `skipped_headless` or `in_progress` renders a clear passive/in-progress state, without exposing invalid actions
+- finalize action errors remain visible inline
+
+This is not #303's richer review gate. Keep the UI compact and action-focused.
+
+- [ ] **Step 6: Implement finalize approve/retry mutations and minimal UI**
+
+Add hook-level mutations for:
+
+- `POST /api/v1/{identifier}/finalize/approve`
+- `POST /api/v1/{identifier}/finalize/retry`
+
+Ensure these paths encode the issue identifier. Invalidate state and issue detail queries on success.
+
+Add a small finalize section in `IssueDetail.tsx`, near the existing stop/retry controls or artifacts summary, that reflects current finalize status from issue detail data. The section should be reusable or easy to move into `IssueCommandPanel` later.
+
+- [ ] **Step 7: Run foundation tests**
+
+Run:
+
+```bash
+pnpm test -- src/pages/IssueDetail.test.tsx
+```
+
+Working directory: `crates/ensemble-ui/src-ui`
+
+Also run any hook/API test file added in this task.
+
+Expected: PASS.
 
 ---
 
@@ -1043,8 +1160,12 @@ export interface IssueRuntimeState {
   timelineIsError: boolean;
   retryMutation: ReturnType<typeof useRetryMutation>;
   stopMutation: ReturnType<typeof useStopMutation>;
-  inputMutation: ReturnType<typeof useIssueInputMutation>;
+  respondMutation: ReturnType<typeof useRespondToInteractionMutation>;
+  resumeMutation: ReturnType<typeof useResumeIssueMutation>;
   cancelMutation: ReturnType<typeof useCancelInteractionMutation>;
+  finalizeApproveMutation: ReturnType<typeof useFinalizeApproveMutation>;
+  finalizeRetryMutation: ReturnType<typeof useFinalizeRetryMutation>;
+  submitInteractionReply: (value: string) => void;
   setActiveEntryIdForConversationIndex: (index: number) => void;
   setActiveEntryId: (entryId: string | null) => void;
 }
@@ -1061,8 +1182,8 @@ Important extraction rules:
 - Move `triggerNotification`, `formatTokens` should stay in `IssueDetail.tsx` only if still used there; otherwise move formatting to the consumer.
 - Keep `requestPermissionIfNeeded()` and `connectWs()` behavior unchanged.
 - Keep transcript deduplication and timeline merge behavior unchanged.
-- Keep mutation hooks unchanged.
-- Do not change backend API calls.
+- Keep the corrected mutation behavior from Task 0 unchanged: interaction replies must use respond/resume, and finalize controls must use finalize approve/retry.
+- Do not add new backend API calls.
 
 - [ ] **Step 3: Update `IssueDetail.tsx` to use `useIssueRuntime`**
 
@@ -1088,8 +1209,12 @@ const {
   timelineIsError,
   retryMutation,
   stopMutation,
-  inputMutation,
+  respondMutation,
+  resumeMutation,
   cancelMutation,
+  finalizeApproveMutation,
+  finalizeRetryMutation,
+  submitInteractionReply,
   setActiveEntryIdForConversationIndex,
   setActiveEntryId,
 } = runtime;
@@ -1117,7 +1242,7 @@ Run:
 pnpm test -- src/pages/IssueDetail.test.tsx
 ```
 
-Expected: PASS with no behavior changes.
+Expected: PASS with no behavior changes beyond the Task 0 interaction/finalize fixes already covered by tests.
 
 - [ ] **Step 5: Run TypeScript check for the frontend**
 
@@ -1168,6 +1293,7 @@ vi.mock("./useIssueRuntime", () => ({
       workspace: { path: "/tmp/workspace" },
       workflow_steps: [],
       artifacts: null,
+      finalize: { status: "not_required", repos: [] },
       issue: { title: "Test issue" },
       last_error: null,
     },
@@ -1187,8 +1313,12 @@ vi.mock("./useIssueRuntime", () => ({
     timelineIsError: false,
     retryMutation: { mutate: vi.fn(), isPending: false },
     stopMutation: { mutate: vi.fn(), isPending: false },
-    inputMutation: { mutate: vi.fn(), isPending: false },
+    respondMutation: { mutate: vi.fn(), isPending: false },
+    resumeMutation: { mutate: vi.fn(), isPending: false },
     cancelMutation: { mutate: vi.fn(), isPending: false },
+    finalizeApproveMutation: { mutate: vi.fn(), isPending: false },
+    finalizeRetryMutation: { mutate: vi.fn(), isPending: false },
+    submitInteractionReply: vi.fn(),
     setActiveEntryIdForConversationIndex: vi.fn(),
     setActiveEntryId: vi.fn(),
   })),
@@ -1253,6 +1383,7 @@ describe("IssueCommandPanel", () => {
 
     expect(onActiveTabChange).toHaveBeenCalledWith("transcript");
   });
+
 });
 ```
 
@@ -1341,11 +1472,17 @@ export function IssueCommandPanel({ identifier, activeTab, onActiveTabChange, on
     timelineIsError,
     retryMutation,
     stopMutation,
-    inputMutation,
+    respondMutation,
+    resumeMutation,
     cancelMutation,
+    finalizeApproveMutation,
+    finalizeRetryMutation,
+    submitInteractionReply,
     setActiveEntryIdForConversationIndex,
     setActiveEntryId,
   } = runtime;
+
+  const interactionSubmitting = respondMutation.isPending || resumeMutation.isPending;
 
   if (isLoading) {
     return <aside className="min-h-[28rem] rounded-xl border bg-card p-6 text-sm text-muted-foreground lg:w-[28rem]">Loading issue...</aside>;
@@ -1359,6 +1496,10 @@ export function IssueCommandPanel({ identifier, activeTab, onActiveTabChange, on
       </aside>
     );
   }
+
+  const finalizeStatus = data.finalize?.status;
+  const canApproveFinalize = finalizeStatus === "pending_approval";
+  const canRetryFinalize = finalizeStatus === "failed";
 
   return (
     <aside className="flex h-full min-h-[34rem] w-full flex-col overflow-hidden rounded-xl border bg-card shadow-sm lg:w-[30rem] xl:w-[34rem]">
@@ -1382,6 +1523,16 @@ export function IssueCommandPanel({ identifier, activeTab, onActiveTabChange, on
           {data.retry ? (
             <Button size="sm" onClick={() => retryMutation.mutate({ identifier })} disabled={retryMutation.isPending}>
               Retry
+            </Button>
+          ) : null}
+          {canApproveFinalize ? (
+            <Button size="sm" onClick={() => finalizeApproveMutation.mutate({ identifier })} disabled={finalizeApproveMutation.isPending}>
+              Approve finalize
+            </Button>
+          ) : null}
+          {canRetryFinalize ? (
+            <Button size="sm" onClick={() => finalizeRetryMutation.mutate({ identifier })} disabled={finalizeRetryMutation.isPending}>
+              Retry finalize
             </Button>
           ) : null}
           <span className="rounded-full border px-2 py-1 text-xs text-muted-foreground">WS: {isLiveRun ? wsStatus : "inactive"}</span>
@@ -1426,18 +1577,30 @@ export function IssueCommandPanel({ identifier, activeTab, onActiveTabChange, on
               <div className="rounded-lg border bg-muted/20 p-3"><div className="text-muted-foreground">Turns</div><div className="font-semibold">{data.running?.turn_count ?? 0}</div></div>
               <div className="rounded-lg border bg-muted/20 p-3"><div className="text-muted-foreground">Tokens</div><div className="font-semibold">{formatTokens(data.running?.tokens.total_tokens)}</div></div>
             </div>
+            {finalizeStatus && finalizeStatus !== "not_required" ? (
+              <div className="rounded-lg border bg-muted/20 p-3 text-sm">
+                <div className="font-medium">Finalize</div>
+                <div className="mt-1 text-muted-foreground">{finalizeStatus}</div>
+              </div>
+            ) : null}
             {data.last_error ? <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-3 text-sm">{data.last_error}</div> : null}
           </div>
         ) : null}
 
         {activeTab === "respond" ? (
           <div className="space-y-3">
-            <IssueComposer
-              pendingQuestion={pendingQuestion}
-              onSubmitReply={(value) => inputMutation.mutate(value)}
-              onSubmitFollowUp={(value) => inputMutation.mutate(value)}
-              isSubmitting={inputMutation.isPending}
-            />
+            {pendingQuestion ? (
+              <IssueComposer
+                pendingQuestion={pendingQuestion}
+                onSubmitReply={submitInteractionReply}
+                onSubmitFollowUp={() => {}}
+                isSubmitting={interactionSubmitting}
+              />
+            ) : (
+              <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
+                No response is currently available. Use Transcript or Steps to inspect the issue.
+              </div>
+            )}
             {interaction && interaction.status !== "resolved" ? (
               <Button variant="outline" size="sm" onClick={() => cancelMutation.mutate({ id: interaction.id })} disabled={cancelMutation.isPending}>
                 Cancel Request
@@ -1971,6 +2134,7 @@ If the implementation changes user-visible behavior beyond the spec, update the 
 
 Spec coverage:
 
+- MVP action foundations: Task 0 covers #305, #306, and minimal #307 before Mission Control shares issue-detail behavior.
 - Mission Control shell: Tasks 6 and 7.
 - System strip: Task 2.
 - Attention queue: Task 2.
@@ -1980,7 +2144,7 @@ Spec coverage:
 - Reuse existing detail components: Task 5.
 - Local storage preferences: Task 6.
 - Existing polling and per-issue WebSocket behavior: Task 4 and Task 6.
-- Phase 2 exclusions: no task adds backend capabilities, global stream, workspace browser, diff review, or keyboard shortcuts.
+- Phase 2 exclusions: no task adds backend capabilities, global stream, workspace browser, diff review, keyboard shortcuts, operator notes, or the richer #303 finalization/review gate. Task 0 only adds minimal finalize approve/retry controls for the existing backend endpoints.
 
 Placeholder scan:
 

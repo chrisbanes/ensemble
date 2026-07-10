@@ -14,6 +14,7 @@ interface ConfirmDialogProps {
   title: string;
   message: string;
   confirmLabel: string;
+  confirmDisabled?: boolean;
   destructive?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -24,6 +25,7 @@ export default function ConfirmDialog({
   title,
   message,
   confirmLabel,
+  confirmDisabled = false,
   destructive = true,
   onConfirm,
   onCancel,
@@ -39,6 +41,7 @@ export default function ConfirmDialog({
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction
             onClick={onConfirm}
+            disabled={confirmDisabled}
             variant={destructive ? "destructive" : "default"}
           >
             {confirmLabel}

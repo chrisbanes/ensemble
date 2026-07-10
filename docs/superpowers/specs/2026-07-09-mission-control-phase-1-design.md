@@ -27,6 +27,7 @@ The UI should avoid becoming primarily a chat app. Chat/transcript remains avail
 
 In scope for Phase 1:
 
+- Fix MVP UI action blockers that Mission Control would otherwise inherit: encoded issue identifiers in UI API calls, human interaction replies through the implemented interaction API, and minimal finalize approve/retry controls.
 - Replace the current dashboard experience with a Mission Control shell.
 - Add a compact system status strip with current orchestration health signals.
 - Promote the attention queue to a first-class region.
@@ -44,7 +45,7 @@ Out of scope for Phase 1:
 - Global live dashboard event streams.
 - Workspace file browsing.
 - Workspace diff review.
-- Rich finalization/review gate redesign.
+- Rich finalization/review gate redesign beyond minimal approve/retry controls needed for MVP.
 - Keyboard shortcut system.
 - Operator notes/annotations.
 - Multi-user routing, assignment, or ownership.
@@ -57,6 +58,12 @@ Phase 2 follow-up issues exist for the out-of-scope items:
 - #302 Mission Control Phase 2: workspace diff review
 - #303 Mission Control Phase 2: richer finalization and review gate
 - #304 Mission Control Phase 2: operator productivity features
+
+Phase 1 also folds in these MVP blockers because the selected issue panel and retained issue detail route depend on them:
+
+- #305 MVP: URL-encode issue identifiers in generated UI clients
+- #306 MVP: fix issue-detail human interaction replies
+- #307 MVP: make finalize approval and retry usable from UI
 
 ## Existing Starting Point
 
@@ -109,6 +116,8 @@ The top strip should surface high-signal operational state from the existing das
 - failed or retry-exhausted count
 - rate-limit warning if present
 
+The strip treats state as stale when either snapshot generation or the last orchestrator tick is older than three poll intervals, with a 10-second minimum threshold. Rate capacity at or below 10% is a warning and includes the reset time when available.
+
 The strip should also contain the main controls:
 
 - refresh
@@ -155,6 +164,8 @@ Board view groups issues by operational state. Initial columns should map to exi
 
 If existing data supports more precise groups, the implementation can split or rename columns, but it should avoid introducing states that are not actually backed by runtime data.
 
+Synthetic `halted:{issue}:{step}` waiting rows represent `on_failure: halt`, not actionable interaction records. Mission Control classifies them as Failed or Blocked, gives them Inspect/Open actions, and presents passive issue inspection without requesting interaction detail.
+
 List view should support dense scanning of the same issues. It should show the same metadata as cards but in rows, with compact status, issue identity, current step, agent, updated time, and attention indicators.
 
 Cards and rows should show:
@@ -166,6 +177,7 @@ Cards and rows should show:
 - active task or current activity if available
 - retry/attempt count if available
 - turns/tokens if already available
+- compact updated time if available
 - waiting/question indicator
 - selected state
 
@@ -206,7 +218,7 @@ It should show:
 - retry/attempt summary
 - latest activity or timeline summary
 - pending question summary if present
-- primary intervention controls using existing action logic
+- primary intervention controls using existing action logic, including stop, retry, minimal finalize approve, and minimal finalize retry where currently supported
 - compact links/buttons to the deeper tabs
 
 #### Respond Tab
@@ -214,6 +226,8 @@ It should show:
 Respond should not be the default mental model, but it should become visually prominent when the issue needs human input.
 
 It should reuse `IssueQuestionBanner` and `IssueComposer` where possible.
+
+Submitting a response must use the implemented interaction flow: respond to the current interaction request, then resume the issue when the backend indicates a resume is required. Phase 1 must not keep or reintroduce the stale issue-scoped `/issues/{identifier}/input` flow.
 
 States:
 
@@ -239,6 +253,8 @@ Logs should reuse `EventTimeline` and existing raw event views. It is for debugg
 
 Artifacts should reuse `ArtifactsPanel` and expose existing finalization output. A richer review gate is Phase 2.
 
+Minimal finalize controls are still in scope for MVP: if current issue detail data shows finalize status `pending_approval`, `failed`, `skipped_headless`, or `in_progress`, the issue detail route and selected issue command panel should surface that state. Operators must be able to approve pending finalize and retry failed finalize using the existing backend endpoints. This is intentionally narrower than the Phase 2 review gate in #303.
+
 ## Data Flow
 
 Phase 1 should prefer existing data contracts:
@@ -247,6 +263,10 @@ Phase 1 should prefer existing data contracts:
 - existing refresh mutation/control for manual refresh
 - per-issue fetches for selected panel detail data
 - existing per-issue WebSocket for live transcript/detail updates where available
+- existing interaction detail/respond/cancel and issue resume APIs for human input flows
+- existing finalize approve/retry APIs for minimal finalization controls
+
+All UI-generated API paths that include issue identifiers or step names must URL-encode path segments before request dispatch. This includes issue detail, stop, retry, resume, finalize approve/retry, timeline, step detail, and conversation/transcript calls. Identifiers such as `repo#42` and `org/repo#42` are core product identifiers and must not be treated as URL fragments or path separators.
 
 The command panel may fetch detail data lazily when an issue is selected. It should avoid subscribing to every issue's detailed stream from the dashboard.
 
@@ -267,6 +287,8 @@ Mission Control should make operational state failures obvious but non-destructi
 - If selected issue details fail, keep the board usable and show an error state in the command panel.
 - If WebSocket disconnects for the selected issue, show stale/disconnected state near the panel header or transcript tab.
 - If a reply/retry/stop action fails, keep the operator's input visible and show the backend error inline.
+- If interaction response succeeds but resume fails, keep the issue selected, show the resume error inline, and let the operator retry or refresh rather than silently discarding the reply context.
+- If finalize approve/retry fails, leave the finalize panel visible and show the backend error inline.
 - Empty states should distinguish "nothing running" from "data failed to load".
 
 ## Visual Direction
@@ -296,10 +318,14 @@ Specific visual improvements:
 
 Phase 1 should include tests appropriate to the UI changes:
 
+- tests that issue identifiers containing `#` or `/` are encoded before UI request dispatch
+- tests that blocked issue replies use the interaction respond/resume flow rather than `/issues/{identifier}/input`
+- tests that minimal finalize approve/retry controls render and call the expected endpoints
 - component tests for filtering/search/view-mode behavior if the current frontend test setup supports them
 - tests for attention queue derivation if that logic is extracted into pure functions
 - tests for local-storage preference parsing/fallbacks if non-trivial
-- existing Rust/API tests should continue to pass because Phase 1 should not require backend contract changes
+- Rust/API tests should cover the additive `InteractionDetail.kind` and `awaiting_resume` fields and explicit status values used by the corrected interaction flow
+- regenerate the OpenAPI specification and generated client after those backward-compatible additions; Phase 1 does not require new Phase 2 capability DTOs or global-stream APIs
 
 If the current frontend test harness cannot cover a behavior without significant new setup, the implementation should prefer pure helper tests plus the manual verification checklist rather than introduce a large testing framework change in this UI redesign.
 
@@ -337,16 +363,18 @@ Existing components should be reused before rewriting:
 
 Phase 1 is complete when:
 
-1. The dashboard route presents a Mission Control workspace instead of the current simple Control Room layout.
-2. Operators can see active work, attention items, and system health from one screen.
-3. Operators can switch between board and list views over active issues.
-4. Operators can search/filter active issues using basic controls.
-5. Selecting an issue opens an inline command panel without losing the operations overview.
-6. The command panel exposes Overview, Respond, Steps, Transcript, Logs, and Artifacts tabs.
-7. Pending human questions are visible from both the attention queue and selected issue panel.
-8. Responding to an agent from the command panel uses the existing interaction flow.
-9. Existing issue detail deep links still work or have a clear replacement path.
-10. The implementation does not require Phase 2 backend APIs.
+1. UI API paths correctly handle issue identifiers containing `#` or `/`.
+2. Issue Detail and Mission Control replies use the implemented interaction respond/resume flow.
+3. Issue Detail and Mission Control expose minimal finalize approve/retry controls when current state supports them.
+4. The dashboard route presents a Mission Control workspace instead of the current simple Control Room layout.
+5. Operators can see active work, attention items, and system health from one screen.
+6. Operators can switch between board and list views over active issues.
+7. Operators can search/filter active issues using basic controls.
+8. Selecting an issue opens an inline command panel without losing the operations overview.
+9. The command panel exposes Overview, Respond, Steps, Transcript, Logs, and Artifacts tabs.
+10. Pending human questions are visible from both the attention queue and selected issue panel.
+11. Existing issue detail deep links still work or have a clear replacement path.
+12. The implementation does not require Phase 2 backend APIs.
 
 ## Open Decisions Resolved For Phase 1
 
@@ -354,4 +382,5 @@ Phase 1 is complete when:
 - Workspace and diff inspection are Phase 2.
 - Backend action capabilities are Phase 2; Phase 1 can use existing action checks.
 - Global dashboard streaming is Phase 2; Phase 1 can use current snapshot/polling behavior.
+- Minimal finalize approve/retry controls are Phase 1 MVP blockers; richer finalization/review evidence and gating remain Phase 2.
 - Mission Control should borrow agent-runner's shell pattern but use Ensemble's pipeline-native ontology.

@@ -11,11 +11,13 @@ function interaction(overrides: Partial<InteractionDetail> = {}): InteractionDet
     issue_identifier: "my-repo#42",
     step_name: "review",
     agent_name: "reviewer",
+    awaiting_resume: true,
     status: "open",
     question: "Need clarification",
     why_blocked: "The agent needs human input to continue",
     requested_at: "2026-04-04T10:00:00Z",
     ...overrides,
+    kind: overrides.kind ?? "question",
   };
 }
 

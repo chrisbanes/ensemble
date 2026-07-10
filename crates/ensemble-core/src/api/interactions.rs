@@ -1,7 +1,9 @@
 use crate::api::handlers::ApiError;
 use crate::api::router::AppState;
 use crate::interaction::error::InteractionError;
-use crate::interaction::model::{InteractionRequest, InteractionResponse};
+use crate::interaction::model::{
+    InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+};
 use crate::interaction::store::InteractionStore;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
@@ -18,11 +20,13 @@ pub struct InteractionDetail {
     pub issue_identifier: String,
     pub step_name: String,
     pub agent_name: String,
+    pub kind: InteractionKind,
     pub question: String,
     pub why_blocked: String,
     pub suggested_answer: Option<String>,
     pub extra_context: Option<String>,
-    pub status: String,
+    pub status: InteractionStatus,
+    pub awaiting_resume: bool,
     pub requested_at: DateTime<Utc>,
 }
 
@@ -34,11 +38,13 @@ impl From<&InteractionRequest> for InteractionDetail {
             issue_identifier: req.issue_identifier.clone(),
             step_name: req.step_name.clone(),
             agent_name: req.agent_name.clone(),
+            kind: req.kind.clone(),
             question: req.title.clone(),
             why_blocked: req.body.clone(),
             suggested_answer: req.options.first().cloned(),
             extra_context: req.step_tracker_state.clone(),
-            status: req.status.as_str().to_string(),
+            status: req.status.clone(),
+            awaiting_resume: req.awaiting_resume,
             requested_at: req.requested_at,
         }
     }
