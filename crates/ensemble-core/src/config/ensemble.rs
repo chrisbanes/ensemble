@@ -1038,7 +1038,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
     }
     // Synthesis steps must have explicit non-empty dependencies
     for step in &config.steps {
-        if step.kind == StepKind::Synthesis && step.depends.as_ref().map_or(true, Vec::is_empty) {
+        if step.kind == StepKind::Synthesis && step.depends.as_ref().is_none_or(Vec::is_empty) {
             return Err(PipelineError::InvalidSynthesisStep {
                 step: step.name.clone(),
                 reason: "synthesis steps require explicit non-empty depends".to_string(),
