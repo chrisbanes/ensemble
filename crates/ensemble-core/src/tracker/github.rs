@@ -961,24 +961,13 @@ impl GithubTracker {
 
         let items = data
             .pointer("/node/projectItems/nodes")
-            .and_then(|v| v.as_array())
+            .and_then(Value::as_array)
             .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "missing projectItems in response".to_string(),
+                reason: format!("issue {issue_node_id} is missing projectItems nodes"),
             })?;
 
-        for item in items {
-            if let Some(proj_id) = item.pointer("/project/id").and_then(|v| v.as_str()) {
-                if proj_id == project_id {
-                    if let Some(item_id) = item.get("id").and_then(|v| v.as_str()) {
-                        return Ok(item_id.to_string());
-                    }
-                }
-            }
-        }
-
-        Err(TrackerError::UnexpectedPayload {
-            reason: format!("issue {} not found in project", issue_node_id),
-        })
+        let (item_id, _) = select_configured_project_item(issue_node_id, &project_id, items)?;
+        Ok(item_id.to_string())
     }
 
     /// Normalize a node from the state refresh query.
@@ -2055,6 +2044,87 @@ mod tests {
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].state, "In Progress");
+    }
+
+    #[tokio::test]
+    async fn project_mode_write_targets_configured_project_item() {
+        let server = MockServer::start().await;
+        mount_project_discovery(&server, "P_configured").await;
+
+        let find_response = graphql_response(json!({
+            "node": {
+                "projectItems": {
+                    "nodes": [
+                        { "id": "PVTI_other", "project": { "id": "P_other" } },
+                        { "id": "PVTI_configured", "project": { "id": "P_configured" } }
+                    ]
+                }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"nodeId\":\"I_node1\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&find_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mutation_response = graphql_response(json!({
+            "updateProjectV2ItemFieldValue": {
+                "projectV2Item": { "id": "PVTI_configured" }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("updateProjectV2ItemFieldValue"))
+            .and(body_string_contains("\"projectId\":\"P_configured\""))
+            .and(body_string_contains("\"itemId\":\"PVTI_configured\""))
+            .and(body_string_contains("\"fieldId\":\"F_status\""))
+            .and(body_string_contains("\"optionId\":\"O_done\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&mutation_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        create_test_tracker(&server.uri(), Some(1))
+            .set_issue_state("I_node1", "Done")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_mode_write_rejects_multiple_configured_items() {
+        let server = MockServer::start().await;
+        mount_project_discovery(&server, "P_configured").await;
+
+        let find_response = graphql_response(json!({
+            "node": {
+                "projectItems": {
+                    "nodes": [
+                        { "id": "PVTI_b", "project": { "id": "P_configured" } },
+                        { "id": "PVTI_a", "project": { "id": "P_configured" } }
+                    ]
+                }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"nodeId\":\"I_node1\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&find_response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = create_test_tracker(&server.uri(), Some(1))
+            .set_issue_state("I_node1", "Done")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TrackerError::UnexpectedPayload { reason }
+                if reason == "issue I_node1 has multiple items in configured project P_configured: PVTI_a, PVTI_b"
+        ));
     }
 
     #[tokio::test]
