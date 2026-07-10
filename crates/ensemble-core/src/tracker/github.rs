@@ -820,6 +820,12 @@ impl GithubTracker {
             return Ok(vec![]);
         }
 
+        let configured_project_id = if self.project_number.is_some() {
+            Some(self.ensure_project_metadata().await?.0)
+        } else {
+            None
+        };
+
         let variables = json!({
             "ids": ids,
         });
@@ -838,7 +844,9 @@ impl GithubTracker {
             if node.is_null() {
                 continue;
             }
-            if let Some(issue) = self.normalize_state_node(node) {
+            if let Some(issue) =
+                self.normalize_state_node(node, configured_project_id.as_deref())?
+            {
                 issues.push(issue);
             }
         }
@@ -974,48 +982,50 @@ impl GithubTracker {
     }
 
     /// Normalize a node from the state refresh query.
-    fn normalize_state_node(&self, node: &Value) -> Option<Issue> {
-        let id = node.get("id")?.as_str()?;
-        let number = node.get("number")?.as_u64()?;
-        let title = node.get("title")?.as_str().unwrap_or("").to_string();
+    fn normalize_state_node(
+        &self,
+        node: &Value,
+        configured_project_id: Option<&str>,
+    ) -> Result<Option<Issue>, TrackerError> {
+        let Some(id) = node.get("id").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let Some(number) = node.get("number").and_then(Value::as_u64) else {
+            return Ok(None);
+        };
+        let Some(title) = node.get("title") else {
+            return Ok(None);
+        };
+        let title = title.as_str().unwrap_or("").to_string();
 
         let labels = extract_labels(node);
 
-        // Try to get state from project items first
-        let project_state = node
-            .pointer("/projectItems/nodes")
-            .and_then(|v| v.as_array())
-            .and_then(|items| {
-                for item in items {
-                    let field_values = item
-                        .pointer("/fieldValues/nodes")
-                        .and_then(|v| v.as_array());
-                    if let Some(fvs) = field_values {
-                        for fv in fvs {
-                            let field_name = fv.pointer("/field/name").and_then(|v| v.as_str());
-                            if field_name == Some("Status") {
-                                return fv
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                            }
-                        }
-                    }
+        let state = if let Some(configured_project_id) = configured_project_id {
+            let items = node
+                .pointer("/projectItems/nodes")
+                .and_then(Value::as_array)
+                .ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: format!("issue {id} is missing projectItems nodes"),
+                })?;
+            let (item_id, item) = select_configured_project_item(id, configured_project_id, items)?;
+            self.extract_status_from_field_values(item).ok_or_else(|| {
+                TrackerError::UnexpectedPayload {
+                    reason: format!(
+                        "issue {id} project item {item_id} in configured project {configured_project_id} is missing Status"
+                    ),
                 }
-                None
-            });
-
-        let state = project_state.unwrap_or_else(|| {
+            })?
+        } else {
             let raw_state = node
                 .get("state")
-                .and_then(|v| v.as_str())
+                .and_then(Value::as_str)
                 .unwrap_or("open")
                 .to_lowercase();
 
             // In repo-mode, derive canonical state from labels to stay consistent
             // with normalize_repo_issue.
             self.canonical_state_from_labels(&labels, raw_state)
-        });
+        };
 
         let url = node
             .get("url")
@@ -1024,7 +1034,7 @@ impl GithubTracker {
 
         let identifier = format!("{}#{}", self.repo, number);
 
-        Some(Issue {
+        Ok(Some(Issue {
             id: id.to_string(),
             identifier,
             title,
@@ -1037,7 +1047,7 @@ impl GithubTracker {
             blocked_by: vec![],
             created_at: None,
             updated_at: None,
-        })
+        }))
     }
 }
 
@@ -1074,6 +1084,59 @@ fn extract_labels(node: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Select the one ProjectV2 item for an issue in the configured project.
+fn select_configured_project_item<'a>(
+    issue_node_id: &str,
+    configured_project_id: &str,
+    items: &'a [Value],
+) -> Result<(&'a str, &'a Value), TrackerError> {
+    let mut configured_items = Vec::new();
+
+    for (index, item) in items.iter().enumerate() {
+        let item_id = item.get("id").and_then(Value::as_str).ok_or_else(|| {
+            TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "issue {issue_node_id} project item at index {index} is missing item ID"
+                ),
+            }
+        })?;
+        let project_id = item
+            .pointer("/project/id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "issue {issue_node_id} project item {item_id} is missing project ID"
+                ),
+            })?;
+
+        if project_id == configured_project_id {
+            configured_items.push((item_id, item));
+        }
+    }
+
+    match configured_items.as_slice() {
+        [] => Err(TrackerError::UnexpectedPayload {
+            reason: format!(
+                "issue {issue_node_id} has no item in configured project {configured_project_id}"
+            ),
+        }),
+        [(item_id, item)] => Ok((*item_id, *item)),
+        _ => {
+            let mut item_ids: Vec<&str> = configured_items
+                .iter()
+                .map(|(item_id, _)| *item_id)
+                .collect();
+            item_ids.sort_unstable();
+            Err(TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "issue {issue_node_id} has multiple items in configured project {configured_project_id}: {}",
+                    item_ids.join(", ")
+                ),
+            })
+        }
+    }
 }
 
 /// Extract priority from project item field values.
@@ -1338,6 +1401,37 @@ mod tests {
         json!({ "data": data })
     }
 
+    async fn mount_project_discovery(server: &MockServer, project_id: &str) {
+        let response = graphql_response(json!({
+            "repository": {
+                "projectV2": {
+                    "id": project_id,
+                    "fields": {
+                        "nodes": [
+                            {
+                                "id": "F_status",
+                                "name": "Status",
+                                "options": [
+                                    { "id": "O_todo", "name": "Todo" },
+                                    { "id": "O_progress", "name": "In Progress" },
+                                    { "id": "O_done", "name": "Done" }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("projectNumber"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
     // --- parse_owner_repo tests ---
 
     #[test]
@@ -1479,6 +1573,87 @@ mod tests {
             }
         });
         assert_eq!(extract_priority_from_field_values(&node), None);
+    }
+
+    // --- project-mode state reconciliation tests ---
+
+    #[test]
+    fn configured_project_item_rejects_missing_project_identity() {
+        let items = json!([{ "id": "PVTI_unknown" }]);
+
+        let result =
+            select_configured_project_item("I_node1", "P_configured", items.as_array().unwrap());
+
+        match result {
+            Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
+                reason,
+                "issue I_node1 project item PVTI_unknown is missing project ID"
+            ),
+            other => panic!("expected UnexpectedPayload error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configured_project_item_rejects_missing_configured_project() {
+        let items = json!([{ "id": "PVTI_other", "project": { "id": "P_other" } }]);
+
+        let result =
+            select_configured_project_item("I_node1", "P_configured", items.as_array().unwrap());
+
+        match result {
+            Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
+                reason,
+                "issue I_node1 has no item in configured project P_configured"
+            ),
+            other => panic!("expected UnexpectedPayload error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn configured_project_item_rejects_multiple_configured_items() {
+        let items = json!([
+            { "id": "PVTI_b", "project": { "id": "P_configured" } },
+            { "id": "PVTI_a", "project": { "id": "P_configured" } }
+        ]);
+
+        let result =
+            select_configured_project_item("I_node1", "P_configured", items.as_array().unwrap());
+
+        match result {
+            Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
+                reason,
+                "issue I_node1 has multiple items in configured project P_configured: PVTI_a, PVTI_b"
+            ),
+            other => panic!("expected UnexpectedPayload error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_mode_reconciliation_rejects_missing_status() {
+        let tracker = create_test_tracker("https://example.invalid", Some(1));
+        let node = json!({
+            "id": "I_node1",
+            "number": 1,
+            "title": "Issue 1",
+            "state": "OPEN",
+            "projectItems": {
+                "nodes": [{
+                    "id": "PVTI_configured",
+                    "project": { "id": "P_configured" },
+                    "fieldValues": { "nodes": [] }
+                }]
+            }
+        });
+
+        let result = tracker.normalize_state_node(&node, Some("P_configured"));
+
+        match result {
+            Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
+                reason,
+                "issue I_node1 project item PVTI_configured in configured project P_configured is missing Status"
+            ),
+            other => panic!("expected UnexpectedPayload error, got: {other:?}"),
+        }
     }
 
     // --- wiremock integration tests ---
@@ -1742,6 +1917,8 @@ mod tests {
     async fn test_fetch_states_by_ids() {
         let server = MockServer::start().await;
 
+        mount_project_discovery(&server, "P_configured").await;
+
         let response = graphql_response(json!({
             "nodes": [
                 {
@@ -1754,6 +1931,8 @@ mod tests {
                     "projectItems": {
                         "nodes": [
                             {
+                                "id": "PVTI_configured",
+                                "project": { "id": "P_configured" },
                                 "fieldValues": {
                                     "nodes": [
                                         {
@@ -1774,7 +1953,18 @@ mod tests {
                     "state": "CLOSED",
                     "url": "https://github.com/acme/my-repo/issues/99",
                     "labels": { "nodes": [] },
-                    "projectItems": { "nodes": [] }
+                    "projectItems": {
+                        "nodes": [{
+                            "id": "PVTI_configured_node3",
+                            "project": { "id": "P_configured" },
+                            "fieldValues": {
+                                "nodes": [{
+                                    "name": "Done",
+                                    "field": { "name": "Status" }
+                                }]
+                            }
+                        }]
+                    }
                 }
             ]
         }));
@@ -1803,10 +1993,68 @@ mod tests {
         assert_eq!(issues[0].identifier, "my-repo#42");
         assert_eq!(issues[0].labels, vec!["bug"]);
 
-        // Third issue has no project status, falls back to GitHub state
+        // Third issue derives its state from the configured project's Status.
         assert_eq!(issues[1].id, "I_node3");
-        assert_eq!(issues[1].state, "closed");
+        assert_eq!(issues[1].state, "Done");
         assert_eq!(issues[1].identifier, "my-repo#99");
+    }
+
+    #[tokio::test]
+    async fn project_mode_reconciliation_reads_configured_project_status() {
+        let server = MockServer::start().await;
+        mount_project_discovery(&server, "P_configured").await;
+
+        let response = graphql_response(json!({
+            "nodes": [{
+                "id": "I_node1",
+                "number": 1,
+                "title": "Issue 1",
+                "state": "OPEN",
+                "url": "https://github.com/acme/my-repo/issues/1",
+                "labels": { "nodes": [] },
+                "projectItems": {
+                    "nodes": [
+                        {
+                            "id": "PVTI_other",
+                            "project": { "id": "P_other" },
+                            "fieldValues": {
+                                "nodes": [{
+                                    "name": "Done",
+                                    "field": { "name": "Status" }
+                                }]
+                            }
+                        },
+                        {
+                            "id": "PVTI_configured",
+                            "project": { "id": "P_configured" },
+                            "fieldValues": {
+                                "nodes": [{
+                                    "name": "In Progress",
+                                    "field": { "name": "Status" }
+                                }]
+                            }
+                        }
+                    ]
+                }
+            }]
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let issues = tracker
+            .fetch_issue_states_by_ids(&["I_node1".to_string()])
+            .await
+            .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].state, "In Progress");
     }
 
     #[tokio::test]
