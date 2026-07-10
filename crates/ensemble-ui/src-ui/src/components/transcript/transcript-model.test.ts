@@ -20,10 +20,12 @@ describe("buildTranscriptEntries", () => {
       interactions: [
         {
           agent_name: "builder",
+          awaiting_resume: true,
           id: "ask-1",
           issue_id: "issue-1",
           issue_identifier: "todo-1",
-          status: "pending",
+          status: "open",
+          kind: "question",
           question: "What API key should I use?",
           why_blocked: "Deployment requires credentials",
           suggested_answer: "Use staging key",
@@ -276,10 +278,12 @@ describe("buildTranscriptEntries", () => {
       interactions: [
         {
           agent_name: "builder",
+          awaiting_resume: true,
           id: "ask-2",
           issue_id: "issue-1",
           issue_identifier: "todo-1",
-          status: "pending",
+          status: "open",
+          kind: "question",
           question: "Second question",
           why_blocked: "Need approval",
           suggested_answer: null,
@@ -289,10 +293,12 @@ describe("buildTranscriptEntries", () => {
         },
         {
           agent_name: "builder",
+          awaiting_resume: true,
           id: "ask-1",
           issue_id: "issue-1",
           issue_identifier: "todo-1",
-          status: "pending",
+          status: "open",
+          kind: "question",
           question: "First question",
           why_blocked: "Need credentials",
           suggested_answer: null,
@@ -496,6 +502,39 @@ describe("buildTranscriptEntries", () => {
           sequence: 2,
         },
       ],
+    });
+
+    expect(second[0]).not.toBe(first[0]);
+  });
+
+  it.each([
+    ["kind", { kind: "approval" as const }],
+    ["awaiting resume", { awaiting_resume: false }],
+  ])("replaces an interaction entry when %s changes", (_field, change) => {
+    const interaction = {
+      agent_name: "builder",
+      awaiting_resume: true,
+      id: "ask-1",
+      issue_id: "issue-1",
+      issue_identifier: "repo#1",
+      status: "open" as const,
+      kind: "question" as const,
+      question: "Continue?",
+      why_blocked: "Needs input",
+      suggested_answer: null,
+      extra_context: null,
+      step_name: "build",
+      requested_at: "2026-07-09T10:00:00Z",
+    };
+    const first = reconcileGroupedTranscriptEntries(undefined, {
+      conversation: [],
+      interactions: [interaction],
+      events: [],
+    });
+    const second = reconcileGroupedTranscriptEntries(first, {
+      conversation: [],
+      interactions: [{ ...interaction, ...change }],
+      events: [],
     });
 
     expect(second[0]).not.toBe(first[0]);

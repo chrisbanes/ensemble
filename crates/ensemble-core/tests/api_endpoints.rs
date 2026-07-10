@@ -308,6 +308,41 @@ async fn test_get_issue_detail_running() {
 }
 
 #[tokio::test]
+async fn encoded_slash_issue_identifier_reaches_detail_and_control_handlers() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    {
+        let mut state = app_state.orchestrator_state.write().await;
+        let running = state.running.get_mut("NODE_123").unwrap();
+        running.identifier = "org/repo#42".to_string();
+        running.issue.identifier = "org/repo#42".to_string();
+    }
+    let base_url = start_test_server(app_state).await;
+    let client = reqwest::Client::new();
+
+    let detail = client
+        .get(format!("{}/api/v1/org%2Frepo%2342", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(detail.status(), 200);
+    let detail_json: serde_json::Value = detail.json().await.unwrap();
+    assert_eq!(detail_json["issue_identifier"], "org/repo#42");
+
+    let control = client
+        .post(format!("{}/api/v1/org%2Frepo%2342/retry", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(control.status(), 409);
+    let control_json: serde_json::Value = control.json().await.unwrap();
+    assert_eq!(control_json["error"]["code"], "not_retrying");
+    assert!(control_json["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("org/repo#42"));
+}
+
+#[tokio::test]
 async fn test_get_issue_detail_retrying() {
     let (app_state, _temp_dir) = build_populated_app_state();
     let base_url = start_test_server(app_state).await;
@@ -469,6 +504,23 @@ async fn get_step_conversation_returns_transcript_records() {
     let body: serde_json::Value = response.json().await.unwrap();
     assert_eq!(body["records"][0]["kind"], "assistant_message");
     assert_eq!(body["records"][0]["payload"]["text"], "hello");
+}
+
+#[tokio::test]
+async fn encoded_slash_and_space_step_name_reaches_conversation_path_validation() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let base_url = test_app_with_workspace_root(temp.path()).await;
+
+    let response = reqwest::get(format!(
+        "{base_url}/api/v1/org%2Frepo%2342/runs/run-1/steps/qa%2Freview%20pass/conversation"
+    ))
+    .await
+    .unwrap();
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap();
+
+    assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "invalid_path");
 }
 
 #[tokio::test]
@@ -873,7 +925,9 @@ async fn get_interaction_by_id() {
     assert_eq!(json["issue_identifier"], "my-repo#77");
     assert_eq!(json["question"], "Need clarification");
     assert_eq!(json["why_blocked"], "Pick a deployment target");
+    assert_eq!(json["kind"], "question");
     assert_eq!(json["status"], "open");
+    assert_eq!(json["awaiting_resume"], true);
 }
 
 #[tokio::test]

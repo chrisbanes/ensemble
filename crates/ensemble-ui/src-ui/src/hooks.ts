@@ -1,15 +1,9 @@
 import { useState, useEffect } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { getState } from "./generated/api/state/state";
-import { getIssueDetail } from "./generated/api/issues/issues";
 import { getHistory } from "./generated/api/history/history";
 import { listDirectory } from "./generated/api/filesystem/filesystem";
-import {
-  postRefresh,
-  postResumeIssue,
-  postStop,
-  postRetry,
-} from "./generated/api/controls/controls";
+import { postRefresh } from "./generated/api/controls/controls";
 import {
   listOpenInteractions,
   getInteractionById,
@@ -26,7 +20,6 @@ import {
   getConfig,
   getSetupDefaults,
 } from "./generated/api/config/config";
-import { getStepConversation } from "./generated/api/conversation/conversation";
 import type {
   GetStepConversationParams,
   GetHistoryParams,
@@ -47,6 +40,8 @@ import type {
   InteractionResponseBody,
   ListDirectoryParams,
   ListResponse,
+  FinalizeStatus,
+  RepoFinalizeSnapshot,
 } from "./generated/models";
 import { customFetch } from "./fetch-client";
 
@@ -57,12 +52,62 @@ const STATE_QUERY_KEY = ["/api/v1/state"] as const;
 const CONFIG_QUERY_KEY = ["getConfig"] as const;
 const LIST_OPEN_INTERACTIONS_KEY = ["listOpenInteractions"] as const;
 
+function pathSegment(value: string) {
+  return encodeURIComponent(value);
+}
+
+function issuePath(identifier: string) {
+  return `/api/v1/${pathSegment(identifier)}`;
+}
+
+function issuesPath(identifier: string) {
+  return `/api/v1/issues/${pathSegment(identifier)}`;
+}
+
 function issueDetailQueryKey(identifier: string) {
   return ["getIssueDetail", identifier] as const;
 }
 
 function interactionByIdQueryKey(id: string) {
   return ["getInteractionById", id] as const;
+}
+
+function aggregateFinalizeStatus(repos: RepoFinalizeSnapshot[]): FinalizeStatus {
+  if (repos.every((repo) => repo.status === "succeeded")) return "succeeded";
+  if (repos.some((repo) => repo.status === "in_progress")) return "in_progress";
+  return "pending_approval";
+}
+
+function markFinalizeTransition(
+  queryClient: QueryClient,
+  identifier: string,
+  previousStatus: "pending_approval" | "failed",
+) {
+  queryClient.setQueryData<IssueDetailSnapshot>(issueDetailQueryKey(identifier), (current) => {
+    if (!current) return current;
+
+    const repos = current.finalize.repos.map((repo) =>
+      repo.status === previousStatus
+        ? {
+            ...repo,
+            status:
+              previousStatus === "failed" && repo.approval_required
+                ? ("pending_approval" as const)
+                : ("in_progress" as const),
+            last_error: null,
+          }
+        : repo,
+    );
+
+    return {
+      ...current,
+      finalize: {
+        ...current.finalize,
+        status: aggregateFinalizeStatus(repos),
+        repos,
+      },
+    };
+  });
 }
 
 export function useStateQuery() {
@@ -111,7 +156,9 @@ export function useIssueDetailQuery(identifier: string) {
     refetchInterval: 2000,
     enabled: identifier.length > 0,
     queryFn: async (): Promise<IssueDetailSnapshot> => {
-      const resp = await getIssueDetail(identifier);
+      const resp = await customFetch<{ data: IssueDetailSnapshot }>(issuePath(identifier), {
+        method: "GET",
+      });
       return resp.data as IssueDetailSnapshot;
     },
   });
@@ -146,7 +193,8 @@ export function useTimelineQuery(identifier: string, runId?: string, limit = 200
         limit: String(limit),
       });
       const response = await customFetch<{ data: TimelineResponse }>(
-        `/api/v1/${encodeURIComponent(identifier)}/timeline?${params.toString()}`,
+        `${issuePath(identifier)}/timeline?${params.toString()}`,
+        { method: "GET" },
       );
       return response.data;
     },
@@ -179,7 +227,8 @@ export function useStepDetailQuery(identifier: string, stepName: string) {
     enabled: identifier.length > 0 && stepName.length > 0,
     queryFn: async (): Promise<StepDetailSnapshot> => {
       const response = await customFetch<{ data: StepDetailSnapshot }>(
-        `/api/v1/${encodeURIComponent(identifier)}/step/${encodeURIComponent(stepName)}`,
+        `${issuePath(identifier)}/step/${pathSegment(stepName)}`,
+        { method: "GET" },
       );
       return response.data;
     },
@@ -201,6 +250,14 @@ export function useInteractionDetailQuery(id: string) {
   return useQuery({
     queryKey: interactionByIdQueryKey(id),
     enabled: id.length > 0,
+    refetchInterval: (query) => {
+      const detail = query.state.data;
+      return detail?.status === "resolved" && detail.awaiting_resume ? 2000 : false;
+    },
+    staleTime: (query) => {
+      const detail = query.state.data;
+      return detail?.status === "resolved" && !detail.awaiting_resume ? Infinity : 0;
+    },
     queryFn: async (): Promise<InteractionDetail> => {
       const resp = await getInteractionById(id);
       return resp.data as InteractionDetail;
@@ -218,7 +275,15 @@ export function useStepConversationQuery(
     queryKey: ["getStepConversation", identifier, runId, stepName, params],
     enabled: identifier.length > 0 && runId.length > 0 && stepName.length > 0,
     queryFn: async (): Promise<TranscriptResponse> => {
-      const resp = await getStepConversation(identifier, runId, stepName, params);
+      const normalizedParams = new URLSearchParams();
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined) {
+          normalizedParams.append(key, value === null ? "null" : String(value));
+        }
+      });
+      const query = normalizedParams.toString();
+      const url = `${issuePath(identifier)}/runs/${pathSegment(runId)}/steps/${pathSegment(stepName)}/conversation${query ? `?${query}` : ""}`;
+      const resp = await customFetch<{ data: TranscriptResponse }>(url, { method: "GET" });
       return resp.data as TranscriptResponse;
     },
   });
@@ -297,7 +362,8 @@ export function useRefreshMutation() {
 export function useStopMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (params: { identifier: string }) => postStop(params.identifier),
+    mutationFn: (params: { identifier: string }) =>
+      customFetch(`${issuePath(params.identifier)}/stop`, { method: "POST" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
     },
@@ -307,7 +373,8 @@ export function useStopMutation() {
 export function useRetryMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (params: { identifier: string }) => postRetry(params.identifier),
+    mutationFn: (params: { identifier: string }) =>
+      customFetch(`${issuePath(params.identifier)}/retry`, { method: "POST" }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
     },
@@ -317,15 +384,34 @@ export function useRetryMutation() {
 export function useRespondToInteractionMutation(identifier?: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (params: { id: string } & InteractionResponseBody) => respondToInteraction(params.id, params),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
-      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
-      if (identifier) {
-        queryClient.invalidateQueries({
-          queryKey: issueDetailQueryKey(identifier),
-        });
+    mutationFn: ({ id, ...body }: { id: string } & InteractionResponseBody) =>
+      respondToInteraction(id, body),
+    onSuccess: async (response, variables) => {
+      const interactionData = response.data;
+      if ("status" in interactionData) {
+        queryClient.setQueryData<InteractionDetail>(
+          interactionByIdQueryKey(variables.id),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  status: interactionData.status,
+                  awaiting_resume: interactionData.awaiting_resume ?? current.awaiting_resume,
+                }
+              : current,
+        );
       }
+      const invalidations = [
+        queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY }),
+        queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY }),
+        queryClient.invalidateQueries({ queryKey: interactionByIdQueryKey(variables.id) }),
+      ];
+      if (identifier) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: issueDetailQueryKey(identifier) }),
+        );
+      }
+      await Promise.all(invalidations);
     },
   });
 }
@@ -334,62 +420,85 @@ export function useCancelInteractionMutation(identifier?: string) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (params: { id: string }) => cancelInteraction(params.id),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
-      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
-      if (identifier) {
-        queryClient.invalidateQueries({
-          queryKey: issueDetailQueryKey(identifier),
-        });
+    onSuccess: async (response, variables) => {
+      const interactionData = response.data;
+      if ("status" in interactionData) {
+        queryClient.setQueryData<InteractionDetail>(
+          interactionByIdQueryKey(variables.id),
+          (current) =>
+            current
+              ? {
+                  ...current,
+                  status: interactionData.status,
+                  awaiting_resume: interactionData.awaiting_resume ?? current.awaiting_resume,
+                }
+              : current,
+        );
       }
+      const invalidations = [
+        queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY }),
+        queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY }),
+        queryClient.invalidateQueries({ queryKey: interactionByIdQueryKey(variables.id) }),
+      ];
+      if (identifier) {
+        invalidations.push(
+          queryClient.invalidateQueries({ queryKey: issueDetailQueryKey(identifier) }),
+        );
+      }
+      await Promise.all(invalidations);
     },
   });
 }
 
-export function useResumeIssueMutation(identifier?: string) {
+export function useResumeIssueMutation(_identifier?: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (params: { identifier: string }) => postResumeIssue(params.identifier),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
-      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
-      if (identifier) {
-        queryClient.invalidateQueries({
-          queryKey: issueDetailQueryKey(identifier),
-        });
+    mutationFn: (params: { identifier: string; interactionId?: string }) =>
+      customFetch(`${issuesPath(params.identifier)}/resume`, { method: "POST" }),
+    onSuccess: async (_response, variables) => {
+      const invalidations = [
+        queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY }),
+        queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY }),
+        queryClient.invalidateQueries({ queryKey: issueDetailQueryKey(variables.identifier) }),
+      ];
+      if (variables.interactionId) {
+        invalidations.push(
+          queryClient.invalidateQueries({
+            queryKey: interactionByIdQueryKey(variables.interactionId),
+          }),
+        );
       }
+      await Promise.all(invalidations);
     },
   });
 }
 
-export function useIssueInputMutation(identifier?: string, interactionId?: string) {
+export function useFinalizeApproveMutation(_identifier?: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: async (response: string) => {
-      if (!identifier) {
-        throw new Error("issue identifier is required");
-      }
-      return customFetch(`/api/v1/issues/${encodeURIComponent(identifier)}/input`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ response }),
-      });
+    mutationFn: (params: { identifier: string }) =>
+      customFetch(`${issuePath(params.identifier)}/finalize/approve`, { method: "POST" }),
+    onSuccess: async (_response, variables) => {
+      markFinalizeTransition(queryClient, variables.identifier, "pending_approval");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY }),
+        queryClient.invalidateQueries({ queryKey: issueDetailQueryKey(variables.identifier) }),
+      ]);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY });
-      queryClient.invalidateQueries({ queryKey: LIST_OPEN_INTERACTIONS_KEY });
-      if (identifier) {
-        queryClient.invalidateQueries({
-          queryKey: issueDetailQueryKey(identifier),
-        });
-      }
-      if (interactionId) {
-        queryClient.invalidateQueries({
-          queryKey: interactionByIdQueryKey(interactionId),
-        });
-      }
+  });
+}
+
+export function useFinalizeRetryMutation(_identifier?: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (params: { identifier: string }) =>
+      customFetch(`${issuePath(params.identifier)}/finalize/retry`, { method: "POST" }),
+    onSuccess: async (_response, variables) => {
+      markFinalizeTransition(queryClient, variables.identifier, "failed");
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: STATE_QUERY_KEY }),
+        queryClient.invalidateQueries({ queryKey: issueDetailQueryKey(variables.identifier) }),
+      ]);
     },
   });
 }
