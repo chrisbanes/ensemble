@@ -20,6 +20,13 @@
   "ignoreDeps": ["rust-version"],
   "packageRules": [
     {
+      "description": "Require review for pinned Rust toolchain updates",
+      "matchManagers": ["rust-toolchain"],
+      "matchDepTypes": ["toolchain"],
+      "rangeStrategy": "pin",
+      "automerge": false
+    },
+    {
       "description": "Group Rust workspace ecosystem packages",
       "matchManagers": ["cargo"],
       "groupName": "Rust dependencies",
