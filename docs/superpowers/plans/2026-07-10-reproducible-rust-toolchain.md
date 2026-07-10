@@ -343,7 +343,7 @@ jq -e '.packageRules[] | select(
 )' renovate.json
 ! rg -n 'Rust 1\.80|rust-version 1\.80' docs/contributing.md AGENTS.md
 rg -n 'Rust 1\.95|Rust 1\.97\.0|rust-toolchain\.toml|MSRV' docs/contributing.md AGENTS.md
-pnpm dlx renovate@43.257.5 renovate-config-validator renovate.json
+pnpm --package=renovate@43.257.5 dlx renovate-config-validator renovate.json
 ```
 
 Expected: the `jq` assertion passes, no stale Rust 1.80 reference remains in current guidance, both documents describe the new contracts, and Renovate reports valid configuration.
@@ -407,7 +407,7 @@ Run:
 
 ```sh
 actionlint .github/workflows/ci.yml
-pnpm dlx renovate@43.257.5 renovate-config-validator renovate.json
+pnpm --package=renovate@43.257.5 dlx renovate-config-validator renovate.json
 git diff --check
 git status --short
 ```

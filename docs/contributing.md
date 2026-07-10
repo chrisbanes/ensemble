@@ -3,8 +3,9 @@
 ## Build and test
 
 Ensemble is a Rust workspace. The minimum supported Rust version (MSRV) is Rust 1.95.
-Normal development and CI use the exact Rust 1.97.0 toolchain pinned in
-[`rust-toolchain.toml`](../rust-toolchain.toml); Rustup selects it automatically.
+Normal development and primary CI use the exact Rust 1.97.0 toolchain pinned in
+[`rust-toolchain.toml`](../rust-toolchain.toml); Rustup selects it automatically. The dedicated
+MSRV compatibility job uses Rust 1.95.0.
 
 With Rustup installed, these commands use the pinned normal toolchain:
 
@@ -37,7 +38,8 @@ rustup toolchain install 1.95.0 --profile minimal
 RUSTFLAGS= SKIP_UI_BUILD=1 cargo +1.95.0 check --workspace --all-targets
 ```
 
-Run all four normal checks before pushing — CI enforces them. CI runs the MSRV check separately.
+Run all four normal commands as a recommended local pre-push checklist. CI runs a subset in its
+primary jobs and runs the MSRV check separately.
 Exact Renovate updates to the primary Rust toolchain are review-only; changing the MSRV is a
 separate, intentional compatibility decision.
 
