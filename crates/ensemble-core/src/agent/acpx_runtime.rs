@@ -14,6 +14,7 @@ use crate::observability::events_contract::{
 use super::acpx_cli::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
 use super::{detect_worker_result_with_output, AgentRunRequest};
+use crate::config::ensemble::PermissionMode;
 
 /// Agent runtime backed by the `acpx` CLI tool.
 ///
@@ -79,6 +80,15 @@ impl AcpxRuntime {
             .ok_or_else(|| AgentError::PromptError {
                 reason: format!("agent '{}' is missing acpx_agent", request.agent_name),
             })?;
+        let permission_mode = agent
+            .permission_mode
+            .as_deref()
+            .map(|value| {
+                PermissionMode::parse(value).ok_or_else(|| AgentError::PromptError {
+                    reason: format!("unsupported permission_mode '{value}'"),
+                })
+            })
+            .transpose()?;
         const MAX_SESSION_NAME_LEN: usize = 128;
 
         let id_comp = sanitize_session_component(&request.issue.id);
@@ -120,12 +130,14 @@ impl AcpxRuntime {
             agent_name = request.agent_name,
             acpx_agent,
             model = agent.model.as_deref(),
+            permission_mode = ?permission_mode,
             session_name,
             "ensuring acpx session"
         );
         let command_options = AcpxCommandOptions {
             model: agent.model.as_deref(),
             reasoning_level: agent.reasoning_level.as_deref(),
+            permission_mode,
         };
         self.cli
             .ensure_session(
@@ -533,14 +545,21 @@ mod tests {
     const TEST_TIMEOUT_MS: u64 = 5_000;
 
     fn test_config() -> Arc<crate::config::ensemble::EnsembleConfig> {
+        test_config_with_permission_mode(None)
+    }
+
+    fn test_config_with_permission_mode(
+        permission_mode: Option<&str>,
+    ) -> Arc<crate::config::ensemble::EnsembleConfig> {
         Arc::new(
-            parse_config(
+            parse_config(&format!(
                 r#"
 tracker:
   kind: todo_file
 agents:
   builder:
     acpx_agent: codex
+    {}
     prompt: hi
 steps:
   - name: build
@@ -550,9 +569,122 @@ workspace:
 on_success: Done
 on_failure: Failed
 "#,
-            )
+                permission_mode
+                    .map(|mode| format!("permission_mode: {mode}"))
+                    .unwrap_or_default()
+            ))
             .unwrap(),
         )
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_passes_permission_mode_to_every_lifecycle_command() {
+        let cases = [
+            (Some("approve_all"), Some("--approve-all")),
+            (Some("approve_reads"), Some("--approve-reads")),
+            (Some("deny_all"), Some("--deny-all")),
+            (None, None),
+        ];
+
+        for (permission_mode, expected_flag) in cases {
+            let workspace = tempfile::TempDir::new().unwrap();
+            let args_path = workspace.path().join("args.txt");
+            let script_path = write_mock_acpx_script(
+                workspace.path(),
+                &format!(
+                    r#"#!/usr/bin/env bash
+printf '%s\n' "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*|*" sessions close "*) exit 0 ;;
+  *" prompt --session "*)
+    cat >/dev/null
+    printf '%s\n' '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{{\"result\":\"succeeded\"}}"}}}}}}}}' '{{"jsonrpc":"2.0","id":1,"result":{{"stopReason":"end_turn"}}}}'
+    exit 0
+    ;;
+esac
+exit 1
+"#,
+                    args_path.display()
+                ),
+            );
+            let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let issue = test_issue("issue-1", "Todo");
+            let config = test_config_with_permission_mode(permission_mode);
+            let request = AgentRunRequest {
+                config,
+                issue: &issue,
+                agent_name: "builder",
+                step_name: "build",
+                step_kind: StepKind::Agent,
+                attempt: None,
+                timeout_ms: TEST_TIMEOUT_MS,
+                interaction_response: None,
+                workspace_path: workspace.path(),
+                event_tx: tx,
+                cancel_token: CancellationToken::new(),
+                step_outputs: StepOutputTemplateContext::default(),
+            };
+
+            runner.run_step(&request, "finish the task").await.unwrap();
+
+            let commands: Vec<_> = std::fs::read_to_string(args_path)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(commands.len(), 4, "commands: {commands:?}");
+            for command in commands {
+                let permission_flags = ["--approve-all", "--approve-reads", "--deny-all"];
+                assert_eq!(
+                    permission_flags
+                        .iter()
+                        .filter(|flag| command.contains(**flag))
+                        .count(),
+                    usize::from(expected_flag.is_some()),
+                    "command: {command}"
+                );
+                if let Some(flag) = expected_flag {
+                    assert!(command.contains(flag), "command: {command}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_rejects_invalid_permission_mode_before_launching_acpx() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let marker_path = workspace.path().join("invoked.flag");
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!("#!/usr/bin/env bash\n: > \"{}\"\n", marker_path.display()),
+        );
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let issue = test_issue("issue-1", "Todo");
+        let config = test_config_with_permission_mode(Some("maybe"));
+        let request = AgentRunRequest {
+            config,
+            issue: &issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: None,
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        let error = runner
+            .run_step(&request, "finish the task")
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported permission_mode"));
+        assert!(!marker_path.exists());
     }
 
     #[tokio::test]
@@ -1321,7 +1453,7 @@ exit 1
         let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
         let (tx, mut rx) = tokio::sync::mpsc::channel(16);
         let issue = test_issue("issue-1", "Todo");
-        let config = test_config();
+        let config = test_config_with_permission_mode(Some("approve_reads"));
         let request = AgentRunRequest {
             config,
             issue: &issue,
@@ -1346,6 +1478,14 @@ exit 1
         let args = std::fs::read_to_string(args_path).unwrap();
         assert!(args.contains("cancel --session"));
         assert!(args.contains("sessions close"));
+        let cancel_args = args
+            .lines()
+            .find(|line| line.contains("cancel --session"))
+            .expect("cancel command should be recorded");
+        assert!(
+            cancel_args.contains("--approve-reads"),
+            "cancel command: {cancel_args}"
+        );
 
         let mut run_failed_reasons = Vec::new();
         while let Ok(event) = rx.try_recv() {
