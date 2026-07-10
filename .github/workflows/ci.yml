@@ -43,20 +43,20 @@ jobs:
           SKIP_UI_BUILD: 1
 
   msrv:
-    name: MSRV (Rust 1.88.0)
+    name: MSRV (Rust 1.95.0)
     runs-on: ubuntu-latest
     env:
-      RUSTUP_TOOLCHAIN: 1.88.0
+      RUSTUP_TOOLCHAIN: 1.95.0
       RUSTFLAGS: ""
       SKIP_UI_BUILD: 1
     steps:
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: dtolnay/rust-toolchain@1.95.0
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1.88.0
+          key: msrv-1.95.0
 
       - name: Install Tauri system dependencies
         run: |
@@ -64,7 +64,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
       - name: Check minimum supported Rust version
-        run: cargo +1.88.0 check --workspace --all-targets
+        run: cargo +1.95.0 check --workspace --all-targets
 
   frontend:
     name: Frontend Test and Build
