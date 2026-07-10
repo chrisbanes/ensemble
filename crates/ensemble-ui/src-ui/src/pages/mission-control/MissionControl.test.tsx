@@ -835,7 +835,7 @@ describe("Mission Control page", () => {
     });
 
     expect(await screen.findByText("Select an issue")).toBeInTheDocument();
-    expect(operations).toHaveFocus();
+    await waitFor(() => expect(operations).toHaveFocus());
   });
 
   it("does not move focus or scroll the panel after desktop selection", async () => {
