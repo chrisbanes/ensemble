@@ -5,6 +5,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, warn};
 
+use crate::config::ensemble::PermissionMode;
 use crate::error::AgentError;
 
 use super::acpx_adapter::{AcpxAgentAdapter, AcpxAgentInvocation};
@@ -19,6 +20,7 @@ pub struct AcpxCli {
 pub struct AcpxCommandOptions<'a> {
     pub model: Option<&'a str>,
     pub reasoning_level: Option<&'a str>,
+    pub(crate) permission_mode: Option<PermissionMode>,
 }
 
 fn append_global_args(
@@ -27,6 +29,10 @@ fn append_global_args(
     command: &mut Command,
     options: AcpxCommandOptions<'_>,
 ) {
+    if let Some(permission_mode) = options.permission_mode {
+        command.arg(permission_mode.acpx_flag());
+    }
+
     if let Some(raw_command) = invocation.raw_command() {
         command.args(["--agent", raw_command]);
     } else if let Some(model) = adapter.generic_model_arg(options.model) {
@@ -90,7 +96,7 @@ impl AcpxCli {
         ]);
         append_agent_command(&invocation, &mut command);
         command.args(["sessions", "ensure", "--name", session_name]);
-        debug!(agent, session_name, cwd = %cwd.display(), model = options.model, reasoning_level = options.reasoning_level, "running acpx sessions ensure");
+        debug!(agent, session_name, cwd = %cwd.display(), model = options.model, reasoning_level = options.reasoning_level, permission_mode = ?options.permission_mode, "running acpx sessions ensure");
 
         let output = spawn_with_etxtbsy_retry(command)
             .map_err(|e| AgentError::IoError {
@@ -626,6 +632,7 @@ mod tests {
                 AcpxCommandOptions {
                     model: Some("gpt-5.4/medium"),
                     reasoning_level: None,
+                    permission_mode: None,
                 },
             )
             .await
@@ -664,6 +671,7 @@ mod tests {
                 AcpxCommandOptions {
                     model: Some("opencode-go/kimi-k2.5"),
                     reasoning_level: None,
+                    permission_mode: None,
                 },
             )
             .await
@@ -705,6 +713,7 @@ mod tests {
                 AcpxCommandOptions {
                     model: Some("opencode-go/kimi-k2.5"),
                     reasoning_level: None,
+                    permission_mode: None,
                 },
             )
             .await
@@ -746,6 +755,7 @@ mod tests {
                 AcpxCommandOptions {
                     model: Some("opencode-go/kimi-k2.5"),
                     reasoning_level: None,
+                    permission_mode: None,
                 },
             )
             .await
@@ -789,6 +799,7 @@ mod tests {
                     options: AcpxCommandOptions {
                         model: Some("opencode-go/kimi-k2.5"),
                         reasoning_level: None,
+                        permission_mode: None,
                     },
                     visibility: PromptVisibility::Hidden,
                 },
@@ -843,6 +854,7 @@ mod tests {
                 AcpxCommandOptions {
                     model: None,
                     reasoning_level: Some("high"),
+                    permission_mode: None,
                 },
             )
             .await
