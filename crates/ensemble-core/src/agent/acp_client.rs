@@ -3,14 +3,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_client_protocol::schema::{
+use agent_client_protocol::schema::v1::{
     ContentBlock, EnvVariable, InitializeRequest, McpServer, McpServerStdio, NewSessionRequest,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory,
+    PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionModeRequest,
     StopReason as SdkStopReason,
 };
+use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::{AcpAgent, Client, Dispatch, SessionMessage};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -451,9 +452,7 @@ fn map_sdk_stop_reason(stop: &SdkStopReason) -> super::events::StopReason {
     }
 }
 
-fn select_value_description(
-    value: &agent_client_protocol::schema::SessionConfigSelectOption,
-) -> Option<String> {
+fn select_value_description(value: &SessionConfigSelectOption) -> Option<String> {
     value.description.clone().filter(|text| !text.is_empty())
 }
 
@@ -1101,7 +1100,7 @@ pub async fn run_acp_session(
 mod tests {
     use std::time::Duration;
 
-    use agent_client_protocol::schema::{
+    use agent_client_protocol::schema::v1::{
         ContentBlock, ContentChunk, PermissionOption, PermissionOptionKind, SessionNotification,
         SessionUpdate, TextContent, UsageUpdate,
     };
@@ -1548,7 +1547,7 @@ mod tests {
 
     #[test]
     fn discover_capabilities_from_options_extracts_models_and_modes() {
-        use agent_client_protocol::schema::{
+        use agent_client_protocol::schema::v1::{
             SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
         };
 
@@ -1599,7 +1598,7 @@ mod tests {
 
     #[test]
     fn discover_capabilities_from_options_flattens_grouped_options_with_descriptions() {
-        use agent_client_protocol::schema::{
+        use agent_client_protocol::schema::v1::{
             SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectGroup,
             SessionConfigSelectOption,
         };
