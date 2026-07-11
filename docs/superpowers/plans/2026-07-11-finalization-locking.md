@@ -207,14 +207,15 @@ The cloned `EnsembleConfig` prevents configuration reloads from being blocked by
 Replace the remainder of the branch with a state-only block that builds owned post-commit work:
 
 ```rust
-let completed_at = Utc::now();
 let (
     tracker_state,
-    history_record,
-    history_run_id,
-    release_record,
+    tracker_error_message,
+    transition,
+    release,
+    history,
 ) = {
     let mut state = self.state.write().await;
+    let completed_at = Utc::now();
     let history_record = state
         .running
         .get(issue_id)
@@ -231,9 +232,6 @@ let (
             })
         });
     let running_entry = state.get_running(issue_id).cloned();
-    let history_run_id = running_entry
-        .as_ref()
-        .and_then(|entry| entry.run_id.clone());
 
     if matches!(
         finalize_state.status,
@@ -253,6 +251,9 @@ let (
         }
         state.clear_finalize_state(issue_id);
 
+        let history_run_id = running_entry
+            .as_ref()
+            .and_then(|entry| entry.run_id.clone());
         let release_identifier = running_entry
             .as_ref()
             .map(|entry| entry.identifier.clone())
@@ -261,9 +262,10 @@ let (
             self.tracker
                 .supports_writes()
                 .then(|| config_snapshot.on_success.clone()),
-            history_record,
-            history_run_id.clone(),
+            "failed to set tracker success state",
+            step_transition,
             Some((release_identifier, history_run_id.clone())),
+            history_record.map(|record| (history_run_id, record)),
         )
     } else {
         let tracker_state = (self.tracker.supports_writes()
@@ -272,14 +274,23 @@ let (
                 FinalizeStatus::Failed | FinalizeStatus::SkippedHeadless
             ))
         .then(|| config_snapshot.on_failure.clone());
+        if let Some(entry) = state.remove_running(issue_id) {
+            state.add_runtime_seconds(&entry);
+        }
         state.set_finalize_state(issue_id, finalize_state);
         state.remove_pipeline_run(issue_id);
-        (tracker_state, None, history_run_id, None)
+        (
+            tracker_state,
+            "failed to set tracker failure state after finalize failure",
+            None,
+            None,
+            None,
+        )
     }
 };
 ```
 
-Keep this block synchronous: it may read or mutate `state`, but it must contain no `.await`.
+Once acquired, this guard only reads or mutates `state`; it performs no external I/O. Unresolved finalization removes the running entry and adds its runtime seconds before parking the finalize state, releasing the running slot while retaining the claim, workspace, and artifacts.
 
 - [ ] **Step 3: Perform tracker and persistence I/O after the guard is gone**
 
@@ -287,23 +298,15 @@ Immediately after the state-only block, perform the owned work without a state g
 
 ```rust
 if let Some(tracker_state) = tracker_state {
-    if let Err(error) = self
-        .tracker
-        .set_issue_state(issue_id, &tracker_state)
-        .await
-    {
-        warn!(
-            issue_id = %issue_id,
-            error = %error,
-            "failed to set tracker state after finalization"
-        );
+    if let Err(error) = self.tracker.set_issue_state(issue_id, &tracker_state).await {
+        warn!(issue_id = %issue_id, error = %error, "{tracker_error_message}");
     }
 }
 
-if let Some((release_identifier, release_run_id)) = release_record {
-    if let Some(input) = step_transition {
-        self.append_pipeline_transition(input).await;
-    }
+if let Some(input) = transition {
+    self.append_pipeline_transition(input).await;
+}
+if let Some((release_identifier, release_run_id)) = release {
     self.append_pipeline_release(
         issue_id,
         &release_identifier,
@@ -311,10 +314,10 @@ if let Some((release_identifier, release_run_id)) = release_record {
         "completed",
     )
     .await;
-    if let Some(record) = history_record {
-        self.append_history_record(history_run_id.as_deref(), record)
-            .await;
-    }
+}
+if let Some((history_run_id, record)) = history {
+    self.append_history_record(history_run_id.as_deref(), record)
+        .await;
 }
 ```
 

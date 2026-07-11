@@ -1645,6 +1645,9 @@ impl Orchestrator {
                                                 | FinalizeStatus::SkippedHeadless
                                         ))
                                     .then(|| config_snapshot.on_failure.clone());
+                                    if let Some(entry) = state.remove_running(issue_id) {
+                                        state.add_runtime_seconds(&entry);
+                                    }
                                     state.set_finalize_state(issue_id, finalize_state);
                                     state.remove_pipeline_run(issue_id);
 
@@ -7300,6 +7303,8 @@ agent:
             state.artifacts["1"].repos[0].finalize_status,
             "pending_approval"
         );
+        assert!(!state.is_running("1"));
+        assert!(state.is_claimed("1"));
 
         drop(repo_temp);
     }

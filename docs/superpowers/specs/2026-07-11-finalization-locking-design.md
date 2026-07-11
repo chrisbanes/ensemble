@@ -36,7 +36,7 @@ The `PipelineAction::Succeeded` branch will use two distinct phases.
    - Reacquire the orchestrator state write guard after finalization returns.
    - Build the history record after artifact results have been applied so the record includes finalization output.
    - For `succeeded` or `not_required`, mark the issue completed, release its claim, remove running and pipeline state, and clear transient finalize state.
-   - For unresolved or failed finalization, persist the returned finalize state and remove the completed pipeline run while retaining the claim and workspace for approval or retry.
+    - For unresolved or failed finalization, remove the running entry and record its runtime before persisting the returned finalize state and removing the completed pipeline run. This releases the running slot while retaining the claim, workspace, and artifacts for approval or retry.
    - Collect tracker, journal, release, and history operations as owned values.
    - Release the state guard before awaiting any of those operations.
 
