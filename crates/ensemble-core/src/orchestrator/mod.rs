@@ -1570,72 +1570,105 @@ impl Orchestrator {
                                 .as_ref()
                                 .map(|issue| issue.identifier.clone())
                                 .unwrap_or_else(|| issue_id.to_string());
+                            let config_snapshot = config.clone();
+                            drop(config);
+                            drop(state);
                             let finalize_state = self
-                                .run_finalize_phase(issue_id, &issue_identifier, &config)
+                                .run_finalize_phase(issue_id, &issue_identifier, &config_snapshot)
                                 .await;
 
-                            let completed_at = Utc::now();
-                            let history_record = state
-                                .running
-                                .get(issue_id)
-                                .zip(state.get_pipeline_run(issue_id))
-                                .map(|(entry, run)| {
-                                    self.build_history_record(RunningHistoryRecordInput {
-                                        issue_id,
-                                        outcome: HISTORY_OUTCOME_SUCCEEDED,
-                                        last_error: None,
-                                        running_entry: entry,
-                                        run,
-                                        completed_at,
-                                        artifacts: state.artifacts.get(issue_id).cloned(),
-                                    })
-                                });
+                            let (
+                                tracker_state,
+                                tracker_error_message,
+                                transition,
+                                release,
+                                history,
+                            ) = {
+                                let mut state = self.state.write().await;
+                                let completed_at = Utc::now();
+                                let history_record = state
+                                    .running
+                                    .get(issue_id)
+                                    .zip(state.get_pipeline_run(issue_id))
+                                    .map(|(entry, run)| {
+                                        self.build_history_record(RunningHistoryRecordInput {
+                                            issue_id,
+                                            outcome: HISTORY_OUTCOME_SUCCEEDED,
+                                            last_error: None,
+                                            running_entry: entry,
+                                            run,
+                                            completed_at,
+                                            artifacts: state.artifacts.get(issue_id).cloned(),
+                                        })
+                                    });
+                                let running_entry = state.get_running(issue_id).cloned();
 
-                            // Get running entry data before removing
-                            let running_entry = state.get_running(issue_id).cloned();
-
-                            if finalize_state.status == FinalizeStatus::Succeeded
-                                || finalize_state.status == FinalizeStatus::NotRequired
-                            {
-                                // Add to completed BEFORE removing from running
-                                if let Some(ref entry) = running_entry {
-                                    state.add_completed(
-                                        issue_id.to_string(),
-                                        entry.identifier.clone(),
-                                        "completed_succeeded".to_string(),
-                                    );
-                                }
-
-                                if self.tracker.supports_writes() {
-                                    if let Err(e) = self
-                                        .tracker
-                                        .set_issue_state(issue_id, &config.on_success)
-                                        .await
-                                    {
-                                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker success state");
+                                if matches!(
+                                    finalize_state.status,
+                                    FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
+                                ) {
+                                    if let Some(ref entry) = running_entry {
+                                        state.add_completed(
+                                            issue_id.to_string(),
+                                            entry.identifier.clone(),
+                                            "completed_succeeded".to_string(),
+                                        );
                                     }
-                                }
-                                state.release_claim(issue_id);
-                                state.remove_pipeline_run(issue_id);
+                                    state.release_claim(issue_id);
+                                    state.remove_pipeline_run(issue_id);
+                                    if let Some(entry) = state.remove_running(issue_id) {
+                                        state.add_runtime_seconds(&entry);
+                                    }
+                                    state.clear_finalize_state(issue_id);
 
-                                // Now remove from running and add runtime seconds
-                                if let Some(entry) = state.remove_running(issue_id) {
-                                    state.add_runtime_seconds(&entry);
-                                }
-                                state.clear_finalize_state(issue_id);
+                                    let history_run_id = running_entry
+                                        .as_ref()
+                                        .and_then(|entry| entry.run_id.clone());
+                                    let release_identifier = running_entry
+                                        .as_ref()
+                                        .map(|entry| entry.identifier.clone())
+                                        .unwrap_or_else(|| issue_identifier.clone());
+                                    (
+                                        self.tracker
+                                            .supports_writes()
+                                            .then(|| config_snapshot.on_success.clone()),
+                                        "failed to set tracker success state",
+                                        step_transition,
+                                        Some((release_identifier, history_run_id.clone())),
+                                        history_record.map(|record| (history_run_id, record)),
+                                    )
+                                } else {
+                                    let tracker_state = (self.tracker.supports_writes()
+                                        && matches!(
+                                            finalize_state.status,
+                                            FinalizeStatus::Failed
+                                                | FinalizeStatus::SkippedHeadless
+                                        ))
+                                    .then(|| config_snapshot.on_failure.clone());
+                                    state.set_finalize_state(issue_id, finalize_state);
+                                    state.remove_pipeline_run(issue_id);
 
-                                let history_run_id = running_entry
-                                    .as_ref()
-                                    .and_then(|entry| entry.run_id.clone());
-                                let release_identifier = running_entry
-                                    .as_ref()
-                                    .map(|entry| entry.identifier.clone())
-                                    .unwrap_or_else(|| issue_identifier.clone());
-                                let release_run_id = history_run_id.clone();
-                                drop(state);
-                                if let Some(input) = step_transition {
-                                    self.append_pipeline_transition(input).await;
+                                    (
+                                        tracker_state,
+                                        "failed to set tracker failure state after finalize failure",
+                                        None,
+                                        None,
+                                        None,
+                                    )
                                 }
+                            };
+
+                            if let Some(tracker_state) = tracker_state {
+                                if let Err(error) =
+                                    self.tracker.set_issue_state(issue_id, &tracker_state).await
+                                {
+                                    warn!(issue_id = %issue_id, error = %error, "{tracker_error_message}");
+                                }
+                            }
+                            if let Some(input) = transition {
+                                self.append_pipeline_transition(input).await;
+                            }
+                            if let Some((release_identifier, release_run_id)) = release {
                                 self.append_pipeline_release(
                                     issue_id,
                                     &release_identifier,
@@ -1643,27 +1676,10 @@ impl Orchestrator {
                                     "completed",
                                 )
                                 .await;
-                                if let Some(record) = history_record {
-                                    self.append_history_record(history_run_id.as_deref(), record)
-                                        .await;
-                                }
-                            } else {
-                                if self.tracker.supports_writes()
-                                    && matches!(
-                                        finalize_state.status,
-                                        FinalizeStatus::Failed | FinalizeStatus::SkippedHeadless
-                                    )
-                                {
-                                    if let Err(e) = self
-                                        .tracker
-                                        .set_issue_state(issue_id, &config.on_failure)
-                                        .await
-                                    {
-                                        warn!(issue_id = %issue_id, error = %e, "failed to set tracker failure state after finalize failure");
-                                    }
-                                }
-                                state.set_finalize_state(issue_id, finalize_state);
-                                state.remove_pipeline_run(issue_id);
+                            }
+                            if let Some((history_run_id, record)) = history {
+                                self.append_history_record(history_run_id.as_deref(), record)
+                                    .await;
                             }
                         }
                         PipelineAction::Failed { step, reason } => {
@@ -5702,6 +5718,61 @@ mod tests {
         crate::tracker::model::test_helpers::test_issue(id, state)
     }
 
+    async fn create_finalize_repo() -> (tempfile::TempDir, crate::config::ensemble::RepoConfig) {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo_path = temp.path().join("source-repo");
+        tokio::fs::create_dir_all(&repo_path).await.unwrap();
+
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test User"],
+        ] {
+            let output = tokio::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        tokio::fs::write(repo_path.join("README.md"), "# source repo\n")
+            .await
+            .unwrap();
+        for args in [vec!["add", "README.md"], vec!["commit", "-m", "initial"]] {
+            let output = tokio::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo_path)
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        (
+            temp,
+            crate::config::ensemble::RepoConfig {
+                path: repo_path.display().to_string(),
+                branch: "main".to_string(),
+                git_remote: "origin".to_string(),
+                finalize: crate::workspace::finalize::RepoFinalizeConfig {
+                    enabled: true,
+                    mode: FinalizeMode::Push,
+                    approval_required: true,
+                },
+            },
+        )
+    }
+
     fn make_config() -> EnsembleConfig {
         let yaml = r#"
 tracker:
@@ -7152,6 +7223,85 @@ agent:
             state.completed.contains_key("1") || state.retry_attempts.contains_key("1"),
             "should be completed or retrying"
         );
+    }
+
+    #[tokio::test]
+    async fn enabled_finalization_returns_without_reentrant_state_locking() {
+        let (repo_temp, repo_config) = create_finalize_repo().await;
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            state.artifacts.insert(
+                "1".to_string(),
+                RunArtifacts {
+                    run_id: "run-1".to_string(),
+                    workspace_path: workspace_temp.path().display().to_string(),
+                    repos: vec![crate::history::artifacts::RepoArtifact {
+                        repo: "source-repo".to_string(),
+                        finalize_status: "pending".to_string(),
+                        ..Default::default()
+                    }],
+                    transcripts: vec![],
+                },
+            );
+        }
+
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            orchestrator.handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            ),
+        )
+        .await
+        .expect("finalization should not deadlock on the state lock");
+
+        let state = orchestrator.state.read().await;
+        let finalize = state
+            .get_finalize_state("1")
+            .expect("finalize state should be retained while awaiting approval");
+        assert_eq!(finalize.status, FinalizeStatus::PendingApproval);
+        assert_eq!(finalize.repos[0].status, FinalizeStatus::PendingApproval);
+        assert_eq!(
+            state.artifacts["1"].repos[0].finalize_status,
+            "pending_approval"
+        );
+
+        drop(repo_temp);
     }
 
     #[tokio::test]
