@@ -58,6 +58,19 @@ Approval and retry API handlers only mutate in-memory state and notify the orche
 
 `retry_finalize_for_issue` already follows the required three-step sequence: snapshot retry work under a read guard, perform workspace and git/GitHub I/O without a guard, then commit finalize and artifact outcomes under a short write guard. Tracker writes happen afterward. This path should remain structurally unchanged unless regression testing exposes a separate defect.
 
+### Stale result protection
+
+Releasing the state guard allows control requests to observe the issue while finalization performs external I/O. The final state commit must therefore verify that it still belongs to the running attempt that entered finalization.
+
+Before releasing state, capture an identity containing both the running entry's `run_id` and `started_at`. The run ID alone is insufficient because Ensemble may reuse the issue-level run ID after a stop and redispatch. After finalization returns and state is reacquired, compare both fields with the current running entry. If the entry is missing or either field differs, log that the finalization result is stale and return without applying completion/finalize state or performing tracker, transition, release, or history writes.
+
+This is preferred over two broader alternatives:
+
+- Changing finalize-control lookup precedence would hide the race without proving that the committing run still owns the issue.
+- Publishing an explicit `InProgress` finalize state before I/O would improve UI visibility but requires a larger lifecycle and history-snapshot redesign that is not needed for issue #324.
+
+The artifact helpers remain unchanged. Under current orchestration, worker events and redispatch run on the same event loop, while public controls cannot replace an active running entry without first stopping it. Identity validation protects the final state and external side effects if that ownership changes.
+
 ## Error Handling
 
 Workspace preparation and git/GitHub failures continue to produce `FinalizeStatus::Failed` with per-repository error details. The state commit phase persists that result and leaves the issue recoverable through the existing retry flow.
@@ -76,6 +89,8 @@ The test must:
 - pass after the fix because worker-exit handling returns,
 - assert the resulting issue-level and repository-level finalize state or completed state,
 - assert the artifact finalization status was updated.
+
+Add a focused identity regression test that demonstrates a replacement running entry is not the same finalization owner even when the issue-level run ID is reused. Cover both a missing running entry and a replacement with the same `run_id` but a different `started_at` value.
 
 Use a local temporary git repository and workspace fixture so the test does not depend on network access. An approval-required rule is acceptable for the primary deadlock reproduction because it reaches the artifact status helper without requiring a remote push. Existing approval/retry API tests remain in place; add a focused timeout assertion for retry processing only if it can reuse the same fixture without introducing substantial test-only infrastructure.
 
