@@ -20,6 +20,8 @@ The change covers initial worker-exit and restored-pipeline finalization after a
 
 The change does not redesign the finalization state model, alter completion semantics, or refactor unrelated worker-failure handling.
 
+For a non-stale restored-pipeline result that is pending approval or otherwise unresolved, the commit releases the running entry and records its runtime before retaining finalize state and removing the completed pipeline run. The claim, workspace, and artifacts remain so existing finalize controls can approve or retry the parked result.
+
 ## Design
 
 ### Two-phase successful-exit handling
@@ -93,6 +95,8 @@ The test must:
 Add a focused identity regression test that demonstrates a replacement running entry is not the same finalization owner even when the issue-level run ID is reused. Cover both a missing running entry and a replacement with the same `run_id` but a different `started_at` value.
 
 Add a deterministic restored-pipeline lifecycle test. Pause immediately after finalization and replace the running entry before the commit phase; verify that the restored pipeline remains active and that no completion/finalize mutation, tracker write, pipeline-release journal write, or history record occurs. This exercises the production restored-pipeline finalization path rather than only the identity helper.
+
+Add a restored pending-approval lifecycle test using a matching artifact fixture. Verify the result is parked with `PendingApproval`, no running entry, a retained claim, a removed pipeline run, and an updated artifact finalization status.
 
 Use a local temporary git repository and workspace fixture so the test does not depend on network access. An approval-required rule is acceptable for the primary deadlock reproduction because it reaches the artifact status helper without requiring a remote push. Existing approval/retry API tests remain in place; add a focused timeout assertion for retry processing only if it can reuse the same fixture without introducing substantial test-only infrastructure.
 

@@ -538,6 +538,8 @@ Use the same private validation gate in both paths. The early return must occur 
 
 Add a deterministic test seam immediately after `run_finalize_phase` returns, then pause the restored-pipeline path, replace its running entry with the same run ID and a later `started_at`, and resume the commit. Assert the restored pipeline remains running and retained, completion/finalize state is unchanged, and tracker, pipeline-release journal, and history writes are absent. This must invoke `dispatch_issue` so removing the restored-path guard makes the test fail; do not rely only on `RunningAttemptIdentity::is_current`.
 
+Add a separate restored pending-approval lifecycle test with a matching artifact fixture. In the non-stale unresolved branch, assert `PendingApproval`, no running entry, a retained claim, a removed pipeline run, and artifact status `pending_approval`. The branch must remove the running entry and add its runtime before persisting finalize state; it must retain the claim, workspace, and artifacts for existing finalize controls.
+
 - [ ] **Step 7: Run focused tests to verify GREEN**
 
 Run:

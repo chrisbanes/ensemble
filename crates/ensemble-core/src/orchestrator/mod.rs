@@ -915,6 +915,9 @@ impl Orchestrator {
                                 state.clear_finalize_state(&issue.id);
                                 (history_record, history_run_id, release_run_id, true)
                             } else {
+                                if let Some(entry) = state.remove_running(&issue.id) {
+                                    state.add_runtime_seconds(&entry);
+                                }
                                 state.set_finalize_state(&issue.id, finalize_state);
                                 state.remove_pipeline_run(&issue.id);
                                 (history_record, history_run_id, release_run_id, false)
@@ -8780,6 +8783,74 @@ agent:
                 .total,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn restored_pending_approval_finalization_releases_running_slot() {
+        let (repo_temp, repo_config) = create_finalize_repo().await;
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("1", "Todo");
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+            pipeline_run.step_completed("build", succeeded_step_output(), false);
+
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            state.artifacts.insert(
+                "1".to_string(),
+                RunArtifacts {
+                    run_id: "run-1".to_string(),
+                    workspace_path: workspace_temp.path().display().to_string(),
+                    repos: vec![crate::history::artifacts::RepoArtifact {
+                        repo: "source-repo".to_string(),
+                        finalize_status: "pending".to_string(),
+                        ..Default::default()
+                    }],
+                    transcripts: vec![],
+                },
+            );
+        }
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        let state = orchestrator.state.read().await;
+        let finalize = state.get_finalize_state("1").unwrap();
+        assert_eq!(finalize.status, FinalizeStatus::PendingApproval);
+        assert!(!state.is_running("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        assert_eq!(
+            state.artifacts["1"].repos[0].finalize_status,
+            "pending_approval"
+        );
+
+        drop(repo_temp);
     }
 
     #[tokio::test]
