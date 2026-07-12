@@ -103,6 +103,27 @@ struct InteractionRequestContext {
     step_tracker_state: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningAttemptIdentity {
+    run_id: Option<String>,
+    started_at: chrono::DateTime<Utc>,
+}
+
+impl RunningAttemptIdentity {
+    fn capture(state: &OrchestratorState, issue_id: &str) -> Option<Self> {
+        state.get_running(issue_id).map(|entry| Self {
+            run_id: entry.run_id.clone(),
+            started_at: entry.started_at,
+        })
+    }
+
+    fn is_current(&self, state: &OrchestratorState, issue_id: &str) -> bool {
+        state
+            .get_running(issue_id)
+            .is_some_and(|entry| entry.run_id == self.run_id && entry.started_at == self.started_at)
+    }
+}
+
 const HISTORY_OUTCOME_SUCCEEDED: &str = "succeeded";
 const HISTORY_OUTCOME_FAILED: &str = "failed";
 const HISTORY_OUTCOME_STOPPED: &str = "stopped";
@@ -1570,6 +1591,8 @@ impl Orchestrator {
                                 .as_ref()
                                 .map(|issue| issue.identifier.clone())
                                 .unwrap_or_else(|| issue_id.to_string());
+                            let finalize_attempt =
+                                RunningAttemptIdentity::capture(&state, issue_id);
                             let config_snapshot = config.clone();
                             drop(config);
                             drop(state);
@@ -1585,6 +1608,16 @@ impl Orchestrator {
                                 history,
                             ) = {
                                 let mut state = self.state.write().await;
+                                if !finalize_attempt
+                                    .as_ref()
+                                    .is_some_and(|attempt| attempt.is_current(&state, issue_id))
+                                {
+                                    warn!(
+                                        issue_id = %issue_id,
+                                        "discarding stale finalization result because the running attempt changed"
+                                    );
+                                    return;
+                                }
                                 let completed_at = Utc::now();
                                 let history_record = state
                                     .running
@@ -7307,6 +7340,25 @@ agent:
         assert!(state.is_claimed("1"));
 
         drop(repo_temp);
+    }
+
+    #[test]
+    fn finalization_attempt_rejects_missing_or_replaced_running_entry() {
+        let config = make_config();
+        let mut state = OrchestratorState::new(1_000, &config.concurrency);
+        state.add_running(&test_issue("1", "Todo"), None);
+
+        let attempt = RunningAttemptIdentity::capture(&state, "1").unwrap();
+        assert!(attempt.is_current(&state, "1"));
+
+        let mut replacement = state.remove_running("1").unwrap();
+        assert!(!attempt.is_current(&state, "1"));
+
+        let original_run_id = replacement.run_id.clone();
+        replacement.started_at += chrono::Duration::seconds(1);
+        state.running.insert("1".to_string(), replacement);
+        assert_eq!(state.get_running("1").unwrap().run_id, original_run_id);
+        assert!(!attempt.is_current(&state, "1"));
     }
 
     #[tokio::test]

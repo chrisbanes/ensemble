@@ -419,3 +419,146 @@ git commit -m "Format finalization locking fix"
 ```
 
 If the worktree is clean, do not create an empty commit.
+
+### Task 4: Reject Stale Finalization Results
+
+**Files:**
+- Modify: `crates/ensemble-core/src/orchestrator/mod.rs:78-105`
+- Modify: `crates/ensemble-core/src/orchestrator/mod.rs:1567-1685`
+- Test: `crates/ensemble-core/src/orchestrator/mod.rs` in the existing `#[cfg(test)] mod tests`
+
+- [ ] **Step 1: Write the running-attempt identity regression test**
+
+Add this test near `enabled_finalization_returns_without_reentrant_state_locking`. It proves that an issue-level run ID is not sufficient to identify the attempt that entered finalization:
+
+```rust
+#[test]
+fn finalization_attempt_rejects_missing_or_replaced_running_entry() {
+    let config = make_config();
+    let mut state = OrchestratorState::new(config.polling.interval_ms, &config.concurrency);
+    let issue = test_issue("1", "Todo");
+    state.add_running(&issue, None);
+
+    let identity = RunningAttemptIdentity::capture(&state, &issue.id).unwrap();
+    assert!(identity.is_current(&state, &issue.id));
+
+    let mut replacement = state.remove_running(&issue.id).unwrap();
+    assert!(!identity.is_current(&state, &issue.id));
+
+    replacement.started_at += chrono::Duration::seconds(1);
+    state.running.insert(issue.id.clone(), replacement);
+    assert_eq!(
+        identity.run_id.as_deref(),
+        state
+            .get_running(&issue.id)
+            .unwrap()
+            .run_id
+            .as_deref()
+    );
+    assert!(!identity.is_current(&state, &issue.id));
+}
+```
+
+- [ ] **Step 2: Run the test to verify RED**
+
+Run:
+
+```bash
+cargo test -p ensemble-core finalization_attempt_rejects_missing_or_replaced_running_entry -- --nocapture
+```
+
+Expected: compilation fails because `RunningAttemptIdentity` is not defined. This confirms the test names the missing ownership contract before production code is added.
+
+- [ ] **Step 3: Add the minimal attempt identity type**
+
+Add this private type near the other orchestrator input/context types:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunningAttemptIdentity {
+    run_id: Option<String>,
+    started_at: chrono::DateTime<Utc>,
+}
+
+impl RunningAttemptIdentity {
+    fn capture(state: &OrchestratorState, issue_id: &str) -> Option<Self> {
+        state.get_running(issue_id).map(|entry| Self {
+            run_id: entry.run_id.clone(),
+            started_at: entry.started_at,
+        })
+    }
+
+    fn is_current(&self, state: &OrchestratorState, issue_id: &str) -> bool {
+        state.get_running(issue_id).is_some_and(|entry| {
+            entry.run_id == self.run_id && entry.started_at == self.started_at
+        })
+    }
+}
+```
+
+The timestamp intentionally participates in equality because `issue_run_ids` may preserve and reuse the same run ID after a stop.
+
+- [ ] **Step 4: Capture identity before releasing state**
+
+In the `PipelineAction::Succeeded` branch, capture the identity while the original state write guard still proves ownership:
+
+```rust
+let finalize_attempt = RunningAttemptIdentity::capture(&state, issue_id);
+let config_snapshot = config.clone();
+drop(config);
+drop(state);
+```
+
+Keep the existing call to `run_finalize_phase` immediately after the guards are dropped.
+
+- [ ] **Step 5: Reject stale results before committing state**
+
+At the beginning of the post-finalization state block, immediately after acquiring the fresh write guard, validate the captured identity:
+
+```rust
+let mut state = self.state.write().await;
+if !finalize_attempt
+    .as_ref()
+    .is_some_and(|attempt| attempt.is_current(&state, issue_id))
+{
+    warn!(
+        issue_id = %issue_id,
+        "discarding stale finalization result because the running attempt changed"
+    );
+    return;
+}
+```
+
+The early return must occur before building history, applying completion/finalize state, or collecting tracker/journal/history work. Do not change `run_finalize_phase`, artifact helper APIs, API lookup precedence, or unrelated failure paths.
+
+- [ ] **Step 6: Run focused tests to verify GREEN**
+
+Run:
+
+```bash
+cargo test -p ensemble-core finalization_attempt_rejects_missing_or_replaced_running_entry -- --nocapture
+cargo test -p ensemble-core enabled_finalization_returns_without_reentrant_state_locking -- --nocapture
+cargo test -p ensemble-core finalize -- --nocapture
+```
+
+Expected: all selected tests PASS. The original deadlock/parking regression must continue to assert pending approval, updated artifacts, no running slot, and a retained claim.
+
+- [ ] **Step 7: Run complete verification**
+
+Run:
+
+```bash
+cargo test --workspace --exclude ensemble-desktop
+cargo clippy --workspace --exclude ensemble-desktop -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Expected: 0 test failures, no clippy warnings, no formatting changes, and no whitespace errors.
+
+- [ ] **Step 8: Commit the stale-result fix**
+
+```bash
+git add crates/ensemble-core/src/orchestrator/mod.rs docs/superpowers/plans/2026-07-11-finalization-locking.md
+git commit -m "Discard stale finalization results"
+```
