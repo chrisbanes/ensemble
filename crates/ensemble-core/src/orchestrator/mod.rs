@@ -151,6 +151,9 @@ pub struct Orchestrator {
     worker_tx: mpsc::Sender<WorkerEvent>,
     worker_rx: mpsc::Receiver<WorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
+    #[cfg(test)]
+    finalization_commit_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
 }
 
 static RUN_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -192,6 +195,14 @@ struct WaitingHistoryRecordInput<'a> {
 impl Orchestrator {
     fn effective_step_timeout_ms(timeout_ms: Option<u64>, config: &EnsembleConfig) -> u64 {
         timeout_ms.unwrap_or(config.agent.turn_timeout_ms)
+    }
+
+    fn finalization_attempt_is_current(
+        attempt: Option<&RunningAttemptIdentity>,
+        state: &OrchestratorState,
+        issue_id: &str,
+    ) -> bool {
+        attempt.is_some_and(|attempt| attempt.is_current(state, issue_id))
     }
 
     /// Create a new Orchestrator.
@@ -271,6 +282,25 @@ impl Orchestrator {
             worker_tx,
             worker_rx,
             shutdown_rx,
+            #[cfg(test)]
+            finalization_commit_test_barriers: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn set_finalization_commit_test_barriers(
+        &mut self,
+        before_commit: Arc<tokio::sync::Barrier>,
+        resume_commit: Arc<tokio::sync::Barrier>,
+    ) {
+        self.finalization_commit_test_barriers = Some((before_commit, resume_commit));
+    }
+
+    #[cfg(test)]
+    async fn wait_for_finalization_commit_test_barriers(&self) {
+        if let Some((before_commit, resume_commit)) = &self.finalization_commit_test_barriers {
+            before_commit.wait().await;
+            resume_commit.wait().await;
         }
     }
 
@@ -778,7 +808,7 @@ impl Orchestrator {
             if state.get_pipeline_run(&issue.id).is_some() {
                 drop(state);
 
-                let (config_snapshot, action, effective_cycle, effective_attempt) = {
+                let (config_snapshot, action, effective_cycle, effective_attempt, finalize_attempt) = {
                     let mut state = self.state.write().await;
                     let existing_cycle = state
                         .get_pipeline_run(&issue.id)
@@ -796,7 +826,14 @@ impl Orchestrator {
                             run.start()
                         })
                         .unwrap_or(PipelineAction::Waiting);
-                    (config, action, effective_cycle, effective_attempt)
+                    let finalize_attempt = RunningAttemptIdentity::capture(&state, &issue.id);
+                    (
+                        config,
+                        action,
+                        effective_cycle,
+                        effective_attempt,
+                        finalize_attempt,
+                    )
                 };
 
                 let Some(config_snapshot) = config_snapshot else {
@@ -825,9 +862,22 @@ impl Orchestrator {
                         let finalize_state = self
                             .run_finalize_phase(&issue.id, &issue.identifier, &config_snapshot)
                             .await;
+                        #[cfg(test)]
+                        self.wait_for_finalization_commit_test_barriers().await;
                         let completed_at = Utc::now();
                         let (history_record, history_run_id, release_run_id, should_release) = {
                             let mut state = self.state.write().await;
+                            if !Self::finalization_attempt_is_current(
+                                finalize_attempt.as_ref(),
+                                &state,
+                                &issue.id,
+                            ) {
+                                warn!(
+                                    issue_id = %issue.id,
+                                    "discarding stale finalization result because the running attempt changed"
+                                );
+                                return;
+                            }
                             let history_record = state
                                 .running
                                 .get(&issue.id)
@@ -1608,10 +1658,11 @@ impl Orchestrator {
                                 history,
                             ) = {
                                 let mut state = self.state.write().await;
-                                if !finalize_attempt
-                                    .as_ref()
-                                    .is_some_and(|attempt| attempt.is_current(&state, issue_id))
-                                {
+                                if !Self::finalization_attempt_is_current(
+                                    finalize_attempt.as_ref(),
+                                    &state,
+                                    issue_id,
+                                ) {
                                     warn!(
                                         issue_id = %issue_id,
                                         "discarding stale finalization result because the running attempt changed"
@@ -8649,6 +8700,86 @@ agent:
             run.step_states.get("test"),
             Some(StepState::Running { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn restored_finalization_discards_stale_attempt_before_owned_writes() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let state_writes = Arc::new(RwLock::new(Vec::new()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+            state_writes: Arc::clone(&state_writes),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("1", "Todo");
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+            pipeline_run.step_completed("build", succeeded_step_output(), false);
+
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        let before_commit = Arc::new(tokio::sync::Barrier::new(2));
+        let resume_commit = Arc::new(tokio::sync::Barrier::new(2));
+        orchestrator.set_finalization_commit_test_barriers(
+            Arc::clone(&before_commit),
+            Arc::clone(&resume_commit),
+        );
+        let state = Arc::clone(&orchestrator.state);
+        let journal_path = orchestrator.pipeline_journal.path_for_issue("1");
+        let history_store = orchestrator.history_store.clone().unwrap();
+
+        let dispatch = tokio::spawn(async move {
+            orchestrator.dispatch_issue(&issue, None).await;
+        });
+        before_commit.wait().await;
+
+        {
+            let mut state = state.write().await;
+            let mut replacement = state.remove_running("1").unwrap();
+            replacement.started_at += chrono::Duration::seconds(1);
+            state.running.insert("1".to_string(), replacement);
+        }
+        resume_commit.wait().await;
+        dispatch.await.unwrap();
+
+        let state = state.read().await;
+        assert!(state.is_running("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        assert!(!state.completed.contains_key("1"));
+        assert!(state.get_finalize_state("1").is_none());
+        assert!(state_writes.read().await.is_empty());
+        assert!(!journal_path.exists());
+        assert_eq!(
+            history_store
+                .read_history(&crate::history::reader::HistoryQuery::default())
+                .await
+                .unwrap()
+                .total,
+            0
+        );
     }
 
     #[tokio::test]

@@ -12,11 +12,11 @@ This design addresses GitHub issue #324.
 
 The same success branch currently awaits tracker writes while retaining the state guard. Even when those calls do not reenter orchestrator state, they unnecessarily block every other state reader and writer for the duration of external I/O.
 
-Restored-pipeline completion, approval resume, and finalize retry already demonstrate the intended pattern: perform external work without a state guard, acquire the guard briefly to commit outcomes, then release it before tracker and persistence I/O.
+Restored-pipeline completion, approval resume, and finalize retry use the intended broad pattern: perform external work without a state guard, acquire the guard briefly to commit outcomes, then release it before tracker and persistence I/O. Both the initial worker-exit and restored-pipeline success paths must additionally prove that their original running attempt still owns the issue before committing.
 
 ## Scope
 
-The change covers initial finalization after a successful pipeline, including successful finalization, finalization failure, pending approval, and skipped-headless outcomes. It also verifies that approval and retry processing terminate without lock inversion.
+The change covers initial worker-exit and restored-pipeline finalization after a successful pipeline, including successful finalization, finalization failure, pending approval, and skipped-headless outcomes. It also verifies that approval and retry processing terminate without lock inversion.
 
 The change does not redesign the finalization state model, alter completion semantics, or refactor unrelated worker-failure handling.
 
@@ -62,7 +62,7 @@ Approval and retry API handlers only mutate in-memory state and notify the orche
 
 Releasing the state guard allows control requests to observe the issue while finalization performs external I/O. The final state commit must therefore verify that it still belongs to the running attempt that entered finalization.
 
-Before releasing state, capture an identity containing both the running entry's `run_id` and `started_at`. The run ID alone is insufficient because Ensemble may reuse the issue-level run ID after a stop and redispatch. After finalization returns and state is reacquired, compare both fields with the current running entry. If the entry is missing or either field differs, log that the finalization result is stale and return without applying completion/finalize state or performing tracker, transition, release, or history writes.
+Before releasing state, both `PipelineAction::Succeeded` paths capture an identity containing both the running entry's `run_id` and `started_at`. The run ID alone is insufficient because Ensemble may reuse the issue-level run ID after a stop and redispatch. After finalization returns and state is reacquired, both paths compare both fields with the current running entry. If the entry is missing or either field differs, log that the finalization result is stale and return without applying completion/finalize state or performing tracker, transition, release, or history writes.
 
 This is preferred over two broader alternatives:
 
@@ -91,6 +91,8 @@ The test must:
 - assert the artifact finalization status was updated.
 
 Add a focused identity regression test that demonstrates a replacement running entry is not the same finalization owner even when the issue-level run ID is reused. Cover both a missing running entry and a replacement with the same `run_id` but a different `started_at` value.
+
+Add a deterministic restored-pipeline lifecycle test. Pause immediately after finalization and replace the running entry before the commit phase; verify that the restored pipeline remains active and that no completion/finalize mutation, tracker write, pipeline-release journal write, or history record occurs. This exercises the production restored-pipeline finalization path rather than only the identity helper.
 
 Use a local temporary git repository and workspace fixture so the test does not depend on network access. An approval-required rule is acceptable for the primary deadlock reproduction because it reaches the artifact status helper without requiring a remote push. Existing approval/retry API tests remain in place; add a focused timeout assertion for retry processing only if it can reuse the same fixture without introducing substantial test-only infrastructure.
 

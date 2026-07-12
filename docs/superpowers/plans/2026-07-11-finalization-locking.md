@@ -424,6 +424,7 @@ If the worktree is clean, do not create an empty commit.
 
 **Files:**
 - Modify: `crates/ensemble-core/src/orchestrator/mod.rs:78-105`
+- Modify: `crates/ensemble-core/src/orchestrator/mod.rs:773-910`
 - Modify: `crates/ensemble-core/src/orchestrator/mod.rs:1567-1685`
 - Test: `crates/ensemble-core/src/orchestrator/mod.rs` in the existing `#[cfg(test)] mod tests`
 
@@ -498,9 +499,9 @@ impl RunningAttemptIdentity {
 
 The timestamp intentionally participates in equality because `issue_run_ids` may preserve and reuse the same run ID after a stop.
 
-- [ ] **Step 4: Capture identity before releasing state**
+- [ ] **Step 4: Capture identity before releasing state in both success paths**
 
-In the `PipelineAction::Succeeded` branch, capture the identity while the original state write guard still proves ownership:
+In both the initial worker-exit and restored-pipeline `PipelineAction::Succeeded` branches, capture the identity while the original state write guard still proves ownership. The worker-exit path captures before cloning and dropping its guards; the restored path captures before leaving the state-write block that calls `add_running`:
 
 ```rust
 let finalize_attempt = RunningAttemptIdentity::capture(&state, issue_id);
@@ -509,18 +510,20 @@ drop(config);
 drop(state);
 ```
 
+```rust
+state.add_running(issue, effective_attempt);
+let finalize_attempt = RunningAttemptIdentity::capture(&state, &issue.id);
+```
+
 Keep the existing call to `run_finalize_phase` immediately after the guards are dropped.
 
-- [ ] **Step 5: Reject stale results before committing state**
+- [ ] **Step 5: Reject stale results before either path commits state**
 
 At the beginning of the post-finalization state block, immediately after acquiring the fresh write guard, validate the captured identity:
 
 ```rust
 let mut state = self.state.write().await;
-if !finalize_attempt
-    .as_ref()
-    .is_some_and(|attempt| attempt.is_current(&state, issue_id))
-{
+if !Self::finalization_attempt_is_current(finalize_attempt.as_ref(), &state, issue_id) {
     warn!(
         issue_id = %issue_id,
         "discarding stale finalization result because the running attempt changed"
@@ -529,21 +532,26 @@ if !finalize_attempt
 }
 ```
 
-The early return must occur before building history, applying completion/finalize state, or collecting tracker/journal/history work. Do not change `run_finalize_phase`, artifact helper APIs, API lookup precedence, or unrelated failure paths.
+Use the same private validation gate in both paths. The early return must occur before building history, applying completion/finalize state, or collecting tracker/journal/history work. Do not change `run_finalize_phase`, artifact helper APIs, API lookup precedence, or unrelated failure paths.
 
-- [ ] **Step 6: Run focused tests to verify GREEN**
+- [ ] **Step 6: Add restored-pipeline lifecycle coverage**
+
+Add a deterministic test seam immediately after `run_finalize_phase` returns, then pause the restored-pipeline path, replace its running entry with the same run ID and a later `started_at`, and resume the commit. Assert the restored pipeline remains running and retained, completion/finalize state is unchanged, and tracker, pipeline-release journal, and history writes are absent. This must invoke `dispatch_issue` so removing the restored-path guard makes the test fail; do not rely only on `RunningAttemptIdentity::is_current`.
+
+- [ ] **Step 7: Run focused tests to verify GREEN**
 
 Run:
 
 ```bash
 cargo test -p ensemble-core finalization_attempt_rejects_missing_or_replaced_running_entry -- --nocapture
+cargo test -p ensemble-core restored_finalization_discards_stale_attempt_before_owned_writes -- --nocapture
 cargo test -p ensemble-core enabled_finalization_returns_without_reentrant_state_locking -- --nocapture
 cargo test -p ensemble-core finalize -- --nocapture
 ```
 
 Expected: all selected tests PASS. The original deadlock/parking regression must continue to assert pending approval, updated artifacts, no running slot, and a retained claim.
 
-- [ ] **Step 7: Run complete verification**
+- [ ] **Step 8: Run complete verification**
 
 Run:
 
@@ -556,7 +564,7 @@ git diff --check
 
 Expected: 0 test failures, no clippy warnings, no formatting changes, and no whitespace errors.
 
-- [ ] **Step 8: Commit the stale-result fix**
+- [ ] **Step 9: Commit the stale-result fix**
 
 ```bash
 git add crates/ensemble-core/src/orchestrator/mod.rs docs/superpowers/plans/2026-07-11-finalization-locking.md
