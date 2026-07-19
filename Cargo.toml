@@ -18,7 +18,7 @@ serde_yaml = "0.9.34"
 liquid = "0.26.11"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["json", "env-filter"] }
-thiserror = "2.0.18"
+thiserror = "2.0.19"
 chrono = { version = "0.4.45", features = ["serde"] }
 tempfile = "3.27.0"
 async-trait = "0.1.89"
