@@ -24,7 +24,7 @@ tempfile = "3.27.0"
 async-trait = "0.1.91"
 reqwest = { version = "0.13.4", features = ["json"] }
 futures = "0.3.33"
-libc = "0.2.187"
+libc = "0.2.188"
 wiremock = "0.6.5"
 axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.33"
