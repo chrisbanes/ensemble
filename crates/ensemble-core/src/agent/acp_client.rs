@@ -4,15 +4,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
-    ContentBlock, EnvVariable, InitializeRequest, McpServer, McpServerStdio, NewSessionRequest,
-    PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
-    SessionConfigSelectOptions, SessionNotification, SessionUpdate, SetSessionModeRequest,
-    StopReason as SdkStopReason,
+    ContentBlock, InitializeRequest, NewSessionRequest, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionConfigSelectOptions,
+    SessionNotification, SessionUpdate, SetSessionModeRequest, StopReason as SdkStopReason,
 };
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{AcpAgent, Client, Dispatch, SessionMessage};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Client, Dispatch, SessionMessage};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -52,16 +51,11 @@ fn build_acp_agent(cmd: &ResolvedCommand, workspace_path: &Path) -> AcpAgent {
         cmd.program.to_string_lossy().to_string(),
     ];
     args.extend(cmd.args.iter().cloned());
-    AcpAgent::new(McpServer::Stdio(
-        McpServerStdio::new(name, PathBuf::from("sh"))
+    AcpAgent::new(
+        AcpAgentConfig::new("sh")
             .args(args)
-            .env(
-                cmd.env
-                    .iter()
-                    .map(|(k, v)| EnvVariable::new(k.clone(), v.clone()))
-                    .collect(),
-            ),
-    ))
+            .envs(cmd.env.iter().map(|(key, value)| (key, value))),
+    )
 }
 
 #[derive(Debug)]
@@ -724,14 +718,15 @@ pub async fn run_acp_session(
                 }
             }
 
-            let session_response = match tokio::time::timeout(
+            let mut session = match tokio::time::timeout(
                 Duration::from_millis(read_timeout_ms),
-                cx.send_request(NewSessionRequest::new(&workspace_path))
-                    .block_task(),
+                cx.build_session(&workspace_path)
+                    .block_task()
+                    .start_session(),
             )
             .await
             {
-                Ok(Ok(response)) => response,
+                Ok(Ok(session)) => session,
                 Ok(Err(e)) => {
                     let mut err = session_error_inner.lock().await;
                     *err = Some(format!("session error: {e}"));
@@ -744,18 +739,23 @@ pub async fn run_acp_session(
                 }
             };
 
-            let capabilities =
-                discover_capabilities_from_options(session_response.config_options.as_deref());
+            let capabilities = session
+                .modes()
+                .map(|modes| DiscoveredCapabilities {
+                    current_mode: Some(modes.current_mode_id.to_string()),
+                    modes: modes
+                        .available_modes
+                        .iter()
+                        .map(|mode| ModeDefinition {
+                            id: mode.id.to_string(),
+                            name: mode.name.clone(),
+                            description: mode.description.clone(),
+                        })
+                        .collect(),
+                    ..DiscoveredCapabilities::default()
+                })
+                .unwrap_or_default();
             *discovered_capabilities_inner.lock().await = capabilities;
-
-            let mut session = match cx.attach_session(session_response, Vec::new()) {
-                Ok(session) => session,
-                Err(e) => {
-                    let mut err = session_error_inner.lock().await;
-                    *err = Some(format!("session attach failed: {e}"));
-                    return Ok(());
-                }
-            };
 
             let session_id = session.session_id().to_string();
 
@@ -1108,6 +1108,35 @@ mod tests {
 
     use super::*;
     use crate::pipeline::verdict::StepResult;
+
+    #[test]
+    fn build_acp_agent_preserves_command_arguments_environment_and_workspace() {
+        let command = ResolvedCommand {
+            program: PathBuf::from("/opt/agent binary"),
+            args: vec!["--model".to_string(), "test model".to_string()],
+            env: vec![("AGENT_TOKEN".to_string(), "secret".to_string())],
+        };
+        let agent = build_acp_agent(&command, Path::new("/tmp/work space"));
+        let config = agent.config();
+
+        assert_eq!(config.command(), Path::new("sh"));
+        assert_eq!(
+            config.arguments(),
+            [
+                "-c",
+                r#"cd "$1" && shift && exec "$@""#,
+                "agent binary",
+                "/tmp/work space",
+                "/opt/agent binary",
+                "--model",
+                "test model",
+            ]
+        );
+        assert_eq!(
+            config.environment().get("AGENT_TOKEN").map(String::as_str),
+            Some("secret")
+        );
+    }
 
     #[test]
     fn permission_option_event_kind_serializes_as_snake_case() {
