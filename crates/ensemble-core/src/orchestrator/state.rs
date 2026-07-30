@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
 use crate::history::artifacts::RunArtifacts;
+use crate::orchestrator::pipeline_journal::PendingTerminalTransition;
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
@@ -111,6 +112,14 @@ pub struct IssueFinalizeState {
     pub repos: Vec<RepoFinalizeState>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingTerminalEntry {
+    pub identifier: String,
+    pub run_id: Option<String>,
+    pub issue: Option<Issue>,
+    pub transition: PendingTerminalTransition,
+}
+
 /// The single authoritative in-memory state owned by the orchestrator.
 /// All state mutations are serialized through the orchestrator's event loop.
 #[derive(Debug)]
@@ -141,6 +150,8 @@ pub struct OrchestratorState {
     pub pipeline_runs: HashMap<String, PipelineRun>,
     /// Finalization state for issues that have finished pipeline execution.
     pub finalize: HashMap<String, IssueFinalizeState>,
+    /// Terminal tracker writes that must reconcile before local run release.
+    pub pending_terminal_transitions: HashMap<String, PendingTerminalEntry>,
     /// Durable run artifacts collected before history is written.
     pub artifacts: HashMap<String, RunArtifacts>,
     /// Immutable config snapshot for each active pipeline run.
@@ -184,6 +195,7 @@ impl OrchestratorState {
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
             finalize: HashMap::new(),
+            pending_terminal_transitions: HashMap::new(),
             artifacts: HashMap::new(),
             pipeline_configs: HashMap::new(),
             last_tick_at: None,
@@ -354,6 +366,7 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        self.pending_terminal_transitions.remove(issue_id);
         self.artifacts.remove(issue_id);
         self.step_states.remove(issue_id);
         if let Some(run_id) = self.issue_run_ids.remove(issue_id) {
@@ -521,6 +534,7 @@ impl OrchestratorState {
         let running = self.running.get(issue_id).cloned();
         let waiting = self.waiting_on_human.get(issue_id).cloned();
         let finalize = self.finalize.get(issue_id).cloned();
+        let pending_terminal = self.pending_terminal_transitions.get(issue_id).cloned();
         let run = self.pipeline_runs.get(issue_id).cloned();
         let config = self.pipeline_configs.get(issue_id).cloned();
 
@@ -536,6 +550,11 @@ impl OrchestratorState {
             .map(|entry| entry.issue.clone())
             .or_else(|| waiting.as_ref().and_then(|entry| entry.issue.clone()))
             .or_else(|| {
+                pending_terminal
+                    .as_ref()
+                    .and_then(|entry| entry.issue.clone())
+            })
+            .or_else(|| {
                 self.completed
                     .get(issue_id)
                     .map(|entry| entry.issue.clone())
@@ -548,6 +567,11 @@ impl OrchestratorState {
             .as_ref()
             .map(|entry| entry.identifier.clone())
             .or_else(|| waiting.as_ref().map(|entry| entry.identifier.clone()))
+            .or_else(|| {
+                pending_terminal
+                    .as_ref()
+                    .map(|entry| entry.identifier.clone())
+            })
             .or_else(|| {
                 finalize
                     .as_ref()
@@ -563,6 +587,11 @@ impl OrchestratorState {
             .as_ref()
             .and_then(|entry| entry.run_id.clone())
             .or_else(|| waiting.as_ref().and_then(|entry| entry.run_id.clone()))
+            .or_else(|| {
+                pending_terminal
+                    .as_ref()
+                    .and_then(|entry| entry.run_id.clone())
+            })
             .or_else(|| {
                 self.completed
                     .get(issue_id)

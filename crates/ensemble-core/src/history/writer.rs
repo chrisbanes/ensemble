@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
-use tokio::fs::OpenOptions;
-use tokio::io::AsyncWriteExt;
+use tokio::fs::{File, OpenOptions};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 use super::model::HistoryRecord;
 
@@ -32,6 +32,26 @@ impl HistoryWriter {
         file.write_all(line.as_bytes()).await?;
         file.flush().await?;
         Ok(())
+    }
+
+    pub async fn append_if_absent(&self, record: &HistoryRecord) -> Result<(), std::io::Error> {
+        let file = match File::open(&self.path).await {
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(file) = file {
+            let mut lines = BufReader::new(file).lines();
+            while let Some(line) = lines.next_line().await? {
+                if serde_json::from_str::<HistoryRecord>(&line)
+                    .is_ok_and(|existing| existing == *record)
+                {
+                    return Ok(());
+                }
+            }
+        }
+
+        self.append(record).await
     }
 }
 
@@ -90,6 +110,21 @@ mod tests {
         writer.append(&r2).await.unwrap();
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(contents.lines().count(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_if_absent_does_not_duplicate_the_same_record() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        std::fs::remove_file(&path).ok();
+        let writer = HistoryWriter::new(path.clone());
+        let record = sample_record();
+
+        writer.append_if_absent(&record).await.unwrap();
+        writer.append_if_absent(&record).await.unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        assert_eq!(contents.lines().count(), 1);
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tracing::warn;
 
+use crate::history::model::HistoryRecord;
 use crate::pipeline::engine::PipelineRunSnapshot;
 use crate::tracker::model::RetryEntry;
 
@@ -25,7 +26,29 @@ pub enum PipelineTransitionKind {
     PipelineHalted,
     PipelineSucceeded,
     PipelineFailed,
+    PendingTerminalTransition,
+    TerminalTransitionApplied,
     Released,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalOutcome {
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingTerminalTransition {
+    pub target_state: String,
+    pub outcome: TerminalOutcome,
+    pub attempt: u32,
+    pub last_error: Option<String>,
+    pub last_attempted_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub tracker_write_confirmed: bool,
+    #[serde(default)]
+    pub history_record: Option<HistoryRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +64,8 @@ pub struct PipelineTransitionRecord {
     pub reason: Option<String>,
     pub retry: Option<RetryEntry>,
     pub snapshot: Option<PipelineRunSnapshot>,
+    #[serde(default)]
+    pub terminal_transition: Option<PendingTerminalTransition>,
     pub written_at: DateTime<Utc>,
 }
 
@@ -55,6 +80,7 @@ pub struct PipelineTransitionInput {
     pub reason: Option<String>,
     pub retry: Option<RetryEntry>,
     pub snapshot: Option<PipelineRunSnapshot>,
+    pub terminal_transition: Option<PendingTerminalTransition>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +128,7 @@ impl PipelineRunJournal {
             reason: input.reason,
             retry: input.retry,
             snapshot: input.snapshot,
+            terminal_transition: input.terminal_transition,
             written_at: Utc::now(),
         };
 
@@ -135,6 +162,7 @@ impl PipelineRunJournal {
             reason: Some(reason.to_string()),
             retry: None,
             snapshot: None,
+            terminal_transition: None,
         })
         .await
     }
@@ -350,6 +378,7 @@ mod tests {
                 reason: None,
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -364,6 +393,7 @@ mod tests {
                 reason: Some("passed".to_string()),
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -391,6 +421,7 @@ mod tests {
                 reason: None,
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -419,6 +450,7 @@ mod tests {
                 reason: Some("failed".to_string()),
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -443,6 +475,7 @@ mod tests {
                 reason: None,
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -457,6 +490,7 @@ mod tests {
                 reason: None,
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -488,6 +522,7 @@ mod tests {
                 reason: None,
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
@@ -505,6 +540,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_success_transition_round_trips_as_live_until_released() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+        let pending = PendingTerminalTransition {
+            target_state: "Done".to_string(),
+            outcome: TerminalOutcome::Succeeded,
+            attempt: 2,
+            last_error: Some("ambiguous tracker response".to_string()),
+            last_attempted_at: Some(Utc::now()),
+            tracker_write_confirmed: false,
+            history_record: None,
+        };
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PendingTerminalTransition,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(snapshot()),
+                terminal_transition: Some(pending.clone()),
+            })
+            .await
+            .unwrap();
+
+        let live = journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.terminal_transition, Some(pending.clone()));
+
+        let mut confirmed = pending.clone();
+        confirmed.tracker_write_confirmed = true;
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::TerminalTransitionApplied,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(snapshot()),
+                terminal_transition: Some(confirmed.clone()),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            journal
+                .latest_live_record_for_issue("issue/1")
+                .await
+                .unwrap()
+                .unwrap()
+                .terminal_transition,
+            Some(confirmed)
+        );
+
+        journal
+            .append_released("issue/1", "repo#1", Some("run-1".to_string()), "completed")
+            .await
+            .unwrap();
+        assert!(journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_failure_transition_round_trips_retry_metadata_as_live() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+        let pending = PendingTerminalTransition {
+            target_state: "Failed".to_string(),
+            outcome: TerminalOutcome::Failed,
+            attempt: 3,
+            last_error: Some("transport timeout".to_string()),
+            last_attempted_at: Some(Utc::now()),
+            tracker_write_confirmed: false,
+            history_record: None,
+        };
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PendingTerminalTransition,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: pending.last_error.clone(),
+                retry: None,
+                snapshot: Some(snapshot()),
+                terminal_transition: Some(pending.clone()),
+            })
+            .await
+            .unwrap();
+
+        let live = journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(live.terminal_transition, Some(pending));
+    }
+
+    #[test]
+    fn schema_v1_record_without_terminal_payload_remains_readable() {
+        let legacy = serde_json::json!({
+            "schema_version": 1,
+            "seq": 1,
+            "kind": "run_started",
+            "issue_id": "issue/1",
+            "identifier": "repo#1",
+            "run_id": "run-1",
+            "cycle": 1,
+            "step": null,
+            "reason": null,
+            "retry": null,
+            "snapshot": null,
+            "written_at": Utc::now(),
+        });
+
+        let record: PipelineTransitionRecord = serde_json::from_value(legacy).unwrap();
+        assert!(record.terminal_transition.is_none());
+    }
+
+    #[tokio::test]
     async fn malformed_trailing_line_does_not_hide_last_valid_record() {
         let dir = tempdir().unwrap();
         let journal = PipelineRunJournal::new(dir.path());
@@ -519,6 +688,7 @@ mod tests {
                 reason: None,
                 retry: None,
                 snapshot: Some(snapshot()),
+                terminal_transition: None,
             })
             .await
             .unwrap();
