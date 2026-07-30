@@ -2338,13 +2338,15 @@ Recommended additional hardening for ports:
   values are represented as `[REDACTED]`; `$VAR` references may remain visible as non-secret
   metadata. Lookalike keys are not secret fields.
 - Raw YAML saves interpret `[REDACTED]` as "preserve the authoritative value at this YAML path".
-  Sequence entries are matched one-to-one by their complete non-secret structure rather than by
-  position, so reordering or inserting entries cannot move credentials between logical entries.
-  The placeholder is invalid when no unique stored value exists at that identity. An explicit
-  replacement replaces the value and an omitted field removes it.
+  Sequence entries are matched one-to-one by a unique scalar `id`, then `name`; unnamed entries
+  fall back to their complete non-secret structure. Position is never an identity, so reordering,
+  inserting, or editing non-identity fields cannot move credentials between logical entries.
+  Missing or duplicate identities are rejected. An explicit replacement replaces the value and an
+  omitted field removes it.
 - Structured editors represent secret changes explicitly as preserve, replace with a write-only
   literal, replace with an environment reference, or remove. Existing secrets default to preserve,
-  and blank literal or environment replacements are rejected before configuration persistence.
+  and blank literal replacements are rejected before configuration persistence. Environment names
+  must match `[A-Za-z_][A-Za-z0-9_]*`.
 - If malformed YAML cannot be structurally redacted, omit it from API responses.
 - Configuration file replacement must be atomic. On Unix, preserve an existing file's permissions
   and create new configuration files with mode `0600`.

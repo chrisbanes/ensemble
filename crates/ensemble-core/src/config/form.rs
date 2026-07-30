@@ -782,7 +782,7 @@ on_failure: Failed
     }
 
     #[test]
-    fn guided_secret_edits_reject_blank_replacements() {
+    fn guided_secret_edits_reject_invalid_replacements() {
         let base = r#"
 tracker:
   kind: github
@@ -797,20 +797,32 @@ steps:
 on_success: Done
 on_failure: Failed
 "#;
-        for edit in [
-            SecretEdit::SetLiteral {
-                value: " ".to_string(),
-            },
-            SecretEdit::SetEnvironment {
-                variable: "\t".to_string(),
-            },
+        for (edit, expected) in [
+            (
+                SecretEdit::SetLiteral {
+                    value: " ".to_string(),
+                },
+                "must not be blank",
+            ),
+            (
+                SecretEdit::SetEnvironment {
+                    variable: "\t".to_string(),
+                },
+                "must not be blank",
+            ),
+            (
+                SecretEdit::SetEnvironment {
+                    variable: "FOO=BAR".to_string(),
+                },
+                "environment variable name",
+            ),
         ] {
             let mut form = extract_guided_form(base).unwrap();
             form.tracker.api_key_edit = edit;
 
             let error = apply_guided_form(base, &form)
-                .expect_err("blank guided secret replacements must be rejected");
-            assert!(error.to_string().contains("must not be blank"));
+                .expect_err("invalid guided secret replacements must be rejected");
+            assert!(error.to_string().contains(expected));
         }
     }
 

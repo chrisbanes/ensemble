@@ -162,6 +162,38 @@ describe("SetupWizard", () => {
     expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
   });
 
+  it("does not advance with a malformed secret environment name", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key: { state: "environment", variable: "GITHUB_TOKEN" },
+              api_key_edit: { action: "set_environment", variable: "FOO=BAR" },
+              active_states: ["Todo"],
+              terminal_states: ["Done"],
+            },
+            repos: [],
+            agents: [],
+            steps: [],
+            onSuccess: "Done",
+            onFailure: "Failed",
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+
+    expect(await screen.findByText(/valid environment variable name/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
+  });
+
   it("renders in create mode by default", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/v1/config/setup/defaults")) {

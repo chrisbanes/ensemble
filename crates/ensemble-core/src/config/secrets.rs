@@ -75,9 +75,24 @@ impl SecretEdit {
                     reason: "secret environment variable name must not be blank".to_string(),
                 })
             }
+            Self::SetEnvironment { variable }
+                if !is_valid_environment_variable_name(variable) =>
+            {
+                Err(ConfigError::ConfigWriteRejected {
+                    reason: "secret environment variable name must start with an ASCII letter or underscore and contain only ASCII letters, digits, or underscores".to_string(),
+                })
+            }
             _ => Ok(()),
         }
     }
+}
+
+fn is_valid_environment_variable_name(variable: &str) -> bool {
+    let mut characters = variable.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 impl fmt::Debug for SecretEdit {
@@ -174,29 +189,66 @@ fn secret_free_identity(value: &serde_yaml::Value) -> serde_yaml::Value {
     }
 }
 
+fn sequence_identity_value<'a>(
+    value: &'a serde_yaml::Value,
+    identity_key: &str,
+) -> Option<&'a serde_yaml::Value> {
+    value.as_mapping()?.iter().find_map(|(key, value)| {
+        key.as_str()
+            .is_some_and(|key| key.eq_ignore_ascii_case(identity_key))
+            .then_some(value)
+            .filter(|value| match value {
+                serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => true,
+                serde_yaml::Value::String(value) => !value.trim().is_empty(),
+                _ => false,
+            })
+    })
+}
+
+fn explicit_sequence_identity(
+    value: &serde_yaml::Value,
+) -> Option<(&'static str, &serde_yaml::Value)> {
+    ["id", "name"]
+        .into_iter()
+        .find_map(|key| sequence_identity_value(value, key).map(|value| (key, value)))
+}
+
+fn sequence_identity_error() -> ConfigError {
+    ConfigError::ConfigWriteRejected {
+        reason: "secret preserve marker has no unique matching stored sequence entry".to_string(),
+    }
+}
+
 fn match_authoritative_sequence_entry<'a>(
     submitted: &serde_yaml::Value,
     authoritative: &'a [serde_yaml::Value],
     claimed: &mut [bool],
+    submitted_identity_is_unique: bool,
 ) -> Result<&'a serde_yaml::Value, ConfigError> {
-    let identity = secret_free_identity(submitted);
+    let explicit_identity = explicit_sequence_identity(submitted);
+    if explicit_identity.is_some() && !submitted_identity_is_unique {
+        return Err(sequence_identity_error());
+    }
+    let structural_identity = explicit_identity
+        .is_none()
+        .then(|| secret_free_identity(submitted));
     let mut candidates = authoritative
         .iter()
         .enumerate()
         .filter(|(index, candidate)| {
-            !claimed[*index] && secret_free_identity(candidate) == identity
+            !claimed[*index]
+                && match explicit_identity {
+                    Some((key, value)) => sequence_identity_value(candidate, key) == Some(value),
+                    None => structural_identity
+                        .as_ref()
+                        .is_some_and(|identity| secret_free_identity(candidate) == *identity),
+                }
         });
     let Some((index, candidate)) = candidates.next() else {
-        return Err(ConfigError::ConfigWriteRejected {
-            reason: "secret preserve marker has no unique matching stored sequence entry"
-                .to_string(),
-        });
+        return Err(sequence_identity_error());
     };
     if candidates.next().is_some() {
-        return Err(ConfigError::ConfigWriteRejected {
-            reason: "secret preserve marker has no unique matching stored sequence entry"
-                .to_string(),
-        });
+        return Err(sequence_identity_error());
     }
     claimed[index] = true;
     Ok(candidate)
@@ -268,12 +320,27 @@ fn merge_preserve_markers(
                 .and_then(serde_yaml::Value::as_sequence)
                 .map_or(&[][..], Vec::as_slice);
             let mut claimed = vec![false; authoritative_sequence.len()];
-            for submitted_value in submitted_sequence {
+            let submitted_identities: Vec<_> = submitted_sequence
+                .iter()
+                .map(|value| {
+                    explicit_sequence_identity(value).map(|(key, value)| (key, value.clone()))
+                })
+                .collect();
+            for (index, submitted_value) in submitted_sequence.iter_mut().enumerate() {
                 let authoritative_value = if contains_secret_preserve_marker(submitted_value) {
+                    let submitted_identity_is_unique =
+                        submitted_identities[index].as_ref().is_none_or(|identity| {
+                            submitted_identities
+                                .iter()
+                                .filter(|candidate| candidate.as_ref() == Some(identity))
+                                .count()
+                                == 1
+                        });
                     Some(match_authoritative_sequence_entry(
                         submitted_value,
                         authoritative_sequence,
                         &mut claimed,
+                        submitted_identity_is_unique,
                     )?)
                 } else {
                     None
@@ -432,6 +499,41 @@ services:
     }
 
     #[test]
+    fn merge_preserves_sequence_secrets_while_editing_non_identity_fields() {
+        let authoritative = r#"
+services:
+  - id: service-1
+    name: alpha
+    endpoint: https://old.example
+    token: alpha-secret
+  - name: beta
+    endpoint: https://old.example
+    token: beta-secret
+"#;
+        let submitted = r#"
+services:
+  - id: service-1
+    name: renamed
+    endpoint: https://new.example
+    token: "[REDACTED]"
+  - name: beta
+    endpoint: https://new.example
+    token: "[REDACTED]"
+"#;
+
+        let merged = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect("a stable id should preserve the secret across ordinary field edits");
+        let value = yaml_value(&merged);
+
+        assert_eq!(value["services"][0]["name"], "renamed");
+        assert_eq!(value["services"][0]["endpoint"], "https://new.example");
+        assert_eq!(value["services"][0]["token"], "alpha-secret");
+        assert_eq!(value["services"][1]["name"], "beta");
+        assert_eq!(value["services"][1]["endpoint"], "https://new.example");
+        assert_eq!(value["services"][1]["token"], "beta-secret");
+    }
+
+    #[test]
     fn merge_rejects_ambiguous_sequence_secret_identity() {
         let authoritative = r#"
 services:
@@ -452,6 +554,28 @@ services:
         assert!(error.to_string().contains("no unique matching"));
         assert!(!error.to_string().contains("first-secret"));
         assert!(!error.to_string().contains("second-secret"));
+    }
+
+    #[test]
+    fn merge_rejects_duplicate_submitted_sequence_identity() {
+        let authoritative = r#"
+services:
+  - id: service-1
+    token: original-secret
+"#;
+        let submitted = r#"
+services:
+  - id: service-1
+    token: replacement-secret
+  - id: service-1
+    token: "[REDACTED]"
+"#;
+
+        let error = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect_err("submitted sequence identities must be unique");
+
+        assert!(error.to_string().contains("no unique matching"));
+        assert!(!error.to_string().contains("original-secret"));
     }
 
     #[test]
@@ -493,5 +617,25 @@ tracker:
 
         assert!(!format!("{edit:?}").contains("ghp_literal_secret"));
         assert!(!format!("{value:?}").contains("ghp_literal_secret"));
+    }
+
+    #[test]
+    fn secret_edit_rejects_malformed_environment_variable_names() {
+        for variable in ["FOO=BAR", "1TOKEN", "TOKEN-NAME", "$TOKEN", "TOKEN NAME"] {
+            let error = SecretEdit::SetEnvironment {
+                variable: variable.to_string(),
+            }
+            .validate()
+            .expect_err("environment references must use the supported variable-name grammar");
+
+            assert!(error.to_string().contains("environment variable name"));
+        }
+        for variable in ["GITHUB_TOKEN", "_TOKEN", "TOKEN1"] {
+            SecretEdit::SetEnvironment {
+                variable: variable.to_string(),
+            }
+            .validate()
+            .expect("valid environment variable names should be accepted");
+        }
     }
 }

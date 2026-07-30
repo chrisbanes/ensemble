@@ -122,6 +122,37 @@ describe("GuidedEditor", () => {
     expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
   });
 
+  it("disables validation and save for a malformed secret environment name", () => {
+    const githubForm: GuidedForm = {
+      ...initialForm,
+      tracker: {
+        kind: "github",
+        repository: "acme/repo",
+        api_key: { state: "environment", variable: "GITHUB_TOKEN" },
+        api_key_edit: { action: "set_environment", variable: "FOO=BAR" },
+        active_states: ["Todo"],
+        terminal_states: ["Done"],
+        labels_filter: [],
+      },
+    };
+
+    renderWithProviders(
+      <GuidedEditor
+        initialForm={githubForm}
+        baseRawYaml={"tracker:\n  kind: github\n  api_key: \"$GITHUB_TOKEN\"\n"}
+        issues={[]}
+        onValidate={vi.fn(async () => [])}
+        onSave={vi.fn(async () => undefined)}
+        onReset={vi.fn()}
+      />,
+      { route: "/config" }
+    );
+
+    expect(screen.getByText(/valid environment variable name/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /validate/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+  });
+
   it("shows validation issues returned by validate without waiting for save", async () => {
     const user = userEvent.setup();
 

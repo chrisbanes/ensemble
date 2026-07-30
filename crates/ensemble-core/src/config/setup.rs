@@ -1536,26 +1536,38 @@ on_failure: Failed
     }
 
     #[test]
-    fn setup_merge_rejects_blank_secret_replacements() {
-        for edit in [
-            SecretEdit::SetLiteral {
-                value: " \t".to_string(),
-            },
-            SecretEdit::SetEnvironment {
-                variable: " \t".to_string(),
-            },
+    fn setup_merge_rejects_invalid_secret_replacements() {
+        for (edit, expected) in [
+            (
+                SecretEdit::SetLiteral {
+                    value: " \t".to_string(),
+                },
+                "must not be blank",
+            ),
+            (
+                SecretEdit::SetEnvironment {
+                    variable: " \t".to_string(),
+                },
+                "must not be blank",
+            ),
+            (
+                SecretEdit::SetEnvironment {
+                    variable: "FOO=BAR".to_string(),
+                },
+                "environment variable name",
+            ),
         ] {
             let error = merge_setup_request(None, &github_setup_request(edit))
-                .expect_err("blank secret replacements must not reach persistence");
+                .expect_err("invalid secret replacements must not reach persistence");
 
-            assert!(error.to_string().contains("must not be blank"));
+            assert!(error.to_string().contains(expected));
         }
     }
 
     #[tokio::test]
-    async fn setup_checks_reject_blank_secret_replacements() {
-        let checks = run_setup_checks(&github_setup_request(SecretEdit::SetLiteral {
-            value: String::new(),
+    async fn setup_checks_reject_invalid_secret_replacements() {
+        let checks = run_setup_checks(&github_setup_request(SecretEdit::SetEnvironment {
+            variable: "FOO=BAR".to_string(),
         }))
         .await;
         let config_check = checks
@@ -1564,7 +1576,7 @@ on_failure: Failed
             .expect("setup checks should include generated config validation");
 
         assert!(!config_check.passed);
-        assert!(config_check.detail.contains("must not be blank"));
+        assert!(config_check.detail.contains("environment variable name"));
         assert!(!setup_can_save(&checks));
     }
 

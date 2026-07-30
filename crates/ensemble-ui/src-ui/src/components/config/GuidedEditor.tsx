@@ -7,6 +7,7 @@ import { AlertCircle, Save, RotateCcw, Check, FileText } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import FileBrowser from "./FileBrowser";
 import WorkflowEditor from "./WorkflowEditor";
+import { secretEditValidationError } from "./secretEditValidation";
 import type { SecretDisplay, SecretEdit, ValidationIssue } from "@/generated/models";
 
 type CapabilityDefinition = {
@@ -42,13 +43,6 @@ function permissionModeOptions(availableModes: CapabilityDefinition[] | undefine
 
 function supportedPermissionMode(value: string | undefined) {
   return value && SUPPORTED_PERMISSION_MODES.has(value) ? value : undefined;
-}
-
-function secretEditIsValid(edit: SecretEdit | undefined) {
-  if (!edit || edit.action === "preserve" || edit.action === "remove") return true;
-  return edit.action === "set_literal"
-    ? edit.value.trim().length > 0
-    : edit.variable.trim().length > 0;
 }
 
 function normalizeGuidedForm(form: GuidedForm): GuidedForm {
@@ -231,7 +225,7 @@ export default function GuidedEditor({
     label: a.name,
   }));
   const secretEdit = form.tracker.api_key_edit ?? { action: "preserve" as const };
-  const secretEditValid = secretEditIsValid(secretEdit);
+  const secretEditError = secretEditValidationError(secretEdit);
   const secretStatus =
     form.tracker.api_key.state === "redacted"
       ? "Existing secret is configured."
@@ -269,13 +263,13 @@ export default function GuidedEditor({
           <Button
             variant="outline"
             onClick={handleValidate}
-            disabled={isValidating || !secretEditValid}
+            disabled={isValidating || Boolean(secretEditError)}
           >
             Validate
           </Button>
           <Button
             onClick={handleSave}
-            disabled={!isDirty || isSaving || hasErrors || !secretEditValid}
+            disabled={!isDirty || isSaving || hasErrors || Boolean(secretEditError)}
           >
             <Save className="h-4 w-4 mr-2" />
             {isSaving ? "Saving..." : "Save"}
@@ -455,8 +449,8 @@ export default function GuidedEditor({
                   placeholder="GITHUB_TOKEN"
                 />
               )}
-              {!secretEditValid && (
-                <p className="text-sm text-destructive">Secret replacement must not be blank.</p>
+              {secretEditError && (
+                <p className="text-sm text-destructive">{secretEditError}</p>
               )}
             </div>
           </div>
