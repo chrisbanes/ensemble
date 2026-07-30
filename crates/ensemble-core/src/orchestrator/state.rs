@@ -7,7 +7,7 @@ use crate::interaction::model::InteractionKind;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
+use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig};
 use crate::history::artifacts::RunArtifacts;
 use crate::orchestrator::pipeline_journal::PendingTerminalTransition;
 use crate::pipeline::engine::PipelineRun;
@@ -515,6 +515,11 @@ impl OrchestratorState {
         self.pipeline_configs.insert(issue_id.to_string(), config);
     }
 
+    pub fn insert_terminal_pipeline_run(&mut self, issue_id: &str, run: PipelineRun) {
+        self.pipeline_runs.insert(issue_id.to_string(), run);
+        self.pipeline_configs.remove(issue_id);
+    }
+
     /// Remove and return a pipeline run.
     pub fn remove_pipeline_run(&mut self, issue_id: &str) -> Option<PipelineRun> {
         self.pipeline_configs.remove(issue_id);
@@ -603,9 +608,14 @@ impl OrchestratorState {
                 .map(|entry| entry.status.clone())
                 .unwrap_or_else(|| "completed_succeeded".to_string())
         });
-        let workflow_steps = config
+        let workflow_steps = run
             .as_ref()
-            .map(|config| completed_workflow_steps(config, run.as_ref()))
+            .map(completed_workflow_steps_from_run)
+            .or_else(|| {
+                config
+                    .as_ref()
+                    .map(|config| completed_workflow_steps_from_config(config))
+            })
             .or_else(|| {
                 self.completed
                     .get(issue_id)
@@ -682,10 +692,7 @@ impl OrchestratorState {
     }
 }
 
-fn completed_workflow_steps(
-    config: &EnsembleConfig,
-    run: Option<&PipelineRun>,
-) -> Vec<CompletedWorkflowStep> {
+fn completed_workflow_steps_from_config(config: &EnsembleConfig) -> Vec<CompletedWorkflowStep> {
     config
         .steps
         .iter()
@@ -694,16 +701,28 @@ fn completed_workflow_steps(
             agent: step.agent.clone(),
             kind: step.kind.to_string(),
             dependencies: step.depends.clone().unwrap_or_default(),
-            state: completed_step_state(step, run),
-            can_navigate: run
-                .map(|pipeline_run| pipeline_run.step_states.contains_key(&step.name))
-                .unwrap_or(false),
+            state: "unknown".to_string(),
+            can_navigate: false,
         })
         .collect()
 }
 
-fn completed_step_state(step: &StepConfig, run: Option<&PipelineRun>) -> String {
-    run.and_then(|pipeline_run| pipeline_run.step_states.get(&step.name))
+fn completed_workflow_steps_from_run(run: &PipelineRun) -> Vec<CompletedWorkflowStep> {
+    run.workflow_steps()
+        .map(|step| CompletedWorkflowStep {
+            name: step.name.clone(),
+            agent: step.agent.clone(),
+            kind: step.kind.to_string(),
+            dependencies: step.depends.clone(),
+            state: completed_step_state_for_name(&step.name, run),
+            can_navigate: run.step_states.contains_key(&step.name),
+        })
+        .collect()
+}
+
+fn completed_step_state_for_name(step_name: &str, run: &PipelineRun) -> String {
+    run.step_states
+        .get(step_name)
         .map(|state| match state {
             crate::pipeline::engine::StepState::Pending => "pending",
             crate::pipeline::engine::StepState::Running { .. } => "running",

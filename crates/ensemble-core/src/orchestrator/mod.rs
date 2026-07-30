@@ -942,10 +942,8 @@ impl Orchestrator {
                                     history_record,
                                 )
                             } else {
-                                let is_terminal_failure = matches!(
-                                    finalize_state.status,
-                                    FinalizeStatus::Failed | FinalizeStatus::SkippedHeadless
-                                );
+                                let is_terminal_failure =
+                                    finalize_state.status == FinalizeStatus::SkippedHeadless;
                                 if let Some(entry) = state.remove_running(&issue.id) {
                                     state.add_runtime_seconds(&entry);
                                 }
@@ -1727,10 +1725,8 @@ impl Orchestrator {
                                         history_record,
                                     )
                                 } else {
-                                    let is_terminal_failure = matches!(
-                                        finalize_state.status,
-                                        FinalizeStatus::Failed | FinalizeStatus::SkippedHeadless
-                                    );
+                                    let is_terminal_failure =
+                                        finalize_state.status == FinalizeStatus::SkippedHeadless;
                                     if let Some(entry) = state.remove_running(issue_id) {
                                         state.add_runtime_seconds(&entry);
                                     }
@@ -3379,7 +3375,11 @@ impl Orchestrator {
             return Ok(());
         }
 
-        state.insert_pipeline_run(&record.issue_id, run, Arc::clone(&config_snapshot));
+        if is_pending_terminal {
+            state.insert_terminal_pipeline_run(&record.issue_id, run);
+        } else {
+            state.insert_pipeline_run(&record.issue_id, run, Arc::clone(&config_snapshot));
+        }
         state.add_claimed(&record.issue_id);
         if let Some(run_id) = record.run_id.clone() {
             state.issue_run_ids.insert(record.issue_id.clone(), run_id);
@@ -3557,7 +3557,7 @@ impl Orchestrator {
                 error = %error,
                 "failed to persist terminal transition intent"
             );
-            return existing_transition;
+            return Some(transition);
         }
         Some(transition)
     }
@@ -3607,19 +3607,14 @@ impl Orchestrator {
                     })
             }
         };
-        let config_snapshot = if restored_run.is_some() {
-            Some(Arc::new(self.config.read().await.clone()))
-        } else {
-            None
-        };
         {
             let mut state = self.state.write().await;
             if state.get_pipeline_run(issue_id).is_none() {
-                if let (Some((run, run_id)), Some(config)) = (restored_run, config_snapshot) {
+                if let Some((run, run_id)) = restored_run {
                     if let Some(run_id) = run_id {
                         state.issue_run_ids.insert(issue_id.to_string(), run_id);
                     }
-                    state.insert_pipeline_run(issue_id, run, config);
+                    state.insert_terminal_pipeline_run(issue_id, run);
                 }
             }
             let run_id = state
@@ -4074,18 +4069,12 @@ impl Orchestrator {
         config: &EnsembleConfig,
         finalize_state: &IssueFinalizeState,
     ) {
-        let outcome = if matches!(
-            finalize_state.status,
-            FinalizeStatus::Succeeded | FinalizeStatus::NotRequired
-        ) {
-            TerminalOutcome::Succeeded
-        } else if matches!(
-            finalize_state.status,
-            FinalizeStatus::Failed | FinalizeStatus::SkippedHeadless
-        ) {
-            TerminalOutcome::Failed
-        } else {
-            return;
+        let outcome = match finalize_state.status {
+            FinalizeStatus::Succeeded | FinalizeStatus::NotRequired => TerminalOutcome::Succeeded,
+            FinalizeStatus::SkippedHeadless => TerminalOutcome::Failed,
+            FinalizeStatus::PendingApproval
+            | FinalizeStatus::InProgress
+            | FinalizeStatus::Failed => return,
         };
         let target_state = match outcome {
             TerminalOutcome::Succeeded => config.on_success.clone(),
@@ -4369,38 +4358,11 @@ impl Orchestrator {
                         }
                     }
                 }
-                let config_snapshot = self.config.read().await.clone();
-                let target_state = config_snapshot.on_failure.clone();
-                if let Some(finalize_state) = self
-                    .state
-                    .read()
-                    .await
-                    .get_finalize_state(issue_id)
-                    .cloned()
-                {
-                    self.stage_finalization_terminal_transition(
-                        issue_id,
-                        issue_identifier,
-                        &config_snapshot,
-                        &finalize_state,
-                    )
-                    .await;
-                }
-                let issue = self
-                    .tracker
-                    .fetch_issue_states_by_ids(&[issue_id.to_string()])
-                    .await
-                    .ok()
-                    .and_then(|issues| issues.into_iter().next());
-                self.begin_terminal_transition_for_identity(
-                    issue_id,
-                    issue_identifier,
-                    issue,
-                    TerminalOutcome::Failed,
-                    target_state,
-                    None,
-                )
-                .await;
+                warn!(
+                    issue_id = %issue_id,
+                    error = %error,
+                    "finalize retry workspace preparation failed"
+                );
                 return;
             }
         };
@@ -4517,22 +4479,13 @@ impl Orchestrator {
             (final_status, should_complete, last_error)
         };
 
-        let terminal_outcome = if should_complete {
-            Some(TerminalOutcome::Succeeded)
-        } else if final_status == FinalizeStatus::Failed {
-            Some(TerminalOutcome::Failed)
-        } else {
-            None
-        };
-        if let Some(outcome) = terminal_outcome {
+        if should_complete {
+            let outcome = TerminalOutcome::Succeeded;
             let config_snapshot = {
                 let config = self.config.read().await;
                 config.clone()
             };
-            let target_state = match outcome {
-                TerminalOutcome::Succeeded => config_snapshot.on_success.clone(),
-                TerminalOutcome::Failed => config_snapshot.on_failure.clone(),
-            };
+            let target_state = config_snapshot.on_success.clone();
             if let Some(finalize_state) = self
                 .state
                 .read()
@@ -4563,9 +4516,13 @@ impl Orchestrator {
                 None,
             )
             .await;
-            if let Some(error) = last_error {
-                warn!(issue_id = %issue_id, error = %error, "finalize retry failed");
-            }
+        } else if let Some(error) = last_error {
+            warn!(
+                issue_id = %issue_id,
+                status = ?final_status,
+                error = %error,
+                "finalize retry failed"
+            );
         }
     }
 
@@ -7992,6 +7949,159 @@ agent:
         drop(repo_temp);
     }
 
+    #[tokio::test]
+    async fn terminal_intent_persistence_retries_in_memory_without_holding_a_slot() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let state_writes = Arc::new(RwLock::new(Vec::new()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+            state_writes: Arc::clone(&state_writes),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(workspace_temp.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+
+        tokio::fs::create_dir_all(workspace_temp.path().join("state"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            workspace_temp.path().join("state").join("pipeline-runs"),
+            b"not a directory",
+        )
+        .await
+        .unwrap();
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        {
+            let state = orchestrator.state.read().await;
+            assert!(!state.is_running("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            assert!(state.pending_terminal_transitions.contains_key("1"));
+            assert!(!state.completed.contains_key("1"));
+        }
+        assert!(state_writes.read().await.is_empty());
+
+        tokio::fs::remove_file(workspace_temp.path().join("state").join("pipeline-runs"))
+            .await
+            .unwrap();
+        orchestrator.handle_tick().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_claimed("1"));
+        assert!(state.pending_terminal_transitions.get("1").is_none());
+        assert!(state.completed.contains_key("1"));
+        drop(state);
+        assert_eq!(
+            state_writes.read().await.as_slice(),
+            &[("1".to_string(), "Done".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_failure_remains_parked_for_operator_retry() {
+        let (repo_temp, repo_config) = create_finalize_repo().await;
+        let config = Arc::new(RwLock::new(make_config()));
+        let state_writes = Arc::new(RwLock::new(Vec::new()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+            state_writes: Arc::clone(&state_writes),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.mark_running("build", "session-1".to_string());
+
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+        }
+        drop(repo_temp);
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let finalize = state.get_finalize_state("1").unwrap();
+        assert_eq!(finalize.status, FinalizeStatus::Failed);
+        assert!(finalize
+            .repos
+            .iter()
+            .any(|repo| repo.status == FinalizeStatus::Failed));
+        assert!(!state.is_running("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        assert!(state.pending_terminal_transitions.get("1").is_none());
+        assert!(!state.completed.contains_key("1"));
+        drop(state);
+        assert!(state_writes.read().await.is_empty());
+    }
+
     #[test]
     fn finalization_attempt_rejects_missing_or_replaced_running_entry() {
         let config = make_config();
@@ -9991,7 +10101,11 @@ agent:
     #[tokio::test]
     async fn pending_terminal_transition_retries_after_restart_without_rerunning_work() {
         let config_dir = tempfile::TempDir::new().unwrap();
-        let config = Arc::new(RwLock::new(make_config()));
+        let original_config = make_config();
+        let original_agent = original_config.steps[0].agent.clone();
+        let mut current_config = original_config.clone();
+        current_config.steps[0].agent = "replacement-agent".to_string();
+        let config = Arc::new(RwLock::new(current_config));
         let issue = test_issue("1", "Todo");
         let failures_remaining = Arc::new(RwLock::new(1));
         let state_writes = Arc::new(RwLock::new(Vec::new()));
@@ -10015,8 +10129,7 @@ agent:
             shutdown_rx,
         );
 
-        let cfg = config.read().await;
-        let dag = build_dag(&cfg.steps).unwrap();
+        let dag = build_dag(&original_config.steps).unwrap();
         let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
         run.start();
         run.mark_running("build", "finished-session".to_string());
@@ -10024,8 +10137,6 @@ agent:
             run.step_completed("build", succeeded_step_output(), false),
             PipelineAction::Succeeded
         );
-        drop(cfg);
-
         orchestrator
             .pipeline_journal
             .append(PipelineTransitionInput {
@@ -10075,7 +10186,9 @@ agent:
         assert!(!state.is_claimed("1"));
         assert!(state.pending_terminal_transitions.get("1").is_none());
         assert!(state.get_pipeline_run("1").is_none());
-        assert!(state.completed.contains_key("1"));
+        let completed = state.completed.get("1").unwrap();
+        assert_eq!(completed.workflow_steps.len(), 1);
+        assert_eq!(completed.workflow_steps[0].agent, original_agent);
         drop(state);
         assert_eq!(
             state_writes.read().await.as_slice(),
