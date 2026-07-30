@@ -155,3 +155,17 @@ Before finishing any change, check whether it changes documented behavior. Updat
 - **Manual refresh behavior**: Refresh, retry, and resume controls should signal the orchestrator loop to run a tick; do not implement ad-hoc polling/state mutation in API or UI handlers that bypasses the orchestrator.
 - **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
 - **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs are tracked in GitHub Issues. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the default canonical triage labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This repository uses the single-context domain documentation layout. See `docs/agents/domain.md`.
