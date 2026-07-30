@@ -974,6 +974,147 @@ async fn respond_to_question_marks_interaction_resolved() {
 }
 
 #[tokio::test]
+async fn concurrent_interaction_api_responses_have_one_winner_and_one_durable_audit() {
+    let temp_dir = TempDir::new().unwrap();
+    let config_path = temp_dir.path().join("ensemble_test_config.yaml");
+    let first_state = build_app_state(
+        &temp_dir,
+        OrchestratorState::new(30000, &ConcurrencyConfig::default()),
+        parsed_document_state(config_path.clone()),
+    );
+    let second_state = build_app_state(
+        &temp_dir,
+        OrchestratorState::new(30000, &ConcurrencyConfig::default()),
+        parsed_document_state(config_path),
+    );
+    create_interaction(
+        &first_state,
+        test_interaction("interaction-api-race", "NODE_789", "my-repo#77"),
+    )
+    .await;
+
+    let first_url = start_test_server(first_state.clone()).await;
+    let second_url = start_test_server(second_state).await;
+    let client = reqwest::Client::new();
+    let first = client
+        .post(format!(
+            "{first_url}/api/v1/interactions/interaction-api-race/respond"
+        ))
+        .json(&serde_json::json!({
+            "kind": "question",
+            "response_schema_version": 1,
+            "text": "Use staging",
+            "selected_option": "staging"
+        }))
+        .send();
+    let second = client
+        .post(format!(
+            "{second_url}/api/v1/interactions/interaction-api-race/respond"
+        ))
+        .json(&serde_json::json!({
+            "kind": "question",
+            "response_schema_version": 1,
+            "text": "Use production",
+            "selected_option": "production"
+        }))
+        .send();
+
+    let (first, second) = tokio::join!(first, second);
+    let statuses = [first.unwrap().status(), second.unwrap().status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == reqwest::StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+
+    let config_dir = first_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let stored = InteractionStore::new(config_dir)
+        .get("interaction-api-race")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, InteractionStatus::Resolved);
+    assert!(stored.response.is_some());
+    let accepted = stored.accepted_command.as_ref().unwrap();
+    assert_eq!(accepted.author, "local-api");
+    assert!(accepted.comment_id.starts_with("local-api-"));
+    assert!(accepted.raw_body.contains("\"kind\":\"question\""));
+    assert_eq!(stored.ignored_commands.len(), 1);
+    let ignored = &stored.ignored_commands[0];
+    assert_eq!(ignored.author, "local-api");
+    assert!(ignored.comment_id.starts_with("local-api-"));
+    assert_ne!(ignored.comment_id, accepted.comment_id);
+    assert!(ignored.raw_body.contains("\"kind\":\"question\""));
+    assert_eq!(ignored.reason, "interaction_already_resolved");
+}
+
+#[tokio::test]
+async fn interaction_api_response_after_cancellation_is_audited_before_conflict() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    create_interaction(
+        &app_state,
+        test_interaction("interaction-api-cancelled", "NODE_789", "my-repo#77"),
+    )
+    .await;
+    let config_dir = app_state
+        .config_runtime
+        .config_path
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    InteractionStore::new(config_dir.clone())
+        .cancel("interaction-api-cancelled")
+        .await
+        .unwrap();
+
+    let base_url = start_test_server(app_state).await;
+    let response = reqwest::Client::new()
+        .post(format!(
+            "{base_url}/api/v1/interactions/interaction-api-cancelled/respond"
+        ))
+        .json(&serde_json::json!({
+            "kind": "question",
+            "response_schema_version": 1,
+            "text": "Use staging",
+            "selected_option": "staging"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "already_cancelled");
+
+    let stored = InteractionStore::new(config_dir)
+        .get("interaction-api-cancelled")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.status, InteractionStatus::Cancelled);
+    assert_eq!(stored.ignored_commands.len(), 1);
+    assert_eq!(stored.ignored_commands[0].author, "local-api");
+    assert_eq!(
+        stored.ignored_commands[0].reason,
+        "interaction_already_cancelled"
+    );
+}
+
+#[tokio::test]
 async fn cancel_interaction_returns_conflict_when_already_resolved() {
     let (app_state, _temp_dir) = build_populated_app_state();
     create_interaction(

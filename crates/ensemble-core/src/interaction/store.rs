@@ -1,6 +1,7 @@
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, Weak};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -12,28 +13,48 @@ use crate::interaction::model::{
     InteractionResponse, InteractionStatus,
 };
 
+type RecordLock = Arc<Mutex<()>>;
+type RecordLockRegistry = std::sync::Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>;
+
+static RECORD_LOCKS: OnceLock<RecordLockRegistry> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InteractionAcceptance {
+    Accepted(InteractionRequest),
+    Ignored(InteractionRequest),
+}
+
 #[derive(Debug, Clone)]
 pub struct InteractionStore {
     config_dir: PathBuf,
-    create_mutex: std::sync::Arc<Mutex<()>>,
-    command_locks: std::sync::Arc<std::sync::Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>>,
+    create_mutex: Arc<Mutex<()>>,
 }
 
 impl InteractionStore {
     pub fn new(config_dir: PathBuf) -> Self {
         Self {
             config_dir,
-            create_mutex: std::sync::Arc::new(Mutex::new(())),
-            command_locks: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            create_mutex: Arc::new(Mutex::new(())),
         }
     }
 
-    fn command_lock_for(&self, id: &str) -> std::sync::Arc<Mutex<()>> {
-        let mut locks = self.command_locks.lock().unwrap();
-        locks
-            .entry(id.to_string())
-            .or_insert_with(|| std::sync::Arc::new(Mutex::new(())))
-            .clone()
+    fn record_lock_for(&self, id: &str) -> RecordLock {
+        let path = self.path_for_id(id);
+        let key = std::fs::canonicalize(&path)
+            .or_else(|_| std::path::absolute(&path))
+            .unwrap_or(path);
+        let registry = RECORD_LOCKS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+        let mut locks = registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+            return lock;
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(key, Arc::downgrade(&lock));
+        lock
     }
 
     pub fn config_dir(&self) -> &Path {
@@ -106,6 +127,8 @@ impl InteractionStore {
         id: &str,
         response: InteractionResponse,
     ) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.record_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -137,6 +160,8 @@ impl InteractionStore {
         root_comment_id: String,
         root_comment_url: Option<String>,
     ) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.record_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -152,6 +177,8 @@ impl InteractionStore {
         id: &str,
         comment_id: String,
     ) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.record_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -161,35 +188,61 @@ impl InteractionStore {
         Ok(interaction)
     }
 
-    pub async fn accept_first_command(
+    pub async fn accept_response(
         &self,
         id: &str,
         command: AcceptedInteractionCommand,
-    ) -> Result<InteractionRequest, InteractionError> {
-        let lock = self.command_lock_for(id);
+        response: InteractionResponse,
+    ) -> Result<InteractionAcceptance, InteractionError> {
+        let lock = self.record_lock_for(id);
         let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
             .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
 
-        match interaction.status {
-            InteractionStatus::Resolved => {
-                return Err(InteractionError::AlreadyResolved { id: id.to_string() });
-            }
-            InteractionStatus::Cancelled => {
-                return Err(InteractionError::AlreadyCancelled { id: id.to_string() });
-            }
-            InteractionStatus::Open => {}
+        validate_response_kind(&interaction.kind, &response)?;
+
+        if interaction
+            .accepted_command
+            .as_ref()
+            .is_some_and(|accepted| accepted.comment_id == command.comment_id)
+            || interaction
+                .ignored_commands
+                .iter()
+                .any(|ignored| ignored.comment_id == command.comment_id)
+        {
+            return Ok(InteractionAcceptance::Ignored(interaction));
         }
 
-        if interaction.accepted_command.is_some() {
-            return Err(InteractionError::CommandAlreadyAccepted { id: id.to_string() });
+        if interaction.status != InteractionStatus::Open || interaction.accepted_command.is_some() {
+            let reason = match interaction.status {
+                InteractionStatus::Cancelled => "interaction_already_cancelled",
+                InteractionStatus::Open | InteractionStatus::Resolved => {
+                    "interaction_already_resolved"
+                }
+            };
+            interaction
+                .ignored_commands
+                .push(IgnoredInteractionCommand {
+                    command: Some(command.command),
+                    raw_body: command.raw_body,
+                    author: command.author,
+                    comment_id: command.comment_id,
+                    received_at: command.received_at,
+                    reason: reason.to_string(),
+                });
+            self.write_interaction(&interaction).await?;
+            return Ok(InteractionAcceptance::Ignored(interaction));
         }
 
         interaction.accepted_command = Some(command);
+        interaction.status = InteractionStatus::Resolved;
+        interaction.awaiting_resume = true;
+        interaction.response = Some(response);
+        interaction.resolved_at = Some(Utc::now());
         self.write_interaction(&interaction).await?;
-        Ok(interaction)
+        Ok(InteractionAcceptance::Accepted(interaction))
     }
 
     pub async fn append_ignored_command(
@@ -197,7 +250,7 @@ impl InteractionStore {
         id: &str,
         command: IgnoredInteractionCommand,
     ) -> Result<InteractionRequest, InteractionError> {
-        let lock = self.command_lock_for(id);
+        let lock = self.record_lock_for(id);
         let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
@@ -209,6 +262,8 @@ impl InteractionStore {
     }
 
     pub async fn cancel(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.record_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -232,6 +287,8 @@ impl InteractionStore {
     }
 
     pub async fn mark_resumed(&self, id: &str) -> Result<InteractionRequest, InteractionError> {
+        let lock = self.record_lock_for(id);
+        let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
@@ -246,17 +303,25 @@ impl InteractionStore {
         &self,
         id: &str,
     ) -> Result<InteractionRequest, InteractionError> {
-        let interaction = self
+        let lock = self.record_lock_for(id);
+        let _guard = lock.lock().await;
+        let mut interaction = self
             .get(id)
             .await?
             .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
 
         match interaction.status {
-            InteractionStatus::Open => self.cancel(id).await,
+            InteractionStatus::Open => {
+                interaction.status = InteractionStatus::Cancelled;
+                interaction.awaiting_resume = false;
+                interaction.resolved_at = Some(Utc::now());
+            }
             InteractionStatus::Resolved | InteractionStatus::Cancelled => {
-                self.mark_resumed(id).await
+                interaction.awaiting_resume = false;
             }
         }
+        self.write_interaction(&interaction).await?;
+        Ok(interaction)
     }
 
     async fn list_all(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
@@ -411,7 +476,7 @@ fn unique_temp_path(dir: &Path, id: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::InteractionStore;
+    use super::{InteractionAcceptance, InteractionStore};
     use crate::interaction::error::InteractionError;
     use crate::interaction::model::{
         AcceptedInteractionCommand, IgnoredInteractionCommand, InteractionKind, InteractionRequest,
@@ -765,46 +830,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_first_command_and_rejects_second() {
-        let dir = tempdir().unwrap();
-        let store = InteractionStore::new(dir.path().to_path_buf());
-        store
-            .create(sample_question("int_cmd", "issue-1", "ACME-1"))
-            .await
-            .unwrap();
-
-        let accepted = AcceptedInteractionCommand {
-            command: "/approve".to_string(),
-            raw_body: "/approve".to_string(),
-            author: "alice".to_string(),
-            comment_id: "c1".to_string(),
-            received_at: Utc::now(),
-        };
-        store
-            .accept_first_command("int_cmd", accepted)
-            .await
-            .unwrap();
-
-        let err = store
-            .accept_first_command(
-                "int_cmd",
-                AcceptedInteractionCommand {
-                    command: "/reject".to_string(),
-                    raw_body: "/reject nope".to_string(),
-                    author: "bob".to_string(),
-                    comment_id: "c2".to_string(),
-                    received_at: Utc::now(),
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(
-            err,
-            InteractionError::CommandAlreadyAccepted { .. }
-        ));
-    }
-
-    #[tokio::test]
     async fn appends_ignored_commands() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
@@ -834,60 +859,276 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cannot_accept_command_when_interaction_is_resolved_or_cancelled() {
+    async fn interaction_acceptance_is_atomic_across_store_instances() {
+        let dir = tempdir().unwrap();
+        let creator = InteractionStore::new(dir.path().to_path_buf());
+        creator
+            .create(sample_question("int_race", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let first_store = InteractionStore::new(dir.path().to_path_buf());
+        let second_store = InteractionStore::new(dir.path().to_path_buf());
+        let first_barrier = Arc::clone(&barrier);
+        let second_barrier = Arc::clone(&barrier);
+
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_store
+                .accept_response(
+                    "int_race",
+                    AcceptedInteractionCommand {
+                        command: "/answer".to_string(),
+                        raw_body: "/answer staging".to_string(),
+                        author: "alice".to_string(),
+                        comment_id: "c1".to_string(),
+                        received_at: Utc::now(),
+                    },
+                    InteractionResponse::Question {
+                        response_schema_version: 1,
+                        text: "staging".to_string(),
+                        selected_option: None,
+                    },
+                )
+                .await
+        });
+        let second = tokio::spawn(async move {
+            second_barrier.wait().await;
+            second_store
+                .accept_response(
+                    "int_race",
+                    AcceptedInteractionCommand {
+                        command: "/answer".to_string(),
+                        raw_body: "/answer production".to_string(),
+                        author: "bob".to_string(),
+                        comment_id: "c2".to_string(),
+                        received_at: Utc::now(),
+                    },
+                    InteractionResponse::Question {
+                        response_schema_version: 1,
+                        text: "production".to_string(),
+                        selected_option: None,
+                    },
+                )
+                .await
+        });
+
+        let outcomes = [
+            first.await.unwrap().unwrap(),
+            second.await.unwrap().unwrap(),
+        ];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, InteractionAcceptance::Accepted(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, InteractionAcceptance::Ignored(_)))
+                .count(),
+            1
+        );
+
+        let stored = creator.get("int_race").await.unwrap().unwrap();
+        assert_eq!(stored.status, InteractionStatus::Resolved);
+        assert!(stored.response.is_some());
+        assert!(stored.accepted_command.is_some());
+        assert_eq!(stored.ignored_commands.len(), 1);
+        assert_eq!(
+            stored.ignored_commands[0].reason,
+            "interaction_already_resolved"
+        );
+        assert_ne!(
+            stored.accepted_command.as_ref().unwrap().comment_id,
+            stored.ignored_commands[0].comment_id
+        );
+    }
+
+    #[tokio::test]
+    async fn interaction_acceptance_preserves_concurrent_cursor_update() {
+        let dir = tempdir().unwrap();
+        let creator = InteractionStore::new(dir.path().to_path_buf());
+        creator
+            .create(sample_question("int_cursor", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let acceptance_store = InteractionStore::new(dir.path().to_path_buf());
+        let cursor_store = InteractionStore::new(dir.path().to_path_buf());
+        let acceptance_barrier = Arc::clone(&barrier);
+        let cursor_barrier = Arc::clone(&barrier);
+
+        let acceptance = tokio::spawn(async move {
+            acceptance_barrier.wait().await;
+            acceptance_store
+                .accept_response(
+                    "int_cursor",
+                    AcceptedInteractionCommand {
+                        command: "/answer".to_string(),
+                        raw_body: "/answer staging".to_string(),
+                        author: "alice".to_string(),
+                        comment_id: "c1".to_string(),
+                        received_at: Utc::now(),
+                    },
+                    InteractionResponse::Question {
+                        response_schema_version: 1,
+                        text: "staging".to_string(),
+                        selected_option: None,
+                    },
+                )
+                .await
+        });
+        let cursor = tokio::spawn(async move {
+            cursor_barrier.wait().await;
+            cursor_store
+                .update_last_processed_comment("int_cursor", "c1".to_string())
+                .await
+        });
+
+        acceptance.await.unwrap().unwrap();
+        cursor.await.unwrap().unwrap();
+
+        let stored = creator.get("int_cursor").await.unwrap().unwrap();
+        assert_eq!(stored.status, InteractionStatus::Resolved);
+        assert!(stored.accepted_command.is_some());
+        assert!(stored.response.is_some());
+        assert_eq!(stored.last_processed_comment_id.as_deref(), Some("c1"));
+    }
+
+    #[tokio::test]
+    async fn interaction_acceptance_preserves_concurrent_ignored_audit() {
+        let dir = tempdir().unwrap();
+        let creator = InteractionStore::new(dir.path().to_path_buf());
+        creator
+            .create(sample_question("int_audit", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+
+        let barrier = Arc::new(Barrier::new(2));
+        let acceptance_store = InteractionStore::new(dir.path().to_path_buf());
+        let audit_store = InteractionStore::new(dir.path().to_path_buf());
+        let acceptance_barrier = Arc::clone(&barrier);
+        let audit_barrier = Arc::clone(&barrier);
+
+        let acceptance = tokio::spawn(async move {
+            acceptance_barrier.wait().await;
+            acceptance_store
+                .accept_response(
+                    "int_audit",
+                    AcceptedInteractionCommand {
+                        command: "/answer".to_string(),
+                        raw_body: "/answer staging".to_string(),
+                        author: "alice".to_string(),
+                        comment_id: "c1".to_string(),
+                        received_at: Utc::now(),
+                    },
+                    InteractionResponse::Question {
+                        response_schema_version: 1,
+                        text: "staging".to_string(),
+                        selected_option: None,
+                    },
+                )
+                .await
+        });
+        let audit = tokio::spawn(async move {
+            audit_barrier.wait().await;
+            audit_store
+                .append_ignored_command(
+                    "int_audit",
+                    IgnoredInteractionCommand {
+                        command: None,
+                        raw_body: "not a command".to_string(),
+                        author: "bob".to_string(),
+                        comment_id: "c2".to_string(),
+                        received_at: Utc::now(),
+                        reason: "not_a_supported_command".to_string(),
+                    },
+                )
+                .await
+        });
+
+        acceptance.await.unwrap().unwrap();
+        audit.await.unwrap().unwrap();
+
+        let stored = creator.get("int_audit").await.unwrap().unwrap();
+        assert_eq!(stored.status, InteractionStatus::Resolved);
+        assert!(stored.accepted_command.is_some());
+        assert!(stored.response.is_some());
+        assert_eq!(stored.ignored_commands.len(), 1);
+        assert_eq!(stored.ignored_commands[0].comment_id, "c2");
+    }
+
+    #[tokio::test]
+    async fn interaction_acceptance_lock_is_scoped_to_one_interaction() {
         let dir = tempdir().unwrap();
         let store = InteractionStore::new(dir.path().to_path_buf());
         store
-            .create(sample_question("int_closed", "issue-1", "ACME-1"))
+            .create(sample_question("int_a", "issue-1", "ACME-1"))
             .await
             .unwrap();
         store
-            .resolve(
-                "int_closed",
-                InteractionResponse::Question {
-                    response_schema_version: 1,
-                    text: "answer".to_string(),
-                    selected_option: None,
-                },
-            )
+            .create(sample_question("int_b", "issue-2", "ACME-2"))
             .await
             .unwrap();
 
-        let err = store
-            .accept_first_command(
-                "int_closed",
-                AcceptedInteractionCommand {
-                    command: "/approve".to_string(),
-                    raw_body: "/approve".to_string(),
-                    author: "alice".to_string(),
-                    comment_id: "c1".to_string(),
-                    received_at: Utc::now(),
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, InteractionError::AlreadyResolved { .. }));
+        let lock_a = store.record_lock_for("int_a");
+        let _guard_a = lock_a.lock().await;
+        let other_store = InteractionStore::new(dir.path().to_path_buf());
 
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            other_store.update_last_processed_comment("int_b", "c2".to_string()),
+        )
+        .await
+        .expect("interaction B must not wait for interaction A")
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn interaction_acceptance_audits_response_after_cancellation() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
         store
             .create(sample_question("int_cancelled", "issue-2", "ACME-2"))
             .await
             .unwrap();
-        store.cancel("int_cancelled").await.unwrap();
 
-        let err = store
-            .accept_first_command(
+        let cancel_store = InteractionStore::new(dir.path().to_path_buf());
+        let acceptance_store = InteractionStore::new(dir.path().to_path_buf());
+        let (cancelled, outcome) = tokio::join!(
+            cancel_store.cancel("int_cancelled"),
+            acceptance_store.accept_response(
                 "int_cancelled",
                 AcceptedInteractionCommand {
-                    command: "/approve".to_string(),
-                    raw_body: "/approve".to_string(),
+                    command: "/answer".to_string(),
+                    raw_body: "/answer staging".to_string(),
                     author: "alice".to_string(),
                     comment_id: "c2".to_string(),
                     received_at: Utc::now(),
                 },
+                InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "staging".to_string(),
+                    selected_option: None,
+                },
             )
-            .await
-            .unwrap_err();
-        assert!(matches!(err, InteractionError::AlreadyCancelled { .. }));
+        );
+        assert_eq!(cancelled.unwrap().status, InteractionStatus::Cancelled);
+        let outcome = outcome.unwrap();
+        assert!(matches!(outcome, InteractionAcceptance::Ignored(_)));
+
+        let stored = store.get("int_cancelled").await.unwrap().unwrap();
+        assert_eq!(stored.status, InteractionStatus::Cancelled);
+        assert_eq!(stored.ignored_commands.len(), 1);
+        assert_eq!(
+            stored.ignored_commands[0].reason,
+            "interaction_already_cancelled"
+        );
     }
 
     #[tokio::test]

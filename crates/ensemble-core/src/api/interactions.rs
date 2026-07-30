@@ -2,9 +2,10 @@ use crate::api::handlers::ApiError;
 use crate::api::router::AppState;
 use crate::interaction::error::InteractionError;
 use crate::interaction::model::{
-    InteractionKind, InteractionRequest, InteractionResponse, InteractionStatus,
+    AcceptedInteractionCommand, InteractionKind, InteractionRequest, InteractionResponse,
+    InteractionStatus,
 };
-use crate::interaction::store::InteractionStore;
+use crate::interaction::store::{InteractionAcceptance, InteractionStore};
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -12,6 +13,9 @@ use axum::response::IntoResponse;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static LOCAL_API_INPUT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct InteractionDetail {
@@ -50,7 +54,7 @@ impl From<&InteractionRequest> for InteractionDetail {
     }
 }
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InteractionResponseBody {
     Question {
@@ -119,9 +123,6 @@ fn interaction_error_response(error: InteractionError) -> (StatusCode, Json<serd
         InteractionError::NotFound { .. } => (StatusCode::NOT_FOUND, "interaction_not_found"),
         InteractionError::AlreadyResolved { .. } => (StatusCode::CONFLICT, "already_resolved"),
         InteractionError::AlreadyCancelled { .. } => (StatusCode::CONFLICT, "already_cancelled"),
-        InteractionError::CommandAlreadyAccepted { .. } => {
-            (StatusCode::CONFLICT, "command_already_accepted")
-        }
         InteractionError::InvalidResponse { .. } => (StatusCode::BAD_REQUEST, "invalid_response"),
         InteractionError::OpenBlockingInteractionExists { .. }
         | InteractionError::ConcurrentModification { .. }
@@ -238,13 +239,56 @@ pub async fn respond_to_interaction(
         }
     };
 
-    match interaction_store(&state).resolve(&id, body.into()).await {
-        Ok(interaction) => (
+    let raw_body = serde_json::to_string(&body).unwrap_or_default();
+    let response: InteractionResponse = body.into();
+    let received_at = Utc::now();
+    let input_id = format!(
+        "local-api-{}-{}",
+        received_at.timestamp_nanos_opt().unwrap_or_default(),
+        LOCAL_API_INPUT_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let command = AcceptedInteractionCommand {
+        command: api_command_name(&response).to_string(),
+        raw_body,
+        author: "local-api".to_string(),
+        comment_id: input_id,
+        received_at,
+    };
+
+    match interaction_store(&state)
+        .accept_response(&id, command, response)
+        .await
+    {
+        Ok(InteractionAcceptance::Accepted(interaction)) => (
             StatusCode::OK,
             Json(serde_json::to_value(interaction).unwrap()),
         )
             .into_response(),
+        Ok(InteractionAcceptance::Ignored(interaction)) => {
+            let error = if interaction.status == InteractionStatus::Cancelled {
+                InteractionError::AlreadyCancelled { id }
+            } else {
+                InteractionError::AlreadyResolved { id }
+            };
+            interaction_error_response(error).into_response()
+        }
         Err(error) => interaction_error_response(error).into_response(),
+    }
+}
+
+fn api_command_name(response: &InteractionResponse) -> &'static str {
+    match response {
+        InteractionResponse::Question { .. } => "/answer",
+        InteractionResponse::Approval { approved: true, .. }
+        | InteractionResponse::Handoff {
+            completed: true, ..
+        } => "/approve",
+        InteractionResponse::Approval {
+            approved: false, ..
+        }
+        | InteractionResponse::Handoff {
+            completed: false, ..
+        } => "/reject",
     }
 }
 

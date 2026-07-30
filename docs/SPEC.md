@@ -1636,13 +1636,27 @@ Human interaction requirement:
 
 - If an agent run blocks for human input, Ensemble persists an interaction request in its own state.
 - Ensemble mirrors that request to the tracker as a dedicated root comment thread.
-- Only thread replies are eligible for command intake, using strict slash commands:
-  - `/approve`
-  - `/reject <reason>`
-  - `/answer <text>`
+- Only thread replies are eligible for command intake. A GitHub command consists of one strict slash
+  command, one blank line, and the interaction marker on its own final line:
+
+  ```text
+  /approve
+
+  <!-- ensemble:interaction:interaction-123 -->
+  ```
+
+  The supported slash commands remain `/approve`, `/reject <reason>`, and `/answer <text>`.
+  The root interaction comment provides kind-appropriate, copyable blocks containing the real
+  interaction ID. Missing, duplicate, mismatched, prose-wrapped, or non-final markers are invalid.
 - Command parsing uses original posted body text only; edited comment content is ignored.
-- First valid command wins immediately (request-level lock). Later valid/invalid commands are ignored
-  for state transitions and may be audited as ignored events.
+- The first valid response across tracker comments and the local HTTP API wins one atomic
+  compare-and-set against the durable interaction record. Every store instance in the process shares
+  the same lock for that interaction file, while unrelated interactions use independent locks and do
+  not wait for one another's file I/O.
+- The winning command, typed response, resolved status, and resolution timestamp are written
+  together. A later valid attempt is written as an attributed ignored audit before its caller
+  observes the loss, including when cancellation closed the interaction first. Invalid comments are
+  also audited and never transition the interaction.
 
 ### 10.7 Timeouts and Error Mapping
 
@@ -2173,7 +2187,8 @@ Minimum endpoints:
     ```
 
 - `POST /api/v1/interactions/{id}/respond`
-  - Resolves a specific open human interaction. The body is typed by interaction kind.
+  - Attempts to resolve a specific open human interaction. The body is typed by interaction kind and
+    participates in the same first-valid-response compare-and-set as tracker commands.
   - Question response body:
 
     ```json
@@ -2208,7 +2223,14 @@ Minimum endpoints:
     ```
 
   - Suggested response (`200 OK`) shape: the resolved interaction request.
-  - If the interaction is missing or already resolved, return a JSON error with `404` or `409`.
+  - Trusted-local API attempts are audited with author `local-api`, a unique server-generated input
+    ID in `comment_id`, and the serialized typed request in `raw_body`.
+  - If the interaction is missing, return a JSON error with `404`.
+  - If another valid response wins first, durably append the losing API attempt to
+    `ignored_commands` and only then return `409 Conflict`.
+  - If cancellation wins first, durably append the API attempt with an
+    `interaction_already_cancelled` reason before returning the existing `already_cancelled` `409`
+    error.
 
 - `POST /api/v1/issues/{identifier}/resume`
   - Releases a blocked issue after its human interaction has been resolved so the next orchestrator
