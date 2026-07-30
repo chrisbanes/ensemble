@@ -1,0 +1,45 @@
+# Ensemble
+
+Ensemble orchestrates issue-driven, multi-agent software delivery while keeping runtime authority separate from trackers and agent sessions.
+
+## Language
+
+**Issue**:
+A tracker-sourced unit of work normalized into Ensemble's tracker-independent model.
+_Avoid_: Ticket or task when referring to the normalized runtime model
+
+**Tracker**:
+An external source and projection surface for issues; it does not own Ensemble's runtime state.
+_Avoid_: Board, runtime
+
+**Pipeline**:
+The configured directed graph that defines which steps run and how their results control delivery.
+_Avoid_: Workflow when referring to the executable graph
+
+**Step**:
+A named unit of agent or synthesis work within a pipeline.
+_Avoid_: Stage, phase
+
+**Run**:
+One issue's execution through a resolved pipeline.
+_Avoid_: Session when referring to issue-level execution
+
+**Attempt**:
+One execution of a step within a run; retrying creates another attempt without creating another issue.
+_Avoid_: Run, session
+
+**Step output**:
+The structured result by which a step reports success, failure, concern, summary, and downstream data.
+_Avoid_: Verdict
+
+**Interaction request**:
+A durable question, approval, or handoff that blocks a run until a human resolves it.
+_Avoid_: Prompt, comment
+
+**Finalization**:
+The recoverable post-pipeline phase that performs configured repository publication, if any, before an issue is considered complete.
+_Avoid_: Completion, cleanup
+
+**Workspace**:
+The issue-owned filesystem area in which repository worktrees and run artifacts persist across steps and retries.
+_Avoid_: Checkout, repository

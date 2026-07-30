@@ -17,10 +17,11 @@ Single-context repo (most repos):
 ```
 /
 ├── CONTEXT.md
-├── docs/adr/
-│   ├── 0001-event-sourced-orders.md
-│   └── 0002-postgres-for-write-model.md
-└── src/
+├── docs/
+│   ├── adr/
+│   │   ├── 0001-share-one-core-runtime-across-hosts.md
+│   │   └── 0002-treat-the-config-directory-as-a-runtime-boundary.md
+└── crates/
 ```
 
 Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
@@ -48,4 +49,4 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_
+> _Contradicts ADR-0007 (separate launch and session permissions) — but worth reopening because…_

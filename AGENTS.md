@@ -2,7 +2,8 @@
 
 Ensemble is a long-running Rust service that orchestrates multi-agent pipelines against an issue tracker. It reads work from trackers (GitHub Projects, todo files), creates isolated per-issue workspaces, runs named agents through a step DAG (build, review, etc.), collects strict `StepOutput` results, and drives tracker state transitions. Configuration lives in a configuration directory containing `config.yaml`.
 
-See `docs/SPEC.md` for the full specification. See `docs/superpowers/plans/` for implementation plans.
+See `docs/SPEC.md` for the full specification, `CONTEXT.md` for canonical domain
+language, and `docs/adr/` for architectural decisions.
 
 ## Project structure
 
@@ -50,7 +51,7 @@ ensemble/
 │       └── src/
 │           ├── main.rs           # Tauri entry point, runtime management
 │           ├── embedded_ui.rs    # rust-embed SPA serving for Tauri
-│           └── orchestrator.rs   # Legacy desktop orchestrator wrapper (prefer shared bootstrap in server.rs)
+│           └── server.rs         # Desktop HTTP server using the shared ensemble-core bootstrap
 └── .github/workflows/ci.yml     # CI: check, test, clippy, fmt
 ```
 
@@ -139,7 +140,7 @@ This bumps versions in `Cargo.toml` + `tauri.conf.json`, commits, tags, and push
 
 ## Documentation maintenance
 
-Before finishing any change, check whether it changes documented behavior. Update the relevant docs in the same branch when you change config schema/defaults, tracker semantics, pipeline behavior, runtime/agent launch behavior, CLI or API contracts, workspace lifecycle, release/build workflow, or user-visible UI behavior. Prefer `docs/SPEC.md` for canonical behavior, `docs/configuration.md` for config reference, `docs/pipelines.md` for pipeline/step-output behavior, and `docs/superpowers/specs/` or `docs/superpowers/plans/` for design/implementation history. If no docs need changes, call that out in the final summary.
+Before finishing any change, check whether it changes documented behavior. Update the relevant docs in the same branch when you change config schema/defaults, tracker semantics, pipeline behavior, runtime/agent launch behavior, CLI or API contracts, workspace lifecycle, release/build workflow, or user-visible UI behavior. Prefer `docs/SPEC.md` for canonical behavior, `docs/configuration.md` for config reference, `docs/pipelines.md` for pipeline/step-output behavior, and `docs/adr/` for durable architectural decisions. Update `CONTEXT.md` only when canonical domain language changes. If no docs need changes, call that out in the final summary.
 
 ## Git policy
 
@@ -147,14 +148,22 @@ Before finishing any change, check whether it changes documented behavior. Updat
 
 ## Key design decisions
 
-- **Pluggable trackers**: `IssueTracker` is an async trait in `ensemble-core` with read methods and optional write methods (default no-ops). Tracker implementations (GitHub, todo_file) live in `ensemble-core` as sub-modules of `tracker/`.
-- **Config directory based**: All runtime config lives in a configuration directory containing `config.yaml`. `EnsembleConfig` provides typed access with defaults and `$ENV_VAR` resolution. The config directory is resolved via `--config-dir`, `ENSEMBLE_CONFIG_DIR`, or platform defaults. Agent definitions, step DAG, and prompt references are all defined in `config.yaml`. Relative paths are resolved from the config directory.
-- **Agent model discovery**: During `ensemble init`, acpx agent sessions are probed to discover available models. The selected model is stored as `model` in `AgentConfig` and emitted in `config.yaml`.
-- **Multi-agent pipelines**: Named agents run through a step DAG (GitHub Actions-style: sequential by default, `depends` for parallelism). The orchestrator drives state transitions at step boundaries and collects strict `StepOutput` results from hidden extraction turns.
-- **Shared orchestrator startup**: `ensemble run`, `ensemble web` (when compiled with `web-ui`), and desktop/Tauri should all start the same real orchestrator runtime path. Do not add placeholder poll loops or separate per-frontend orchestrator implementations when the shared bootstrap can be reused.
-- **Manual refresh behavior**: Refresh, retry, and resume controls should signal the orchestrator loop to run a tick; do not implement ad-hoc polling/state mutation in API or UI handlers that bypasses the orchestrator.
-- **Workspace isolation**: Each issue gets a directory under a configurable root, keyed by sanitized identifier. Workspaces are reused across retries and cleaned up on completion.
-- **Hook lifecycle**: Shell hooks (after_create, before_run, after_run, before_remove) run in workspace directories with configurable timeouts. Non-fatal hooks use best-effort mode.
+- [ADR-0001](docs/adr/0001-share-one-core-runtime-across-hosts.md): share one core runtime across CLI, web, and desktop hosts.
+- [ADR-0002](docs/adr/0002-treat-the-config-directory-as-a-runtime-boundary.md): treat the config directory as the runtime boundary.
+- [ADR-0003](docs/adr/0003-keep-trackers-as-runtime-adapters.md): keep trackers as adapters rather than runtime authorities.
+- [ADR-0004](docs/adr/0004-isolate-issues-with-multi-repository-worktrees.md): isolate issues with coordinated multi-repository worktrees.
+- [ADR-0005](docs/adr/0005-model-pipelines-as-step-dags-with-strict-outputs.md): model pipelines as step DAGs with strict outputs.
+- [ADR-0006](docs/adr/0006-run-agents-through-acp-runtimes.md): run agents through ACP runtimes.
+- [ADR-0007](docs/adr/0007-separate-launch-and-session-permissions.md): separate launcher permissions from in-session authorization.
+- [ADR-0008](docs/adr/0008-own-human-interaction-as-durable-runtime-state.md): own human interaction as durable runtime state.
+- [ADR-0009](docs/adr/0009-use-embedded-sqlite-for-queryable-run-history.md): use embedded SQLite for queryable run history.
+- [ADR-0010](docs/adr/0010-store-step-transcripts-separately-from-the-timeline.md): store detailed step transcripts separately from the timeline.
+- [ADR-0011](docs/adr/0011-journal-live-pipeline-transitions-for-recovery.md): journal live pipeline transitions for restart recovery.
+- [ADR-0012](docs/adr/0012-keep-lifecycle-authority-in-the-orchestrator-loop.md): keep lifecycle authority in the orchestrator loop.
+- [ADR-0013](docs/adr/0013-make-finalization-an-explicit-recoverable-phase.md): make finalization explicit and recoverable.
+- [ADR-0014](docs/adr/0014-keep-development-methods-outside-the-runtime-core.md): keep development methods outside the runtime core.
+- [ADR-0015](docs/adr/0015-pin-the-primary-rust-toolchain-and-test-msrv-separately.md): pin the primary toolchain and test MSRV separately.
+- [ADR-0016](docs/adr/0016-persist-timeline-events-off-the-orchestrator-hot-path.md): persist timeline events off the orchestrator hot path.
 
 ## Agent skills
 
@@ -168,4 +177,5 @@ Use the default canonical triage labels. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
-This repository uses the single-context domain documentation layout. See `docs/agents/domain.md`.
+This repository uses a single domain context with canonical language in
+`CONTEXT.md` and decisions in `docs/adr/`. See `docs/agents/domain.md`.

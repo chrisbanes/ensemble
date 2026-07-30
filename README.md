@@ -132,5 +132,7 @@ This opens the resolved configuration directory in your system's file manager. I
 - [Configuration Reference](docs/configuration.md) — every `config.yaml` field
 - [Pipeline Guide](docs/pipelines.md) — steps, DAGs, step outputs, retries
 - [SDD Workflow](docs/sdd-workflow.md) — parent planning issues, wave execution issues, and board rules
+- [Domain Glossary](CONTEXT.md) — canonical terms used by the runtime and documentation
+- [Architecture Decisions](docs/adr/) — durable architectural choices and their rationale
 - [Contributing](docs/contributing.md) — building, testing, project structure
 - [Roadmap](docs/roadmap.md) — what's built, what's coming
