@@ -219,39 +219,27 @@ fn sequence_identity_error() -> ConfigError {
     }
 }
 
-fn match_authoritative_sequence_entry<'a>(
+fn matching_authoritative_sequence_entries(
     submitted: &serde_yaml::Value,
-    authoritative: &'a [serde_yaml::Value],
-    claimed: &mut [bool],
-    submitted_identity_is_unique: bool,
-) -> Result<&'a serde_yaml::Value, ConfigError> {
+    authoritative: &[serde_yaml::Value],
+) -> Vec<usize> {
     let explicit_identity = explicit_sequence_identity(submitted);
-    if explicit_identity.is_some() && !submitted_identity_is_unique {
-        return Err(sequence_identity_error());
-    }
     let structural_identity = explicit_identity
         .is_none()
         .then(|| secret_free_identity(submitted));
-    let mut candidates = authoritative
+    authoritative
         .iter()
         .enumerate()
-        .filter(|(index, candidate)| {
-            !claimed[*index]
-                && match explicit_identity {
-                    Some((key, value)) => sequence_identity_value(candidate, key) == Some(value),
-                    None => structural_identity
-                        .as_ref()
-                        .is_some_and(|identity| secret_free_identity(candidate) == *identity),
-                }
-        });
-    let Some((index, candidate)) = candidates.next() else {
-        return Err(sequence_identity_error());
-    };
-    if candidates.next().is_some() {
-        return Err(sequence_identity_error());
-    }
-    claimed[index] = true;
-    Ok(candidate)
+        .filter_map(|(index, candidate)| {
+            match explicit_identity {
+                Some((key, value)) => sequence_identity_value(candidate, key) == Some(value),
+                None => structural_identity
+                    .as_ref()
+                    .is_some_and(|identity| secret_free_identity(candidate) == *identity),
+            }
+            .then_some(index)
+        })
+        .collect()
 }
 
 fn redact_value(value: &mut serde_yaml::Value) {
@@ -326,25 +314,60 @@ fn merge_preserve_markers(
                     explicit_sequence_identity(value).map(|(key, value)| (key, value.clone()))
                 })
                 .collect();
+            let marker_indices: Vec<_> = submitted_sequence
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| {
+                    contains_secret_preserve_marker(value).then_some(index)
+                })
+                .collect();
+            let mut matches = vec![None; submitted_sequence.len()];
+            for &index in &marker_indices {
+                if submitted_identities[index]
+                    .as_ref()
+                    .is_some_and(|identity| {
+                        submitted_identities
+                            .iter()
+                            .filter(|candidate| candidate.as_ref() == Some(identity))
+                            .count()
+                            != 1
+                    })
+                {
+                    return Err(sequence_identity_error());
+                }
+                let candidates = matching_authoritative_sequence_entries(
+                    &submitted_sequence[index],
+                    authoritative_sequence,
+                );
+                match candidates.as_slice() {
+                    [candidate] if !claimed[*candidate] => {
+                        matches[index] = Some(*candidate);
+                        claimed[*candidate] = true;
+                    }
+                    [] => {}
+                    _ => return Err(sequence_identity_error()),
+                }
+            }
+
+            let unresolved: Vec<_> = marker_indices
+                .iter()
+                .copied()
+                .filter(|index| matches[*index].is_none())
+                .collect();
+            let unclaimed: Vec<_> = claimed
+                .iter()
+                .enumerate()
+                .filter_map(|(index, claimed)| (!claimed).then_some(index))
+                .collect();
+            match (unresolved.as_slice(), unclaimed.as_slice()) {
+                ([submitted], [authoritative]) => matches[*submitted] = Some(*authoritative),
+                ([], _) => {}
+                _ => return Err(sequence_identity_error()),
+            }
+
             for (index, submitted_value) in submitted_sequence.iter_mut().enumerate() {
-                let authoritative_value = if contains_secret_preserve_marker(submitted_value) {
-                    let submitted_identity_is_unique =
-                        submitted_identities[index].as_ref().is_none_or(|identity| {
-                            submitted_identities
-                                .iter()
-                                .filter(|candidate| candidate.as_ref() == Some(identity))
-                                .count()
-                                == 1
-                        });
-                    Some(match_authoritative_sequence_entry(
-                        submitted_value,
-                        authoritative_sequence,
-                        &mut claimed,
-                        submitted_identity_is_unique,
-                    )?)
-                } else {
-                    None
-                };
+                let authoritative_value =
+                    matches[index].map(|index| &authoritative_sequence[index]);
                 merge_preserve_markers(submitted_value, authoritative_value)?;
             }
         }
@@ -531,6 +554,57 @@ services:
         assert_eq!(value["services"][1]["name"], "beta");
         assert_eq!(value["services"][1]["endpoint"], "https://new.example");
         assert_eq!(value["services"][1]["token"], "beta-secret");
+    }
+
+    #[test]
+    fn merge_preserves_one_sequence_secret_rename_by_elimination() {
+        let authoritative = r#"
+services:
+  - name: alpha
+    token: alpha-secret
+  - name: beta
+    token: beta-secret
+"#;
+        let submitted = r#"
+services:
+  - name: renamed
+    token: "[REDACTED]"
+  - name: beta
+    token: "[REDACTED]"
+"#;
+
+        let merged = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect("one unmatched rename should map to the one remaining stored entry");
+        let value = yaml_value(&merged);
+
+        assert_eq!(value["services"][0]["name"], "renamed");
+        assert_eq!(value["services"][0]["token"], "alpha-secret");
+        assert_eq!(value["services"][1]["token"], "beta-secret");
+    }
+
+    #[test]
+    fn merge_rejects_multiple_sequence_secret_renames() {
+        let authoritative = r#"
+services:
+  - name: alpha
+    token: alpha-secret
+  - name: beta
+    token: beta-secret
+"#;
+        let submitted = r#"
+services:
+  - name: renamed-alpha
+    token: "[REDACTED]"
+  - name: renamed-beta
+    token: "[REDACTED]"
+"#;
+
+        let error = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect_err("multiple identity changes cannot be matched without crossing secrets");
+
+        assert!(error.to_string().contains("no unique matching"));
+        assert!(!error.to_string().contains("alpha-secret"));
+        assert!(!error.to_string().contains("beta-secret"));
     }
 
     #[test]

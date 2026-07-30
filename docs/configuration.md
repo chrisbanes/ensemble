@@ -204,10 +204,11 @@ When saving raw YAML, `[REDACTED]` preserves the value currently stored at the s
 Within a sequence, entries are matched one-to-one by a unique scalar `id`, then `name`; unnamed
 entries fall back to their complete non-secret structure. Their numeric position is never an
 identity. Reordering, inserting, or editing non-identity fields therefore cannot transfer a
-credential to a different logical entry; an ambiguous or missing match is rejected. Replacing the
-placeholder with a literal or `$VAR` reference replaces the stored value, and removing the field
-removes the value. Malformed YAML is never returned as raw configuration because it cannot be
-safely redacted.
+credential to a different logical entry. After direct matches are claimed, one unmatched
+`[REDACTED]` marker may map to one remaining stored entry by elimination, allowing an unambiguous
+identity rename. Multiple unmatched or duplicate identities are rejected. Replacing the placeholder
+with a literal or `$VAR` reference replaces the stored value, and removing the field removes the
+value. Malformed YAML is never returned as raw configuration because it cannot be safely redacted.
 
 Guided and setup editors use explicit secret actions: keep the current value, replace it with a
 literal, use an environment variable, or remove it. Literal replacement inputs are write-only:

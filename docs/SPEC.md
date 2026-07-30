@@ -2341,8 +2341,10 @@ Recommended additional hardening for ports:
   Sequence entries are matched one-to-one by a unique scalar `id`, then `name`; unnamed entries
   fall back to their complete non-secret structure. Position is never an identity, so reordering,
   inserting, or editing non-identity fields cannot move credentials between logical entries.
-  Missing or duplicate identities are rejected. An explicit replacement replaces the value and an
-  omitted field removes it.
+  After direct matches are claimed, one unmatched preserve marker may map to one remaining stored
+  entry by elimination, allowing an unambiguous identity rename. Multiple unmatched or duplicate
+  identities are rejected. An explicit replacement replaces the value and an omitted field removes
+  it.
 - Structured editors represent secret changes explicitly as preserve, replace with a write-only
   literal, replace with an environment reference, or remove. Existing secrets default to preserve,
   and blank literal replacements are rejected before configuration persistence. Environment names
