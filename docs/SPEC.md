@@ -304,10 +304,25 @@ Pipeline run recovery:
 - Dispatch-time restore never creates new candidates; it only applies to issues already returned by
   the tracker as dispatch-eligible candidates.
 - Restored retry and waiting records stay parked until their normal resume or retry path.
+- Once pipeline execution and required finalization produce a terminal outcome, Ensemble appends a
+  pending terminal transition containing the configured target tracker state, outcome, retry
+  metadata, completion history, and pipeline snapshot before finalization returns control to the
+  caller and before attempting the tracker write.
+- A pending terminal transition remains claimed but does not occupy an agent slot or become
+  dispatch-eligible. Its pipeline snapshot, workspace, artifacts, and completion data remain
+  available while tracker reconciliation is pending.
+- Every tracker error is treated as potentially ambiguous. Startup and poll ticks replay the same
+  configured state transition idempotently without rerunning pipeline steps or finalization, and
+  persist updated attempt/error metadata after failures.
+- After the tracker write is confirmed, Ensemble records that applied state as a still-live journal
+  phase, clears any terminal interaction wait, and persists completion history idempotently. A
+  restart in this phase finishes those local effects without repeating tracker or agent work.
 - Stale `Running` steps from a previous process are normalized to `Pending`; agent processes are not
   recovered across orchestrator restarts or in-process journal rehydration.
-- A `released` transition prevents older snapshots for the issue from being restored after
-  completion, stop, terminal reconciliation, or whole-issue retry.
+- Ensemble appends `released` only after the terminal tracker transition is confirmed (or no
+  tracker write is supported) and completion history is durable. That boundary prevents older
+  snapshots for the issue from being restored after completion, stop, terminal reconciliation, or
+  whole-issue retry.
 
 #### 4.1.7 StepOutput
 
@@ -1048,7 +1063,13 @@ claim state.
 4. `RetryQueued`
    - Worker is not running, but a retry timer exists in `retry_attempts`.
 
-5. `Released`
+5. `TerminalReconciliation`
+   - Pipeline execution and required finalization are complete, but the configured terminal tracker
+     state is not yet confirmed.
+   - The claim and recoverable run data remain owned by the orchestrator while tracker I/O retries
+     independently of agent capacity.
+
+6. `Released`
    - Claim removed because issue is terminal, non-active, missing, or retry path completed without
      re-dispatch.
 
@@ -2281,6 +2302,8 @@ After restart:
 - No running sessions are assumed recoverable.
 - Service recovers by:
   - startup restoration of live pipeline journal snapshots
+  - retrying pending terminal tracker transitions before candidate dispatch, without rerunning
+    pipeline or finalization work
   - startup terminal workspace cleanup
   - fresh polling of active issues
   - dispatch-time restoration of live journal snapshots for already eligible candidates

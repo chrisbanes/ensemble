@@ -7,8 +7,9 @@ use crate::interaction::model::InteractionKind;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig, StepConfig};
+use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig};
 use crate::history::artifacts::RunArtifacts;
+use crate::orchestrator::pipeline_journal::PendingTerminalTransition;
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
@@ -111,6 +112,14 @@ pub struct IssueFinalizeState {
     pub repos: Vec<RepoFinalizeState>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PendingTerminalEntry {
+    pub identifier: String,
+    pub run_id: Option<String>,
+    pub issue: Option<Issue>,
+    pub transition: PendingTerminalTransition,
+}
+
 /// The single authoritative in-memory state owned by the orchestrator.
 /// All state mutations are serialized through the orchestrator's event loop.
 #[derive(Debug)]
@@ -141,6 +150,8 @@ pub struct OrchestratorState {
     pub pipeline_runs: HashMap<String, PipelineRun>,
     /// Finalization state for issues that have finished pipeline execution.
     pub finalize: HashMap<String, IssueFinalizeState>,
+    /// Terminal tracker writes that must reconcile before local run release.
+    pub pending_terminal_transitions: HashMap<String, PendingTerminalEntry>,
     /// Durable run artifacts collected before history is written.
     pub artifacts: HashMap<String, RunArtifacts>,
     /// Immutable config snapshot for each active pipeline run.
@@ -184,6 +195,7 @@ impl OrchestratorState {
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
             finalize: HashMap::new(),
+            pending_terminal_transitions: HashMap::new(),
             artifacts: HashMap::new(),
             pipeline_configs: HashMap::new(),
             last_tick_at: None,
@@ -354,6 +366,7 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        self.pending_terminal_transitions.remove(issue_id);
         self.artifacts.remove(issue_id);
         self.step_states.remove(issue_id);
         if let Some(run_id) = self.issue_run_ids.remove(issue_id) {
@@ -502,6 +515,11 @@ impl OrchestratorState {
         self.pipeline_configs.insert(issue_id.to_string(), config);
     }
 
+    pub fn insert_terminal_pipeline_run(&mut self, issue_id: &str, run: PipelineRun) {
+        self.pipeline_runs.insert(issue_id.to_string(), run);
+        self.pipeline_configs.remove(issue_id);
+    }
+
     /// Remove and return a pipeline run.
     pub fn remove_pipeline_run(&mut self, issue_id: &str) -> Option<PipelineRun> {
         self.pipeline_configs.remove(issue_id);
@@ -521,6 +539,7 @@ impl OrchestratorState {
         let running = self.running.get(issue_id).cloned();
         let waiting = self.waiting_on_human.get(issue_id).cloned();
         let finalize = self.finalize.get(issue_id).cloned();
+        let pending_terminal = self.pending_terminal_transitions.get(issue_id).cloned();
         let run = self.pipeline_runs.get(issue_id).cloned();
         let config = self.pipeline_configs.get(issue_id).cloned();
 
@@ -536,6 +555,11 @@ impl OrchestratorState {
             .map(|entry| entry.issue.clone())
             .or_else(|| waiting.as_ref().and_then(|entry| entry.issue.clone()))
             .or_else(|| {
+                pending_terminal
+                    .as_ref()
+                    .and_then(|entry| entry.issue.clone())
+            })
+            .or_else(|| {
                 self.completed
                     .get(issue_id)
                     .map(|entry| entry.issue.clone())
@@ -548,6 +572,11 @@ impl OrchestratorState {
             .as_ref()
             .map(|entry| entry.identifier.clone())
             .or_else(|| waiting.as_ref().map(|entry| entry.identifier.clone()))
+            .or_else(|| {
+                pending_terminal
+                    .as_ref()
+                    .map(|entry| entry.identifier.clone())
+            })
             .or_else(|| {
                 finalize
                     .as_ref()
@@ -564,6 +593,11 @@ impl OrchestratorState {
             .and_then(|entry| entry.run_id.clone())
             .or_else(|| waiting.as_ref().and_then(|entry| entry.run_id.clone()))
             .or_else(|| {
+                pending_terminal
+                    .as_ref()
+                    .and_then(|entry| entry.run_id.clone())
+            })
+            .or_else(|| {
                 self.completed
                     .get(issue_id)
                     .and_then(|entry| entry.run_id.clone())
@@ -574,9 +608,14 @@ impl OrchestratorState {
                 .map(|entry| entry.status.clone())
                 .unwrap_or_else(|| "completed_succeeded".to_string())
         });
-        let workflow_steps = config
+        let workflow_steps = run
             .as_ref()
-            .map(|config| completed_workflow_steps(config, run.as_ref()))
+            .map(completed_workflow_steps_from_run)
+            .or_else(|| {
+                config
+                    .as_ref()
+                    .map(|config| completed_workflow_steps_from_config(config))
+            })
             .or_else(|| {
                 self.completed
                     .get(issue_id)
@@ -653,10 +692,7 @@ impl OrchestratorState {
     }
 }
 
-fn completed_workflow_steps(
-    config: &EnsembleConfig,
-    run: Option<&PipelineRun>,
-) -> Vec<CompletedWorkflowStep> {
+fn completed_workflow_steps_from_config(config: &EnsembleConfig) -> Vec<CompletedWorkflowStep> {
     config
         .steps
         .iter()
@@ -665,16 +701,28 @@ fn completed_workflow_steps(
             agent: step.agent.clone(),
             kind: step.kind.to_string(),
             dependencies: step.depends.clone().unwrap_or_default(),
-            state: completed_step_state(step, run),
-            can_navigate: run
-                .map(|pipeline_run| pipeline_run.step_states.contains_key(&step.name))
-                .unwrap_or(false),
+            state: "unknown".to_string(),
+            can_navigate: false,
         })
         .collect()
 }
 
-fn completed_step_state(step: &StepConfig, run: Option<&PipelineRun>) -> String {
-    run.and_then(|pipeline_run| pipeline_run.step_states.get(&step.name))
+fn completed_workflow_steps_from_run(run: &PipelineRun) -> Vec<CompletedWorkflowStep> {
+    run.workflow_steps()
+        .map(|step| CompletedWorkflowStep {
+            name: step.name.clone(),
+            agent: step.agent.clone(),
+            kind: step.kind.to_string(),
+            dependencies: step.depends.clone(),
+            state: completed_step_state_for_name(&step.name, run),
+            can_navigate: run.step_states.contains_key(&step.name),
+        })
+        .collect()
+}
+
+fn completed_step_state_for_name(step_name: &str, run: &PipelineRun) -> String {
+    run.step_states
+        .get(step_name)
         .map(|state| match state {
             crate::pipeline::engine::StepState::Pending => "pending",
             crate::pipeline::engine::StepState::Running { .. } => "running",

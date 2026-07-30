@@ -212,12 +212,17 @@ pub async fn startup_terminal_cleanup(
     tracker: &dyn IssueTracker,
     terminal_states: &[String],
     workspace_mgr: &WorkspaceManager,
+    excluded_issue_ids: &HashSet<String>,
 ) {
     info!("performing startup terminal workspace cleanup");
 
     match tracker.fetch_issues_by_states(terminal_states).await {
         Ok(terminal_issues) => {
-            for issue in &terminal_issues {
+            let cleanup_issues = terminal_issues
+                .iter()
+                .filter(|issue| !excluded_issue_ids.contains(&issue.id))
+                .collect::<Vec<_>>();
+            for issue in &cleanup_issues {
                 match workspace_mgr.remove_workspace(&issue.identifier).await {
                     Ok(()) => {
                         debug!(
@@ -235,7 +240,7 @@ pub async fn startup_terminal_cleanup(
                 }
             }
             info!(
-                count = terminal_issues.len(),
+                count = cleanup_issues.len(),
                 "startup terminal cleanup complete"
             );
         }
@@ -518,10 +523,37 @@ mod tests {
             should_fail: false,
         };
 
-        startup_terminal_cleanup(&tracker, &default_terminal(), &workspace_mgr).await;
+        startup_terminal_cleanup(
+            &tracker,
+            &default_terminal(),
+            &workspace_mgr,
+            &HashSet::new(),
+        )
+        .await;
 
         // Workspace should be cleaned up
         assert!(!dir.path().join("repo_42").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_terminal_cleanup_retains_pending_reconciliation_workspace() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        workspace_mgr.prepare_workspace("repo#42").await.unwrap();
+
+        let tracker = MockTrackerForReconcile {
+            issues: vec![test_issue("42", "Done")],
+            should_fail: false,
+        };
+        startup_terminal_cleanup(
+            &tracker,
+            &default_terminal(),
+            &workspace_mgr,
+            &HashSet::from(["42".to_string()]),
+        )
+        .await;
+
+        assert!(dir.path().join("repo_42").exists());
     }
 
     #[tokio::test]
@@ -535,6 +567,12 @@ mod tests {
         };
 
         // Should not panic — just logs and continues
-        startup_terminal_cleanup(&tracker, &default_terminal(), &workspace_mgr).await;
+        startup_terminal_cleanup(
+            &tracker,
+            &default_terminal(),
+            &workspace_mgr,
+            &HashSet::new(),
+        )
+        .await;
     }
 }

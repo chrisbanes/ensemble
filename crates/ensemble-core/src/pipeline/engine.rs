@@ -388,6 +388,13 @@ impl PipelineRun {
         self.dag.steps.iter().find(|step| step.name == step_name)
     }
 
+    pub(crate) fn workflow_steps(&self) -> impl Iterator<Item = &DagStep> {
+        self.dag
+            .steps
+            .iter()
+            .filter(|step| !self.synthetic_fixup_steps.contains(&step.name))
+    }
+
     /// Reset `step_name` and every step that transitively depends on it back
     /// to pending, clearing any stored outputs for those steps.
     pub fn retry_from_step(&mut self, step_name: &str) -> HashSet<String> {
