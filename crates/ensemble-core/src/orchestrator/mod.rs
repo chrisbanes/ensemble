@@ -481,7 +481,7 @@ impl Orchestrator {
         self.restore_pipeline_runs_from_journal().await;
         self.reconcile_pending_terminal_transitions().await;
         self.hydrate_waiting_on_human_from_store().await;
-        self.process_waiting_interaction_commands().await;
+        self.process_interaction_thread_commands().await;
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
@@ -2971,34 +2971,19 @@ impl Orchestrator {
         Ok(())
     }
 
-    async fn process_waiting_interaction_commands(&self) {
-        let waiting_entries = {
-            let state = self.state.read().await;
-            state
-                .waiting_on_human
-                .values()
-                .cloned()
-                .collect::<Vec<WaitingOnHumanEntry>>()
+    async fn process_interaction_thread_commands(&self) {
+        let interactions = match self.interaction_store.list_with_thread_roots().await {
+            Ok(interactions) => interactions,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "failed to list interaction threads while processing commands"
+                );
+                return;
+            }
         };
 
-        for waiting in waiting_entries {
-            let mut interaction = match self
-                .interaction_store
-                .get(&waiting.interaction_request_id)
-                .await
-            {
-                Ok(Some(interaction)) => interaction,
-                Ok(None) => continue,
-                Err(error) => {
-                    warn!(
-                        interaction_id = %waiting.interaction_request_id,
-                        error = %error,
-                        "failed to load interaction while processing thread commands"
-                    );
-                    continue;
-                }
-            };
-
+        for mut interaction in interactions {
             let Some(root_comment_id) = interaction.thread_root_comment_id.clone() else {
                 continue;
             };
@@ -3024,11 +3009,10 @@ impl Orchestrator {
                     continue;
                 }
             };
-            // v1 currently asks the tracker adapter for comments after the root anchor.
-            // If this becomes expensive on very long-lived issues, add a persisted
-            // per-interaction checkpoint to avoid repeated full-history scans.
+            // Each persisted thread retains its own cursor, so completed interactions
+            // request only comments after the last durably processed input.
 
-            let last_comment_id = comments.last().map(|c| c.comment_id.clone());
+            let mut last_persisted_comment_id = None;
 
             for comment in comments {
                 if interaction
@@ -3040,6 +3024,7 @@ impl Orchestrator {
                         .iter()
                         .any(|ignored| ignored.comment_id == comment.comment_id)
                 {
+                    last_persisted_comment_id = Some(comment.comment_id.clone());
                     continue;
                 }
 
@@ -3048,50 +3033,70 @@ impl Orchestrator {
                     .zip(comment.created_at)
                     .is_some_and(|(updated, created)| updated > created)
                 {
-                    interaction = self
+                    let Some(updated) = self
                         .append_ignored_command(
                             &interaction,
                             None,
                             &comment,
                             "edited_comments_not_supported",
                         )
-                        .await;
+                        .await
+                    else {
+                        break;
+                    };
+                    interaction = updated;
+                    last_persisted_comment_id = Some(comment.comment_id.clone());
                     continue;
                 }
 
                 let parsed = match parse_scoped_interaction_command(&comment.body) {
                     Ok(parsed) if parsed.interaction_id == interaction.id => parsed.command,
                     Ok(_) => {
-                        interaction = self
+                        let Some(updated) = self
                             .append_ignored_command(
                                 &interaction,
                                 None,
                                 &comment,
                                 "interaction_marker_mismatch",
                             )
-                            .await;
+                            .await
+                        else {
+                            break;
+                        };
+                        interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                         continue;
                     }
                     Err(ParseScopedInteractionCommandError::MissingMarker) => {
-                        interaction = self
+                        let Some(updated) = self
                             .append_ignored_command(
                                 &interaction,
                                 None,
                                 &comment,
                                 "comment_not_scoped_to_interaction",
                             )
-                            .await;
+                            .await
+                        else {
+                            break;
+                        };
+                        interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                         continue;
                     }
                     Err(_) => {
-                        interaction = self
+                        let Some(updated) = self
                             .append_ignored_command(
                                 &interaction,
                                 None,
                                 &comment,
                                 "not_a_supported_command",
                             )
-                            .await;
+                            .await
+                        else {
+                            break;
+                        };
+                        interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                         continue;
                     }
                 };
@@ -3099,14 +3104,19 @@ impl Orchestrator {
                 let response = match response_from_command(&interaction.kind, &parsed) {
                     Some(response) => response,
                     None => {
-                        interaction = self
+                        let Some(updated) = self
                             .append_ignored_command(
                                 &interaction,
                                 Some(parsed.command_name()),
                                 &comment,
                                 "command_invalid_for_interaction_kind",
                             )
-                            .await;
+                            .await
+                        else {
+                            break;
+                        };
+                        interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                         continue;
                     }
                 };
@@ -3129,11 +3139,13 @@ impl Orchestrator {
                 match accepted_result {
                     Ok(InteractionAcceptance::Accepted(updated)) => {
                         interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                         let mut state = self.state.write().await;
                         state.queue_resume(&interaction.issue_id);
                     }
                     Ok(InteractionAcceptance::Ignored(updated)) => {
                         interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                     }
                     Err(error) => {
                         warn!(
@@ -3141,19 +3153,24 @@ impl Orchestrator {
                             error = %error,
                             "failed to accept interaction command"
                         );
-                        interaction = self
+                        let Some(updated) = self
                             .append_ignored_command(
                                 &interaction,
                                 Some(parsed.command_name()),
                                 &comment,
                                 "interaction_acceptance_failed",
                             )
-                            .await;
+                            .await
+                        else {
+                            break;
+                        };
+                        interaction = updated;
+                        last_persisted_comment_id = Some(comment.comment_id.clone());
                     }
                 }
             }
 
-            if let Some(last_id) = last_comment_id {
+            if let Some(last_id) = last_persisted_comment_id {
                 if interaction.last_processed_comment_id.as_deref() != Some(&last_id) {
                     if let Err(error) = self
                         .interaction_store
@@ -3177,7 +3194,7 @@ impl Orchestrator {
         command: Option<&str>,
         comment: &crate::tracker::model::TrackerComment,
         reason: &str,
-    ) -> crate::interaction::model::InteractionRequest {
+    ) -> Option<crate::interaction::model::InteractionRequest> {
         match self
             .interaction_store
             .append_ignored_command(
@@ -3193,14 +3210,14 @@ impl Orchestrator {
             )
             .await
         {
-            Ok(updated) => updated,
+            Ok(updated) => Some(updated),
             Err(error) => {
                 warn!(
                     interaction_id = %interaction.id,
                     error = %error,
                     "failed to append ignored interaction command"
                 );
-                interaction.clone()
+                None
             }
         }
     }
@@ -11130,7 +11147,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn interaction_thread_command_resolves_open_interaction_on_tick() {
+    async fn interaction_thread_command_audits_valid_reply_after_resume() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
         let comment_ts = Utc::now();
@@ -11143,7 +11160,7 @@ agent:
         }]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(CommandMockTracker {
             issues,
-            comments,
+            comments: Arc::clone(&comments),
             list_barrier: None,
         });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
@@ -11251,12 +11268,163 @@ agent:
             Some(InteractionResponse::Question { .. })
         ));
 
-        orchestrator.process_waiting_interaction_commands().await;
+        orchestrator.process_interaction_thread_commands().await;
         let replayed = store.get("interaction-1").await.unwrap().unwrap();
         assert!(replayed.ignored_commands.is_empty());
         assert_eq!(
             replayed.accepted_command.as_ref().unwrap().comment_id,
             "c-1"
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            state.remove_waiting_on_human("1");
+            assert!(!state.is_resume_requested("1"));
+        }
+        let resumed = store.mark_resumed("interaction-1").await.unwrap();
+        assert!(!resumed.awaiting_resume);
+        comments
+            .write()
+            .await
+            .push(crate::tracker::model::TrackerComment {
+                comment_id: "c-2".to_string(),
+                body: "/answer use production\n\n<!-- ensemble:interaction:interaction-1 -->"
+                    .to_string(),
+                author: "bob".to_string(),
+                created_at: Some(comment_ts),
+                updated_at: Some(comment_ts),
+            });
+
+        orchestrator.process_interaction_thread_commands().await;
+
+        let audited = store.get("interaction-1").await.unwrap().unwrap();
+        assert_eq!(audited.ignored_commands.len(), 1);
+        assert_eq!(audited.ignored_commands[0].comment_id, "c-2");
+        assert_eq!(
+            audited.ignored_commands[0].reason,
+            "interaction_already_resolved"
+        );
+        assert_eq!(audited.last_processed_comment_id.as_deref(), Some("c-2"));
+        assert!(!orchestrator.state.read().await.is_resume_requested("1"));
+    }
+
+    #[tokio::test]
+    async fn interaction_thread_command_retries_when_acceptance_and_audit_writes_fail() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let comment_ts = Utc::now();
+        let comments = Arc::new(RwLock::new(vec![crate::tracker::model::TrackerComment {
+            comment_id: "c-retry".to_string(),
+            body: "/answer use staging\n\n<!-- ensemble:interaction:interaction-retry -->"
+                .to_string(),
+            author: "alice".to_string(),
+            created_at: Some(comment_ts),
+            updated_at: Some(comment_ts),
+        }]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(CommandMockTracker {
+            issues,
+            comments,
+            list_barrier: None,
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let cfg = config.read().await;
+            state.init_state_lists(&cfg);
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-retry".to_string(),
+                step_name: "build".to_string(),
+                kind: InteractionKind::Question,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
+            });
+        }
+
+        let store = orchestrator.interaction_store.clone();
+        store
+            .create(crate::interaction::InteractionRequest {
+                id: "interaction-retry".to_string(),
+                schema_version: 1,
+                issue_id: "1".to_string(),
+                issue_identifier: "repo#1".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: vec![],
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec![],
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::default(),
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: Some("root-retry".to_string()),
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+            })
+            .await
+            .unwrap();
+
+        store.fail_next_writes(2);
+        orchestrator.process_interaction_thread_commands().await;
+
+        let failed = store.get("interaction-retry").await.unwrap().unwrap();
+        assert_eq!(failed.status, InteractionStatus::Open);
+        assert!(failed.accepted_command.is_none());
+        assert!(failed.ignored_commands.is_empty());
+        assert_eq!(failed.last_processed_comment_id, None);
+
+        orchestrator.process_interaction_thread_commands().await;
+
+        let retried = store.get("interaction-retry").await.unwrap().unwrap();
+        assert_eq!(retried.status, InteractionStatus::Resolved);
+        assert_eq!(
+            retried.accepted_command.as_ref().unwrap().comment_id,
+            "c-retry"
+        );
+        assert_eq!(
+            retried.last_processed_comment_id.as_deref(),
+            Some("c-retry")
         );
     }
 
@@ -11381,7 +11549,7 @@ agent:
                 .unwrap()
         };
         let (_, api_outcome) = tokio::join!(
-            orchestrator.process_waiting_interaction_commands(),
+            orchestrator.process_interaction_thread_commands(),
             api_attempt
         );
 
@@ -11414,6 +11582,9 @@ agent:
         cancelled_interaction.ignored_commands.clear();
         cancelled_interaction.response = None;
         cancelled_interaction.resolved_at = None;
+        tokio::fs::remove_file(store.interactions_dir().join("interaction-race.json"))
+            .await
+            .unwrap();
         store.create(cancelled_interaction).await.unwrap();
         {
             let mut state = orchestrator.state.write().await;
@@ -11453,7 +11624,7 @@ agent:
         };
         let (cancelled, _) = tokio::join!(
             cancel_attempt,
-            orchestrator.process_waiting_interaction_commands()
+            orchestrator.process_interaction_thread_commands()
         );
         assert_eq!(cancelled.unwrap().status, InteractionStatus::Cancelled);
 

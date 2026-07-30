@@ -1,6 +1,8 @@
 use chrono::Utc;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -28,6 +30,8 @@ pub enum InteractionAcceptance {
 pub struct InteractionStore {
     config_dir: PathBuf,
     create_mutex: Arc<Mutex<()>>,
+    #[cfg(test)]
+    write_failures: Arc<AtomicUsize>,
 }
 
 impl InteractionStore {
@@ -35,7 +39,14 @@ impl InteractionStore {
         Self {
             config_dir,
             create_mutex: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            write_failures: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_writes(&self, count: usize) {
+        self.write_failures.store(count, Ordering::Relaxed);
     }
 
     fn record_lock_for(&self, id: &str) -> RecordLock {
@@ -118,6 +129,15 @@ impl InteractionStore {
     pub async fn list_awaiting_resume(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
         let mut interactions = self.list_all().await?;
         interactions.retain(|interaction| interaction.blocking && interaction.awaiting_resume);
+        interactions.sort_by_key(|interaction| interaction.requested_at);
+        Ok(interactions)
+    }
+
+    pub async fn list_with_thread_roots(
+        &self,
+    ) -> Result<Vec<InteractionRequest>, InteractionError> {
+        let mut interactions = self.list_all().await?;
+        interactions.retain(|interaction| interaction.thread_root_comment_id.is_some());
         interactions.sort_by_key(|interaction| interaction.requested_at);
         Ok(interactions)
     }
@@ -364,6 +384,17 @@ impl InteractionStore {
         &self,
         interaction: &InteractionRequest,
     ) -> Result<(), InteractionError> {
+        #[cfg(test)]
+        if self
+            .write_failures
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(std::io::Error::other("injected interaction write failure").into());
+        }
+
         let dir = self.interactions_dir();
         tokio::fs::create_dir_all(&dir).await?;
         let path = self.path_for_id(&interaction.id);

@@ -1657,6 +1657,9 @@ Human interaction requirement:
   together. A later valid attempt is written as an attributed ignored audit before its caller
   observes the loss, including when cancellation closed the interaction first. Invalid comments are
   also audited and never transition the interaction.
+- Persisted interaction threads remain eligible for cursor-driven command intake after the issue
+  resumes. The cursor advances only through comments whose acceptance or ignored audit is durable,
+  so transient persistence failures leave the first unaudited comment available for retry.
 
 ### 10.7 Timeouts and Error Mapping
 
