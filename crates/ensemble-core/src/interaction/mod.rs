@@ -3,10 +3,13 @@ pub mod error;
 pub mod model;
 pub mod store;
 
-pub use commands::{parse_interaction_command, InteractionCommand, ParseInteractionCommandError};
+pub use commands::{
+    parse_interaction_command, parse_scoped_interaction_command, InteractionCommand,
+    ParseInteractionCommandError, ParseScopedInteractionCommandError, ScopedInteractionCommand,
+};
 pub use error::InteractionError;
 pub use model::{
     InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
     InteractionStatus,
 };
-pub use store::InteractionStore;
+pub use store::{InteractionAcceptance, InteractionStore};
