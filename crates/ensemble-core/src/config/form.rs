@@ -8,6 +8,7 @@
 use crate::config::ensemble::{
     ModeDefinition, ModelDefinition, PermissionRequestPolicy, PermissionRequestPolicyMode, StepKind,
 };
+use crate::config::secrets::{SecretDisplay, SecretEdit};
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +36,10 @@ pub struct GuidedTrackerForm {
     pub path: Option<String>,
     pub repository: Option<String>,
     pub project_number: Option<i64>,
-    pub api_key: Option<String>,
+    pub api_key: SecretDisplay,
+    #[serde(default, skip_serializing_if = "SecretEdit::is_preserve")]
+    #[schema(write_only = true)]
+    pub api_key_edit: SecretEdit,
     pub endpoint: Option<String>,
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
@@ -189,7 +193,8 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 .map(|p| p.to_string_lossy().to_string()),
             repository: config.tracker.repository.clone(),
             project_number: config.tracker.project_number,
-            api_key: config.tracker.api_key.clone(),
+            api_key: SecretDisplay::from_config_value(config.tracker.api_key.as_deref()),
+            api_key_edit: SecretEdit::Preserve,
             endpoint: config.tracker.endpoint.clone(),
             active_states: config.tracker.active_states.clone(),
             terminal_states: config.tracker.terminal_states.clone(),
@@ -325,10 +330,22 @@ pub fn apply_guided_form(
         } else {
             tm.remove("project_number");
         }
-        if let Some(v) = opt_to_value(form.tracker.api_key.clone()) {
-            tm.insert("api_key".into(), v);
-        } else {
-            tm.remove("api_key");
+        match &form.tracker.api_key_edit {
+            SecretEdit::Preserve => {}
+            SecretEdit::Remove => {
+                tm.remove("api_key");
+            }
+            SecretEdit::SetLiteral { value } => {
+                tm.insert("api_key".into(), value.clone().into());
+            }
+            SecretEdit::SetEnvironment { variable } => {
+                if variable.is_empty() {
+                    return Err(ConfigError::ConfigWriteRejected {
+                        reason: "secret environment variable name must not be empty".to_string(),
+                    });
+                }
+                tm.insert("api_key".into(), format!("${variable}").into());
+            }
         }
         if let Some(v) = opt_to_value(form.tracker.endpoint.clone()) {
             tm.insert("endpoint".into(), v);
@@ -681,6 +698,93 @@ pub struct GuidedFormSaveResponse {
 mod tests {
     use super::*;
 
+    #[test]
+    fn guided_form_serialization_exposes_only_safe_secret_state() {
+        let literal = extract_guided_form(
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: ghp_literal_secret
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+        let environment = extract_guided_form(
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: $GITHUB_TOKEN
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let literal_json = serde_json::to_string(&literal).unwrap();
+        let environment_json = serde_json::to_string(&environment).unwrap();
+
+        assert!(!literal_json.contains("ghp_literal_secret"));
+        assert!(literal_json.contains(r#""state":"redacted""#));
+        assert!(environment_json.contains(r#""state":"environment""#));
+        assert!(environment_json.contains("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn guided_secret_edits_replace_reference_or_remove_explicitly() {
+        let base = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: ghp_existing
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let mut form = extract_guided_form(base).unwrap();
+
+        form.tracker.api_key_edit = SecretEdit::SetEnvironment {
+            variable: "GITHUB_TOKEN".to_string(),
+        };
+        let referenced: serde_yaml::Value =
+            serde_yaml::from_str(&apply_guided_form(base, &form).unwrap()).unwrap();
+        assert_eq!(referenced["tracker"]["api_key"], "$GITHUB_TOKEN");
+
+        form.tracker.api_key_edit = SecretEdit::SetLiteral {
+            value: "ghp_replacement".to_string(),
+        };
+        let replaced: serde_yaml::Value =
+            serde_yaml::from_str(&apply_guided_form(base, &form).unwrap()).unwrap();
+        assert_eq!(replaced["tracker"]["api_key"], "ghp_replacement");
+
+        form.tracker.api_key_edit = SecretEdit::Remove;
+        let removed: serde_yaml::Value =
+            serde_yaml::from_str(&apply_guided_form(base, &form).unwrap()).unwrap();
+        assert!(removed["tracker"].get("api_key").is_none());
+    }
+
     fn guided_form_with_workspace_root(root: &str) -> GuidedConfigForm {
         GuidedConfigForm {
             tracker: GuidedTrackerForm {
@@ -688,7 +792,8 @@ mod tests {
                 path: None,
                 repository: None,
                 project_number: None,
-                api_key: None,
+                api_key: SecretDisplay::Unset,
+                api_key_edit: SecretEdit::Preserve,
                 endpoint: None,
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],

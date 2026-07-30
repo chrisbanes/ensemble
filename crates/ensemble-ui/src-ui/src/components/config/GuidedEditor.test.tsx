@@ -9,6 +9,7 @@ const initialForm: GuidedForm = {
   tracker: {
     kind: "todo_file",
     path: "/tmp/todo.md",
+    api_key: { state: "unset" },
     active_states: [],
     terminal_states: [],
     labels_filter: [],
@@ -54,6 +55,42 @@ const initialForm: GuidedForm = {
 };
 
 describe("GuidedEditor", () => {
+  it("preserves an existing secret by default without rendering a token", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_form: GuidedForm, _baseRawYaml: string) => undefined);
+    const githubForm: GuidedForm = {
+      ...initialForm,
+      tracker: {
+        kind: "github",
+        repository: "acme/repo",
+        api_key: { state: "redacted" },
+        api_key_edit: { action: "preserve" },
+        active_states: ["Todo"],
+        terminal_states: ["Done"],
+        labels_filter: [],
+      },
+    };
+
+    renderWithProviders(
+      <GuidedEditor
+        initialForm={githubForm}
+        baseRawYaml={"tracker:\n  kind: github\n  api_key: \"[REDACTED]\"\n"}
+        issues={[]}
+        onValidate={vi.fn(async () => [])}
+        onSave={onSave}
+        onReset={vi.fn()}
+      />,
+      { route: "/config" }
+    );
+
+    expect(screen.getByText(/existing secret is configured/i)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue(/ghp_/i)).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText(/repository/i), "-updated");
+    await user.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(onSave.mock.calls[0]?.[0].tracker.api_key_edit).toEqual({ action: "preserve" });
+  });
+
   it("shows validation issues returned by validate without waiting for save", async () => {
     const user = userEvent.setup();
 

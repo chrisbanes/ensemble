@@ -7,7 +7,7 @@ import { AlertCircle, Save, RotateCcw, Check, FileText } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import FileBrowser from "./FileBrowser";
 import WorkflowEditor from "./WorkflowEditor";
-import type { ValidationIssue } from "@/generated/models";
+import type { SecretDisplay, SecretEdit, ValidationIssue } from "@/generated/models";
 
 type CapabilityDefinition = {
   id: string;
@@ -70,7 +70,8 @@ export interface GuidedForm {
     path?: string;
     repository?: string;
     project_number?: number;
-    api_key?: string;
+    api_key: SecretDisplay;
+    api_key_edit?: SecretEdit;
     endpoint?: string;
     active_states: string[];
     terminal_states: string[];
@@ -222,6 +223,13 @@ export default function GuidedEditor({
     name: a.name,
     label: a.name,
   }));
+  const secretEdit = form.tracker.api_key_edit ?? { action: "preserve" as const };
+  const secretStatus =
+    form.tracker.api_key.state === "redacted"
+      ? "Existing secret is configured."
+      : form.tracker.api_key.state === "environment"
+        ? `Environment reference: $${form.tracker.api_key.variable}`
+        : "No secret is configured.";
 
   return (
     <div className="space-y-6">
@@ -366,21 +374,79 @@ export default function GuidedEditor({
               />
             </div>
             <div className="space-y-2">
-              <label htmlFor="tracker-api-key" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">API Key (optional)</label>
-              <Input
-                id="tracker-api-key"
-                type="password"
-                value={form.tracker.api_key || ""}
-                onChange={(e) =>
+              <label htmlFor="tracker-secret-action" className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">API Key</label>
+              <p className="text-sm text-muted-foreground">{secretStatus}</p>
+              <Select
+                value={secretEdit.action}
+                onValueChange={(action) => {
+                  let apiKeyEdit: SecretEdit;
+                  if (action === "set_literal") {
+                    apiKeyEdit = { action, value: "" };
+                  } else if (action === "set_environment") {
+                    apiKeyEdit = {
+                      action,
+                      variable:
+                        form.tracker.api_key.state === "environment"
+                          ? form.tracker.api_key.variable
+                          : "GITHUB_TOKEN",
+                    };
+                  } else if (action === "remove") {
+                    apiKeyEdit = { action };
+                  } else {
+                    apiKeyEdit = { action: "preserve" };
+                  }
                   handleFormChange({
-                    tracker: {
-                      ...form.tracker,
-                      api_key: e.target.value || undefined,
-                    },
-                  })
-                }
-                placeholder="$ENV_VAR or value"
-              />
+                    tracker: { ...form.tracker, api_key_edit: apiKeyEdit },
+                  });
+                }}
+              >
+                <SelectTrigger id="tracker-secret-action">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="preserve">Keep current value</SelectItem>
+                  <SelectItem value="set_environment">Use environment variable</SelectItem>
+                  <SelectItem value="set_literal">Replace with literal</SelectItem>
+                  <SelectItem value="remove">Remove</SelectItem>
+                </SelectContent>
+              </Select>
+              {secretEdit.action === "set_literal" && (
+                <Input
+                  aria-label="Replacement API key"
+                  type="password"
+                  value={secretEdit.value}
+                  onChange={(event) =>
+                    handleFormChange({
+                      tracker: {
+                        ...form.tracker,
+                        api_key_edit: {
+                          action: "set_literal",
+                          value: event.target.value,
+                        },
+                      },
+                    })
+                  }
+                  autoComplete="new-password"
+                />
+              )}
+              {secretEdit.action === "set_environment" && (
+                <Input
+                  aria-label="API key environment variable"
+                  value={secretEdit.variable}
+                  onChange={(event) =>
+                    handleFormChange({
+                      tracker: {
+                        ...form.tracker,
+                        api_key_edit: {
+                          action: "set_environment",
+                          variable: event.target.value.replace(/^\$/, ""),
+                        },
+                      },
+                    })
+                  }
+                  placeholder="GITHUB_TOKEN"
+                />
+              )}
             </div>
           </div>
         </CardContent>

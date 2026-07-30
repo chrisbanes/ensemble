@@ -3,16 +3,6 @@ use crate::api::router::AppState;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::Json;
-use serde::Serialize;
-
-/// Response for GET /api/v1/config (legacy - kept for backwards compatibility).
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct ConfigResponse {
-    pub valid: bool,
-    pub errors: Vec<String>,
-    pub config_path: String,
-    pub config: Option<crate::config::ensemble::EnsembleConfig>,
-}
 
 /// GET /api/v1/config
 ///
@@ -81,11 +71,7 @@ on_failure: Failed
         assert_eq!(response.state, "parsed");
         assert!(response.issues.is_empty());
         assert_eq!(response.config_path, "config.yaml");
-        assert!(response.active_config.is_some());
-        assert_eq!(
-            response.active_config.as_ref().unwrap().tracker.kind,
-            "todo_file"
-        );
+        assert!(response.guided_form.is_some());
     }
 
     #[tokio::test]
@@ -111,28 +97,20 @@ on_failure: Failed
         .unwrap();
         let state = build_app_state(config);
         let (_status, Json(response)) = get_config(State(state)).await;
-        // The literal secret must never appear in the JSON output. The
-        // `api_key` field may appear in the guided form (which is now
-        // derived from the in-memory active_config snapshot) with its
-        // value replaced by the `[REDACTED]` marker, but it must not
-        // contain the original token.
+        // The literal secret must never appear in the JSON output. The guided
+        // form exposes only the fact that a secret is configured.
         let json = serde_json::to_string(&response).unwrap();
         assert!(
             !json.contains("ghp_secret_token_12345"),
             "secret token leaked into JSON: {json}"
         );
-        if let Some(idx) = json.find("\"api_key\"") {
-            let after = &json[idx..];
-            let value_start = after.find(':').unwrap() + 1;
-            let value_end_rel = after[value_start..]
-                .find(|c: char| c == ',' || c == '}')
-                .unwrap_or(after.len() - value_start);
-            let value = after[value_start..value_start + value_end_rel].trim();
-            assert!(
-                value == "\"[REDACTED]\"",
-                "api_key value should be the redaction marker, got {value:?}"
-            );
-        }
+        assert_eq!(
+            response
+                .guided_form
+                .as_ref()
+                .map(|form| &form.tracker.api_key),
+            Some(&crate::config::secrets::SecretDisplay::Redacted)
+        );
     }
 
     #[tokio::test]
@@ -145,6 +123,6 @@ on_failure: Failed
         let (status, Json(response)) = get_config(State(state)).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response.state, "missing");
-        assert!(response.active_config.is_none());
+        assert!(response.guided_form.is_none());
     }
 }

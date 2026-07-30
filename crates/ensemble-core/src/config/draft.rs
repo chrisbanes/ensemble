@@ -3,6 +3,7 @@ use crate::error::{ConfigError, PipelineError};
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -419,8 +420,6 @@ pub fn save_raw_yaml_atomically(
     path: &Path,
     raw_yaml: &str,
 ) -> Result<ConfigDocumentState, ConfigError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-
     // Validate the YAML before saving
     let draft = parse_raw_yaml(path.to_path_buf(), raw_yaml.to_string());
     if draft.kind == ConfigStateKind::SyntaxError {
@@ -443,29 +442,69 @@ pub fn save_raw_yaml_atomically(
         }
     }
 
-    // Write to temp file then rename for atomic operation
-    let temp_path = parent.join(format!(
-        ".{}.tmp",
-        path.file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("config.yaml")
-    ));
-
-    if let Err(e) = std::fs::write(&temp_path, raw_yaml) {
-        return Err(ConfigError::ConfigWriteFailed {
-            reason: format!("failed to write temp file: {}", e),
-        });
-    }
-
-    if let Err(e) = std::fs::rename(&temp_path, path) {
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(ConfigError::ConfigWriteFailed {
-            reason: format!("failed to rename temp file: {}", e),
-        });
-    }
+    persist_config_atomically(path, raw_yaml)?;
 
     // Reload the saved config
     load_config_state(path)
+}
+
+pub fn persist_config_atomically(path: &Path, contents: &str) -> Result<(), ConfigError> {
+    let mut temporary = create_config_temporary(path)?;
+
+    temporary
+        .write_all(contents.as_bytes())
+        .and_then(|_| temporary.flush())
+        .map_err(|error| ConfigError::ConfigWriteFailed {
+            reason: format!("failed to write temporary config file: {error}"),
+        })?;
+
+    temporary
+        .persist(path)
+        .map_err(|error| ConfigError::ConfigWriteFailed {
+            reason: format!("failed to replace config file: {}", error.error),
+        })?;
+    Ok(())
+}
+
+fn create_config_temporary(path: &Path) -> Result<tempfile::NamedTempFile, ConfigError> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.is_file() => metadata.permissions(),
+            Ok(_) => {
+                return Err(ConfigError::ConfigWriteFailed {
+                    reason: "config destination is not a file".to_string(),
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::Permissions::from_mode(0o600)
+            }
+            Err(error) => {
+                return Err(ConfigError::ConfigWriteFailed {
+                    reason: format!("failed to inspect existing config permissions: {error}"),
+                })
+            }
+        }
+    };
+
+    let temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+        ConfigError::ConfigWriteFailed {
+            reason: format!("failed to create temporary config file: {error}"),
+        }
+    })?;
+
+    #[cfg(unix)]
+    temporary
+        .as_file()
+        .set_permissions(permissions)
+        .map_err(|error| ConfigError::ConfigWriteFailed {
+            reason: format!("failed to secure temporary config file: {error}"),
+        })?;
+
+    Ok(temporary)
 }
 
 #[cfg(test)]
@@ -909,6 +948,97 @@ on_failure: Failed
         assert!(path.exists());
         let saved = std::fs::read_to_string(&path).unwrap();
         assert!(saved.contains("acpx_agent: claude"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_raw_yaml_atomically_creates_new_file_with_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let valid_config = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        save_raw_yaml_atomically(&path, valid_config).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_raw_yaml_atomically_preserves_existing_restrictive_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let valid_config = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+
+        save_raw_yaml_atomically(&path, valid_config).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writer_secures_temporary_before_persisting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let temporary = create_config_temporary(&path).unwrap();
+
+        assert_eq!(
+            temporary.as_file().metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_atomic_persist_leaves_no_temporary_or_partial_destination() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::create_dir(&path).unwrap();
+
+        let error = persist_config_atomically(&path, "replacement").unwrap_err();
+
+        assert!(error.to_string().contains("destination is not a file"));
+        assert!(path.is_dir());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

@@ -64,6 +64,7 @@ pub async fn run_validation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ensemble_core::config::secrets::{SecretDisplay, SecretEdit};
     use std::path::PathBuf;
 
     #[test]
@@ -120,14 +121,26 @@ mod tests {
             SetupTracker::GitHub {
                 repository,
                 project_number,
-                api_key_env,
+                api_key,
+                api_key_edit,
                 api_token,
                 active_states,
                 terminal_states,
             } => {
                 assert_eq!(repository, "acme/frontend");
                 assert_eq!(project_number, Some(42));
-                assert_eq!(api_key_env, "GITHUB_TOKEN");
+                assert_eq!(
+                    api_key,
+                    SecretDisplay::Environment {
+                        variable: "GITHUB_TOKEN".to_string()
+                    }
+                );
+                assert_eq!(
+                    api_key_edit,
+                    SecretEdit::SetEnvironment {
+                        variable: "GITHUB_TOKEN".to_string()
+                    }
+                );
                 assert_eq!(api_token, None);
                 assert_eq!(active_states, vec!["Todo"]);
                 assert_eq!(terminal_states, vec!["Done"]);

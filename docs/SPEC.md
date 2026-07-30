@@ -2332,6 +2332,19 @@ Recommended additional hardening for ports:
 - Support `$VAR` indirection in workflow config.
 - Do not log API tokens or secret env values.
 - Validate presence of secrets without printing them.
+- Configuration APIs must not serialize resolved runtime configuration or literal secret values.
+- In configuration YAML exposed through an API, mapping keys named exactly `api_key`, `token`,
+  `password`, or `secret` (case-insensitive) are secret fields at any nesting depth. Literal secret
+  values are represented as `[REDACTED]`; `$VAR` references may remain visible as non-secret
+  metadata. Lookalike keys are not secret fields.
+- Raw YAML saves interpret `[REDACTED]` as "preserve the authoritative value at this YAML path".
+  The placeholder is invalid when no stored value exists at that path. An explicit replacement
+  replaces the value and an omitted field removes it.
+- Structured editors represent secret changes explicitly as preserve, replace with a write-only
+  literal, replace with an environment reference, or remove. Existing secrets default to preserve.
+- If malformed YAML cannot be structurally redacted, omit it from API responses.
+- Configuration file replacement must be atomic. On Unix, preserve an existing file's permissions
+  and create new configuration files with mode `0600`.
 
 ### 15.4 Hook Script Safety
 

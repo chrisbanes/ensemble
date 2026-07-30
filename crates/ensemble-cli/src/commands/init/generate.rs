@@ -246,6 +246,7 @@ fn apply_declined_overwrites(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ensemble_core::config::secrets::{SecretDisplay, SecretEdit, SecretValue};
     use ensemble_core::config::setup::{SetupAgent, SetupStep};
     use std::path::PathBuf;
 
@@ -452,8 +453,13 @@ mod tests {
             tracker: SetupTracker::GitHub {
                 repository: "acme/repo".to_string(),
                 project_number: None,
-                api_key_env: "GITHUB_TOKEN".to_string(),
-                api_token: Some("secret".to_string()),
+                api_key: SecretDisplay::Environment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_token: Some(SecretValue::new("secret")),
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],
             },

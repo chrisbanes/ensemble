@@ -10,6 +10,7 @@ import type {
   SetupStep,
   DiscoveredAgentInfo,
   SetupCheck,
+  SecretEdit,
 } from "@/generated/models";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -63,7 +64,8 @@ const DEFAULT_GH_TRACKER: SetupTracker = {
   kind: "github", 
   repository: "", 
   project_number: null,
-  api_key_env: "GITHUB_TOKEN",
+  api_key: { state: "unset" },
+  api_key_edit: { action: "set_environment", variable: "GITHUB_TOKEN" },
   active_states: ["Todo", "In Progress"],
   terminal_states: ["Done"],
 };
@@ -163,9 +165,17 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
   useEffect(() => {
     if (defaultsData?.data?.defaults && defaultsData.data.has_existing_config) {
       const defaults = defaultsData.data.defaults as Partial<SetupDraft>;
+      const tracker = defaults.tracker?.kind === "github"
+        ? {
+            ...defaults.tracker,
+            api_key: defaults.tracker.api_key ?? { state: "unset" as const },
+            api_key_edit: defaults.tracker.api_key_edit ?? { action: "preserve" as const },
+          }
+        : defaults.tracker;
       setDraft(prev => ({
         ...prev,
         ...defaults,
+        tracker: tracker ?? prev.tracker,
         repos: defaults.repos || prev.repos,
         agents: defaults.agents || prev.agents,
         steps: defaults.steps || prev.steps,
@@ -405,6 +415,87 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                 } as SetupTracker,
               }))}
             />
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm font-medium" htmlFor="setup-secret-action">API Key</label>
+            <p className="text-sm text-muted-foreground">
+              {draft.tracker.api_key?.state === "redacted"
+                ? "Existing secret is configured."
+                : draft.tracker.api_key?.state === "environment"
+                  ? `Environment reference: $${draft.tracker.api_key.variable}`
+                  : "No secret is configured."}
+            </p>
+            <Select
+              value={(draft.tracker.api_key_edit ?? { action: "preserve" }).action}
+              onValueChange={(action) => {
+                let edit: SecretEdit;
+                if (action === "set_literal") {
+                  edit = { action, value: "" };
+                } else if (action === "set_environment") {
+                  edit = {
+                    action,
+                    variable:
+                      draft.tracker.kind === "github" &&
+                      draft.tracker.api_key.state === "environment"
+                        ? draft.tracker.api_key.variable
+                        : "GITHUB_TOKEN",
+                  };
+                } else if (action === "remove") {
+                  edit = { action };
+                } else {
+                  edit = { action: "preserve" };
+                }
+                setDraft(prev => prev.tracker.kind === "github" ? {
+                  ...prev,
+                  tracker: { ...prev.tracker, api_key_edit: edit },
+                } : prev);
+              }}
+            >
+              <SelectTrigger id="setup-secret-action">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="preserve">Keep current value</SelectItem>
+                <SelectItem value="set_environment">Use environment variable</SelectItem>
+                <SelectItem value="set_literal">Replace with literal</SelectItem>
+                <SelectItem value="remove">Remove</SelectItem>
+              </SelectContent>
+            </Select>
+            {draft.tracker.api_key_edit?.action === "set_literal" && (
+              <Input
+                aria-label="Replacement API key"
+                type="password"
+                value={draft.tracker.api_key_edit.value}
+                onChange={(event) => setDraft(prev => prev.tracker.kind === "github" ? {
+                  ...prev,
+                  tracker: {
+                    ...prev.tracker,
+                    api_key_edit: {
+                      action: "set_literal",
+                      value: event.target.value,
+                    },
+                  },
+                } : prev)}
+                autoComplete="new-password"
+              />
+            )}
+            {draft.tracker.api_key_edit?.action === "set_environment" && (
+              <Input
+                aria-label="API key environment variable"
+                value={draft.tracker.api_key_edit.variable}
+                onChange={(event) => setDraft(prev => prev.tracker.kind === "github" ? {
+                  ...prev,
+                  tracker: {
+                    ...prev.tracker,
+                    api_key_edit: {
+                      action: "set_environment",
+                      variable: event.target.value.replace(/^\$/, ""),
+                    },
+                  },
+                } : prev)}
+                placeholder="GITHUB_TOKEN"
+              />
+            )}
           </div>
         </>
       )}

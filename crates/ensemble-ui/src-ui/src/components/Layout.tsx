@@ -72,9 +72,10 @@ export default function Layout() {
   );
   const { data: configData } = useConfigStateQuery();
 
-  // Check if config is runnable (parsed state with no issues and valid config)
+  // Parsed config state with no validation issues is runnable. The API does not
+  // expose the resolved runtime config because it may contain secrets.
   const isConfigRunnable = configData
-    ? configData.state === "parsed" && configData.active_config != null && configData.issues.length === 0
+    ? configData.state === "parsed" && configData.issues.length === 0
     : false;
   const notificationLabel =
     unreadCount > 0 ? `Notifications (${unreadCount} unread)` : "Notifications";

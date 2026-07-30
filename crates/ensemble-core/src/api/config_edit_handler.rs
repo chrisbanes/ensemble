@@ -4,6 +4,7 @@ use crate::config::draft::{
     parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState, ConfigStateKind, ValidationIssue,
 };
 use crate::config::ensemble::EnsembleConfig;
+use crate::config::secrets::{merge_redacted_yaml, redact_yaml_secrets, SecretDisplay};
 use crate::config_watcher::record_self_write;
 use crate::error::ConfigError;
 use axum::extract::State;
@@ -14,122 +15,6 @@ use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 use tracing::warn;
-
-/// Redact literal secret values from YAML text.
-/// Preserves `$ENV_VAR` references (they're not actual secrets in the file).
-/// Patterns matched (case-insensitive, as YAML keys): api_key, token, password, secret.
-fn redact_secrets(yaml: &str) -> String {
-    let secret_keys = ["api_key", "token", "password", "secret"];
-    yaml.lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            let indent = &line[..line.len() - trimmed.len()];
-            format!("{indent}{}", redact_secret_in_line(trimmed, &secret_keys))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn redact_secret_in_line(line: &str, keys: &[&str]) -> String {
-    let mut redacted = line.to_string();
-
-    for &key in keys {
-        for delimiter in [":", "="] {
-            let pattern = format!("{key}{delimiter}");
-            let mut search_from = 0;
-
-            while let Some(relative_start) =
-                redacted[search_from..].to_ascii_lowercase().find(&pattern)
-            {
-                let start = search_from + relative_start;
-                let prefix_start = redacted[..start]
-                    .char_indices()
-                    .last()
-                    .filter(|(_, ch)| !matches!(ch, ' ' | '{' | ',' | '-'));
-
-                if prefix_start.is_some() {
-                    search_from = start + pattern.len();
-                    continue;
-                }
-
-                let value_start = start + pattern.len();
-                let value = &redacted[value_start..];
-                let value_trimmed = value.trim_start();
-                let leading_ws = value.len() - value_trimmed.len();
-
-                let suffix_offset = find_value_end(value_trimmed);
-                let candidate_value = &value_trimmed[..suffix_offset].trim_end();
-                if is_env_var_reference(candidate_value) {
-                    search_from = value_start + leading_ws + 1;
-                    continue;
-                }
-
-                let replace_start = value_start + leading_ws;
-                let replace_end = replace_start + suffix_offset;
-                redacted.replace_range(replace_start..replace_end, "\"[REDACTED]\"");
-                search_from = replace_start + "\"[REDACTED]\"".len();
-            }
-        }
-    }
-
-    redacted
-}
-
-/// Find the end of a YAML value, respecting quoted strings.
-fn find_value_end(value: &str) -> usize {
-    let trimmed = value.trim_start();
-    if let Some(stripped) = trimmed.strip_prefix('"') {
-        // Find closing quote, skipping escaped quotes
-        let mut in_escape = false;
-        for (i, ch) in stripped.char_indices() {
-            if in_escape {
-                in_escape = false;
-                continue;
-            }
-            if ch == '\\' {
-                in_escape = true;
-                continue;
-            }
-            if ch == '"' {
-                return trimmed[..i + 2].len();
-            }
-        }
-        // No closing quote found — treat entire value
-        trimmed.len()
-    } else if let Some(stripped) = trimmed.strip_prefix('\'') {
-        // Single-quoted value (no escapes in YAML single quotes except '')
-        match stripped.find('\'') {
-            Some(idx) => trimmed[..idx + 2].len(),
-            None => trimmed.len(),
-        }
-    } else {
-        // Unquoted value: terminate at comma, closing brace, or end
-        trimmed.find([',', '}']).unwrap_or(trimmed.len())
-    }
-}
-
-fn is_env_var_reference(value: &str) -> bool {
-    value.starts_with('$')
-        || value
-            .strip_prefix('"')
-            .and_then(|value| value.strip_suffix('"'))
-            .is_some_and(|value| value.starts_with('$'))
-}
-
-fn redact_guided_form_secrets(
-    mut guided_form: crate::config::form::GuidedConfigForm,
-) -> crate::config::form::GuidedConfigForm {
-    if guided_form
-        .tracker
-        .api_key
-        .as_deref()
-        .is_some_and(|value| !value.starts_with('$'))
-    {
-        guided_form.tracker.api_key = Some("[REDACTED]".to_string());
-    }
-
-    guided_form
-}
 
 /// Request to validate YAML content.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -144,7 +29,6 @@ pub struct ConfigStateResponse {
     pub config_path: String,
     pub raw_yaml: Option<String>,
     pub issues: Vec<ValidationIssue>,
-    pub active_config: Option<EnsembleConfig>,
     pub guided_form: Option<crate::config::form::GuidedConfigForm>,
 }
 
@@ -162,22 +46,33 @@ impl ConfigStateResponse {
         // `available_models`/`available_modes`) that the user has not yet
         // written back to YAML. Fall back to the parsed YAML view when no
         // active snapshot exists.
-        let guided_form = if let Some(ref config) = state.active_config {
-            Some(crate::config::form::guided_form_from_config(config))
-        } else {
-            state
-                .raw_yaml
-                .as_ref()
-                .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok())
+        let mut guided_form = state
+            .raw_yaml
+            .as_ref()
+            .and_then(|yaml| crate::config::form::extract_guided_form(yaml).ok())
+            .or_else(|| {
+                state
+                    .active_config
+                    .as_ref()
+                    .map(crate::config::form::guided_form_from_config)
+            });
+
+        if let (Some(form), Some(active_config)) = (&mut guided_form, &state.active_config) {
+            for form_agent in &mut form.agents {
+                if let Some(active_agent) = active_config.agents.get(&form_agent.name) {
+                    form_agent.available_models = (!active_agent.available_models.is_empty())
+                        .then(|| active_agent.available_models.clone());
+                    form_agent.available_modes = (!active_agent.available_modes.is_empty())
+                        .then(|| active_agent.available_modes.clone());
+                }
+            }
         }
-        .map(redact_guided_form_secrets);
 
         Self {
             state: state_str.to_string(),
             config_path: state.path.display().to_string(),
-            raw_yaml: state.raw_yaml.as_ref().map(|y| redact_secrets(y)),
+            raw_yaml: state.raw_yaml.as_deref().and_then(redact_yaml_secrets),
             issues: state.validation.issues.clone(),
-            active_config: state.active_config.clone(),
             guided_form,
         }
     }
@@ -249,6 +144,15 @@ fn reload_document_state(
     })
 }
 
+fn apply_guided_form_to_current(
+    current: &ConfigDocumentState,
+    base_raw_yaml: &str,
+    form: &crate::config::form::GuidedConfigForm,
+) -> Result<String, ConfigError> {
+    let base_yaml = merge_redacted_yaml(current.raw_yaml.as_deref(), base_raw_yaml)?;
+    crate::config::form::apply_guided_form(&base_yaml, form)
+}
+
 /// POST /api/v1/config/yaml/validate
 ///
 /// Validates raw YAML content without saving it.
@@ -266,8 +170,19 @@ pub async fn validate_yaml(
     State(state): State<AppState>,
     Json(request): Json<ValidateYamlRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
-    let draft = parse_raw_yaml(state.config_runtime.config_path.clone(), request.raw_yaml);
-    (StatusCode::OK, config_state_json(&draft))
+    let current = state.config_runtime.document_state.read().await;
+    match merge_redacted_yaml(current.raw_yaml.as_deref(), &request.raw_yaml) {
+        Ok(merged_yaml) => {
+            let draft = parse_raw_yaml(state.config_runtime.config_path.clone(), merged_yaml);
+            (StatusCode::OK, config_state_json(&draft))
+        }
+        Err(error) => {
+            let draft = parse_raw_yaml(state.config_runtime.config_path.clone(), request.raw_yaml);
+            let mut response = ConfigStateResponse::from_state(&draft);
+            push_config_issue(&mut response, "yaml", error.to_string());
+            (StatusCode::OK, Json(response))
+        }
+    }
 }
 
 /// Request to save YAML content.
@@ -296,11 +211,20 @@ pub async fn save_yaml(
     Json(request): Json<SaveYamlRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
     let mut doc_state = state.config_runtime.document_state.write().await;
+    let merged_yaml = match merge_redacted_yaml(doc_state.raw_yaml.as_deref(), &request.raw_yaml) {
+        Ok(merged_yaml) => merged_yaml,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                current_error_json(&doc_state, "yaml", error.to_string()),
+            )
+        }
+    };
 
     match replace_document_state_from_yaml(
         &mut doc_state,
         &state.config_runtime.config_path,
-        &request.raw_yaml,
+        &merged_yaml,
     ) {
         Ok(response) => {
             drop(doc_state);
@@ -673,12 +597,7 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
             "kind": "github",
             "repository": config.tracker.repository,
             "project_number": config.tracker.project_number,
-            "api_key_env": config
-                .tracker
-                .api_key
-                .as_deref()
-                .and_then(|key| key.strip_prefix('$'))
-                .unwrap_or("GITHUB_TOKEN"),
+            "api_key": SecretDisplay::from_config_value(config.tracker.api_key.as_deref()),
             "active_states": config.tracker.active_states,
             "terminal_states": config.tracker.terminal_states,
         }),
@@ -784,7 +703,8 @@ pub async fn validate_guided_form(
     State(state): State<AppState>,
     Json(request): Json<ValidateGuidedFormRequest>,
 ) -> (StatusCode, Json<ValidateGuidedFormResponse>) {
-    match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
+    let current = state.config_runtime.document_state.read().await;
+    match apply_guided_form_to_current(&current, &request.base_raw_yaml, &request.form) {
         Ok(merged_yaml) => {
             // Parse and validate the merged YAML
             let draft = crate::config::draft::parse_raw_yaml(
@@ -796,7 +716,7 @@ pub async fn validate_guided_form(
                 && draft.validation.issues.is_empty();
 
             let response = ValidateGuidedFormResponse {
-                merged_yaml,
+                merged_yaml: redact_yaml_secrets(&merged_yaml).unwrap_or_default(),
                 issues: draft.validation.issues,
                 valid,
             };
@@ -804,7 +724,7 @@ pub async fn validate_guided_form(
         }
         Err(e) => {
             let response = ValidateGuidedFormResponse {
-                merged_yaml: request.base_raw_yaml,
+                merged_yaml: redact_yaml_secrets(&request.base_raw_yaml).unwrap_or_default(),
                 issues: vec![crate::config::draft::ValidationIssue {
                     kind: crate::config::draft::ValidationIssueKind::Config,
                     message: format!("Form merge failed: {}", e),
@@ -849,7 +769,7 @@ pub async fn save_guided_form(
 
     // First, merge the guided form with the base YAML
     let merged_yaml =
-        match crate::config::form::apply_guided_form(&request.base_raw_yaml, &request.form) {
+        match apply_guided_form_to_current(&doc_state, &request.base_raw_yaml, &request.form) {
             Ok(yaml) => yaml,
             Err(e) => {
                 return (
@@ -893,6 +813,7 @@ mod tests {
     use crate::api::bootstrap::take_registered_orchestrator;
     use crate::api::test_helpers::app_state_with_missing_config;
     use crate::config::draft::{ConfigStateKind, DraftValidationReport};
+    use crate::config::secrets::{SecretEdit, REDACTED_SECRET};
     use axum::body::Body;
     use axum::response::IntoResponse;
     use futures_util::StreamExt;
@@ -1016,7 +937,7 @@ on_failure: Failed
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(response.state, "parsed");
-        assert!(response.active_config.is_some());
+        assert!(response.guided_form.is_some());
     }
 
     #[test]
@@ -1048,12 +969,15 @@ on_failure: Failed
         );
 
         let response = ConfigStateResponse::from_state(&state);
+        let serialized = serde_json::to_string(&response).unwrap();
 
         let guided_form = response.guided_form.unwrap();
         assert_eq!(guided_form.tracker.repository.as_deref(), Some("acme/repo"));
         assert_eq!(guided_form.tracker.project_number, Some(9));
-        assert_eq!(guided_form.tracker.api_key.as_deref(), Some("[REDACTED]"));
+        assert_eq!(guided_form.tracker.api_key, SecretDisplay::Redacted);
         assert!(response.raw_yaml.unwrap().contains("[REDACTED]"));
+        assert!(!serialized.contains("active_config"));
+        assert!(!serialized.contains("ghp_secret123"));
     }
 
     #[test]
@@ -1123,6 +1047,106 @@ on_failure: Failed
             .as_ref()
             .expect("discovered modes should surface in guided form");
         assert_eq!(modes[0].id, "code");
+    }
+
+    #[tokio::test]
+    async fn save_yaml_preserves_authoritative_secret_during_unrelated_edit() {
+        let (state, _temp_dir) = test_app_state();
+        let current_yaml = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: ghp_original
+  active_states: [Todo]
+  terminal_states: [Done]
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        std::fs::write(&state.config_runtime.config_path, current_yaml).unwrap();
+        *state.config_runtime.document_state.write().await = parse_raw_yaml(
+            state.config_runtime.config_path.clone(),
+            current_yaml.to_string(),
+        );
+
+        let submitted_yaml = redact_yaml_secrets(current_yaml)
+            .unwrap()
+            .replace("on_failure: Failed", "on_failure: Needs Attention");
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: submitted_yaml,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let saved = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(saved.contains("ghp_original"));
+        assert!(!saved.contains(REDACTED_SECRET));
+        assert!(saved.contains("on_failure: Needs Attention"));
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(!response_json.contains("ghp_original"));
+
+        if let Some(runtime) = take_registered_orchestrator(&state) {
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn save_guided_form_preserves_authoritative_secret_by_default() {
+        let (state, _temp_dir) = test_app_state();
+        let current_yaml = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: ghp_original
+  active_states: [Todo]
+  terminal_states: [Done]
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        std::fs::write(&state.config_runtime.config_path, current_yaml).unwrap();
+        let current = parse_raw_yaml(
+            state.config_runtime.config_path.clone(),
+            current_yaml.to_string(),
+        );
+        let response = ConfigStateResponse::from_state(&current);
+        *state.config_runtime.document_state.write().await = current;
+        let mut form = response.guided_form.unwrap();
+        form.transitions.on_failure = "Needs Attention".to_string();
+
+        let (status, Json(_response)) = save_guided_form(
+            axum::extract::State(state.clone()),
+            Json(SaveGuidedFormRequest {
+                base_raw_yaml: response.raw_yaml.unwrap(),
+                form,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let saved = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(saved.contains("ghp_original"));
+        assert!(!saved.contains(REDACTED_SECRET));
+        assert!(saved.contains("Needs Attention"));
+
+        if let Some(runtime) = take_registered_orchestrator(&state) {
+            runtime.shutdown().await;
+        }
     }
 
     #[test]
@@ -1581,7 +1605,8 @@ on_failure: Failed
                 path: Some("TODO.md".to_string()),
                 repository: None,
                 project_number: None,
-                api_key: None,
+                api_key: SecretDisplay::Unset,
+                api_key_edit: SecretEdit::Preserve,
                 endpoint: None,
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],
@@ -1755,7 +1780,10 @@ on_failure: Failed
                 path: None,
                 repository: Some("acme/repo".to_string()),
                 project_number: Some(9),
-                api_key: Some("ghp_secret123".to_string()),
+                api_key: SecretDisplay::Redacted,
+                api_key_edit: SecretEdit::SetLiteral {
+                    value: "ghp_secret123".to_string(),
+                },
                 endpoint: None,
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],
@@ -1914,7 +1942,10 @@ on_failure: Failed
                 path: None,
                 repository: Some("acme/repo".to_string()),
                 project_number: Some(9),
-                api_key: Some("ghp_secret123".to_string()),
+                api_key: SecretDisplay::Redacted,
+                api_key_edit: SecretEdit::SetLiteral {
+                    value: "ghp_secret123".to_string(),
+                },
                 endpoint: None,
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],
@@ -2031,8 +2062,13 @@ on_failure: Failed
                 tracker: crate::config::setup::SetupTracker::GitHub {
                     repository: "acme/repo".to_string(),
                     project_number: Some(9),
-                    api_key_env: "GITHUB_TOKEN".to_string(),
-                    api_token: Some("ghp_secret123".to_string()),
+                    api_key: SecretDisplay::Environment {
+                        variable: "GITHUB_TOKEN".to_string(),
+                    },
+                    api_key_edit: SecretEdit::SetEnvironment {
+                        variable: "GITHUB_TOKEN".to_string(),
+                    },
+                    api_token: Some(crate::config::secrets::SecretValue::new("ghp_secret123")),
                     active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                     terminal_states: vec!["Done".to_string()],
                 },
@@ -2074,12 +2110,12 @@ on_failure: Failed
             .as_ref()
             .unwrap()
             .contains("ghp_secret123"));
-        let tracker = &response.active_config.as_ref().unwrap().tracker;
+        let persisted_state = state.config_runtime.document_state.read().await;
+        let tracker = &persisted_state.active_config.as_ref().unwrap().tracker;
         assert_eq!(tracker.repository.as_deref(), Some("acme/repo"));
         assert_eq!(tracker.project_number, Some(9));
         assert_eq!(tracker.api_key.as_deref(), Some("ghp_secret123"));
 
-        let persisted_state = state.config_runtime.document_state.read().await;
         let disk_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
         assert_eq!(
             persisted_state.raw_yaml.as_deref(),
@@ -2144,7 +2180,7 @@ on_failure: Failed
             save_yaml(axum::extract::State(state.clone()), Json(request)).await;
 
         assert_eq!(status, StatusCode::OK);
-        assert!(response.active_config.is_some());
+        assert!(response.guided_form.is_some());
 
         tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -2176,7 +2212,7 @@ on_failure: Failed
                 save_yaml(axum::extract::State(state.clone()), Json(request)).await;
 
             assert_eq!(status, StatusCode::OK);
-            assert!(response.active_config.is_some());
+            assert!(response.guided_form.is_some());
 
             tokio::time::timeout(std::time::Duration::from_secs(2), async {
                 loop {
@@ -2190,153 +2226,5 @@ on_failure: Failed
             .await
             .expect("orchestrator should adopt the saved poll interval");
         }
-    }
-
-    #[test]
-    fn redact_secrets_redacts_literal_api_key() {
-        let yaml = "tracker:\n  kind: github\n  api_key: ghp_secret123";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("[REDACTED]"));
-        assert!(!redacted.contains("ghp_secret123"));
-    }
-
-    #[test]
-    fn redact_secrets_preserves_env_var_reference() {
-        let yaml = "tracker:\n  api_key: $GITHUB_TOKEN";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("$GITHUB_TOKEN"));
-        assert!(!redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_preserves_quoted_env_var_reference() {
-        let yaml = "tracker:\n  api_key: \"$GITHUB_TOKEN\"";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("\"$GITHUB_TOKEN\""));
-        assert!(!redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_does_not_panic_on_unterminated_quoted_value() {
-        let yaml = "tracker:\n  api_key: \"";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_redacts_token_and_password() {
-        let yaml = "auth:\n  token: abc123\n  password: hunter2";
-        let redacted = redact_secrets(yaml);
-        assert!(!redacted.contains("abc123"));
-        assert!(!redacted.contains("hunter2"));
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_redacts_literal_secret() {
-        let yaml = "secret: mysecretvalue";
-        let redacted = redact_secrets(yaml);
-        assert!(!redacted.contains("mysecretvalue"));
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_handles_equals_separator() {
-        let yaml = "secret=mysecretvalue";
-        let redacted = redact_secrets(yaml);
-        assert!(!redacted.contains("mysecretvalue"));
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_preserves_indentation() {
-        let yaml = "tracker:\n  api_key: ghp_secret";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.starts_with("tracker:\n  api_key:"));
-    }
-
-    #[test]
-    fn redact_secrets_redacts_inline_yaml_mapping_values() {
-        let yaml = "tracker: { api_key: ghp_secret123, kind: github }";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("api_key: \"[REDACTED]\""));
-        assert!(!redacted.contains("ghp_secret123"));
-        assert!(redacted.contains("kind: github"));
-    }
-
-    #[test]
-    fn redact_secrets_preserves_quoted_env_var_reference_in_inline_mapping() {
-        let yaml = "tracker: { api_key: \"$GITHUB_TOKEN\", kind: github }";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("api_key: \"$GITHUB_TOKEN\""));
-        assert!(!redacted.contains("[REDACTED]"));
-        assert!(redacted.contains("kind: github"));
-    }
-
-    #[test]
-    fn redact_secrets_redacts_multiple_inline_secrets_on_same_line() {
-        let yaml = "tracker: { api_key: ghp_x, token: abc, kind: github }";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("api_key: \"[REDACTED]\""));
-        assert!(redacted.contains("token: \"[REDACTED]\""));
-        assert!(!redacted.contains("ghp_x"));
-        assert!(!redacted.contains("abc"));
-        assert!(redacted.contains("kind: github"));
-    }
-
-    #[test]
-    fn redact_secrets_redacts_sequence_item_key_values() {
-        let yaml = "secrets:\n  - token: abc123\n  - password: hunter2";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("- token: \"[REDACTED]\""));
-        assert!(redacted.contains("- password: \"[REDACTED]\""));
-        assert!(!redacted.contains("abc123"));
-        assert!(!redacted.contains("hunter2"));
-    }
-
-    #[test]
-    fn redact_secrets_is_case_insensitive() {
-        let yaml = "tracker:\n  API_KEY: GHP_UPPER\n  Token: mixed_case";
-        let redacted = redact_secrets(yaml);
-        assert!(!redacted.contains("GHP_UPPER"));
-        assert!(!redacted.contains("mixed_case"));
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_does_not_redact_non_secret_keys() {
-        let yaml = "config:\n  token_count: 42\n  tokenized: true\n  api_keys_list: []";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("token_count: 42"));
-        assert!(redacted.contains("tokenized: true"));
-        assert!(redacted.contains("api_keys_list: []"));
-        assert!(!redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_redacts_quoted_literal_values() {
-        let yaml = "tracker:\n  api_key: \"ghp_quoted_secret\"";
-        let redacted = redact_secrets(yaml);
-        assert!(!redacted.contains("ghp_quoted_secret"));
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_handles_empty_value() {
-        let yaml = "tracker:\n  api_key:";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("[REDACTED]"));
-    }
-
-    #[test]
-    fn redact_secrets_handles_multi_key_yaml_document() {
-        let yaml = "tracker:\n  kind: github\n  api_key: ghp_real\n  repository: org/repo\nagents:\n  builder:\n    model: sonnet\n    secret: mysecret";
-        let redacted = redact_secrets(yaml);
-        assert!(redacted.contains("kind: github"));
-        assert!(redacted.contains("repository: org/repo"));
-        assert!(redacted.contains("model: sonnet"));
-        assert!(!redacted.contains("ghp_real"));
-        assert!(!redacted.contains("mysecret"));
-        assert!(redacted.contains("[REDACTED]"));
     }
 }
