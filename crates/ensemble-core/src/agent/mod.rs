@@ -140,8 +140,12 @@ fn update_agent_capabilities(
     capabilities: &DiscoveredCapabilities,
 ) {
     if let Some(agent) = config.agents.get_mut(agent_name) {
-        agent.available_models = capabilities.models.clone();
-        agent.available_modes = capabilities.modes.clone();
+        if !capabilities.models.is_empty() {
+            agent.available_models = capabilities.models.clone();
+        }
+        if !capabilities.modes.is_empty() {
+            agent.available_modes = capabilities.modes.clone();
+        }
     }
 }
 
@@ -164,9 +168,8 @@ impl AcpAgentRunner {
     }
 
     /// Persist discovered ACP capabilities back into the shared in-memory
-    /// `AgentConfig` snapshots. No-op if the discovery returned no models and
-    /// no modes so that a transient empty discovery does not wipe
-    /// previously-stored data.
+    /// `AgentConfig` snapshots. Empty capability dimensions preserve previously
+    /// stored data because ACP runtimes may expose models and modes separately.
     async fn store_agent_capabilities(
         &self,
         agent_name: &str,
@@ -1144,6 +1147,26 @@ on_failure: Todo
                 .id,
             "gpt-5"
         );
+
+        runner
+            .store_agent_capabilities(
+                "builder",
+                DiscoveredCapabilities {
+                    modes: vec![ModeDefinition {
+                        id: "ask".to_string(),
+                        name: "Ask".to_string(),
+                        description: None,
+                    }],
+                    current_mode: Some("ask".to_string()),
+                    ..DiscoveredCapabilities::default()
+                },
+            )
+            .await;
+
+        let runtime_config = runtime_config.read().await;
+        let builder = runtime_config.agents.get("builder").unwrap();
+        assert_eq!(builder.available_models[0].id, "gpt-5");
+        assert_eq!(builder.available_modes[0].id, "ask");
     }
 
     fn collect_event_names(rx: &mut mpsc::Receiver<WorkerEvent>) -> Vec<String> {
