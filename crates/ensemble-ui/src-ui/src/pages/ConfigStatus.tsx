@@ -18,10 +18,10 @@ export default function ConfigStatus() {
 
   if (!data) return null;
 
-  const { active_config: config } = data;
+  const config = data.guided_form;
   
   // Handle missing or invalid config
-  const isValid = data.state === "parsed" && config != null;
+  const isValid = data.state === "parsed" && config != null && data.issues.length === 0;
   const hasIssues = data.issues.length > 0;
 
   return (
@@ -144,19 +144,19 @@ export default function ConfigStatus() {
               <dl className="grid grid-cols-2 sm:grid-cols-3 gap-4">
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Max Concurrent</dt>
-                  <dd className="text-sm">{config.concurrency?.max_concurrent_agents ?? "—"}</dd>
+                  <dd className="text-sm">{config.runtime.concurrency.max_concurrent_agents}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Max Retries</dt>
-                  <dd className="text-sm">{config.max_cycles}</dd>
+                  <dd className="text-sm">{config.runtime.max_cycles}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Poll Interval</dt>
-                  <dd className="text-sm">{config.polling?.interval_ms != null ? `${config.polling.interval_ms / 1000}s` : "—"}</dd>
+                  <dd className="text-sm">{`${config.runtime.polling.interval_ms / 1000}s`}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Workspace Root</dt>
-                  <dd className="text-sm"><code className="bg-muted px-1 rounded">{config.workspace?.root ?? "default"}</code></dd>
+                  <dd className="text-sm"><code className="bg-muted px-1 rounded">{config.runtime.workspace.root ?? "default"}</code></dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Tracker</dt>
@@ -164,7 +164,7 @@ export default function ConfigStatus() {
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Max Turns</dt>
-                  <dd className="text-sm">{config.agent?.max_turns ?? "—"}</dd>
+                  <dd className="text-sm">{config.runtime.agent.max_turns}</dd>
                 </div>
               </dl>
             </CardContent>
@@ -179,11 +179,11 @@ export default function ConfigStatus() {
               <dl className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">On Success</dt>
-                  <dd className="text-sm">{config.on_success}</dd>
+                  <dd className="text-sm">{config.transitions.on_success}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">On Failure</dt>
-                  <dd className="text-sm">{config.on_failure}</dd>
+                  <dd className="text-sm">{config.transitions.on_failure}</dd>
                 </div>
                 <div>
                   <dt className="text-sm font-medium text-muted-foreground">Active States</dt>

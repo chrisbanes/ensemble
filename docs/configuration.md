@@ -192,6 +192,32 @@ Hostname resolution for step 3:
 4. `GH_HOST`
 5. `github.com`
 
+### Editing secrets in the web and desktop configuration UI
+
+Configuration responses never include resolved secret values. YAML mapping keys named exactly
+`api_key`, `token`, `password`, or `secret` (case-insensitive) are treated as secret fields at any
+nesting depth, including inside sequences. Literal values are displayed as `[REDACTED]`; `$VAR`
+references remain visible so operators can see which environment variable is configured. Similar
+names such as `tokenizer` and `secret_name` are not secret fields.
+
+When saving raw YAML, `[REDACTED]` preserves the value currently stored at the same YAML path.
+Within a sequence, entries are matched one-to-one by a unique scalar `id`, then `name`; unnamed
+entries fall back to their complete non-secret structure. Their numeric position is never an
+identity. Reordering, inserting, or editing non-identity fields therefore cannot transfer a
+credential to a different logical entry. After direct matches are claimed, one unmatched
+`[REDACTED]` marker may map to one remaining stored entry by elimination, allowing an unambiguous
+identity rename. Multiple unmatched or duplicate identities are rejected. Replacing the placeholder
+with a literal or `$VAR` reference replaces the stored value, and removing the field removes the
+value. Malformed YAML is never returned as raw configuration because it cannot be safely redacted.
+
+Guided and setup editors use explicit secret actions: keep the current value, replace it with a
+literal, use an environment variable, or remove it. Literal replacement inputs are write-only:
+after save, the UI only reports that a secret is configured. Blank literal and environment
+replacements are rejected before configuration persistence, and environment names must match
+`[A-Za-z_][A-Za-z0-9_]*`. New `config.yaml` files created by the editors use owner-only permissions
+(`0600`) on Unix; existing file permissions are retained. Configuration writes replace the file
+atomically from a temporary file in the same directory.
+
 **Todo file fields** (when `kind: todo_file`):
 
 | Field | Type | Default | Description |

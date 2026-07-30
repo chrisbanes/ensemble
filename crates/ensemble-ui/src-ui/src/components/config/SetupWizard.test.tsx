@@ -81,6 +81,119 @@ describe("SetupWizard", () => {
     vi.stubGlobal("EventSource", MockEventSource);
   });
 
+  it("preserves an existing setup secret without rendering or resubmitting it", async () => {
+    const user = userEvent.setup();
+    const validateMock = vi.fn();
+    vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key: { state: "redacted" },
+              active_states: ["Todo"],
+              terminal_states: ["Done"],
+            },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null }],
+            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+            onSuccess: "Done",
+            onFailure: "Failed",
+          },
+        });
+      }
+      if (url.includes("/api/v1/config/setup/validate")) {
+        validateMock(JSON.parse(String(init?.body)));
+        return jsonResponse({
+          can_save: true,
+          checks: [{ label: "Tracker", passed: true, detail: "ok" }],
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+
+    expect(await screen.findByText(/existing secret is configured/i)).toBeInTheDocument();
+    expect(screen.queryByDisplayValue(/ghp_/i)).not.toBeInTheDocument();
+    for (let step = 0; step < 4; step += 1) {
+      await user.click(screen.getByRole("button", { name: /next/i }));
+    }
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+
+    await waitFor(() => expect(validateMock).toHaveBeenCalled());
+    expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.api_key_edit).toEqual({
+      action: "preserve",
+    });
+  });
+
+  it("does not advance with a blank secret replacement", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key: { state: "redacted" },
+              api_key_edit: { action: "set_literal", value: "" },
+              active_states: ["Todo"],
+              terminal_states: ["Done"],
+            },
+            repos: [],
+            agents: [],
+            steps: [],
+            onSuccess: "Done",
+            onFailure: "Failed",
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+
+    expect(await screen.findByText(/secret replacement must not be blank/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
+  });
+
+  it("does not advance with a malformed secret environment name", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key: { state: "environment", variable: "GITHUB_TOKEN" },
+              api_key_edit: { action: "set_environment", variable: "FOO=BAR" },
+              active_states: ["Todo"],
+              terminal_states: ["Done"],
+            },
+            repos: [],
+            agents: [],
+            steps: [],
+            onSuccess: "Done",
+            onFailure: "Failed",
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+
+    expect(await screen.findByText(/valid environment variable name/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
+  });
+
   it("renders in create mode by default", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/v1/config/setup/defaults")) {

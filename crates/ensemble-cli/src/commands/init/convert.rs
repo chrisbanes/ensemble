@@ -7,6 +7,7 @@ use crate::commands::init::agents::AgentEntry;
 use crate::commands::init::pipeline::PipelineStep;
 use crate::commands::init::repos::RepoEntry;
 use crate::commands::init::tracker::TrackerChoice;
+use ensemble_core::config::secrets::{SecretDisplay, SecretEdit, SecretValue};
 use ensemble_core::config::setup::{SetupAgent, SetupRepo, SetupStep, SetupTracker};
 
 impl From<&TrackerChoice> for SetupTracker {
@@ -24,8 +25,15 @@ impl From<&TrackerChoice> for SetupTracker {
             } => SetupTracker::GitHub {
                 repository: repository.clone(),
                 project_number: *project_number,
-                api_key_env: api_key_env.clone(),
-                api_token: api_token.clone(),
+                api_key: SecretDisplay::Environment {
+                    variable: api_key_env.clone(),
+                },
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: api_key_env.clone(),
+                },
+                api_token: api_token
+                    .as_ref()
+                    .map(|token| SecretValue::new(token.clone())),
                 active_states: active_states.clone(),
                 terminal_states: terminal_states.clone(),
             },

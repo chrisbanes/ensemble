@@ -72,7 +72,6 @@ use utoipa::OpenApi;
         crate::interaction::model::InteractionResponse,
         crate::interaction::model::InteractionRequest,
         // Config types
-        crate::api::config_handler::ConfigResponse,
         crate::api::config_edit_handler::ConfigStateResponse,
         crate::api::config_edit_handler::ValidateYamlRequest,
         crate::api::config_edit_handler::SaveYamlRequest,
@@ -87,14 +86,14 @@ use utoipa::OpenApi;
         crate::api::config_edit_handler::SaveGuidedFormRequest,
         crate::config::draft::ValidationIssue,
         crate::config::draft::ValidationIssueKind,
+        crate::config::secrets::SecretDisplay,
+        crate::config::secrets::SecretEdit,
         crate::config::setup::SetupRequest,
         crate::config::setup::SetupTracker,
         crate::config::setup::SetupRepo,
         crate::config::setup::SetupAgent,
         crate::config::setup::SetupStep,
         crate::config::setup::SetupCheck,
-        crate::config::ensemble::EnsembleConfig,
-        crate::config::ensemble::TrackerConfig,
         crate::config::ensemble::AgentConfig,
         crate::config::ensemble::StepConfig,
         crate::config::ensemble::ConcurrencyConfig,
@@ -186,5 +185,25 @@ mod tests {
                 "expected 500 response to be documented for {path}"
             );
         }
+    }
+
+    #[test]
+    fn test_openapi_separates_secret_display_from_write_only_edits() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        assert!(spec["components"]["schemas"]["SecretDisplay"].is_object());
+        assert!(spec["components"]["schemas"]["SecretEdit"].is_object());
+        assert!(
+            spec["components"]["schemas"]["ConfigStateResponse"]["properties"]["active_config"]
+                .is_null()
+        );
+        assert!(spec["components"]["schemas"]["EnsembleConfig"].is_null());
+        assert!(spec["components"]["schemas"]["TrackerConfig"].is_null());
+        assert_eq!(
+            spec["components"]["schemas"]["SecretEdit"]["oneOf"][2]["properties"]["value"]
+                ["writeOnly"],
+            true
+        );
     }
 }

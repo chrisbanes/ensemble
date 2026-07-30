@@ -1,5 +1,6 @@
 use crate::config::ensemble::ModelDefinition;
 use crate::config::ensemble::{resolve_relative_to_base, OnFailure, StepConfig, StepKind};
+use crate::config::secrets::{SecretDisplay, SecretEdit, SecretValue};
 use crate::error::ConfigError;
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
@@ -30,9 +31,13 @@ pub enum SetupTracker {
     GitHub {
         repository: String,
         project_number: Option<i64>,
-        api_key_env: String,
+        api_key: SecretDisplay,
+        #[serde(default, skip_serializing_if = "SecretEdit::is_preserve")]
+        #[schema(write_only = true)]
+        api_key_edit: SecretEdit,
         #[serde(skip)]
-        api_token: Option<String>,
+        #[schema(ignore)]
+        api_token: Option<SecretValue>,
         active_states: Vec<String>,
         terminal_states: Vec<String>,
     },
@@ -174,9 +179,9 @@ pub fn build_setup_artifacts(request: &SetupRequest) -> SetupArtifacts {
     let env_file = match &request.tracker {
         SetupTracker::GitHub {
             api_token: Some(token),
-            api_key_env,
+            api_key_edit: SecretEdit::SetEnvironment { variable },
             ..
-        } => Some(format!("{}={}\n", api_key_env, token)),
+        } => Some(format!("{}={}\n", variable, token.expose())),
         _ => None,
     };
 
@@ -194,6 +199,8 @@ pub fn write_setup_artifacts(
     request: &SetupRequest,
     artifacts: &SetupArtifacts,
 ) -> Result<(), ConfigError> {
+    validate_setup_secret_edit(request)?;
+
     // Create config directory if it doesn't exist
     std::fs::create_dir_all(root).map_err(|e| ConfigError::PathExpansionError {
         path: root.display().to_string(),
@@ -257,11 +264,7 @@ pub fn write_setup_artifacts(
     }
 
     let config_path = root.join("config.yaml");
-    std::fs::write(&config_path, &artifacts.raw_yaml).map_err(|e| {
-        ConfigError::ConfigWriteFailed {
-            reason: format!("failed to write config.yaml: {}", e),
-        }
-    })?;
+    crate::config::draft::persist_config_atomically(&config_path, &artifacts.raw_yaml)?;
 
     Ok(())
 }
@@ -269,6 +272,7 @@ pub fn write_setup_artifacts(
 /// Run setup checks and return the results.
 pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     let mut checks = Vec::new();
+    let secret_edit_error = validate_setup_secret_edit(request).err();
 
     // Check acpx is installed
     let acpx_ok = tokio::time::timeout(
@@ -418,13 +422,16 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
             )
         })
         .collect();
-    let draft_passed = draft.kind != crate::config::draft::ConfigStateKind::SyntaxError
+    let draft_passed = secret_edit_error.is_none()
+        && draft.kind != crate::config::draft::ConfigStateKind::SyntaxError
         && config_issues.is_empty();
     checks.push(SetupCheck {
         kind: SetupCheckKind::Config,
         label: "Config".to_string(),
         passed: draft_passed,
-        detail: if draft.kind == crate::config::draft::ConfigStateKind::SyntaxError {
+        detail: if let Some(error) = secret_edit_error {
+            error.to_string()
+        } else if draft.kind == crate::config::draft::ConfigStateKind::SyntaxError {
             "generated config has YAML syntax errors".to_string()
         } else if let Some(issue) = config_issues.first() {
             issue.message.clone()
@@ -471,6 +478,8 @@ pub fn merge_setup_request(
     base_raw_yaml: Option<&str>,
     request: &SetupRequest,
 ) -> Result<SetupArtifacts, ConfigError> {
+    validate_setup_secret_edit(request)?;
+
     match base_raw_yaml {
         Some(raw_yaml) => {
             // Parse the existing YAML to preserve unsupported fields
@@ -504,9 +513,9 @@ pub fn merge_setup_request(
             let env_file = match &request.tracker {
                 SetupTracker::GitHub {
                     api_token: Some(token),
-                    api_key_env,
+                    api_key_edit: SecretEdit::SetEnvironment { variable },
                     ..
-                } => Some(format!("{}={}\n", api_key_env, token)),
+                } => Some(format!("{}={}\n", variable, token.expose())),
                 _ => None,
             };
 
@@ -580,6 +589,13 @@ pub async fn discover_agent_capabilities(agent: &str) -> AgentCapabilities {
 
 // --- Internal helper functions ---
 
+fn validate_setup_secret_edit(request: &SetupRequest) -> Result<(), ConfigError> {
+    match &request.tracker {
+        SetupTracker::GitHub { api_key_edit, .. } => api_key_edit.validate(),
+        SetupTracker::TodoFile { .. } => Ok(()),
+    }
+}
+
 /// Build a tracker YAML mapping from a setup request.
 /// Shared between `generate_yaml` and `update_yaml_from_request`.
 fn build_tracker_mapping(request: &SetupRequest) -> serde_yaml::Mapping {
@@ -610,7 +626,7 @@ fn build_tracker_mapping(request: &SetupRequest) -> serde_yaml::Mapping {
         SetupTracker::GitHub {
             repository,
             project_number,
-            api_key_env,
+            api_key_edit,
             active_states,
             terminal_states,
             ..
@@ -620,10 +636,18 @@ fn build_tracker_mapping(request: &SetupRequest) -> serde_yaml::Mapping {
                 "repository".into(),
                 serde_yaml::Value::String(repository.clone()),
             );
-            tracker_map.insert(
-                "api_key".into(),
-                serde_yaml::Value::String(format!("${}", api_key_env)),
-            );
+            match api_key_edit {
+                SecretEdit::Preserve | SecretEdit::Remove => {}
+                SecretEdit::SetLiteral { value } => {
+                    tracker_map.insert("api_key".into(), serde_yaml::Value::String(value.clone()));
+                }
+                SecretEdit::SetEnvironment { variable } => {
+                    tracker_map.insert(
+                        "api_key".into(),
+                        serde_yaml::Value::String(format!("${variable}")),
+                    );
+                }
+            }
             if let Some(n) = project_number {
                 tracker_map.insert(
                     "project_number".into(),
@@ -994,11 +1018,8 @@ fn extract_tracker(doc: &serde_yaml::Value) -> Result<SetupTracker, ConfigError>
                     reason: "github tracker missing repository".to_string(),
                 })?;
             let project_number = tracker.get("project_number").and_then(|n| n.as_i64());
-            let api_key_env = tracker
-                .get("api_key")
-                .and_then(|k| k.as_str())
-                .map(|s| s.strip_prefix('$').unwrap_or(s).to_string())
-                .unwrap_or_else(|| "GITHUB_TOKEN".to_string());
+            let api_key =
+                SecretDisplay::from_config_value(tracker.get("api_key").and_then(|k| k.as_str()));
             let active_states = tracker
                 .get("active_states")
                 .and_then(|a| a.as_sequence())
@@ -1021,8 +1042,9 @@ fn extract_tracker(doc: &serde_yaml::Value) -> Result<SetupTracker, ConfigError>
             Ok(SetupTracker::GitHub {
                 repository,
                 project_number,
-                api_key_env,
-                api_token: None, // Don't extract tokens from YAML
+                api_key,
+                api_key_edit: SecretEdit::Preserve,
+                api_token: None,
                 active_states,
                 terminal_states,
             })
@@ -1167,6 +1189,7 @@ fn update_yaml_from_request(
         .cloned()
         .unwrap_or_default();
     let mut tracker_mapping = existing_tracker_mapping;
+    let existing_secret = tracker_mapping.get("api_key").cloned();
     // Remove setup-managed keys before reinserting
     for key in [
         "kind",
@@ -1183,6 +1206,17 @@ fn update_yaml_from_request(
     let new_tracker = build_tracker_mapping(request);
     for (key, value) in new_tracker {
         tracker_mapping.insert(key, value);
+    }
+    if matches!(
+        request.tracker,
+        SetupTracker::GitHub {
+            api_key_edit: SecretEdit::Preserve,
+            ..
+        }
+    ) {
+        if let Some(existing_secret) = existing_secret {
+            tracker_mapping.insert("api_key".into(), existing_secret);
+        }
     }
     mapping.insert(
         "tracker".into(),
@@ -1371,6 +1405,197 @@ pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn github_setup_request(api_key_edit: SecretEdit) -> SetupRequest {
+        SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/repo".to_string(),
+                project_number: None,
+                api_key: SecretDisplay::Unset,
+                api_key_edit,
+                api_token: None,
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        }
+    }
+
+    #[test]
+    fn setup_defaults_serialize_only_safe_secret_state() {
+        let literal = extract_setup_defaults(
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: ghp_literal_secret
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+        let environment = extract_setup_defaults(
+            r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: $GITHUB_TOKEN
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let literal_json = serde_json::to_string(&literal).unwrap();
+        let environment_json = serde_json::to_string(&environment).unwrap();
+
+        assert!(!literal_json.contains("ghp_literal_secret"));
+        assert!(literal_json.contains(r#""state":"redacted""#));
+        assert!(environment_json.contains(r#""state":"environment""#));
+        assert!(environment_json.contains("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn setup_merge_preserves_or_removes_existing_secret_only_when_requested() {
+        let existing = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  api_key: ghp_existing
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        let request = SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/repo".to_string(),
+                project_number: None,
+                api_key: SecretDisplay::Redacted,
+                api_key_edit: SecretEdit::Preserve,
+                api_token: None,
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "build".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: Some("Build it.".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "build".to_string(),
+                kind: None,
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let preserved = merge_setup_request(Some(existing), &request).unwrap();
+        let preserved_yaml: serde_yaml::Value = serde_yaml::from_str(&preserved.raw_yaml).unwrap();
+        assert_eq!(preserved_yaml["tracker"]["api_key"], "ghp_existing");
+
+        let mut removal_request = request;
+        let SetupTracker::GitHub { api_key_edit, .. } = &mut removal_request.tracker else {
+            unreachable!("test request is a GitHub tracker");
+        };
+        *api_key_edit = SecretEdit::Remove;
+        let removed = merge_setup_request(Some(existing), &removal_request).unwrap();
+        let removed_yaml: serde_yaml::Value = serde_yaml::from_str(&removed.raw_yaml).unwrap();
+        assert!(removed_yaml["tracker"].get("api_key").is_none());
+    }
+
+    #[test]
+    fn setup_merge_rejects_invalid_secret_replacements() {
+        for (edit, expected) in [
+            (
+                SecretEdit::SetLiteral {
+                    value: " \t".to_string(),
+                },
+                "must not be blank",
+            ),
+            (
+                SecretEdit::SetEnvironment {
+                    variable: " \t".to_string(),
+                },
+                "must not be blank",
+            ),
+            (
+                SecretEdit::SetEnvironment {
+                    variable: "FOO=BAR".to_string(),
+                },
+                "environment variable name",
+            ),
+        ] {
+            let error = merge_setup_request(None, &github_setup_request(edit))
+                .expect_err("invalid secret replacements must not reach persistence");
+
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_checks_reject_invalid_secret_replacements() {
+        let checks = run_setup_checks(&github_setup_request(SecretEdit::SetEnvironment {
+            variable: "FOO=BAR".to_string(),
+        }))
+        .await;
+        let config_check = checks
+            .iter()
+            .find(|check| check.label == "Config")
+            .expect("setup checks should include generated config validation");
+
+        assert!(!config_check.passed);
+        assert!(config_check.detail.contains("environment variable name"));
+        assert!(!setup_can_save(&checks));
+    }
+
+    #[test]
+    fn setup_writer_rejects_blank_secret_before_creating_files() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("config");
+        let request = github_setup_request(SecretEdit::SetEnvironment {
+            variable: " ".to_string(),
+        });
+        let artifacts = build_setup_artifacts(&request);
+
+        let error = write_setup_artifacts(&root, &request, &artifacts)
+            .expect_err("blank replacement must be rejected before filesystem writes");
+
+        assert!(error.to_string().contains("must not be blank"));
+        assert!(!root.exists());
+    }
+
     use std::io::Write;
     use std::sync::Mutex;
 
@@ -1474,6 +1699,49 @@ mod tests {
         assert!(artifacts.todo_md.is_some());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn setup_writer_preserves_existing_config_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.yaml");
+        std::fs::write(&config_path, "old").unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: Some("Build it.".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                kind: None,
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = build_setup_artifacts(&request);
+
+        write_setup_artifacts(root.path(), &request, &artifacts).unwrap();
+
+        assert_eq!(
+            std::fs::metadata(config_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
     #[test]
     fn generated_review_template_uses_visible_review_answer() {
         let template = generate_template("review");
@@ -1491,7 +1759,12 @@ mod tests {
             tracker: SetupTracker::GitHub {
                 repository: "acme/frontend".to_string(),
                 project_number: Some(42),
-                api_key_env: "GITHUB_TOKEN".to_string(),
+                api_key: SecretDisplay::Environment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
                 api_token: None,
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],
@@ -1568,8 +1841,13 @@ mod tests {
             tracker: SetupTracker::GitHub {
                 repository: "acme/frontend".to_string(),
                 project_number: None,
-                api_key_env: "GITHUB_TOKEN".to_string(),
-                api_token: Some("secret-token-123".to_string()),
+                api_key: SecretDisplay::Environment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_token: Some(SecretValue::new("secret-token-123")),
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],
             },
@@ -1853,14 +2131,20 @@ on_failure: Failed
             SetupTracker::GitHub {
                 repository,
                 project_number,
-                api_key_env,
+                api_key,
                 active_states,
                 terminal_states,
                 api_token,
+                ..
             } => {
                 assert_eq!(repository, "acme/repo");
                 assert_eq!(*project_number, Some(5));
-                assert_eq!(api_key_env, "GITHUB_TOKEN");
+                assert_eq!(
+                    api_key,
+                    &SecretDisplay::Environment {
+                        variable: "GITHUB_TOKEN".to_string()
+                    }
+                );
                 assert_eq!(active_states, &vec!["Todo", "In Progress"]);
                 assert_eq!(terminal_states, &vec!["Done"]);
                 assert!(api_token.is_none()); // Tokens should not be extracted
@@ -1956,7 +2240,12 @@ on_failure: Failed
             tracker: SetupTracker::GitHub {
                 repository: "acme/updated".to_string(),
                 project_number: Some(7),
-                api_key_env: "GITHUB_TOKEN".to_string(),
+                api_key: SecretDisplay::Environment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
                 api_token: None,
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],
