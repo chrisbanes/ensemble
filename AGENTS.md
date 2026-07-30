@@ -179,3 +179,8 @@ Use the default canonical triage labels. See `docs/agents/triage-labels.md`.
 
 This repository uses a single domain context with canonical language in
 `CONTEXT.md` and decisions in `docs/adr/`. See `docs/agents/domain.md`.
+
+### GitHub Project execution
+
+Use `docs/agents/run-github-project.md` for the trusted queue configuration and
+lifecycle contract.
