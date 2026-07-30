@@ -210,7 +210,8 @@ If you previously used the GSD-style workflow guide, the core mechanics are unch
 
 ## See Also
 
-- `docs/superpowers/specs/2026-04-03-human-interaction-requests-design.md`
+- [Human interaction as durable runtime state](adr/0008-own-human-interaction-as-durable-runtime-state.md)
+- [Development methods outside the runtime core](adr/0014-keep-development-methods-outside-the-runtime-core.md)
 - `docs/examples/issues/ensemble-parent-planning.md`
 - `docs/examples/issues/ensemble-wave-execution.md`
 - `docs/examples/prompts/gsd-parent-planning-prompt.md`

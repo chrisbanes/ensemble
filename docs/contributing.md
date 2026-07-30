@@ -104,4 +104,5 @@ is a compile-compatibility check.
 ## Further reading
 
 - [SPEC.md](SPEC.md) — full service specification (language-agnostic)
-- [superpowers/plans/](superpowers/plans/) — implementation plans used to build the codebase
+- [Architecture decisions](adr/) — durable architectural choices and rationale
+- [Domain glossary](../CONTEXT.md) — canonical Ensemble terminology

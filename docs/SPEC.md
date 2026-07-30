@@ -104,8 +104,8 @@ Important boundary:
    - Ensures per-issue workspace directories exist.
    - Optionally creates git worktrees for configured repositories via `WorktreeCoordinator`.
    - All-or-nothing worktree creation with rollback on partial failure.
-   - Worktrees stored in `.worktrees/<branch>` within each repo, with branch naming
-     `ensemble-YYYY-MM-DD-<sanitized-issue-id>`.
+   - Worktrees stored under the per-issue workspace, one directory per configured repository, with
+     branch naming `ensemble-YYYY-MM-DD-<sanitized-issue-id>`.
    - Reuses existing worktrees on retry cycles (pulls latest changes).
    - Runs workspace lifecycle hooks.
    - Cleans workspaces and worktrees for terminal issues.

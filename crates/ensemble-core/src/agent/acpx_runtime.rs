@@ -22,8 +22,7 @@ use crate::config::ensemble::PermissionMode;
 /// session scoped to the `(issue, step, attempt)` triple — different steps
 /// never share a session and retries are isolated from prior state.
 ///
-/// See `docs/superpowers/specs/2026-04-05-acpx-runtime-integration-design.md`
-/// for the full session model rationale.
+/// See `docs/adr/0006-run-agents-through-acp-runtimes.md` for the runtime rationale.
 pub struct AcpxRuntime {
     cli: AcpxCli,
 }
