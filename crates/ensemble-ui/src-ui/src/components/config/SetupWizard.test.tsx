@@ -130,6 +130,38 @@ describe("SetupWizard", () => {
     });
   });
 
+  it("does not advance with a blank secret replacement", async () => {
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: {
+              kind: "github",
+              repository: "owner/repo",
+              project_number: null,
+              api_key: { state: "redacted" },
+              api_key_edit: { action: "set_literal", value: "" },
+              active_states: ["Todo"],
+              terminal_states: ["Done"],
+            },
+            repos: [],
+            agents: [],
+            steps: [],
+            onSuccess: "Done",
+            onFailure: "Failed",
+          },
+        });
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
+
+    expect(await screen.findByText(/secret replacement must not be blank/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /next/i })).toBeDisabled();
+  });
+
   it("renders in create mode by default", async () => {
     vi.stubGlobal("fetch", vi.fn((url: string) => {
       if (url.includes("/api/v1/config/setup/defaults")) {

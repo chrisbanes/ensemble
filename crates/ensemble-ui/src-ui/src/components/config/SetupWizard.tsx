@@ -109,6 +109,13 @@ function supportedPermissionMode(value: string | null | undefined) {
   return value && SUPPORTED_PERMISSION_MODES.has(value) ? value : null;
 }
 
+function secretEditIsValid(edit: SecretEdit | undefined) {
+  if (!edit || edit.action === "preserve" || edit.action === "remove") return true;
+  return edit.action === "set_literal"
+    ? edit.value.trim().length > 0
+    : edit.variable.trim().length > 0;
+}
+
 function modelOptions(availableModels: CapabilityDefinition[] | undefined) {
   const models = availableModels ?? [];
   return models.some((model) => model.id === "default")
@@ -199,7 +206,8 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         if (draft.tracker.kind === "todo_file") {
           return draft.tracker.path.trim().length > 0;
         }
-        return draft.tracker.repository.trim().length > 0;
+        return draft.tracker.repository.trim().length > 0
+          && secretEditIsValid(draft.tracker.api_key_edit);
       case "repos":
         return draft.repos.length > 0;
       case "agents":
@@ -495,6 +503,9 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
                 } : prev)}
                 placeholder="GITHUB_TOKEN"
               />
+            )}
+            {!secretEditIsValid(draft.tracker.api_key_edit) && (
+              <p className="text-sm text-destructive">Secret replacement must not be blank.</p>
             )}
           </div>
         </>

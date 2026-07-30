@@ -91,6 +91,37 @@ describe("GuidedEditor", () => {
     expect(onSave.mock.calls[0]?.[0].tracker.api_key_edit).toEqual({ action: "preserve" });
   });
 
+  it("disables validation and save for a blank secret replacement", () => {
+    const githubForm: GuidedForm = {
+      ...initialForm,
+      tracker: {
+        kind: "github",
+        repository: "acme/repo",
+        api_key: { state: "redacted" },
+        api_key_edit: { action: "set_literal", value: "" },
+        active_states: ["Todo"],
+        terminal_states: ["Done"],
+        labels_filter: [],
+      },
+    };
+
+    renderWithProviders(
+      <GuidedEditor
+        initialForm={githubForm}
+        baseRawYaml={"tracker:\n  kind: github\n  api_key: \"[REDACTED]\"\n"}
+        issues={[]}
+        onValidate={vi.fn(async () => [])}
+        onSave={vi.fn(async () => undefined)}
+        onReset={vi.fn()}
+      />,
+      { route: "/config" }
+    );
+
+    expect(screen.getByText(/secret replacement must not be blank/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /validate/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+  });
+
   it("shows validation issues returned by validate without waiting for save", async () => {
     const user = userEvent.setup();
 

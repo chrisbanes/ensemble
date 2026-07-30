@@ -201,14 +201,18 @@ references remain visible so operators can see which environment variable is con
 names such as `tokenizer` and `secret_name` are not secret fields.
 
 When saving raw YAML, `[REDACTED]` preserves the value currently stored at the same YAML path.
-Replacing it with a literal or `$VAR` reference replaces the stored value, and removing the field
-removes the value. A `[REDACTED]` placeholder without a corresponding stored secret is rejected.
-Malformed YAML is never returned as raw configuration because it cannot be safely redacted.
+Within a sequence, entries are matched one-to-one by their complete non-secret structure instead of
+their numeric position. Reordering entries or inserting a new entry therefore cannot transfer a
+credential to a different logical entry; an ambiguous or missing match is rejected. Replacing the
+placeholder with a literal or `$VAR` reference replaces the stored value, and removing the field
+removes the value. Malformed YAML is never returned as raw configuration because it cannot be
+safely redacted.
 
 Guided and setup editors use explicit secret actions: keep the current value, replace it with a
 literal, use an environment variable, or remove it. Literal replacement inputs are write-only:
-after save, the UI only reports that a secret is configured. New `config.yaml` files created by the
-editors use owner-only permissions (`0600`) on Unix; existing file permissions are retained.
+after save, the UI only reports that a secret is configured. Blank literal and environment
+replacements are rejected before configuration persistence. New `config.yaml` files created by
+the editors use owner-only permissions (`0600`) on Unix; existing file permissions are retained.
 Configuration writes replace the file atomically from a temporary file in the same directory.
 
 **Todo file fields** (when `kind: todo_file`):

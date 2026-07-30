@@ -199,6 +199,8 @@ pub fn write_setup_artifacts(
     request: &SetupRequest,
     artifacts: &SetupArtifacts,
 ) -> Result<(), ConfigError> {
+    validate_setup_secret_edit(request)?;
+
     // Create config directory if it doesn't exist
     std::fs::create_dir_all(root).map_err(|e| ConfigError::PathExpansionError {
         path: root.display().to_string(),
@@ -270,6 +272,7 @@ pub fn write_setup_artifacts(
 /// Run setup checks and return the results.
 pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
     let mut checks = Vec::new();
+    let secret_edit_error = validate_setup_secret_edit(request).err();
 
     // Check acpx is installed
     let acpx_ok = tokio::time::timeout(
@@ -419,13 +422,16 @@ pub async fn run_setup_checks(request: &SetupRequest) -> Vec<SetupCheck> {
             )
         })
         .collect();
-    let draft_passed = draft.kind != crate::config::draft::ConfigStateKind::SyntaxError
+    let draft_passed = secret_edit_error.is_none()
+        && draft.kind != crate::config::draft::ConfigStateKind::SyntaxError
         && config_issues.is_empty();
     checks.push(SetupCheck {
         kind: SetupCheckKind::Config,
         label: "Config".to_string(),
         passed: draft_passed,
-        detail: if draft.kind == crate::config::draft::ConfigStateKind::SyntaxError {
+        detail: if let Some(error) = secret_edit_error {
+            error.to_string()
+        } else if draft.kind == crate::config::draft::ConfigStateKind::SyntaxError {
             "generated config has YAML syntax errors".to_string()
         } else if let Some(issue) = config_issues.first() {
             issue.message.clone()
@@ -472,6 +478,8 @@ pub fn merge_setup_request(
     base_raw_yaml: Option<&str>,
     request: &SetupRequest,
 ) -> Result<SetupArtifacts, ConfigError> {
+    validate_setup_secret_edit(request)?;
+
     match base_raw_yaml {
         Some(raw_yaml) => {
             // Parse the existing YAML to preserve unsupported fields
@@ -580,6 +588,13 @@ pub async fn discover_agent_capabilities(agent: &str) -> AgentCapabilities {
 }
 
 // --- Internal helper functions ---
+
+fn validate_setup_secret_edit(request: &SetupRequest) -> Result<(), ConfigError> {
+    match &request.tracker {
+        SetupTracker::GitHub { api_key_edit, .. } => api_key_edit.validate(),
+        SetupTracker::TodoFile { .. } => Ok(()),
+    }
+}
 
 /// Build a tracker YAML mapping from a setup request.
 /// Shared between `generate_yaml` and `update_yaml_from_request`.
@@ -1391,6 +1406,25 @@ pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathB
 mod tests {
     use super::*;
 
+    fn github_setup_request(api_key_edit: SecretEdit) -> SetupRequest {
+        SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/repo".to_string(),
+                project_number: None,
+                api_key: SecretDisplay::Unset,
+                api_key_edit,
+                api_token: None,
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        }
+    }
+
     #[test]
     fn setup_defaults_serialize_only_safe_secret_state() {
         let literal = extract_setup_defaults(
@@ -1499,6 +1533,55 @@ on_failure: Failed
         let removed = merge_setup_request(Some(existing), &removal_request).unwrap();
         let removed_yaml: serde_yaml::Value = serde_yaml::from_str(&removed.raw_yaml).unwrap();
         assert!(removed_yaml["tracker"].get("api_key").is_none());
+    }
+
+    #[test]
+    fn setup_merge_rejects_blank_secret_replacements() {
+        for edit in [
+            SecretEdit::SetLiteral {
+                value: " \t".to_string(),
+            },
+            SecretEdit::SetEnvironment {
+                variable: " \t".to_string(),
+            },
+        ] {
+            let error = merge_setup_request(None, &github_setup_request(edit))
+                .expect_err("blank secret replacements must not reach persistence");
+
+            assert!(error.to_string().contains("must not be blank"));
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_checks_reject_blank_secret_replacements() {
+        let checks = run_setup_checks(&github_setup_request(SecretEdit::SetLiteral {
+            value: String::new(),
+        }))
+        .await;
+        let config_check = checks
+            .iter()
+            .find(|check| check.label == "Config")
+            .expect("setup checks should include generated config validation");
+
+        assert!(!config_check.passed);
+        assert!(config_check.detail.contains("must not be blank"));
+        assert!(!setup_can_save(&checks));
+    }
+
+    #[test]
+    fn setup_writer_rejects_blank_secret_before_creating_files() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("config");
+        let request = github_setup_request(SecretEdit::SetEnvironment {
+            variable: " ".to_string(),
+        });
+        let artifacts = build_setup_artifacts(&request);
+
+        let error = write_setup_artifacts(&root, &request, &artifacts)
+            .expect_err("blank replacement must be rejected before filesystem writes");
+
+        assert!(error.to_string().contains("must not be blank"));
+        assert!(!root.exists());
     }
 
     use std::io::Write;

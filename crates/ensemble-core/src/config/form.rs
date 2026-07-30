@@ -330,6 +330,7 @@ pub fn apply_guided_form(
         } else {
             tm.remove("project_number");
         }
+        form.tracker.api_key_edit.validate()?;
         match &form.tracker.api_key_edit {
             SecretEdit::Preserve => {}
             SecretEdit::Remove => {
@@ -339,11 +340,6 @@ pub fn apply_guided_form(
                 tm.insert("api_key".into(), value.clone().into());
             }
             SecretEdit::SetEnvironment { variable } => {
-                if variable.is_empty() {
-                    return Err(ConfigError::ConfigWriteRejected {
-                        reason: "secret environment variable name must not be empty".to_string(),
-                    });
-                }
                 tm.insert("api_key".into(), format!("${variable}").into());
             }
         }
@@ -783,6 +779,39 @@ on_failure: Failed
         let removed: serde_yaml::Value =
             serde_yaml::from_str(&apply_guided_form(base, &form).unwrap()).unwrap();
         assert!(removed["tracker"].get("api_key").is_none());
+    }
+
+    #[test]
+    fn guided_secret_edits_reject_blank_replacements() {
+        let base = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+"#;
+        for edit in [
+            SecretEdit::SetLiteral {
+                value: " ".to_string(),
+            },
+            SecretEdit::SetEnvironment {
+                variable: "\t".to_string(),
+            },
+        ] {
+            let mut form = extract_guided_form(base).unwrap();
+            form.tracker.api_key_edit = edit;
+
+            let error = apply_guided_form(base, &form)
+                .expect_err("blank guided secret replacements must be rejected");
+            assert!(error.to_string().contains("must not be blank"));
+        }
     }
 
     fn guided_form_with_workspace_root(root: &str) -> GuidedConfigForm {

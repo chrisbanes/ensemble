@@ -62,6 +62,22 @@ impl SecretEdit {
     pub fn is_preserve(&self) -> bool {
         matches!(self, Self::Preserve)
     }
+
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        match self {
+            Self::SetLiteral { value } if value.trim().is_empty() => {
+                Err(ConfigError::ConfigWriteRejected {
+                    reason: "secret replacement must not be blank".to_string(),
+                })
+            }
+            Self::SetEnvironment { variable } if variable.trim().is_empty() => {
+                Err(ConfigError::ConfigWriteRejected {
+                    reason: "secret environment variable name must not be blank".to_string(),
+                })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl fmt::Debug for SecretEdit {
@@ -121,6 +137,69 @@ fn is_environment_reference(value: &serde_yaml::Value) -> bool {
 
 fn is_preserve_marker(value: &serde_yaml::Value) -> bool {
     value.as_str() == Some(REDACTED_SECRET)
+}
+
+fn contains_secret_preserve_marker(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => mapping.iter().any(|(key, value)| {
+            (is_secret_key(key) && is_preserve_marker(value))
+                || (!is_secret_key(key) && contains_secret_preserve_marker(value))
+        }),
+        serde_yaml::Value::Sequence(sequence) => {
+            sequence.iter().any(contains_secret_preserve_marker)
+        }
+        serde_yaml::Value::Tagged(tagged) => contains_secret_preserve_marker(&tagged.value),
+        _ => false,
+    }
+}
+
+fn secret_free_identity(value: &serde_yaml::Value) -> serde_yaml::Value {
+    match value {
+        serde_yaml::Value::Mapping(mapping) => serde_yaml::Value::Mapping(
+            mapping
+                .iter()
+                .filter(|(key, _)| !is_secret_key(key))
+                .map(|(key, value)| (key.clone(), secret_free_identity(value)))
+                .collect(),
+        ),
+        serde_yaml::Value::Sequence(sequence) => {
+            serde_yaml::Value::Sequence(sequence.iter().map(secret_free_identity).collect())
+        }
+        serde_yaml::Value::Tagged(tagged) => {
+            let mut identity = tagged.clone();
+            identity.value = secret_free_identity(&identity.value);
+            serde_yaml::Value::Tagged(identity)
+        }
+        _ => value.clone(),
+    }
+}
+
+fn match_authoritative_sequence_entry<'a>(
+    submitted: &serde_yaml::Value,
+    authoritative: &'a [serde_yaml::Value],
+    claimed: &mut [bool],
+) -> Result<&'a serde_yaml::Value, ConfigError> {
+    let identity = secret_free_identity(submitted);
+    let mut candidates = authoritative
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !claimed[*index] && secret_free_identity(candidate) == identity
+        });
+    let Some((index, candidate)) = candidates.next() else {
+        return Err(ConfigError::ConfigWriteRejected {
+            reason: "secret preserve marker has no unique matching stored sequence entry"
+                .to_string(),
+        });
+    };
+    if candidates.next().is_some() {
+        return Err(ConfigError::ConfigWriteRejected {
+            reason: "secret preserve marker has no unique matching stored sequence entry"
+                .to_string(),
+        });
+    }
+    claimed[index] = true;
+    Ok(candidate)
 }
 
 fn redact_value(value: &mut serde_yaml::Value) {
@@ -185,12 +264,21 @@ fn merge_preserve_markers(
             }
         }
         serde_yaml::Value::Sequence(submitted_sequence) => {
-            let authoritative_sequence = authoritative.and_then(serde_yaml::Value::as_sequence);
-            for (index, submitted_value) in submitted_sequence.iter_mut().enumerate() {
-                merge_preserve_markers(
-                    submitted_value,
-                    authoritative_sequence.and_then(|sequence| sequence.get(index)),
-                )?;
+            let authoritative_sequence = authoritative
+                .and_then(serde_yaml::Value::as_sequence)
+                .map_or(&[][..], Vec::as_slice);
+            let mut claimed = vec![false; authoritative_sequence.len()];
+            for submitted_value in submitted_sequence {
+                let authoritative_value = if contains_secret_preserve_marker(submitted_value) {
+                    Some(match_authoritative_sequence_entry(
+                        submitted_value,
+                        authoritative_sequence,
+                        &mut claimed,
+                    )?)
+                } else {
+                    None
+                };
+                merge_preserve_markers(submitted_value, authoritative_value)?;
             }
         }
         serde_yaml::Value::Tagged(submitted_tagged) => {
@@ -266,14 +354,16 @@ tracker:
 tracker:
   api_key: ghp_original
 services:
-  - token: $SERVICE_TOKEN
+  - name: service
+    token: $SERVICE_TOKEN
 "#;
         let submitted = r#"
 tracker:
   api_key: "[REDACTED]"
   repository: acme/widgets
 services:
-  - token: "[REDACTED]"
+  - name: service
+    token: "[REDACTED]"
 "#;
 
         let merged = merge_redacted_yaml(Some(authoritative), submitted)
@@ -284,6 +374,84 @@ services:
         assert_eq!(value["tracker"]["repository"], "acme/widgets");
         assert_eq!(value["services"][0]["token"], "$SERVICE_TOKEN");
         assert!(!merged.contains(REDACTED_SECRET));
+    }
+
+    #[test]
+    fn merge_preserves_sequence_secrets_across_reordering() {
+        let authoritative = r#"
+services:
+  - name: alpha
+    token: alpha-secret
+  - name: beta
+    token: beta-secret
+"#;
+        let submitted = r#"
+services:
+  - name: beta
+    token: "[REDACTED]"
+  - name: alpha
+    token: "[REDACTED]"
+"#;
+
+        let merged = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect("reordered sequence entries should retain their own secrets");
+        let value = yaml_value(&merged);
+
+        assert_eq!(value["services"][0]["name"], "beta");
+        assert_eq!(value["services"][0]["token"], "beta-secret");
+        assert_eq!(value["services"][1]["name"], "alpha");
+        assert_eq!(value["services"][1]["token"], "alpha-secret");
+    }
+
+    #[test]
+    fn merge_preserves_sequence_secrets_after_insertion() {
+        let authoritative = r#"
+services:
+  - name: alpha
+    token: alpha-secret
+  - name: beta
+    token: beta-secret
+"#;
+        let submitted = r#"
+services:
+  - name: new
+    token: new-secret
+  - name: alpha
+    token: "[REDACTED]"
+  - name: beta
+    token: "[REDACTED]"
+"#;
+
+        let merged = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect("inserted sequence entries should not shift preserved secrets");
+        let value = yaml_value(&merged);
+
+        assert_eq!(value["services"][0]["token"], "new-secret");
+        assert_eq!(value["services"][1]["token"], "alpha-secret");
+        assert_eq!(value["services"][2]["token"], "beta-secret");
+    }
+
+    #[test]
+    fn merge_rejects_ambiguous_sequence_secret_identity() {
+        let authoritative = r#"
+services:
+  - name: duplicate
+    token: first-secret
+  - name: duplicate
+    token: second-secret
+"#;
+        let submitted = r#"
+services:
+  - name: duplicate
+    token: "[REDACTED]"
+"#;
+
+        let error = merge_redacted_yaml(Some(authoritative), submitted)
+            .expect_err("ambiguous sequence identities must not inherit either secret");
+
+        assert!(error.to_string().contains("no unique matching"));
+        assert!(!error.to_string().contains("first-secret"));
+        assert!(!error.to_string().contains("second-secret"));
     }
 
     #[test]
