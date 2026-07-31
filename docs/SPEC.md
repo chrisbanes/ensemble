@@ -40,6 +40,17 @@ Important boundary:
 - A successful run may end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
 
+Web-host security boundary:
+
+- The web and desktop control surfaces are unauthenticated, trusted-local, single-operator
+  surfaces. Default and supported operation uses a loopback listener.
+- A web host must reject a resolved non-loopback listener before loading configuration or starting
+  runtime components, unless its CLI invocation contains an explicit unsafe remote-exposure opt-in.
+  That opt-in does not create an authenticated or supported remote-control mode.
+- Listener exposure is host runtime policy, not `config.yaml` policy. WebSocket upgrades must check
+  valid HTTP(S) `Origin` and `Host` authorities before upgrade and require them to match. Trusted
+  local listeners must additionally require a loopback authority.
+
 ## 2. Goals and Non-Goals
 
 ### 2.1 Goals

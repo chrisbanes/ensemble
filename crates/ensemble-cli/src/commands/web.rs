@@ -7,6 +7,7 @@ use ensemble_core::api::bootstrap::{
     build_app_state, clear_registered_orchestrator, start_or_replace_registered_orchestrator,
 };
 use ensemble_core::api::router::create_api_router;
+use ensemble_core::api::security::classify_bind_addr;
 use ensemble_core::config::draft::recover_and_load_config_state;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
 use ensemble_core::config_watcher::start_config_watcher;
@@ -19,6 +20,7 @@ pub struct WebArgs {
     pub config_dir: Option<PathBuf>,
     pub host: String,
     pub port: Option<u16>,
+    pub unsafe_allow_remote: bool,
 }
 
 fn resolve_bind_addr(host: &str, port: u16) -> std::io::Result<SocketAddr> {
@@ -43,6 +45,50 @@ fn bind_addr_display(host: &str, port: u16) -> String {
 /// This now serves the UI and API regardless of config state.
 /// If config is missing or invalid, the UI will show the setup wizard.
 pub async fn execute(args: WebArgs) -> ExitCode {
+    let port = args.port.unwrap_or(0);
+    let bind_addr = match resolve_bind_addr(&args.host, port) {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!(error = %e, host = %args.host, port, "failed to resolve HTTP bind address");
+            eprintln!(
+                "error: failed to resolve HTTP bind address for {}:{}: {}",
+                args.host, port, e
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let exposure = match classify_bind_addr(bind_addr, args.unsafe_allow_remote) {
+        Ok(exposure) => exposure,
+        Err(e) => {
+            error!(error = %e, "refusing non-loopback API listener");
+            eprintln!(
+                "error: {}; pass --unsafe-allow-remote to expose the unauthenticated API",
+                e
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let bind_addr_display = bind_addr.to_string();
+    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            error!(error = %error, addr = %bind_addr_display, "failed to bind HTTP server");
+            eprintln!(
+                "error: failed to bind HTTP server on {}: {}",
+                bind_addr_display, error
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    let actual_addr = match listener.local_addr() {
+        Ok(addr) => addr,
+        Err(error) => {
+            error!(error = %error, "failed to get local address");
+            eprintln!("error: failed to get local address: {}", error);
+            return ExitCode::FAILURE;
+        }
+    };
+
     let cwd = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(e) => {
@@ -146,61 +192,11 @@ pub async fn execute(args: WebArgs) -> ExitCode {
     }
 
     // Create combined router: API routes + SPA fallback
-    let api_router = create_api_router(app_state.clone());
+    let api_router = create_api_router(app_state.clone(), exposure);
     let spa_router = spa_router();
 
     let router = api_router.merge(spa_router);
 
-    // Warn if binding to a non-loopback address (exposes unauthenticated API)
-    let is_loopback = args.host == "127.0.0.1" || args.host == "::1" || args.host == "localhost";
-    if !is_loopback {
-        warn!(
-            host = %args.host,
-            "binding to a non-loopback address exposes the API without authentication"
-        );
-        eprintln!(
-            "warning: binding to {} exposes the ensemble API to the network without authentication",
-            args.host
-        );
-    }
-
-    // Determine port
-    let port = args.port.unwrap_or(0); // 0 = let OS assign available port
-    let bind_addr = match resolve_bind_addr(&args.host, port) {
-        Ok(addr) => addr,
-        Err(e) => {
-            error!(error = %e, host = %args.host, port, "failed to resolve HTTP bind address");
-            eprintln!(
-                "error: failed to resolve HTTP bind address for {}:{}: {}",
-                args.host, port, e
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-    let bind_addr_display = bind_addr.to_string();
-
-    info!(addr = %bind_addr_display, "starting HTTP server");
-
-    let listener = match tokio::net::TcpListener::bind(bind_addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!(error = %e, addr = %bind_addr_display, "failed to bind HTTP server");
-            eprintln!(
-                "error: failed to bind HTTP server on {}: {}",
-                bind_addr_display, e
-            );
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let actual_addr = match listener.local_addr() {
-        Ok(addr) => addr,
-        Err(e) => {
-            error!(error = %e, "failed to get local address");
-            eprintln!("error: failed to get local address: {}", e);
-            return ExitCode::FAILURE;
-        }
-    };
     info!(
         addr = %actual_addr,
         "HTTP server listening. Open http://{} in your browser",
@@ -250,6 +246,7 @@ mod tests {
             config_dir: Some(PathBuf::from("/tmp/test")),
             host: "0.0.0.0".to_string(),
             port: Some(8080),
+            unsafe_allow_remote: false,
         };
         assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/test")));
         assert_eq!(args.host, "0.0.0.0");
@@ -262,6 +259,7 @@ mod tests {
             config_dir: None,
             host: "127.0.0.1".to_string(),
             port: None,
+            unsafe_allow_remote: false,
         };
         assert!(args.config_dir.is_none());
         assert_eq!(args.host, "127.0.0.1");

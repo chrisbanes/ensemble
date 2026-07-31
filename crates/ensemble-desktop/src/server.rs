@@ -16,6 +16,7 @@ use ensemble_core::api::bootstrap::{
 };
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::api::router::AppState;
+use ensemble_core::api::security::ApiExposure;
 use ensemble_core::config::draft::recover_and_load_config_state;
 use ensemble_core::config_watcher::{start_config_watcher, ConfigWatcherHandle};
 use ensemble_core::observability::events::EventBus;
@@ -52,9 +53,9 @@ impl Drop for DesktopServer {
 /// Start the local HTTP server for the desktop app.
 ///
 /// This server:
-/// 1. Loads config state (which may be missing/invalid)
-/// 2. Creates the API router with the appropriate state
-/// 3. Binds to 127.0.0.1:0 (random available port)
+/// 1. Binds to 127.0.0.1:0 (random available port)
+/// 2. Loads config state (which may be missing/invalid)
+/// 3. Creates the API router with the appropriate state
 /// 4. Serves both API and SPA routes
 ///
 /// The server continues running regardless of config state.
@@ -64,6 +65,19 @@ pub async fn start_desktop_server(
     config_path: PathBuf,
     event_bus: EventBus,
 ) -> Result<DesktopServer, DesktopError> {
+    // Reserve the loopback listener before starting the watcher or orchestrator so a bind failure
+    // cannot leave background runtime work alive after startup returns an error.
+    let bind_addr = "127.0.0.1:0";
+    info!(addr = %bind_addr, "Binding desktop HTTP server");
+    let listener = tokio::net::TcpListener::bind(bind_addr)
+        .await
+        .map_err(|e| DesktopError::BindFailed {
+            addr: bind_addr.to_string(),
+            source: e,
+        })?;
+    let actual_addr = listener.local_addr()?;
+    let server_url = url::Url::parse(&format!("http://{}", actual_addr))?;
+
     info!(
         config_dir = %config_dir.display(),
         config_path = %config_path.display(),
@@ -113,24 +127,10 @@ pub async fn start_desktop_server(
     }
 
     // Create combined router: API routes + SPA fallback
-    let api_router = create_api_router(app_state.clone());
+    let api_router = create_api_router(app_state.clone(), ApiExposure::TrustedLocal);
     let spa_router = spa_router();
 
     let router = api_router.merge(spa_router);
-
-    // Bind to loopback with random port
-    let bind_addr = "127.0.0.1:0";
-    info!(addr = %bind_addr, "Binding desktop HTTP server");
-
-    let listener = tokio::net::TcpListener::bind(bind_addr)
-        .await
-        .map_err(|e| DesktopError::BindFailed {
-            addr: bind_addr.to_string(),
-            source: e,
-        })?;
-
-    let actual_addr = listener.local_addr()?;
-    let server_url = url::Url::parse(&format!("http://{}", actual_addr))?;
 
     info!(
         url = %server_url,

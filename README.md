@@ -92,6 +92,18 @@ The `web` subcommand is available in release builds and source builds installed 
 
 Then open `http://localhost:3000` in your browser.
 
+## Web dashboard security
+
+The web and desktop dashboards control an unauthenticated, single-operator service. `ensemble web`
+therefore binds only to a loopback address by default and rejects every resolved non-loopback address
+before it loads configuration or starts runtime components. There is no `config.yaml` setting or
+environment variable that relaxes this boundary.
+
+For an exceptional local-network or container use case, `ensemble web --host <address>
+--unsafe-allow-remote` permits an unauthenticated remote listener. This mode is unsupported and does
+not add authentication, authorization, TLS, or proxy trust; anyone who can reach the listener can
+operate it. WebSocket upgrades always require matching `Host` and HTTP(S) `Origin` authorities.
+
 ## Configuration location
 
 By default, Ensemble looks for configuration in your system's config directory:

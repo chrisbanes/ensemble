@@ -1,5 +1,6 @@
 use crate::agent::cancellation::CancellationRegistry;
 use crate::api::interactions;
+use crate::api::security::ApiExposure;
 use crate::api::{
     config_edit_handler, config_handler, controls, conversation, fs_handler, handlers,
     history_handler, timeline_handler, ws,
@@ -12,7 +13,7 @@ use crate::transcript::events::TranscriptEventBus;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Extension, Router};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -79,13 +80,13 @@ pub struct AppState {
 /// - `POST /api/v1/{identifier}/retry` — retry a failed issue
 /// - `GET /ws/events/{identifier}` — WebSocket live event stream
 ///
-/// **Security:** The API is unauthenticated. Bind to `127.0.0.1` by
-/// default. Binding to a non-loopback address exposes this unauthenticated API to the
-/// network — only do so in trusted environments or behind a reverse proxy.
+/// **Security:** The API is unauthenticated. Every host must select an explicit
+/// exposure policy. Trusted-local WebSocket upgrades require same-origin
+/// loopback `Host` and `Origin` authorities.
 ///
 /// Note: This router provides API routes only. UI/SPA serving is handled separately
 /// by the CLI's embedded_ui module.
-pub fn create_api_router(state: AppState) -> Router {
+pub fn create_api_router(state: AppState, exposure: ApiExposure) -> Router {
     // API routes get a JSON 404 fallback
     let api_routes = Router::new()
         .route("/state", get(handlers::get_state))
@@ -198,6 +199,7 @@ pub fn create_api_router(state: AppState) -> Router {
         )
         .nest("/api/v1", api_routes)
         .route("/ws/events/{identifier}", get(ws::ws_events))
+        .layer(Extension(exposure))
         .with_state(state)
 }
 
@@ -212,6 +214,7 @@ async fn api_not_found() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::security::ApiExposure;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
 
     fn test_app_state() -> AppState {
@@ -221,6 +224,6 @@ mod tests {
     #[test]
     fn test_router_creation_does_not_panic() {
         let state = test_app_state();
-        let _router = create_api_router(state);
+        let _router = create_api_router(state, ApiExposure::TrustedLocal);
     }
 }

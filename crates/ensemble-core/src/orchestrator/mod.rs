@@ -17623,7 +17623,10 @@ agent:
             prepared.app_state.history_db_path,
             dir.path().join(".ensemble").join("history.db")
         );
-        let app = crate::api::router::create_api_router(prepared.app_state);
+        let app = crate::api::router::create_api_router(
+            prepared.app_state,
+            crate::api::security::ApiExposure::TrustedLocal,
+        );
         let response = app
             .oneshot(
                 Request::builder()
