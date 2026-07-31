@@ -27,7 +27,7 @@ pub enum StepRunState {
 }
 
 /// Issue currently blocked waiting for a human response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitingOnHumanEntry {
     pub issue_id: String,
     pub identifier: String,

@@ -9,8 +9,8 @@ use crate::observability::events::EventBus;
 use crate::orchestrator::retry::ManualStepRetryError;
 use crate::orchestrator::state::OrchestratorState;
 use crate::orchestrator::{
-    ManualStepRetryCommand, Orchestrator, OrchestratorCommand, OrchestratorRuntimeParts,
-    QuiescingLatch,
+    ManualStepRetryCommand, ManualWholeIssueRetryCommand, Orchestrator, OrchestratorCommand,
+    OrchestratorRuntimeParts, QuiescingLatch,
 };
 use crate::tracker::model::RetryEntry;
 use crate::tracker::{create_tracker, IssueTracker};
@@ -82,6 +82,37 @@ impl RegisteredOrchestrator {
         &self,
         command: ManualStepRetryCommand,
     ) -> Result<RetryEntry, ManualStepRetryError> {
+        let Some(command_tx) = self.command_sender() else {
+            return Err(ManualStepRetryError::RuntimeUnavailable);
+        };
+        let (response, result) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(OrchestratorCommand::QueueManualStepRetry { command, response })
+            .await
+            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?;
+        result
+            .await
+            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?
+    }
+
+    pub(crate) async fn queue_manual_whole_issue_retry(
+        &self,
+        command: ManualWholeIssueRetryCommand,
+    ) -> Result<(), ManualStepRetryError> {
+        let Some(command_tx) = self.command_sender() else {
+            return Err(ManualStepRetryError::RuntimeUnavailable);
+        };
+        let (response, result) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(OrchestratorCommand::QueueManualWholeIssueRetry { command, response })
+            .await
+            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?;
+        result
+            .await
+            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?
+    }
+
+    fn command_sender(&self) -> Option<mpsc::Sender<OrchestratorCommand>> {
         let command_tx = {
             let registered = self
                 .inner
@@ -99,17 +130,7 @@ impl RegisteredOrchestrator {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone()
         });
-        let Some(command_tx) = command_tx else {
-            return Err(ManualStepRetryError::RuntimeUnavailable);
-        };
-        let (response, result) = tokio::sync::oneshot::channel();
         command_tx
-            .send(OrchestratorCommand::QueueManualStepRetry { command, response })
-            .await
-            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?;
-        result
-            .await
-            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?
     }
 
     #[cfg(test)]

@@ -32,6 +32,12 @@ pub struct InteractionStore {
     create_mutex: Arc<Mutex<()>>,
     #[cfg(test)]
     write_failures: Arc<AtomicUsize>,
+    #[cfg(test)]
+    retire_waiting_state_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    #[cfg(test)]
+    restore_waiting_state_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
 }
 
 impl InteractionStore {
@@ -41,12 +47,34 @@ impl InteractionStore {
             create_mutex: Arc::new(Mutex::new(())),
             #[cfg(test)]
             write_failures: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            retire_waiting_state_test_barriers: None,
+            #[cfg(test)]
+            restore_waiting_state_test_barriers: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_writes(&self, count: usize) {
         self.write_failures.store(count, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_retire_waiting_state_test_barriers(
+        &mut self,
+        ready: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) {
+        self.retire_waiting_state_test_barriers = Some((ready, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_restore_waiting_state_test_barriers(
+        &mut self,
+        ready: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) {
+        self.restore_waiting_state_test_barriers = Some((ready, release));
     }
 
     fn record_lock_for(&self, id: &str) -> RecordLock {
@@ -323,12 +351,22 @@ impl InteractionStore {
         &self,
         id: &str,
     ) -> Result<InteractionRequest, InteractionError> {
+        self.retire_waiting_state(id)
+            .await
+            .map(|(_, cleared)| cleared)
+    }
+
+    pub(crate) async fn retire_waiting_state(
+        &self,
+        id: &str,
+    ) -> Result<(InteractionRequest, InteractionRequest), InteractionError> {
         let lock = self.record_lock_for(id);
         let _guard = lock.lock().await;
         let mut interaction = self
             .get(id)
             .await?
             .ok_or_else(|| InteractionError::NotFound { id: id.to_string() })?;
+        let previous = interaction.clone();
 
         match interaction.status {
             InteractionStatus::Open => {
@@ -341,7 +379,55 @@ impl InteractionStore {
             }
         }
         self.write_interaction(&interaction).await?;
-        Ok(interaction)
+        #[cfg(test)]
+        if let Some((ready, release)) = &self.retire_waiting_state_test_barriers {
+            ready.wait().await;
+            release.wait().await;
+        }
+        Ok((previous, interaction))
+    }
+
+    pub(crate) async fn restore_waiting_state_after_failed_transition(
+        &self,
+        expected_cleared: &InteractionRequest,
+        previous: &InteractionRequest,
+    ) -> Result<(), InteractionError> {
+        self.replace_if_current(expected_cleared, previous).await?;
+        #[cfg(test)]
+        if let Some((ready, release)) = &self.restore_waiting_state_test_barriers {
+            ready.wait().await;
+            release.wait().await;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn reapply_retired_state_after_failed_owner_restore(
+        &self,
+        expected_previous: &InteractionRequest,
+        cleared: &InteractionRequest,
+    ) -> Result<(), InteractionError> {
+        self.replace_if_current(expected_previous, cleared).await
+    }
+
+    async fn replace_if_current(
+        &self,
+        expected: &InteractionRequest,
+        replacement: &InteractionRequest,
+    ) -> Result<(), InteractionError> {
+        let lock = self.record_lock_for(&expected.id);
+        let _guard = lock.lock().await;
+        let current = self
+            .get(&expected.id)
+            .await?
+            .ok_or_else(|| InteractionError::NotFound {
+                id: expected.id.clone(),
+            })?;
+        if current != *expected {
+            return Err(InteractionError::ConcurrentModification {
+                id: expected.id.clone(),
+            });
+        }
+        self.write_interaction(replacement).await
     }
 
     async fn list_all(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
@@ -729,6 +815,55 @@ mod tests {
 
         let loaded = store.get("int_cancel").await.unwrap().unwrap();
         assert_eq!(loaded.status, InteractionStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn retirement_and_resolution_share_one_record_lock() {
+        let dir = tempdir().unwrap();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        store
+            .create(sample_question("int_retire_race", "issue-1", "ACME-1"))
+            .await
+            .unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let resolving_store = store.clone();
+        let retiring_store = store.clone();
+        let resolving_barrier = Arc::clone(&barrier);
+        let retiring_barrier = Arc::clone(&barrier);
+
+        let resolving = tokio::spawn(async move {
+            resolving_barrier.wait().await;
+            resolving_store
+                .resolve(
+                    "int_retire_race",
+                    InteractionResponse::Question {
+                        response_schema_version: 1,
+                        text: "Use staging".to_string(),
+                        selected_option: Some("staging".to_string()),
+                    },
+                )
+                .await
+        });
+        let retiring = tokio::spawn(async move {
+            retiring_barrier.wait().await;
+            retiring_store.retire_waiting_state("int_retire_race").await
+        });
+
+        let resolved = resolving.await.unwrap();
+        let (previous, cleared) = retiring.await.unwrap().unwrap();
+        match resolved {
+            Ok(resolved) => {
+                assert_eq!(previous, resolved);
+                assert_eq!(cleared.status, InteractionStatus::Resolved);
+                assert!(cleared.response.is_some());
+            }
+            Err(InteractionError::AlreadyCancelled { .. }) => {
+                assert_eq!(previous.status, InteractionStatus::Open);
+                assert_eq!(cleared.status, InteractionStatus::Cancelled);
+            }
+            Err(error) => panic!("unexpected resolution result: {error}"),
+        }
+        assert!(!cleared.awaiting_resume);
     }
 
     #[tokio::test]
