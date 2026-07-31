@@ -212,7 +212,7 @@ async fn prepare_orchestrator_runtime(
             agent_runner,
             workspace_mgr,
             refresh_requested: Arc::clone(&app_state.refresh_requested),
-            cancellation_registry: Arc::clone(&app_state.cancellation_registry),
+            cancellation_registry: app_state.cancellation_registry.clone(),
             event_bus: app_state.event_bus.clone(),
             transcript_event_bus: app_state.transcript_event_bus.clone(),
             workspace_root: PathBuf::from(&app_state.workspace_root),

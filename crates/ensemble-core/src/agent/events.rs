@@ -7,6 +7,23 @@ use crate::agent::protocol::TranscriptBlockKind;
 use crate::interaction::InteractionKind;
 use crate::pipeline::verdict::StepOutput;
 
+/// Exact identity of one active worker attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WorkerIdentity {
+    pub issue_id: String,
+    pub run_id: String,
+    pub cycle: u32,
+    pub step_name: String,
+    pub started_at: DateTime<Utc>,
+}
+
+/// Orchestrator-only envelope that stamps a runner event with its exact owner.
+#[derive(Debug)]
+pub struct OrchestratorWorkerEvent {
+    pub identity: WorkerIdentity,
+    pub event: WorkerEvent,
+}
+
 /// Token usage reported by the ACP agent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {

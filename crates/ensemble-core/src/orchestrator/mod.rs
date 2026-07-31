@@ -14,18 +14,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::cancellation::{
-    cancel_all, clear_issue_cancellation, new_cancellation_registry, register_issue_cancellation,
-    CancellationRegistry,
+    await_worker_drain, is_reconciliation_owned, mark_all_for_drain, mark_issue_for_drain,
+    new_cancellation_registry, register_worker, remove_completed_worker, remove_drained_workers,
+    CancellationRegistry, WorkerDrainHandle,
 };
 use crate::agent::events::{
-    AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerFailureKind,
-    WorkerResult,
+    AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
+    WorkerEvent, WorkerFailureKind, WorkerIdentity, WorkerResult,
 };
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
 use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
@@ -129,6 +130,35 @@ impl RunningAttemptIdentity {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReconciliationOwner {
+    attempt: Option<RunningAttemptIdentity>,
+    pipeline_cycle: Option<u32>,
+}
+
+impl ReconciliationOwner {
+    fn capture(state: &OrchestratorState, issue_id: &str) -> Self {
+        Self {
+            attempt: RunningAttemptIdentity::capture(state, issue_id),
+            pipeline_cycle: state.get_pipeline_run(issue_id).map(|run| run.cycle),
+        }
+    }
+
+    fn is_current(&self, state: &OrchestratorState, issue_id: &str) -> bool {
+        let attempt_is_current = match &self.attempt {
+            Some(attempt) => attempt.is_current(state, issue_id),
+            None => state.get_running(issue_id).is_none(),
+        };
+        attempt_is_current
+            && state.get_pipeline_run(issue_id).map(|run| run.cycle) == self.pipeline_cycle
+    }
+}
+
+struct DrainedWorkers {
+    owner: ReconciliationOwner,
+    handles: Vec<WorkerDrainHandle>,
+}
+
 const HISTORY_OUTCOME_SUCCEEDED: &str = "succeeded";
 const HISTORY_OUTCOME_FAILED: &str = "failed";
 const HISTORY_OUTCOME_STOPPED: &str = "stopped";
@@ -136,6 +166,10 @@ const HISTORY_VERDICT_APPROVED: &str = "approved";
 const HISTORY_VERDICT_REJECTED: &str = "rejected";
 const HISTORY_VERDICT_FAILED: &str = "failed";
 const REJECTION_COMMENT_PREFIX: &str = "Ensemble pipeline rejected";
+#[cfg(not(test))]
+const WORKER_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const WORKER_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// The main orchestrator that manages the poll-dispatch-reconcile loop.
 pub struct Orchestrator {
@@ -154,8 +188,8 @@ pub struct Orchestrator {
     event_bus: EventBus,
     timeline_persistence: Option<TimelinePersistence>,
     transcript_persistence: Option<TranscriptPersistence>,
-    worker_tx: mpsc::Sender<WorkerEvent>,
-    worker_rx: mpsc::Receiver<WorkerEvent>,
+    worker_tx: mpsc::Sender<OrchestratorWorkerEvent>,
+    worker_rx: mpsc::Receiver<OrchestratorWorkerEvent>,
     shutdown_rx: mpsc::Receiver<()>,
     #[cfg(test)]
     finalization_commit_test_barriers:
@@ -320,11 +354,6 @@ impl Orchestrator {
     /// Get a reference to the orchestrator state for API consumers.
     pub fn state(&self) -> Arc<RwLock<OrchestratorState>> {
         Arc::clone(&self.state)
-    }
-
-    /// Get the worker event sender for spawning workers.
-    pub fn worker_tx(&self) -> mpsc::Sender<WorkerEvent> {
-        self.worker_tx.clone()
     }
 
     /// Run the orchestrator main loop.
@@ -498,36 +527,48 @@ impl Orchestrator {
         };
 
         // 1. Reconcile stalled runs
-        let stall_timeout_ms = {
+        let (stall_timeout_ms, max_retry_backoff_ms, max_cycles) = {
             let config = self.config.read().await;
-            config.agent.stall_timeout_ms
+            (
+                config.agent.stall_timeout_ms,
+                config.agent.max_retry_backoff_ms,
+                config.max_cycles,
+            )
         };
-        {
+        let stalled_issue_ids = {
             let state = self.state.read().await;
-            let stall_result = reconcile_stalled_runs(&state, stall_timeout_ms);
-            if stall_result.stalled_count > 0 {
-                drop(state);
-                let mut state = self.state.write().await;
-                let config = self.config.read().await;
-                for issue_id in &stall_result.stalled_issue_ids {
-                    if let Some(entry) = state.remove_running(issue_id) {
-                        state.add_runtime_seconds(&entry);
-                        schedule_failure_retry(
-                            &mut state,
-                            FailureRetryRequest {
-                                issue_id,
-                                identifier: &entry.identifier,
-                                attempt: next_attempt(entry.retry_attempt),
-                                max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                max_cycles: config.max_cycles,
-                                error: "stall timeout",
-                                retry_from_step: None,
-                                with_fixup: false,
-                            },
-                        );
-                    }
-                }
+            reconcile_stalled_runs(&state, stall_timeout_ms).stalled_issue_ids
+        };
+        for issue_id in stalled_issue_ids {
+            let Some(drained) = self.cancel_and_drain_for_reconciliation(&issue_id).await else {
+                continue;
+            };
+            let mut state = self.state.write().await;
+            if !drained.owner.is_current(&state, &issue_id) {
+                warn!(
+                    issue_id = %issue_id,
+                    "stall reconciliation owner changed while workers drained"
+                );
+                continue;
             }
+            if let Some(entry) = state.remove_running(&issue_id) {
+                state.add_runtime_seconds(&entry);
+                schedule_failure_retry(
+                    &mut state,
+                    FailureRetryRequest {
+                        issue_id: &issue_id,
+                        identifier: &entry.identifier,
+                        attempt: next_attempt(entry.retry_attempt),
+                        max_backoff_ms: max_retry_backoff_ms,
+                        max_cycles,
+                        error: "stall timeout",
+                        retry_from_step: None,
+                        with_fixup: false,
+                    },
+                );
+            }
+            drop(state);
+            remove_drained_workers(&self.cancellation_registry, &drained.handles);
         }
 
         // 2. Reconcile tracker states
@@ -553,8 +594,19 @@ impl Orchestrator {
 
             // Terminal: terminate and clean workspace
             for issue in reconcile_result.terminate_cleanup {
+                let Some(drained) = self.cancel_and_drain_for_reconciliation(&issue.id).await
+                else {
+                    continue;
+                };
                 let history_record = {
                     let mut state = self.state.write().await;
+                    if !drained.owner.is_current(&state, &issue.id) {
+                        warn!(
+                            issue_id = %issue.id,
+                            "terminal reconciliation owner changed while workers drained"
+                        );
+                        continue;
+                    }
                     let running_entry = state.remove_running(&issue.id);
                     if let Some(entry) = running_entry.as_ref() {
                         state.add_runtime_seconds(entry);
@@ -591,6 +643,7 @@ impl Orchestrator {
                 };
                 let (identifier, interaction_request_id, history_record, history_run_id) =
                     history_record;
+                remove_drained_workers(&self.cancellation_registry, &drained.handles);
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
@@ -610,8 +663,19 @@ impl Orchestrator {
 
             // Non-active: terminate without cleanup
             for issue in reconcile_result.terminate_no_cleanup {
+                let Some(drained) = self.cancel_and_drain_for_reconciliation(&issue.id).await
+                else {
+                    continue;
+                };
                 let result = {
                     let mut state = self.state.write().await;
+                    if !drained.owner.is_current(&state, &issue.id) {
+                        warn!(
+                            issue_id = %issue.id,
+                            "inactive reconciliation owner changed while workers drained"
+                        );
+                        continue;
+                    }
                     let running_entry = state.remove_running(&issue.id);
                     if let Some(entry) = running_entry.as_ref() {
                         state.add_runtime_seconds(entry);
@@ -639,6 +703,7 @@ impl Orchestrator {
                     (interaction_request_id, history_record, history_run_id)
                 };
                 let (interaction_request_id, history_record, history_run_id) = result;
+                remove_drained_workers(&self.cancellation_registry, &drained.handles);
 
                 self.cancel_open_interaction(interaction_request_id).await;
 
@@ -1250,20 +1315,54 @@ impl Orchestrator {
         }
 
         // Mark step as running in pipeline
-        let (run_id, sequence, attempt_num, step_running_transition) = {
+        let (run_id, sequence, attempt_num, step_running_transition, worker_identity) = {
             let mut state = self.state.write().await;
-            let run_context = Self::run_context_for_issue(&mut state, &issue.id);
-            {
-                if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
-                    run.mark_running(
-                        dispatch.step_name,
-                        format!(
-                            "{}-{}-{}",
-                            issue.id, dispatch.step_name, dispatch.agent_name
+            let running_entry =
+                state
+                    .get_running(&issue.id)
+                    .ok_or_else(|| AgentError::PromptError {
+                        reason: format!(
+                            "cannot dispatch step '{}' without a running issue",
+                            dispatch.step_name
                         ),
-                    );
-                }
-            }
+                    })?;
+            let identity_run_id =
+                running_entry
+                    .run_id
+                    .clone()
+                    .ok_or_else(|| AgentError::PromptError {
+                        reason: format!(
+                            "cannot dispatch step '{}' without a stable run id",
+                            dispatch.step_name
+                        ),
+                    })?;
+            let started_at = running_entry.started_at;
+            let cycle = state
+                .get_pipeline_run(&issue.id)
+                .map(|run| run.cycle)
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!(
+                        "cannot dispatch step '{}' without a pipeline run",
+                        dispatch.step_name
+                    ),
+                })?;
+            let run_context = Self::run_context_for_issue(&mut state, &issue.id);
+            let run =
+                state
+                    .get_pipeline_run_mut(&issue.id)
+                    .ok_or_else(|| AgentError::PromptError {
+                        reason: format!(
+                            "cannot dispatch step '{}' without a pipeline run",
+                            dispatch.step_name
+                        ),
+                    })?;
+            run.mark_running(
+                dispatch.step_name,
+                format!(
+                    "{}-{}-{}",
+                    issue.id, dispatch.step_name, dispatch.agent_name
+                ),
+            );
             let transition = Self::transition_input_for_run(
                 &state,
                 &issue.id,
@@ -1273,7 +1372,20 @@ impl Orchestrator {
                 None,
                 None,
             );
-            (run_context.0, run_context.1, run_context.2, transition)
+            let worker_identity = WorkerIdentity {
+                issue_id: issue.id.clone(),
+                run_id: identity_run_id,
+                cycle,
+                step_name: dispatch.step_name.to_string(),
+                started_at,
+            };
+            (
+                run_context.0,
+                run_context.1,
+                run_context.2,
+                transition,
+                worker_identity,
+            )
         };
 
         if let Some(input) = step_running_transition {
@@ -1300,14 +1412,29 @@ impl Orchestrator {
         let agent_name_owned = dispatch.agent_name.to_string();
         let interaction_response = dispatch.interaction_response.clone();
         let runner = Arc::clone(&self.agent_runner);
-        let event_tx = self.worker_tx.clone();
+        let orchestrator_event_tx = self.worker_tx.clone();
         let workspace_path = dispatch.workspace_path.clone();
         let attempt = dispatch.attempt;
         let timeout_ms = dispatch.timeout_ms;
         let step_outputs = dispatch.step_outputs.clone();
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        register_issue_cancellation(&self.cancellation_registry, &issue.id, cancel_token.clone());
-        let cancellation_registry = Arc::clone(&self.cancellation_registry);
+        let (local_event_tx, local_event_rx) = mpsc::channel(100);
+        let (completion_tx, completion_rx) = watch::channel(false);
+        register_worker(
+            &self.cancellation_registry,
+            worker_identity.clone(),
+            cancel_token.clone(),
+            completion_rx,
+        );
+        let bridge_registry = self.cancellation_registry.clone();
+        let bridge_identity = worker_identity.clone();
+        tokio::spawn(bridge_worker_events(
+            local_event_rx,
+            orchestrator_event_tx,
+            bridge_registry,
+            bridge_identity,
+            completion_tx,
+        ));
         tokio::spawn(async move {
             let worker_result = catch_worker_panic(
                 runner.run(AgentRunRequest {
@@ -1320,7 +1447,7 @@ impl Orchestrator {
                     timeout_ms,
                     interaction_response: interaction_response.clone(),
                     workspace_path: &workspace_path,
-                    event_tx: event_tx.clone(),
+                    event_tx: local_event_tx.clone(),
                     cancel_token,
                     step_outputs,
                 }),
@@ -1329,9 +1456,7 @@ impl Orchestrator {
             )
             .await;
 
-            clear_issue_cancellation(&cancellation_registry, &issue_clone.id);
-
-            let _ = event_tx
+            let _ = local_event_tx
                 .send(WorkerEvent::WorkerExited {
                     issue_id: issue_clone.id.clone(),
                     step_name: step_name_owned,
@@ -1345,15 +1470,61 @@ impl Orchestrator {
     }
 
     /// Handle a worker event from the channel.
-    async fn handle_worker_event(&self, event: WorkerEvent) {
-        match event {
+    async fn handle_worker_event(&self, owned_event: OrchestratorWorkerEvent) {
+        let identity = owned_event.identity;
+        let event_matches_identity = match &owned_event.event {
+            WorkerEvent::AgentUpdate {
+                issue_id,
+                step_name,
+                ..
+            }
+            | WorkerEvent::WorkerExited {
+                issue_id,
+                step_name,
+                ..
+            } => issue_id == &identity.issue_id && step_name == &identity.step_name,
+        };
+        if !event_matches_identity || !self.worker_identity_is_current(&identity).await {
+            return;
+        }
+
+        let reconciliation_owned = is_reconciliation_owned(&self.cancellation_registry, &identity);
+        match owned_event.event {
             WorkerEvent::AgentUpdate {
                 issue_id,
                 step_name,
                 event: agent_event,
                 timestamp,
             } => {
+                if reconciliation_owned {
+                    return;
+                }
                 self.handle_agent_update(&issue_id, &step_name, agent_event, timestamp)
+                    .await;
+            }
+            WorkerEvent::WorkerExited {
+                issue_id,
+                step_name,
+                result,
+                ..
+            } => {
+                if !reconciliation_owned {
+                    self.handle_worker_exit(&issue_id, &step_name, result).await;
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn handle_unowned_test_event(&self, event: WorkerEvent) {
+        match event {
+            WorkerEvent::AgentUpdate {
+                issue_id,
+                step_name,
+                event,
+                timestamp,
+            } => {
+                self.handle_agent_update(&issue_id, &step_name, event, timestamp)
                     .await;
             }
             WorkerEvent::WorkerExited {
@@ -1365,6 +1536,40 @@ impl Orchestrator {
                 self.handle_worker_exit(&issue_id, &step_name, result).await;
             }
         }
+    }
+
+    async fn worker_identity_is_current(&self, identity: &WorkerIdentity) -> bool {
+        let state = self.state.read().await;
+        let Some(entry) = state.get_running(&identity.issue_id) else {
+            return false;
+        };
+        let Some(run) = state.get_pipeline_run(&identity.issue_id) else {
+            return false;
+        };
+        entry.run_id.as_deref() == Some(identity.run_id.as_str())
+            && entry.started_at == identity.started_at
+            && run.cycle == identity.cycle
+            && matches!(
+                run.step_states.get(&identity.step_name),
+                Some(StepState::Running { .. })
+            )
+    }
+
+    async fn cancel_and_drain_for_reconciliation(&self, issue_id: &str) -> Option<DrainedWorkers> {
+        let owner = {
+            let state = self.state.read().await;
+            ReconciliationOwner::capture(&state, issue_id)
+        };
+        let mut handles = mark_issue_for_drain(&self.cancellation_registry, issue_id);
+        if !await_worker_drain(&mut handles, WORKER_DRAIN_TIMEOUT).await {
+            warn!(
+                issue_id = %issue_id,
+                workers = handles.len(),
+                "worker drain timed out; retaining reconciliation ownership"
+            );
+            return None;
+        }
+        Some(DrainedWorkers { owner, handles })
     }
 
     /// Handle an agent update event.
@@ -1509,7 +1714,6 @@ impl Orchestrator {
 
     /// Handle a worker exit. Integrates with PipelineRun to drive step DAG.
     async fn handle_worker_exit(&self, issue_id: &str, step_name: &str, result: WorkerResult) {
-        clear_issue_cancellation(&self.cancellation_registry, issue_id);
         // Get the issue snapshot for potential re-dispatch
         let issue_snapshot = {
             let state = self.state.read().await;
@@ -5540,7 +5744,8 @@ impl Orchestrator {
     }
 
     async fn cancel_active_runs(&self) {
-        let cancelled = cancel_all(&self.cancellation_registry);
+        let mut handles = mark_all_for_drain(&self.cancellation_registry);
+        let cancelled = handles.len();
         if cancelled > 0 {
             debug!(cancelled, "cancelled active worker tokens");
         }
@@ -5572,6 +5777,15 @@ impl Orchestrator {
                     );
                 }
             }
+        }
+
+        if await_worker_drain(&mut handles, WORKER_DRAIN_TIMEOUT).await {
+            remove_drained_workers(&self.cancellation_registry, &handles);
+        } else {
+            warn!(
+                workers = handles.len(),
+                "worker drain timed out during shutdown; retaining worker ownership"
+            );
         }
     }
 
@@ -5620,6 +5834,29 @@ impl Orchestrator {
             .unwrap_or(1);
         (run_id, attempt)
     }
+}
+
+async fn bridge_worker_events(
+    mut local_event_rx: mpsc::Receiver<WorkerEvent>,
+    orchestrator_event_tx: mpsc::Sender<OrchestratorWorkerEvent>,
+    cancellation_registry: CancellationRegistry,
+    identity: WorkerIdentity,
+    completion_tx: watch::Sender<bool>,
+) {
+    while let Some(event) = local_event_rx.recv().await {
+        if orchestrator_event_tx
+            .send(OrchestratorWorkerEvent {
+                identity: identity.clone(),
+                event,
+            })
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let _ = completion_tx.send(true);
+    remove_completed_worker(&cancellation_registry, &identity);
 }
 
 async fn catch_worker_panic<F>(fut: F, issue_id: &str, step_name: &str) -> WorkerResult
@@ -5923,7 +6160,8 @@ fn validate_restored_snapshot_against_config(
 mod tests {
     use super::*;
     use crate::agent::events::{
-        AgentEvent, InteractionRequestDraft, StepApprovalRequestDraft, WorkerEvent, WorkerResult,
+        AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
+        WorkerEvent, WorkerIdentity, WorkerResult,
     };
     use crate::config::ensemble::{parse_config, ConcurrencyConfig, StepConfig};
     use crate::error::AgentError;
@@ -5939,6 +6177,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use tokio::sync::watch;
     use tower::ServiceExt;
 
     /// Mock tracker for orchestrator tests.
@@ -5950,6 +6189,52 @@ mod tests {
         issues: Arc<RwLock<Vec<Issue>>>,
         comments: Arc<RwLock<Vec<crate::tracker::model::TrackerComment>>>,
         list_barrier: Option<Arc<tokio::sync::Barrier>>,
+    }
+
+    async fn worker_identity_test_orchestrator() -> (Orchestrator, tempfile::TempDir, WorkerIdentity)
+    {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let identity = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), Some(1));
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+            let entry = state.get_running("1").unwrap();
+            WorkerIdentity {
+                issue_id: "1".to_string(),
+                run_id: entry.run_id.clone().unwrap(),
+                cycle: 1,
+                step_name: "build".to_string(),
+                started_at: entry.started_at,
+            }
+        };
+
+        (orchestrator, dir, identity)
     }
 
     #[async_trait]
@@ -6106,6 +6391,78 @@ mod tests {
         observed_commands: Option<Arc<RwLock<Vec<String>>>>,
         observed_timeouts: Option<Arc<RwLock<Vec<u64>>>>,
         cancellation_probe: Option<Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>>,
+    }
+
+    struct BlockingDrainRunner {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        cancellation_observed: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<tokio::sync::Semaphore>,
+    }
+
+    #[async_trait]
+    impl AgentRunner for BlockingDrainRunner {
+        async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
+            if let Some(started) = self.started.lock().unwrap().take() {
+                let _ = started.send(());
+            }
+            request.cancel_token.cancelled().await;
+            if let Some(observed) = self.cancellation_observed.lock().unwrap().take() {
+                let _ = observed.send(());
+            }
+            self.release.acquire().await.unwrap().forget();
+            Err(AgentError::TurnCancelled)
+        }
+    }
+
+    async fn blocking_drain_test_orchestrator() -> (
+        Arc<Orchestrator>,
+        tempfile::TempDir,
+        Arc<RwLock<Vec<Issue>>>,
+        tokio::sync::oneshot::Receiver<()>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::clone(&issues),
+        });
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner: Arc<dyn AgentRunner> = Arc::new(BlockingDrainRunner {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            cancellation_observed: std::sync::Mutex::new(Some(cancelled_tx)),
+            release: Arc::clone(&release),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Arc::new(Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        ));
+
+        orchestrator.handle_tick().await;
+        started_rx.await.unwrap();
+
+        (orchestrator, dir, issues, cancelled_rx, release)
+    }
+
+    async fn handle_queued_worker_event(orchestrator: Arc<Orchestrator>) -> Orchestrator {
+        let mut orchestrator = Arc::try_unwrap(orchestrator)
+            .ok()
+            .expect("test owns the only orchestrator reference");
+        let queued_event =
+            tokio::time::timeout(Duration::from_secs(1), orchestrator.worker_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        orchestrator.handle_worker_event(queued_event).await;
+        orchestrator
     }
 
     #[async_trait]
@@ -9010,7 +9367,7 @@ agent:
         }
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::PromptStarted,
@@ -9018,7 +9375,7 @@ agent:
             })
             .await;
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::OutputChunk {
@@ -9296,7 +9653,7 @@ agent:
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
-        let orchestrator = Orchestrator::new(
+        let mut orchestrator = Orchestrator::new(
             config,
             tracker,
             runner,
@@ -9308,21 +9665,14 @@ agent:
 
         orchestrator.dispatch_issue(&issue, None).await;
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                let is_empty = orchestrator
-                    .cancellation_registry
-                    .lock()
-                    .unwrap()
-                    .is_empty();
-                if is_empty {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), orchestrator.worker_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        orchestrator.handle_worker_event(event).await;
+        assert!(crate::agent::cancellation::registry_is_empty(
+            &orchestrator.cancellation_registry
+        ));
     }
 
     #[tokio::test]
@@ -13600,7 +13950,7 @@ agent:
         }
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::TranscriptBlock {
@@ -13672,7 +14022,7 @@ agent:
         }
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::TranscriptBlock {
@@ -13683,7 +14033,7 @@ agent:
             })
             .await;
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::RunCompleted { usage: None },
@@ -13736,7 +14086,7 @@ agent:
         }
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::TranscriptBlock {
@@ -13748,7 +14098,7 @@ agent:
             .await;
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::RunCompleted { usage: None },
@@ -13805,7 +14155,7 @@ agent:
         }
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::TranscriptBlock {
@@ -13821,7 +14171,7 @@ agent:
         }
 
         orchestrator
-            .handle_worker_event(WorkerEvent::AgentUpdate {
+            .handle_unowned_test_event(WorkerEvent::AgentUpdate {
                 issue_id: "issue-1".to_string(),
                 step_name: "build".to_string(),
                 event: AgentEvent::OutputChunk {
@@ -14225,5 +14575,510 @@ agent:
                 "question_asked and input_requested must not reuse the same sequence number"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn worker_identity_stale_update_cannot_mutate_replacement_attempt() {
+        let (orchestrator, dir, stale_identity) = worker_identity_test_orchestrator().await;
+        let (_stale_complete_tx, stale_complete_rx) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            stale_identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            stale_complete_rx,
+        );
+
+        let replacement_identity = {
+            let mut state = orchestrator.state.write().await;
+            let entry = state.running.get_mut("1").unwrap();
+            entry.started_at += chrono::Duration::seconds(1);
+            WorkerIdentity {
+                started_at: entry.started_at,
+                ..stale_identity.clone()
+            }
+        };
+        let (_replacement_complete_tx, replacement_complete_rx) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            replacement_identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            replacement_complete_rx,
+        );
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity: stale_identity.clone(),
+                event: WorkerEvent::AgentUpdate {
+                    issue_id: "1".to_string(),
+                    step_name: "build".to_string(),
+                    event: AgentEvent::SessionStarted {
+                        session_id: "stale-session".to_string(),
+                        agent_pid: None,
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity: stale_identity.clone(),
+                event: WorkerEvent::AgentUpdate {
+                    issue_id: "1".to_string(),
+                    step_name: "build".to_string(),
+                    event: AgentEvent::RunCompleted {
+                        usage: Some(crate::agent::events::TokenUsage {
+                            input_tokens: 10,
+                            output_tokens: 20,
+                            total_tokens: 30,
+                        }),
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity: stale_identity.clone(),
+                event: WorkerEvent::WorkerExited {
+                    issue_id: "1".to_string(),
+                    step_name: "build".to_string(),
+                    result: WorkerResult::Failed {
+                        error: "stale failure".to_string(),
+                        kind: WorkerFailureKind::Runtime,
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity: stale_identity,
+                event: WorkerEvent::WorkerExited {
+                    issue_id: "1".to_string(),
+                    step_name: "build".to_string(),
+                    result: WorkerResult::Success {
+                        output: succeeded_step_output(),
+                        approval_request: None,
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let replacement = state.get_running("1").unwrap();
+        assert_eq!(replacement.session_id, None);
+        assert_eq!(replacement.agent_input_tokens, 0);
+        assert_eq!(replacement.agent_output_tokens, 0);
+        assert_eq!(replacement.agent_total_tokens, 0);
+        assert!(!state.retry_attempts.contains_key("1"));
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(StepState::Running { .. })
+        ));
+        drop(state);
+        assert!(crate::agent::cancellation::contains_worker(
+            &orchestrator.cancellation_registry,
+            &replacement_identity
+        ));
+        assert!(orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(!dir.path().join("ensemble_history.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn worker_identity_current_envelope_drives_updates() {
+        let (orchestrator, _dir, identity) = worker_identity_test_orchestrator().await;
+        let (_complete_tx, complete_rx) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            complete_rx,
+        );
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity,
+                event: WorkerEvent::AgentUpdate {
+                    issue_id: "1".to_string(),
+                    step_name: "build".to_string(),
+                    event: AgentEvent::SessionStarted {
+                        session_id: "current-session".to_string(),
+                        agent_pid: None,
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.get_running("1").unwrap().session_id.as_deref(),
+            Some("current-session")
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_identity_bridge_failure_retains_incomplete_owner() {
+        let registry = crate::agent::cancellation::new_cancellation_registry();
+        let identity = WorkerIdentity {
+            issue_id: "1".to_string(),
+            run_id: "run-1".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (completion_tx, completion_rx) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &registry,
+            identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            completion_rx,
+        );
+        let (local_tx, local_rx) = mpsc::channel(1);
+        let (orchestrator_tx, orchestrator_rx) = mpsc::channel(1);
+        drop(orchestrator_rx);
+        local_tx
+            .send(WorkerEvent::AgentUpdate {
+                issue_id: "1".to_string(),
+                step_name: "build".to_string(),
+                event: AgentEvent::PromptStarted,
+                timestamp: Utc::now(),
+            })
+            .await
+            .unwrap();
+        drop(local_tx);
+
+        bridge_worker_events(
+            local_rx,
+            orchestrator_tx,
+            registry.clone(),
+            identity.clone(),
+            completion_tx,
+        )
+        .await;
+
+        let mut handles =
+            crate::agent::cancellation::mark_issue_for_drain(&registry, &identity.issue_id);
+        assert!(
+            !crate::agent::cancellation::await_worker_drain(
+                &mut handles,
+                Duration::from_millis(10)
+            )
+            .await
+        );
+        assert!(crate::agent::cancellation::contains_worker(
+            &registry, &identity
+        ));
+    }
+
+    #[tokio::test]
+    async fn worker_identity_drain_owned_exit_is_suppressed() {
+        let (orchestrator, _dir, identity) = worker_identity_test_orchestrator().await;
+        let (_complete_tx, complete_rx) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            complete_rx,
+        );
+        crate::agent::cancellation::mark_issue_for_drain(&orchestrator.cancellation_registry, "1");
+
+        orchestrator
+            .handle_worker_event(OrchestratorWorkerEvent {
+                identity: identity.clone(),
+                event: WorkerEvent::WorkerExited {
+                    issue_id: "1".to_string(),
+                    step_name: "build".to_string(),
+                    result: WorkerResult::Failed {
+                        error: "cancelled for reconciliation".to_string(),
+                        kind: WorkerFailureKind::Runtime,
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(!state.retry_attempts.contains_key("1"));
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(StepState::Running { .. })
+        ));
+        drop(state);
+        assert!(crate::agent::cancellation::contains_worker(
+            &orchestrator.cancellation_registry,
+            &identity
+        ));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_drain_terminal_waits_before_release_and_cleanup() {
+        let (orchestrator, _dir, issues, cancelled, release) =
+            blocking_drain_test_orchestrator().await;
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("repo#1").unwrap();
+        assert!(workspace_path.exists());
+        issues.write().await[0].state = "Done".to_string();
+
+        let tick = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.handle_tick().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), cancelled)
+            .await
+            .expect("terminal reconciliation should cancel the active worker")
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(!tick.is_finished());
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_running("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+        }
+        assert!(workspace_path.exists());
+
+        release.add_permits(1);
+        tick.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        drop(state);
+        assert!(!workspace_path.exists());
+
+        let orchestrator = handle_queued_worker_event(orchestrator).await;
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        assert!(!workspace_path.exists());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_drain_inactive_waits_before_release_without_cleanup() {
+        let (orchestrator, _dir, issues, cancelled, release) =
+            blocking_drain_test_orchestrator().await;
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("repo#1").unwrap();
+        issues.write().await[0].state = "Backlog".to_string();
+
+        let tick = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.handle_tick().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), cancelled)
+            .await
+            .expect("inactive reconciliation should cancel the active worker")
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(!tick.is_finished());
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_running("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+        }
+
+        release.add_permits(1);
+        tick.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        drop(state);
+        assert!(workspace_path.exists());
+
+        let orchestrator = handle_queued_worker_event(orchestrator).await;
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        assert!(workspace_path.exists());
+    }
+
+    #[tokio::test]
+    async fn reconciliation_drain_stalled_waits_before_scheduling_retry() {
+        let (orchestrator, _dir, _issues, cancelled, release) =
+            blocking_drain_test_orchestrator().await;
+        orchestrator.config.write().await.agent.stall_timeout_ms = 1;
+        {
+            let mut state = orchestrator.state.write().await;
+            state.running.get_mut("1").unwrap().last_agent_timestamp =
+                Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+
+        let tick = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.handle_tick().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), cancelled)
+            .await
+            .expect("stall reconciliation should cancel the active worker")
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(!tick.is_finished());
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_running("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            assert!(!state.retry_attempts.contains_key("1"));
+        }
+
+        release.add_permits(1);
+        tick.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        assert!(state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_drain_stalled_timeout_retains_owner_then_retries_once() {
+        let (orchestrator, _dir, _issues, cancelled, release) =
+            blocking_drain_test_orchestrator().await;
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("repo#1").unwrap();
+        orchestrator.config.write().await.agent.stall_timeout_ms = 1;
+        let identity = {
+            let mut state = orchestrator.state.write().await;
+            let (run_id, started_at) = {
+                let entry = state.running.get_mut("1").unwrap();
+                entry.last_agent_timestamp = Some(Utc::now() - chrono::Duration::seconds(1));
+                (entry.run_id.clone().unwrap(), entry.started_at)
+            };
+            WorkerIdentity {
+                issue_id: "1".to_string(),
+                run_id,
+                cycle: state.get_pipeline_run("1").unwrap().cycle,
+                step_name: "build".to_string(),
+                started_at,
+            }
+        };
+
+        orchestrator.handle_tick().await;
+        cancelled.await.unwrap();
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_running("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            assert!(!state.retry_attempts.contains_key("1"));
+        }
+        assert!(workspace_path.exists());
+        assert!(crate::agent::cancellation::is_reconciliation_owned(
+            &orchestrator.cancellation_registry,
+            &identity
+        ));
+
+        release.add_permits(1);
+        orchestrator.handle_tick().await;
+        let retry_before_exit = {
+            let state = orchestrator.state.read().await;
+            assert!(!state.is_running("1"));
+            state.retry_attempts.get("1").unwrap().clone()
+        };
+
+        let orchestrator = handle_queued_worker_event(orchestrator).await;
+
+        let state = orchestrator.state.read().await;
+        let retry_after_exit = state.retry_attempts.get("1").unwrap();
+        assert_eq!(retry_after_exit.attempt, retry_before_exit.attempt);
+        assert_eq!(retry_after_exit.due_at_ms, retry_before_exit.due_at_ms);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_drain_stalled_revalidates_exact_owner_before_retry() {
+        let (orchestrator, _dir, _issues, cancelled, release) =
+            blocking_drain_test_orchestrator().await;
+        orchestrator.config.write().await.agent.stall_timeout_ms = 1;
+        {
+            let mut state = orchestrator.state.write().await;
+            state.running.get_mut("1").unwrap().last_agent_timestamp =
+                Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+
+        let tick = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.handle_tick().await }
+        });
+        cancelled.await.unwrap();
+        {
+            let mut state = orchestrator.state.write().await;
+            state.running.get_mut("1").unwrap().started_at += chrono::Duration::seconds(1);
+        }
+        release.add_permits(1);
+        tick.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        assert!(!state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_drains_running_workers_before_returning() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner: Arc<dyn AgentRunner> = Arc::new(BlockingDrainRunner {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            cancellation_observed: std::sync::Mutex::new(Some(cancelled_tx)),
+            release: Arc::clone(&release),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        let run = tokio::spawn(async move { orchestrator.run().await });
+        started_rx.await.unwrap();
+        shutdown_tx.send(()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), cancelled_rx)
+            .await
+            .expect("shutdown should cancel the active worker")
+            .unwrap();
+        tokio::task::yield_now().await;
+        assert!(!run.is_finished());
+
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .expect("shutdown should finish after the worker drains")
+            .unwrap();
     }
 }
