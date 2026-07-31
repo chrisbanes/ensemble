@@ -3,6 +3,7 @@ import { useSetupDefaultsQuery } from "@/hooks";
 import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
 import { useAgentDiscovery } from "@/hooks/useAgentDiscovery";
 import FileBrowser from "./FileBrowser";
+import RestartRequiredNotice, { restartRequiredMessage } from "./RestartRequiredNotice";
 import { secretEditValidationError } from "./secretEditValidation";
 import type {
   SetupTracker,
@@ -55,9 +56,13 @@ interface SetupDraft {
   onFailure: string;
 }
 
+export interface SetupWizardCompletion {
+  restartRequiredMessage?: string;
+}
+
 interface SetupWizardProps {
   mode?: "create" | "reconfigure";
-  onComplete?: () => void;
+  onComplete?: (completion?: SetupWizardCompletion) => void;
 }
 
 const DEFAULT_TODO_TRACKER: SetupTracker = { kind: "todo_file", path: "" };
@@ -131,6 +136,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
     canSave: boolean;
     checks: SetupCheck[];
   } | null>(null);
+  const [restartMessage, setRestartMessage] = useState<string | null>(null);
   const [repoPathInput, setRepoPathInput] = useState("");
   const [repoBranchInput, setRepoBranchInput] = useState("main");
   const hasVisitedWorkflow = useRef(false);
@@ -265,19 +271,28 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
       ...agent,
       permission_mode: supportedPermissionMode(agent.permission_mode),
     }));
-    await saveMutation.mutateAsync({
-      data: {
-        setup: {
-          tracker: draft.tracker,
-          repos: draft.repos,
-          agents,
-          steps: draft.steps,
-          on_success: draft.onSuccess,
-          on_failure: draft.onFailure,
+    try {
+      await saveMutation.mutateAsync({
+        data: {
+          setup: {
+            tracker: draft.tracker,
+            repos: draft.repos,
+            agents,
+            steps: draft.steps,
+            on_success: draft.onSuccess,
+            on_failure: draft.onFailure,
+          },
         },
-      },
-    });
-    onComplete?.();
+      });
+      onComplete?.();
+    } catch (error) {
+      const message = restartRequiredMessage(error);
+      if (!message) {
+        throw error;
+      }
+      setRestartMessage(message);
+      onComplete?.({ restartRequiredMessage: message });
+    }
   };
 
   // Generate default workflow steps based on agent count (CLI parity)
@@ -1084,6 +1099,10 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         return null;
     }
   };
+
+  if (restartMessage) {
+    return <RestartRequiredNotice message={restartMessage} />;
+  }
 
   if (isLoadingDefaults && mode === "reconfigure") {
     return (

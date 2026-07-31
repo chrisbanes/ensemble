@@ -29,4 +29,33 @@ describe("customFetch", () => {
     expect(headers.get("Accept")).toBe("application/json");
     expect(headers.get("Authorization")).toBe("Bearer token");
   });
+
+  it("uses config response issues as the error message", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            issues: [
+              {
+                section: "runtime",
+                message: "Configuration saved; restart Ensemble to apply it",
+              },
+            ],
+          }),
+          {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    const request = customFetch("/api/v1/config/yaml/save", { method: "POST" });
+
+    await expect(request).rejects.toMatchObject({
+      status: 409,
+      message: "Configuration saved; restart Ensemble to apply it",
+    });
+  });
 });

@@ -102,6 +102,9 @@ start-gated until publication and the active-state commit finish.
 filesystem resources. Changing either while Ensemble is running is saved to
 disk but not activated: API saves return `409 Conflict`, and watcher reloads
 emit a restart-required diagnostic. Restart Ensemble to apply the candidate.
+The web and desktop configuration editors treat this response as a persisted
+save and display the restart-required diagnostic instead of reporting a failed
+save.
 Diagnostics identify only the safe failure category and never include candidate
 values or resolved secrets.
 
