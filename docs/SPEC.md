@@ -1548,8 +1548,12 @@ Accepted records are keyed idempotently by `(run_id, sequence)` and read in sequ
 table is the sole durable timeline source for new events: there is no per-run timeline JSONL
 dual-write, fallback read, or historical migration.
 
-The in-memory timeline sequence counter is not restored from persisted maxima after restart.
-Restart sequence recovery is a separate concern.
+When the pipeline journal restores a live run, Ensemble initializes that run's in-memory timeline
+sequence counter from the maximum sequence already stored in `run_events` before the run can emit
+another timeline event. The first post-restart event therefore uses a greater sequence, including
+across repeated restarts. Failure to read the durable maximum prevents that journal record from
+being restored under a potentially reused sequence; the issue remains undispatched rather than
+falling back to a fresh run.
 
 For each pipeline step, Ensemble persists a typed JSONL transcript at:
 
@@ -1564,6 +1568,15 @@ chunks, tool calls, tool results, permission activity, turn completion, prompts,
 Large tool results are truncated with head and tail retention. Adjacent assistant and reasoning
 deltas may be coalesced before persistence. Transcript persistence failures are logged and do not
 fail the agent step.
+
+Before the first post-start append for a `(run_id, step_name)` stream, transcript persistence scans
+the existing JSONL bytes and resumes from the greatest valid durable sequence. A malformed or
+truncated final record is ignored by readers and truncated before the next append; a valid final
+record without a newline is normalized to a JSONL boundary. Malformed UTF-8 or JSON before a later
+record remains an explicit error, leaves the file unchanged, and prevents that append.
+Transcript reads hold a shared advisory file lock while taking their snapshot, while append and
+tail repair hold an exclusive lock, so a reader cannot mistake an in-progress append for durable
+tail corruption.
 
 When a run is recorded in durable history, the history record should include per-step transcript
 metadata so clients can link to completed step logs from issue detail and step detail views after the

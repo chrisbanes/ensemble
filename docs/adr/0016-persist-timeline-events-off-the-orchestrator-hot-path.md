@@ -11,5 +11,7 @@ events with a warning, and a database write failure is logged without affecting 
 Orderly shutdown flushes accepted records, trading guaranteed persistence under overload for
 orchestrator progress and ordered best-effort diagnostics.
 
-The queue does not restore its in-memory sequence counter from persisted maxima after restart.
-Restart sequence recovery is a separate concern.
+For a live run rehydrated from the pipeline journal, the orchestrator seeds the in-memory sequence
+counter from that run's SQLite maximum before new events can enter the queue. Brand-new runs retain
+their in-memory counter initialization. This recovery does not add SQLite work to the event
+publication hot path.

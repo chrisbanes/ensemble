@@ -10,6 +10,7 @@ use super::events::TranscriptEventBus;
 use super::model::{
     TranscriptRecord, TranscriptRecordKind, TranscriptTruncation, TRANSCRIPT_SCHEMA_VERSION,
 };
+use super::reader::scan_transcript;
 use super::writer::TranscriptWriter;
 
 pub const COALESCE_MAX_BYTES: usize = 16 * 1024;
@@ -202,6 +203,44 @@ impl PersistState {
         event_bus: Option<&TranscriptEventBus>,
     ) {
         let sequence_key = (req.run_id.clone(), req.step_name.clone());
+        if !self.sequences.contains_key(&sequence_key) {
+            let scan =
+                match scan_transcript(writer.workspace_root(), &req.run_id, &req.step_name).await {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        warn!(
+                            event = "transcript_persist_failed",
+                            run_id = %req.run_id,
+                            step_name = %req.step_name,
+                            error = %error,
+                            "failed to read transcript sequence before append"
+                        );
+                        return;
+                    }
+                };
+            if scan.needs_repair {
+                if let Err(error) = writer
+                    .prepare_append(
+                        &req.run_id,
+                        &req.step_name,
+                        scan.valid_bytes,
+                        scan.needs_separator,
+                    )
+                    .await
+                {
+                    warn!(
+                        event = "transcript_persist_failed",
+                        run_id = %req.run_id,
+                        step_name = %req.step_name,
+                        error = %error,
+                        "failed to prepare transcript before append"
+                    );
+                    return;
+                }
+            }
+            self.sequences
+                .insert(sequence_key.clone(), scan.maximum_sequence);
+        }
         let sequence = self.sequences.entry(sequence_key).or_insert(0);
         *sequence += 1;
 
@@ -373,6 +412,8 @@ fn ceil_char_boundary(value: &str, mut index: usize) -> usize {
 mod tests {
     use super::*;
     use crate::transcript::model::TranscriptRecordKind;
+    use crate::transcript::reader::read_transcript_page;
+    use std::io::Write;
     use tempfile::TempDir;
 
     fn request(kind: TranscriptRecordKind, text: &str) -> TranscriptPersistRequest {
@@ -383,6 +424,21 @@ mod tests {
             attempt: 1,
             timestamp: chrono::Utc::now(),
             kind,
+            payload: serde_json::json!({"text": text}),
+            truncated: None,
+        }
+    }
+
+    fn record(sequence: u64, text: &str) -> TranscriptRecord {
+        TranscriptRecord {
+            schema_version: TRANSCRIPT_SCHEMA_VERSION,
+            run_id: "run-1".to_string(),
+            issue_identifier: "repo#1".to_string(),
+            step_name: "build".to_string(),
+            attempt: 1,
+            sequence,
+            timestamp: Utc::now(),
+            kind: TranscriptRecordKind::ToolCall,
             payload: serde_json::json!({"text": text}),
             truncated: None,
         }
@@ -415,6 +471,116 @@ mod tests {
 
         assert_eq!(records[0].sequence, 1);
         assert_eq!(records[1].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn persistence_resumes_sequence_across_repeated_recreation() {
+        let temp_dir = TempDir::new().unwrap();
+
+        for text in ["one", "two", "three"] {
+            let mut persistence = TranscriptPersistence::new(temp_dir.path().to_path_buf());
+            persistence.send(request(TranscriptRecordKind::ToolCall, text));
+            persistence.flush().await;
+        }
+
+        let records = read_records(&temp_dir).await;
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[tokio::test]
+    async fn persistence_repairs_malformed_tail_before_append() {
+        let malformed_tails: [&[u8]; 2] = [
+            br#"{"schema_version":1,"run_id":"run-1""#,
+            b"{\"schema_version\":\xff",
+        ];
+
+        for malformed_tail in malformed_tails {
+            let temp_dir = TempDir::new().unwrap();
+            let writer = TranscriptWriter::new(temp_dir.path().to_path_buf());
+            let path = writer.transcript_path("run-1", "build").unwrap();
+            writer.append(&record(7, "before restart")).await.unwrap();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap()
+                .write_all(malformed_tail)
+                .unwrap();
+
+            let mut persistence = TranscriptPersistence::new(temp_dir.path().to_path_buf());
+            persistence.send(request(TranscriptRecordKind::ToolCall, "after restart"));
+            persistence.flush().await;
+
+            let response = read_transcript_page(temp_dir.path(), "run-1", "build", None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                response
+                    .records
+                    .iter()
+                    .map(|record| record.sequence)
+                    .collect::<Vec<_>>(),
+                vec![7, 8]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn persistence_normalizes_missing_final_separator_before_append() {
+        let temp_dir = TempDir::new().unwrap();
+        let writer = TranscriptWriter::new(temp_dir.path().to_path_buf());
+        let path = writer.transcript_path("run-1", "build").unwrap();
+        writer.append(&record(7, "before restart")).await.unwrap();
+        let length = std::fs::metadata(&path).unwrap().len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(length - 1)
+            .unwrap();
+
+        let mut persistence = TranscriptPersistence::new(temp_dir.path().to_path_buf());
+        persistence.send(request(TranscriptRecordKind::ToolCall, "after restart"));
+        persistence.flush().await;
+
+        let response = read_transcript_page(temp_dir.path(), "run-1", "build", None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .records
+                .iter()
+                .map(|record| record.sequence)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+    }
+
+    #[tokio::test]
+    async fn persistence_does_not_append_after_non_tail_corruption() {
+        let temp_dir = TempDir::new().unwrap();
+        let writer = TranscriptWriter::new(temp_dir.path().to_path_buf());
+        let path = writer.transcript_path("run-1", "build").unwrap();
+        writer.append(&record(1, "first")).await.unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"{broken}\n")
+            .unwrap();
+        writer.append(&record(2, "second")).await.unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let mut persistence = TranscriptPersistence::new(temp_dir.path().to_path_buf());
+        persistence.send(request(TranscriptRecordKind::ToolCall, "must not append"));
+        persistence.flush().await;
+
+        assert_eq!(std::fs::read(path).unwrap(), before);
     }
 
     #[tokio::test]

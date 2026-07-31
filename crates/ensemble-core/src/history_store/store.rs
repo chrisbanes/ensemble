@@ -146,6 +146,31 @@ impl HistoryStore {
         .map_err(io::Error::other)?
     }
 
+    pub(crate) async fn max_timeline_sequence(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<u64>, io::Error> {
+        let path = self.db_path.clone();
+        let run_id = run_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<u64>, io::Error> {
+            let conn = Connection::open(path).map_err(io::Error::other)?;
+            crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
+            let maximum = conn
+                .query_row(
+                    "SELECT MAX(sequence) FROM run_events WHERE run_id = ?1",
+                    params![run_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .map_err(io::Error::other)?;
+            maximum
+                .map(u64::try_from)
+                .transpose()
+                .map_err(io::Error::other)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     pub async fn read_history(&self, query: &HistoryQuery) -> Result<HistoryResponse, io::Error> {
         let path = self.db_path.clone();
         let outcome = query.outcome.clone();
@@ -478,6 +503,28 @@ mod tests {
         assert_eq!(response.total, 2);
         assert_eq!(response.events[0].sequence, 1);
         assert_eq!(response.events[1].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn max_timeline_sequence_is_scoped_to_run() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
+
+        for (run_id, sequence) in [("run-1", 8), ("run-1", 3), ("run-2", 21)] {
+            store
+                .append_timeline_event(&sample_event(run_id, "repo#1", sequence))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.max_timeline_sequence("run-1").await.unwrap(), Some(8));
+        assert_eq!(
+            store.max_timeline_sequence("run-2").await.unwrap(),
+            Some(21)
+        );
+        assert_eq!(store.max_timeline_sequence("unknown").await.unwrap(), None);
     }
 
     #[tokio::test]
