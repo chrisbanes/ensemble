@@ -389,30 +389,66 @@ pub async fn start_or_replace_registered_orchestrator(
         candidate,
         file_mtime,
         ORCHESTRATOR_RESTART_TIMEOUT,
+        || Ok(()),
     )
     .await
 }
 
-pub(crate) async fn apply_prepared_config_candidate(
+pub(crate) async fn apply_prepared_config_candidate_with_hooks<Commit, AfterCommit>(
     app_state: &AppState,
     candidate: ConfigDocumentState,
     file_mtime: Option<SystemTime>,
-) -> Result<bool, EnsembleError> {
-    apply_prepared_config_candidate_with_timeout(
+    before_commit: Commit,
+    after_commit: AfterCommit,
+) -> Result<bool, EnsembleError>
+where
+    Commit: FnOnce() -> Result<(), EnsembleError>,
+    AfterCommit: FnOnce(),
+{
+    apply_prepared_config_candidate_with_timeout_and_hooks(
         app_state,
         candidate,
         file_mtime,
         ORCHESTRATOR_RESTART_TIMEOUT,
+        before_commit,
+        after_commit,
     )
     .await
 }
 
-async fn apply_prepared_config_candidate_with_timeout(
+async fn apply_prepared_config_candidate_with_timeout<Commit>(
     app_state: &AppState,
     candidate: ConfigDocumentState,
     file_mtime: Option<SystemTime>,
     restart_timeout: Duration,
-) -> Result<bool, EnsembleError> {
+    before_commit: Commit,
+) -> Result<bool, EnsembleError>
+where
+    Commit: FnOnce() -> Result<(), EnsembleError>,
+{
+    apply_prepared_config_candidate_with_timeout_and_hooks(
+        app_state,
+        candidate,
+        file_mtime,
+        restart_timeout,
+        before_commit,
+        || {},
+    )
+    .await
+}
+
+async fn apply_prepared_config_candidate_with_timeout_and_hooks<Commit, AfterCommit>(
+    app_state: &AppState,
+    candidate: ConfigDocumentState,
+    file_mtime: Option<SystemTime>,
+    restart_timeout: Duration,
+    before_commit: Commit,
+    after_commit: AfterCommit,
+) -> Result<bool, EnsembleError>
+where
+    Commit: FnOnce() -> Result<(), EnsembleError>,
+    AfterCommit: FnOnce(),
+{
     let (active_raw_yaml, active_repos) = {
         let active = app_state.config_runtime.document_state.read().await;
         (
@@ -457,9 +493,10 @@ async fn apply_prepared_config_candidate_with_timeout(
         }
     }
 
-    let current_file_matches_candidate =
-        std::fs::read_to_string(&app_state.config_runtime.config_path).ok() == candidate.raw_yaml;
     if let Some(expected_mtime) = file_mtime {
+        let current_file_matches_candidate =
+            std::fs::read_to_string(&app_state.config_runtime.config_path).ok()
+                == candidate.raw_yaml;
         let current_mtime = std::fs::metadata(&app_state.config_runtime.config_path)
             .and_then(|metadata| metadata.modified())
             .ok();
@@ -492,6 +529,21 @@ async fn apply_prepared_config_candidate_with_timeout(
         _ => return Err(EnsembleError::RuntimeBusy),
     }
 
+    before_commit()?;
+    if let Some(expected_mtime) = file_mtime {
+        let current_file_matches_candidate =
+            std::fs::read_to_string(&app_state.config_runtime.config_path).ok()
+                == candidate.raw_yaml;
+        let current_mtime = std::fs::metadata(&app_state.config_runtime.config_path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        if candidate.raw_yaml.is_some()
+            && (!current_file_matches_candidate || current_mtime != Some(expected_mtime))
+        {
+            return Err(EnsembleError::RuntimeBusy);
+        }
+    }
+
     let retired = registered.take();
     let (replacement, start_tx) = match prepared {
         Some(prepared) => {
@@ -521,6 +573,7 @@ async fn apply_prepared_config_candidate_with_timeout(
     drop(orchestrator_state);
     drop(last_loaded_mtime);
     drop(document_state);
+    after_commit();
     if let Some(start_tx) = start_tx {
         let _ = start_tx.send(());
     }
@@ -529,7 +582,7 @@ async fn apply_prepared_config_candidate_with_timeout(
 }
 
 #[cfg(test)]
-async fn start_or_replace_registered_orchestrator_with_timeout(
+pub(crate) async fn start_or_replace_registered_orchestrator_with_timeout(
     app_state: &AppState,
     restart_timeout: Duration,
 ) -> Result<bool, EnsembleError> {
@@ -537,8 +590,14 @@ async fn start_or_replace_registered_orchestrator_with_timeout(
     let file_mtime = std::fs::metadata(&app_state.config_runtime.config_path)
         .and_then(|metadata| metadata.modified())
         .ok();
-    apply_prepared_config_candidate_with_timeout(app_state, candidate, file_mtime, restart_timeout)
-        .await
+    apply_prepared_config_candidate_with_timeout(
+        app_state,
+        candidate,
+        file_mtime,
+        restart_timeout,
+        || Ok(()),
+    )
+    .await
 }
 
 async fn wait_for_registered_runtime_completion(
@@ -931,6 +990,7 @@ mod tests {
                     candidate,
                     None,
                     Duration::from_secs(2),
+                    || Ok(()),
                 )
                 .await
             }
@@ -1103,6 +1163,7 @@ mod tests {
             candidate.clone(),
             None,
             Duration::from_millis(20),
+            || Ok(()),
         )
         .await;
         assert!(matches!(first, Err(EnsembleError::RuntimeBusy)));
@@ -1134,6 +1195,7 @@ mod tests {
             candidate.clone(),
             None,
             Duration::from_millis(20),
+            || Ok(()),
         )
         .await;
         assert!(matches!(concurrent, Err(EnsembleError::RuntimeBusy)));
@@ -1157,6 +1219,7 @@ mod tests {
                     candidate.clone(),
                     None,
                     Duration::from_millis(20),
+                    || Ok(()),
                 )
                 .await,
                 Err(EnsembleError::RuntimeBusy)
@@ -1180,6 +1243,7 @@ mod tests {
             candidate,
             None,
             Duration::from_secs(1),
+            || Ok(()),
         )
         .await
         .unwrap());

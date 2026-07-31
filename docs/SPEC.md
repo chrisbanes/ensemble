@@ -958,6 +958,21 @@ Dynamic reload is required:
   before dispatch) in case filesystem watch events are missed.
 - Invalid reloads should not crash the service; keep operating with the last known good effective
   configuration and emit an operator-visible error.
+- If an API save persists a candidate that cannot yet activate, return that persisted generation in
+  redacted form and resolve later secret-preserve retries against it; do not roll secret placeholders
+  back to the last-known-good runtime generation.
+- Build a failed save response from the same candidate snapshot used to determine its activation
+  outcome. Setup companion artifacts must publish inside the successful commit boundary, after the
+  prior runtime quiesces. Failures before publication leave last-known-good companions in place;
+  an interrupted partial publication leaves no dispatchable runtime and must recover before retry.
+- Setup saves stage a private versioned journal under the config directory before replacing
+  `config.yaml`. The journal is keyed by the SHA-256 digest of the exact raw config bytes and stores
+  owner-only companion payloads and before-images, never the public setup request. Preparation may
+  resolve dotenv values from the matching staged payload, but runtime template and tracker paths
+  remain their final durable paths.
+- Journal recovery runs before startup opens root-scoped runtime resources. A matching generation
+  resumes publication idempotently; a mismatched partially published generation restores every
+  before-image or fails startup closed. API retry and watcher reload consume the same journal.
 
 ### 6.4 Dispatch Preflight Validation
 

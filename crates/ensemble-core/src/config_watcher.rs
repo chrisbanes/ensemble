@@ -1,4 +1,3 @@
-use crate::api::bootstrap::apply_prepared_config_candidate;
 use crate::api::router::AppState;
 use crate::config::draft::{load_config_state, ConfigDocumentState};
 use crate::error::EnsembleError;
@@ -58,16 +57,84 @@ pub(crate) async fn apply_config_from_disk_locked(
         .and_then(|m| m.modified())
         .ok();
 
+    let had_pending_setup = crate::config::setup_transaction::has_pending_setup_generation(
+        &app_state.config_runtime.config_path,
+    )?;
+    let mut loaded = load_config_state(&app_state.config_runtime.config_path)?;
+    let setup_generation = match loaded.raw_yaml.as_deref() {
+        Some(raw_yaml) => crate::config::setup_transaction::matching_setup_generation(
+            &app_state.config_runtime.config_path,
+            raw_yaml,
+        )?,
+        None => None,
+    };
+    if had_pending_setup && setup_generation.is_none() {
+        loaded = load_config_state(&app_state.config_runtime.config_path)?;
+    }
     {
         let last = app_state.config_runtime.last_loaded_mtime.read().await;
-        if skip_matching_mtime && last.is_some() && *last == file_mtime {
+        if setup_generation.is_none()
+            && skip_matching_mtime
+            && last.is_some()
+            && *last == file_mtime
+        {
             return Ok(ReloadOutcome::Unchanged);
         }
     }
+    let candidate = match (&setup_generation, loaded.raw_yaml.as_deref()) {
+        (Some(generation), Some(raw_yaml)) => generation.prepare_candidate(raw_yaml)?,
+        _ => loaded,
+    };
+    let raw_yaml = candidate.raw_yaml.clone();
+    let generation_for_publish = setup_generation.clone();
+    let accept_unchanged = setup_generation.is_none();
+    let generation_for_finish = setup_generation;
+    let config_path = app_state.config_runtime.config_path.clone();
+    apply_config_candidate_locked_with_hooks(
+        app_state,
+        candidate,
+        file_mtime,
+        accept_unchanged,
+        move || {
+            if let (Some(generation), Some(raw_yaml)) =
+                (generation_for_publish, raw_yaml.as_deref())
+            {
+                generation.publish(raw_yaml)?;
+            }
+            Ok(())
+        },
+        move || {
+            if let Some(generation) = generation_for_finish {
+                if let Err(error) = generation.finish_activation() {
+                    warn!(
+                        error = %error,
+                        path = %config_path.display(),
+                        "setup generation activated but journal cleanup remains pending"
+                    );
+                }
+            }
+        },
+    )
+    .await
+}
 
-    let loaded = load_config_state(&app_state.config_runtime.config_path)?;
+pub(crate) async fn apply_config_candidate_locked_with_hooks<Commit, AfterCommit>(
+    app_state: &AppState,
+    candidate: ConfigDocumentState,
+    file_mtime: Option<std::time::SystemTime>,
+    accept_unchanged: bool,
+    before_commit: Commit,
+    after_commit: AfterCommit,
+) -> Result<ReloadOutcome, EnsembleError>
+where
+    Commit: FnOnce() -> Result<(), EnsembleError>,
+    AfterCommit: FnOnce(),
+{
+    if candidate.raw_yaml.is_some() && file_mtime.is_none() {
+        return Err(EnsembleError::RuntimeBusy);
+    }
     let same_document = {
-        loaded.raw_yaml
+        candidate.raw_yaml
             == app_state
                 .config_runtime
                 .document_state
@@ -75,15 +142,15 @@ pub(crate) async fn apply_config_from_disk_locked(
                 .await
                 .raw_yaml
     };
-    if same_document {
+    if same_document && accept_unchanged {
         *app_state.config_runtime.last_loaded_mtime.write().await = file_mtime;
         return Ok(ReloadOutcome::Unchanged);
     }
-    let has_valid_config = loaded.active_config.is_some();
+    let has_valid_config = candidate.active_config.is_some();
 
     if has_valid_config {
         let current = app_state.config_runtime.document_state.read().await;
-        if candidate_requires_restart(app_state, &current, &loaded)? {
+        if candidate_requires_restart(app_state, &current, &candidate)? {
             warn!(
                 path = %app_state.config_runtime.config_path.display(),
                 reason = "workspace_or_repository_generation_changed",
@@ -93,7 +160,14 @@ pub(crate) async fn apply_config_from_disk_locked(
         }
         drop(current);
 
-        apply_prepared_config_candidate(app_state, loaded, file_mtime).await?;
+        crate::api::bootstrap::apply_prepared_config_candidate_with_hooks(
+            app_state,
+            candidate,
+            file_mtime,
+            before_commit,
+            after_commit,
+        )
+        .await?;
         app_state.refresh_requested.notify_one();
         info!(
             path = %app_state.config_runtime.config_path.display(),
@@ -115,7 +189,7 @@ pub(crate) async fn apply_config_from_disk_locked(
     if had_last_good {
         warn!(
             path = %app_state.config_runtime.config_path.display(),
-            issue_count = loaded.validation.issues.len(),
+            issue_count = candidate.validation.issues.len(),
             "config reload rejected; keeping last known good config"
         );
     } else {
@@ -409,6 +483,160 @@ mod tests {
             .await;
         assert!(doc.active_config.is_none());
         assert_eq!(doc.kind, crate::config::draft::ConfigStateKind::Missing);
+    }
+
+    #[tokio::test]
+    async fn setup_generation_entrypoint_watcher_publishes_matching_generation() {
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.yaml");
+        let initial_yaml = valid_yaml(1000);
+        std::fs::write(&config_path, &initial_yaml).unwrap();
+        let initial = parse_raw_yaml(config_path.clone(), initial_yaml);
+        let prepared = build_app_state(config_path.clone(), initial, EventBus::new());
+        start_or_replace_registered_orchestrator(&prepared.app_state)
+            .await
+            .unwrap();
+        let todo_path = temp.path().join("nested/TODO.md");
+        let request = crate::config::setup::SetupRequest {
+            tracker: crate::config::setup::SetupTracker::TodoFile {
+                path: todo_path.clone(),
+            },
+            repos: vec![],
+            agents: vec![crate::config::setup::SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "codex".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: None,
+                prompt_file: Some("templates/build.liquid".to_string()),
+            }],
+            steps: vec![crate::config::setup::SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                kind: None,
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let artifacts = crate::config::setup::build_setup_artifacts(&request);
+        crate::config::setup_transaction::stage_setup_generation(
+            &config_path,
+            &request,
+            &artifacts,
+        )
+        .unwrap();
+        crate::config::draft::persist_config_atomically(&config_path, &artifacts.raw_yaml).unwrap();
+        *prepared
+            .app_state
+            .config_runtime
+            .last_loaded_mtime
+            .write()
+            .await = std::fs::metadata(&config_path)
+            .and_then(|metadata| metadata.modified())
+            .ok();
+        assert!(!todo_path.exists());
+        assert!(!temp.path().join("templates/build.liquid").exists());
+
+        let outcome = reload_config_from_disk(&prepared.app_state).await.unwrap();
+
+        assert_eq!(outcome, ReloadOutcome::Applied);
+        assert!(todo_path.exists());
+        assert!(temp.path().join("templates/build.liquid").exists());
+        assert!(crate::config::setup_transaction::matching_setup_generation(
+            &config_path,
+            &artifacts.raw_yaml,
+        )
+        .unwrap()
+        .is_none());
+        clear_registered_orchestrator(&prepared.app_state).await;
+    }
+
+    #[tokio::test]
+    async fn setup_generation_entrypoint_watcher_accepts_staged_dotenv_candidate() {
+        use crate::config::secrets::{SecretDisplay, SecretEdit, SecretValue};
+
+        let temp = TempDir::new().unwrap();
+        let config_path = temp.path().join("config.yaml");
+        let workspace_root = temp.path().join("secret-value");
+        let initial_yaml = format!(
+            "{}workspace:\n  root: {}\n",
+            valid_yaml(1000),
+            workspace_root.display()
+        );
+        std::fs::write(&config_path, &initial_yaml).unwrap();
+        let initial = parse_raw_yaml(config_path.clone(), initial_yaml);
+        let prepared = build_app_state(config_path.clone(), initial, EventBus::new());
+        start_or_replace_registered_orchestrator(&prepared.app_state)
+            .await
+            .unwrap();
+        let request = crate::config::setup::SetupRequest {
+            tracker: crate::config::setup::SetupTracker::GitHub {
+                repository: "owner/repo".to_string(),
+                project_number: Some(1),
+                api_key: SecretDisplay::Unset,
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: "NEW_GITHUB_TOKEN".to_string(),
+                },
+                api_token: Some(SecretValue::new("secret-value")),
+                active_states: vec!["Ready".to_string()],
+                terminal_states: vec!["Done".to_string()],
+            },
+            repos: vec![],
+            agents: vec![crate::config::setup::SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "codex".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: None,
+                prompt_file: Some("templates/build.liquid".to_string()),
+            }],
+            steps: vec![crate::config::setup::SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                kind: None,
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+        let mut artifacts = crate::config::setup::build_setup_artifacts(&request);
+        artifacts
+            .raw_yaml
+            .push_str("workspace:\n  root: $NEW_GITHUB_TOKEN\n");
+        crate::config::setup_transaction::stage_setup_generation(
+            &config_path,
+            &request,
+            &artifacts,
+        )
+        .unwrap();
+        crate::config::draft::persist_config_atomically(&config_path, &artifacts.raw_yaml).unwrap();
+
+        let outcome = reload_config_from_disk(&prepared.app_state).await.unwrap();
+
+        assert_eq!(outcome, ReloadOutcome::Applied);
+        let document = prepared
+            .app_state
+            .config_runtime
+            .document_state
+            .read()
+            .await;
+        assert_eq!(
+            document
+                .active_config
+                .as_ref()
+                .unwrap()
+                .tracker
+                .api_key
+                .as_deref(),
+            Some("secret-value")
+        );
+        drop(document);
+        clear_registered_orchestrator(&prepared.app_state).await;
     }
 
     #[tokio::test]

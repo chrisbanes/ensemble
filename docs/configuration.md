@@ -69,6 +69,35 @@ another edit. A runtime that timed out while quiescing is not relaunched; it
 remains the registered owner until it finishes, after which a retry may replace
 it.
 
+When an API save persists a candidate but cannot activate it, the error response
+describes the exact evaluated candidate in redacted form. A later external file
+replacement is treated as a separate generation. A subsequent raw YAML,
+guided-form, or setup retry resolves `[REDACTED]` and explicit preserve actions
+against the latest persisted generation, while the running configuration stays
+on the last-known-good generation until activation succeeds.
+
+Setup-generated companion files such as prompt templates, TODO data, and `.env`
+are published only after the prior runtime has quiesced and immediately before
+the candidate config/runtime generation commits. Failed or deferred activation
+before publication leaves the last-known-good companion files unchanged. An
+interrupted partial publication leaves the runtime stopped and is recovered
+before any retry or restart can dispatch work. Ensemble records setup payloads
+and before-images in a private, versioned journal under
+`.ensemble-state/pending-setup`, keyed to the SHA-256 digest of the exact raw
+`config.yaml` bytes. Journal directories use owner-only access and secret-bearing
+files use mode `0600` on Unix. The journal is internal recovery state, not a
+public configuration file or setup workflow.
+
+API retries, filesystem watcher retries, offline CLI setup, and process startup
+all consume that same pending generation. Startup recovery completes before
+workspace, history, timeline, transcript, or orchestrator resources are opened.
+A matching partial publication resumes forward; an externally replaced config
+causes every published destination to be restored from its before-image. A
+malformed journal, unsafe permissions, or incomplete rollback blocks startup
+rather than launching against mixed config and companion generations. Prepared
+runtimes retain the final configured template and TODO paths and remain
+start-gated until publication and the active-state commit finish.
+
 `workspace.root` and the complete ordered `repos` configuration define process-scoped
 filesystem resources. Changing either while Ensemble is running is saved to
 disk but not activated: API saves return `409 Conflict`, and watcher reloads
@@ -233,6 +262,8 @@ credential to a different logical entry. After direct matches are claimed, one u
 identity rename. Multiple unmatched or duplicate identities are rejected. Replacing the placeholder
 with a literal or `$VAR` reference replaces the stored value, and removing the field removes the
 value. Malformed YAML is never returned as raw configuration because it cannot be safely redacted.
+If a persisted candidate has not activated yet, preservation uses that latest on-disk candidate,
+not the older last-known-good runtime generation.
 
 Guided and setup editors use explicit secret actions: keep the current value, replace it with a
 literal, use an environment variable, or remove it. Literal replacement inputs are write-only:
@@ -240,7 +271,9 @@ after save, the UI only reports that a secret is configured. Blank literal and e
 replacements are rejected before configuration persistence, and environment names must match
 `[A-Za-z_][A-Za-z0-9_]*`. New `config.yaml` files created by the editors use owner-only permissions
 (`0600`) on Unix; existing file permissions are retained. Configuration writes replace the file
-atomically from a temporary file in the same directory.
+atomically from a temporary file in the same directory. Setup-generated secret companions and
+private journal payloads use owner-only permissions; permission or rollback failures are reported
+without including resolved values.
 
 **Todo file fields** (when `kind: todo_file`):
 

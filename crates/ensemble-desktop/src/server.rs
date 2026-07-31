@@ -16,7 +16,7 @@ use ensemble_core::api::bootstrap::{
 };
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::api::router::AppState;
-use ensemble_core::config::draft::load_config_document_or_missing;
+use ensemble_core::config::draft::recover_and_load_config_state;
 use ensemble_core::config_watcher::{start_config_watcher, ConfigWatcherHandle};
 use ensemble_core::observability::events::EventBus;
 
@@ -70,7 +70,8 @@ pub async fn start_desktop_server(
         "Starting desktop HTTP server"
     );
 
-    let document_state = load_config_document_or_missing(&config_path);
+    let document_state = recover_and_load_config_state(&config_path)
+        .map_err(|error| DesktopError::ConfigLoadFailed(error.to_string()))?;
     let prepared = build_app_state(config_path.clone(), document_state, event_bus);
 
     if prepared.has_runnable_config {

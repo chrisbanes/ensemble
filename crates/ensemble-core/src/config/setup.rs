@@ -199,74 +199,17 @@ pub fn write_setup_artifacts(
     request: &SetupRequest,
     artifacts: &SetupArtifacts,
 ) -> Result<(), ConfigError> {
+    let config_path = root.join("config.yaml");
     validate_setup_secret_edit(request)?;
-
-    // Create config directory if it doesn't exist
     std::fs::create_dir_all(root).map_err(|e| ConfigError::PathExpansionError {
         path: root.display().to_string(),
         reason: e.to_string(),
     })?;
-
-    // Write templates before config.yaml so a companion write failure does not
-    // leave a newly-activated config pointing at missing artifacts.
-    let templates_dir = root.join("templates");
-    if !artifacts.templates.is_empty() {
-        std::fs::create_dir_all(&templates_dir).map_err(|e| ConfigError::ConfigWriteFailed {
-            reason: format!("failed to create templates directory: {}", e),
-        })?;
-    }
-
-    for (template_path, content) in &artifacts.templates {
-        let path = root.join(template_path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| ConfigError::ConfigWriteFailed {
-                reason: format!(
-                    "failed to create template parent directory '{}': {}",
-                    parent.display(),
-                    e
-                ),
-            })?;
-        }
-        std::fs::write(&path, content).map_err(|e| ConfigError::ConfigWriteFailed {
-            reason: format!("failed to write template '{}': {}", path.display(), e),
-        })?;
-    }
-
-    if let Some(ref todo_content) = artifacts.todo_md {
-        if let SetupTracker::TodoFile { path } = &request.tracker {
-            let resolved_path = resolve_tracker_output_path(path, root)?;
-            if let Some(parent) = resolved_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| ConfigError::ConfigWriteFailed {
-                    reason: format!("failed to create TODO.md parent directory: {}", e),
-                })?;
-            }
-            std::fs::write(&resolved_path, todo_content).map_err(|e| {
-                ConfigError::ConfigWriteFailed {
-                    reason: format!("failed to write TODO.md: {}", e),
-                }
-            })?;
-        }
-    }
-
-    if let Some(ref env_content) = artifacts.env_file {
-        let env_path = root.join(".env");
-        std::fs::write(&env_path, env_content).map_err(|e| ConfigError::ConfigWriteFailed {
-            reason: format!("failed to write .env: {}", e),
-        })?;
-
-        // Set restrictive permissions (user read/write only) on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            let _ = std::fs::set_permissions(&env_path, perms);
-        }
-    }
-
-    let config_path = root.join("config.yaml");
+    let generation =
+        crate::config::setup_transaction::stage_setup_generation(&config_path, request, artifacts)?;
     crate::config::draft::persist_config_atomically(&config_path, &artifacts.raw_yaml)?;
-
-    Ok(())
+    generation.publish(&artifacts.raw_yaml)?;
+    generation.finish_activation()
 }
 
 /// Run setup checks and return the results.
@@ -2471,7 +2414,10 @@ on_failure: Failed
             on_failure: "Failed".to_string(),
         };
         let artifacts = SetupArtifacts {
-            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            raw_yaml: format!(
+                "tracker:\n  kind: todo_file\n  path: {}\n",
+                todo_path.display()
+            ),
             templates: {
                 let mut map = BTreeMap::new();
                 map.insert(
@@ -2531,7 +2477,7 @@ on_failure: Failed
             on_failure: "Failed".to_string(),
         };
         let artifacts = SetupArtifacts {
-            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            raw_yaml: "tracker:\n  kind: todo_file\n  path: ~/ensemble/TODO.md\n".to_string(),
             templates: BTreeMap::new(),
             todo_md: Some("## Todo\n".to_string()),
             env_file: None,
@@ -2563,7 +2509,7 @@ on_failure: Failed
             on_failure: "Failed".to_string(),
         };
         let artifacts = SetupArtifacts {
-            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            raw_yaml: "tracker:\n  kind: todo_file\n  path: nested/TODO.md\n".to_string(),
             templates: BTreeMap::new(),
             todo_md: Some("## Todo\n".to_string()),
             env_file: None,
@@ -2597,7 +2543,7 @@ on_failure: Failed
             on_failure: "Failed".to_string(),
         };
         let artifacts = SetupArtifacts {
-            raw_yaml: "tracker:\n  kind: todo_file\n".to_string(),
+            raw_yaml: "tracker:\n  kind: todo_file\n  path: $ENSEMBLE_TODO_PATH\n".to_string(),
             templates: BTreeMap::new(),
             todo_md: Some("## Todo\n".to_string()),
             env_file: None,

@@ -72,6 +72,15 @@ pub fn load_config_state(path: &Path) -> Result<ConfigDocumentState, ConfigError
     Ok(parse_raw_yaml(path.to_path_buf(), raw_yaml))
 }
 
+/// Recover any private setup transaction before parsing public configuration.
+///
+/// Hosts must use this entry point before constructing root-scoped runtime
+/// resources so a mixed setup generation fails closed.
+pub fn recover_and_load_config_state(path: &Path) -> Result<ConfigDocumentState, ConfigError> {
+    crate::config::setup_transaction::recover_setup_before_load(path)?;
+    load_config_state(path)
+}
+
 pub fn load_config_document_or_missing(path: &Path) -> ConfigDocumentState {
     match load_config_state(path) {
         Ok(state) => state,
@@ -83,9 +92,18 @@ pub fn load_config_document_or_missing(path: &Path) -> ConfigDocumentState {
 }
 
 pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
-    let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&raw_yaml);
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let dotenv_map = read_dotenv(&config_dir.join(".env"));
+    parse_raw_yaml_with_dotenv(path, raw_yaml, &dotenv_map)
+}
+
+pub(crate) fn parse_raw_yaml_with_dotenv(
+    path: PathBuf,
+    raw_yaml: String,
+    dotenv_map: &std::collections::HashMap<String, String>,
+) -> ConfigDocumentState {
+    let parsed: Result<serde_yaml::Value, _> = serde_yaml::from_str(&raw_yaml);
+    let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
 
     match parsed {
         Ok(document) => {
@@ -94,7 +112,7 @@ pub fn parse_raw_yaml(path: PathBuf, raw_yaml: String) -> ConfigDocumentState {
                 Ok(mut config) => {
                     let mut report = validate_document(&document);
                     let mut config_valid = true;
-                    if let Err(e) = config.resolve_env_from(config_dir, &dotenv_map) {
+                    if let Err(e) = config.resolve_env_from(config_dir, dotenv_map) {
                         report.issues.push(config_error_to_validation_issue(e));
                         config_valid = false;
                     }

@@ -26,3 +26,19 @@ quiescing runtime remains the registered owner and can be replaced by a later
 retry after it finishes; it is never relaunched or detached. Operator
 diagnostics use allowlisted categories rather than candidate values so resolved
 secrets cannot be exposed.
+
+Setup extends this transaction with one private versioned journal inside the
+configuration directory. Before `config.yaml` is persisted, Ensemble records
+the exact raw-byte digest, normalized companion destinations, owner-only
+payloads, and complete before-images. The public config remains the only
+user-editable document. Preparation resolves matching staged dotenv values but
+keeps final template and tracker paths; companion contents become visible only
+after exact runtime quiescence and before the retained synchronous commit.
+
+All hosts recover the setup journal before parsing config or constructing
+workspace, history, timeline, transcript, and orchestrator resources. Matching
+staged or partially published generations resume forward. Digest drift restores
+all before-images, and malformed state, unsafe permissions, or incomplete
+rollback fails closed. API saves, watcher reloads, offline CLI setup, and
+startup therefore share one recovery owner rather than separate staging
+semantics.

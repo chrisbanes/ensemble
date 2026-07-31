@@ -1,10 +1,11 @@
 use crate::api::router::AppState;
 use crate::config::draft::{
-    parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState, ConfigStateKind, ValidationIssue,
+    load_config_state, parse_raw_yaml, save_raw_yaml_atomically, ConfigDocumentState,
+    ConfigStateKind, ValidationIssue,
 };
 use crate::config::ensemble::EnsembleConfig;
 use crate::config::secrets::{merge_redacted_yaml, redact_yaml_secrets, SecretDisplay};
-use crate::config_watcher::{apply_config_from_disk_locked, ReloadOutcome};
+use crate::config_watcher::{apply_config_candidate_locked_with_hooks, ReloadOutcome};
 use crate::error::ConfigError;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -116,39 +117,135 @@ fn config_error_json(
 
 async fn finish_saved_config_transaction(
     state: &AppState,
+    mut candidate: ConfigDocumentState,
+    accept_unchanged: bool,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
-    let outcome = apply_config_from_disk_locked(state, false).await;
-    let current = state.config_runtime.document_state.read().await;
-    match outcome {
+    let file_mtime = std::fs::metadata(&state.config_runtime.config_path)
+        .and_then(|metadata| metadata.modified())
+        .ok();
+    let initial_candidate = candidate.clone();
+    let had_pending_setup = match crate::config::setup_transaction::has_pending_setup_generation(
+        &state.config_runtime.config_path,
+    ) {
+        Ok(pending) => pending,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                config_error_json(&initial_candidate, &error),
+            )
+        }
+    };
+    let setup_generation = match candidate.raw_yaml.as_deref() {
+        Some(raw_yaml) => match crate::config::setup_transaction::matching_setup_generation(
+            &state.config_runtime.config_path,
+            raw_yaml,
+        ) {
+            Ok(generation) => generation,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    config_error_json(&initial_candidate, &error),
+                )
+            }
+        },
+        None => None,
+    };
+    if had_pending_setup && setup_generation.is_none() {
+        candidate = match persisted_config_state(state) {
+            Ok(reloaded) => reloaded,
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    config_error_json(&initial_candidate, &error),
+                )
+            }
+        };
+    }
+    let candidate = match (&setup_generation, candidate.raw_yaml.as_deref()) {
+        (Some(generation), Some(raw_yaml)) => match generation.prepare_candidate(raw_yaml) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    config_error_json(&candidate, &error),
+                )
+            }
+        },
+        _ => candidate,
+    };
+    let response_candidate = candidate.clone();
+    let raw_yaml = candidate.raw_yaml.clone();
+    let generation_for_publish = setup_generation.clone();
+    let generation_for_finish = setup_generation;
+    let config_path = state.config_runtime.config_path.clone();
+    let (status, section, message) = match apply_config_candidate_locked_with_hooks(
+        state,
+        candidate,
+        file_mtime,
+        accept_unchanged,
+        move || {
+            if let (Some(generation), Some(raw_yaml)) =
+                (generation_for_publish, raw_yaml.as_deref())
+            {
+                generation.publish(raw_yaml)?;
+            }
+            Ok(())
+        },
+        move || {
+            if let Some(generation) = generation_for_finish {
+                if let Err(error) = generation.finish_activation() {
+                    warn!(
+                        error = %error,
+                        path = %config_path.display(),
+                        "setup generation activated but journal cleanup remains pending"
+                    );
+                }
+            }
+        },
+    )
+    .await
+    {
         Ok(ReloadOutcome::Applied | ReloadOutcome::Unchanged) => {
-            (StatusCode::OK, config_state_json(&current))
+            let current = state.config_runtime.document_state.read().await;
+            return (StatusCode::OK, config_state_json(&current));
         }
         Ok(ReloadOutcome::RestartRequired) => (
             StatusCode::CONFLICT,
-            current_error_json(
-                &current,
-                "runtime",
-                "Saved config changes workspace or repository resources; restart Ensemble to apply it"
-                    .to_string(),
-            ),
+            "runtime",
+            "Saved config changes workspace or repository resources; restart Ensemble to apply it",
         ),
         Ok(ReloadOutcome::Rejected) => (
             StatusCode::BAD_REQUEST,
-            current_error_json(
-                &current,
-                "save",
-                "Saved config could not be activated; the last known good config is still running"
-                    .to_string(),
-            ),
+            "save",
+            "Saved config could not be activated; the last known good config is still running",
         ),
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            current_error_json(
-                &current,
-                "runtime",
-                "Saved config could not replace the active runtime; retry the save".to_string(),
-            ),
+            "runtime",
+            "Saved config could not replace the active runtime; retry the save",
         ),
+    };
+    (
+        status,
+        current_error_json(&response_candidate, section, message.to_string()),
+    )
+}
+
+fn persisted_config_state(state: &AppState) -> Result<ConfigDocumentState, ConfigError> {
+    load_config_state(&state.config_runtime.config_path)
+}
+
+async fn persisted_or_current_config_state(state: &AppState) -> ConfigDocumentState {
+    match persisted_config_state(state) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            warn!(
+                error = %error,
+                path = %state.config_runtime.config_path.display(),
+                "failed to load persisted config state; using active document for response"
+            );
+            state.config_runtime.document_state.read().await.clone()
+        }
     }
 }
 
@@ -157,20 +254,23 @@ async fn save_config_yaml_and_finish_transaction(
     raw_yaml: &str,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
     match save_raw_yaml_atomically(&state.config_runtime.config_path, raw_yaml) {
-        Ok(_) => finish_saved_config_transaction(state).await,
+        Ok(candidate) => finish_saved_config_transaction(state, candidate, true).await,
         Err(error) => {
-            let current = state.config_runtime.document_state.read().await;
-            (StatusCode::BAD_REQUEST, config_error_json(&current, &error))
+            let response_state = persisted_or_current_config_state(state).await;
+            (
+                StatusCode::BAD_REQUEST,
+                config_error_json(&response_state, &error),
+            )
         }
     }
 }
 
-fn apply_guided_form_to_current(
-    current: &ConfigDocumentState,
+fn apply_guided_form_to_document(
+    document: &ConfigDocumentState,
     base_raw_yaml: &str,
     form: &crate::config::form::GuidedConfigForm,
 ) -> Result<String, ConfigError> {
-    let base_yaml = merge_redacted_yaml(current.raw_yaml.as_deref(), base_raw_yaml)?;
+    let base_yaml = merge_redacted_yaml(document.raw_yaml.as_deref(), base_raw_yaml)?;
     crate::config::form::apply_guided_form(&base_yaml, form)
 }
 
@@ -191,8 +291,9 @@ pub async fn validate_yaml(
     State(state): State<AppState>,
     Json(request): Json<ValidateYamlRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
-    let current = state.config_runtime.document_state.read().await;
-    match merge_redacted_yaml(current.raw_yaml.as_deref(), &request.raw_yaml) {
+    let _reload = state.config_runtime.reload_coordinator.lock().await;
+    let authoritative = persisted_or_current_config_state(&state).await;
+    match merge_redacted_yaml(authoritative.raw_yaml.as_deref(), &request.raw_yaml) {
         Ok(merged_yaml) => {
             let draft = parse_raw_yaml(state.config_runtime.config_path.clone(), merged_yaml);
             (StatusCode::OK, config_state_json(&draft))
@@ -233,18 +334,23 @@ pub async fn save_yaml(
     Json(request): Json<SaveYamlRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
     let _reload = state.config_runtime.reload_coordinator.lock().await;
-    let doc_state = state.config_runtime.document_state.read().await;
-    let merged_yaml = match merge_redacted_yaml(doc_state.raw_yaml.as_deref(), &request.raw_yaml) {
+    let persisted = match persisted_config_state(&state) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            let current = state.config_runtime.document_state.read().await;
+            return (StatusCode::BAD_REQUEST, config_error_json(&current, &error));
+        }
+    };
+    let merged_yaml = match merge_redacted_yaml(persisted.raw_yaml.as_deref(), &request.raw_yaml) {
         Ok(merged_yaml) => merged_yaml,
         Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
-                current_error_json(&doc_state, "yaml", error.to_string()),
+                current_error_json(&persisted, "yaml", error.to_string()),
             )
         }
     };
 
-    drop(doc_state);
     save_config_yaml_and_finish_transaction(&state, &merged_yaml).await
 }
 
@@ -496,7 +602,7 @@ pub async fn validate_setup(
 }
 
 /// Request to save a setup configuration.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct SaveSetupRequest {
     pub setup: crate::config::setup::SetupRequest,
 }
@@ -538,36 +644,70 @@ where
 {
     let checks = run_checks(request.setup.clone()).await;
     if !crate::config::setup::setup_can_save(&checks) {
-        let doc_state = state.config_runtime.document_state.read().await;
+        let _reload = state.config_runtime.reload_coordinator.lock().await;
+        let response_state = persisted_or_current_config_state(&state).await;
         return (
             StatusCode::BAD_REQUEST,
-            current_error_json(&doc_state, "setup", "Setup validation failed".to_string()),
+            current_error_json(
+                &response_state,
+                "setup",
+                "Setup validation failed".to_string(),
+            ),
         );
     }
 
     let _reload = state.config_runtime.reload_coordinator.lock().await;
-    let doc_state = state.config_runtime.document_state.read().await;
+    let persisted = match persisted_config_state(&state) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            let current = state.config_runtime.document_state.read().await;
+            return (StatusCode::BAD_REQUEST, config_error_json(&current, &error));
+        }
+    };
     let artifacts = match crate::config::setup::merge_setup_request(
-        doc_state.raw_yaml.as_deref(),
+        persisted.raw_yaml.as_deref(),
         &request.setup,
     ) {
         Ok(artifacts) => artifacts,
-        Err(e) => return (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
+        Err(e) => return (StatusCode::BAD_REQUEST, config_error_json(&persisted, &e)),
     };
 
-    let root = state
-        .config_runtime
-        .config_path
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-
-    match crate::config::setup::write_setup_artifacts(root, &request.setup, &artifacts) {
-        Ok(()) => {
-            drop(doc_state);
-            finish_saved_config_transaction(&state).await
+    let generation = match crate::config::setup_transaction::stage_setup_generation(
+        &state.config_runtime.config_path,
+        &request.setup,
+        &artifacts,
+    ) {
+        Ok(generation) => generation,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                config_error_json(&persisted, &error),
+            )
         }
-        Err(e) => (StatusCode::BAD_REQUEST, config_error_json(&doc_state, &e)),
+    };
+    if let Err(error) = crate::config::draft::persist_config_atomically(
+        &state.config_runtime.config_path,
+        &artifacts.raw_yaml,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            config_error_json(&persisted, &error),
+        );
     }
+    let candidate = match generation.prepare_candidate(&artifacts.raw_yaml) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            let candidate = parse_raw_yaml(
+                state.config_runtime.config_path.clone(),
+                artifacts.raw_yaml.clone(),
+            );
+            return (
+                StatusCode::BAD_REQUEST,
+                config_error_json(&candidate, &error),
+            );
+        }
+    };
+    finish_saved_config_transaction(&state, candidate, false).await
 }
 
 fn default_setup_defaults() -> serde_json::Value {
@@ -688,8 +828,9 @@ pub async fn validate_guided_form(
     State(state): State<AppState>,
     Json(request): Json<ValidateGuidedFormRequest>,
 ) -> (StatusCode, Json<ValidateGuidedFormResponse>) {
-    let current = state.config_runtime.document_state.read().await;
-    match apply_guided_form_to_current(&current, &request.base_raw_yaml, &request.form) {
+    let _reload = state.config_runtime.reload_coordinator.lock().await;
+    let authoritative = persisted_or_current_config_state(&state).await;
+    match apply_guided_form_to_document(&authoritative, &request.base_raw_yaml, &request.form) {
         Ok(merged_yaml) => {
             // Parse and validate the merged YAML
             let draft = crate::config::draft::parse_raw_yaml(
@@ -752,40 +893,54 @@ pub async fn save_guided_form(
     Json(request): Json<SaveGuidedFormRequest>,
 ) -> (StatusCode, Json<ConfigStateResponse>) {
     let _reload = state.config_runtime.reload_coordinator.lock().await;
-    let doc_state = state.config_runtime.document_state.read().await;
+    let persisted = match persisted_config_state(&state) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            let current = state.config_runtime.document_state.read().await;
+            return (StatusCode::BAD_REQUEST, config_error_json(&current, &error));
+        }
+    };
 
     // First, merge the guided form with the base YAML
     let merged_yaml =
-        match apply_guided_form_to_current(&doc_state, &request.base_raw_yaml, &request.form) {
+        match apply_guided_form_to_document(&persisted, &request.base_raw_yaml, &request.form) {
             Ok(yaml) => yaml,
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    current_error_json(&doc_state, "form", format!("Form merge failed: {}", e)),
+                    current_error_json(&persisted, "form", format!("Form merge failed: {}", e)),
                 )
             }
         };
 
     // Now save the merged YAML using the same path as save_yaml
-    drop(doc_state);
     save_config_yaml_and_finish_transaction(&state, &merged_yaml).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::bootstrap::take_registered_orchestrator;
+    use crate::agent::cancellation::register_worker;
+    use crate::agent::events::WorkerIdentity;
+    use crate::api::bootstrap::{
+        start_or_replace_registered_orchestrator_with_timeout, take_registered_orchestrator,
+    };
     use crate::api::test_helpers::app_state_with_missing_config;
     use crate::config::draft::{ConfigStateKind, DraftValidationReport};
     use crate::config::secrets::{SecretEdit, REDACTED_SECRET};
     use axum::body::Body;
     use axum::response::IntoResponse;
+    use chrono::Utc;
     use futures_util::StreamExt;
     use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex;
     use tempfile::TempDir;
+    use tokio::sync::watch;
+    use tokio_util::sync::CancellationToken;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -856,6 +1011,121 @@ mod tests {
         let mut app_state = app_state_with_missing_config(config_path, &workspace_root);
         app_state.history_path = temp_dir.path().join("history.jsonl");
         (app_state, temp_dir)
+    }
+
+    fn retryable_secret_yaml(
+        todo_path: &std::path::Path,
+        interval_ms: u64,
+        secret: &str,
+        workspace_root: Option<&str>,
+        step_agent: &str,
+    ) -> String {
+        let workspace = workspace_root
+            .map(|root| format!("workspace:\n  root: {root}\n"))
+            .unwrap_or_default();
+        format!(
+            "tracker:\n  kind: todo_file\n  path: {}\n  api_key: {secret}\npolling:\n  interval_ms: {interval_ms}\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: {step_agent}\non_success: Done\non_failure: Failed\n{workspace}",
+            todo_path.display()
+        )
+    }
+
+    async fn active_retry_secret_state() -> (AppState, TempDir, PathBuf) {
+        let (state, temp_dir) = test_app_state();
+        let todo_path = temp_dir.path().join("TODO.md");
+        std::fs::write(&todo_path, "## Todo\n").unwrap();
+        let (status, _) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retryable_secret_yaml(
+                    &todo_path,
+                    1000,
+                    "old-literal-secret",
+                    None,
+                    "builder",
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        (state, temp_dir, todo_path)
+    }
+
+    fn assert_response_hides_secret(response: &ConfigStateResponse, secret: &str) {
+        assert!(!serde_json::to_string(response).unwrap().contains(secret));
+    }
+
+    fn todo_setup_request(todo_path: PathBuf) -> crate::config::setup::SetupRequest {
+        crate::config::setup::SetupRequest {
+            tracker: crate::config::setup::SetupTracker::TodoFile { path: todo_path },
+            repos: vec![],
+            agents: vec![crate::config::setup::SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "codex".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: None,
+                prompt_file: Some("templates/build.liquid".to_string()),
+            }],
+            steps: vec![crate::config::setup::SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                kind: None,
+                depends: vec![],
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_config_is_private(path: &std::path::Path) {
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[cfg(not(unix))]
+    fn assert_config_is_private(_path: &std::path::Path) {}
+
+    #[tokio::test]
+    async fn validate_guided_form_uses_latest_persisted_secret_generation() {
+        let (state, temp_dir) = test_app_state();
+        let todo_path = temp_dir.path().join("TODO.md");
+        std::fs::write(&todo_path, "## Todo\n").unwrap();
+        let active_yaml =
+            retryable_secret_yaml(&todo_path, 1000, "old-literal-secret", None, "builder")
+                .replace("  api_key: old-literal-secret\n", "");
+        *state.config_runtime.document_state.write().await =
+            parse_raw_yaml(state.config_runtime.config_path.clone(), active_yaml);
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &retryable_secret_yaml(&todo_path, 2000, "new-literal-secret", None, "builder"),
+        )
+        .unwrap();
+        let candidate = load_config_state(&state.config_runtime.config_path).unwrap();
+        let candidate_response = ConfigStateResponse::from_state(&candidate);
+
+        let (status, Json(response)) = validate_guided_form(
+            axum::extract::State(state),
+            Json(ValidateGuidedFormRequest {
+                base_raw_yaml: candidate_response.raw_yaml.unwrap(),
+                form: candidate_response.guided_form.unwrap(),
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "response: {}",
+            serde_json::to_string(&response).unwrap()
+        );
+        assert!(response.valid, "{:?}", response.issues);
+        assert!(response.merged_yaml.contains(REDACTED_SECRET));
+        assert!(!response.merged_yaml.contains("new-literal-secret"));
     }
 
     #[tokio::test]
@@ -1502,7 +1772,12 @@ custom_root:
         let (status, Json(response)) =
             save_setup(axum::extract::State(state.clone()), Json(request)).await;
 
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "response: {}",
+            serde_json::to_string(&response).unwrap()
+        );
         assert_eq!(response.state, "parsed");
         assert!(state.config_runtime.config_path.exists());
         assert!(temp_dir.path().join("templates/build.liquid").exists());
@@ -1706,6 +1981,11 @@ on_failure: Failed
             state.config_runtime.config_path.clone(),
             current_yaml.to_string(),
         );
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            current_yaml,
+        )
+        .unwrap();
 
         let form = crate::config::form::GuidedConfigForm {
             tracker: crate::config::form::GuidedTrackerForm {
@@ -1860,6 +2140,11 @@ on_failure: Failed
             state.config_runtime.config_path.clone(),
             current_yaml.to_string(),
         );
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            current_yaml,
+        )
+        .unwrap();
 
         let (yaml_status, Json(yaml_response)) = save_yaml(
             axum::extract::State(state.clone()),
@@ -2129,33 +2414,20 @@ on_failure: Failed
 
     #[tokio::test]
     async fn config_save_reload_transaction_restart_required_is_redacted_and_retryable() {
-        let (state, temp_dir) = test_app_state();
-        let todo_path = temp_dir.path().join("TODO.md");
-        std::fs::write(&todo_path, "## Todo\n").unwrap();
-        let config_yaml = |interval_ms: u64, workspace_root: Option<&str>| {
-            let workspace = workspace_root
-                .map(|root| format!("workspace:\n  root: {root}\n"))
-                .unwrap_or_default();
-            format!(
-                "tracker:\n  kind: todo_file\n  path: {}\npolling:\n  interval_ms: {interval_ms}\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n{workspace}",
-                todo_path.display()
-            )
-        };
-        let (status, _) = save_yaml(
-            axum::extract::State(state.clone()),
-            Json(SaveYamlRequest {
-                raw_yaml: config_yaml(1000, None),
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
         let committed_mtime = *state.config_runtime.last_loaded_mtime.read().await;
 
         let restart_root = "/tmp/private-restart-root";
         let (status, Json(response)) = save_yaml(
             axum::extract::State(state.clone()),
             Json(SaveYamlRequest {
-                raw_yaml: config_yaml(2000, Some(restart_root)),
+                raw_yaml: retryable_secret_yaml(
+                    &todo_path,
+                    2000,
+                    "new-literal-secret",
+                    Some(restart_root),
+                    "builder",
+                ),
             }),
         )
         .await;
@@ -2179,16 +2451,669 @@ on_failure: Failed
             committed_mtime,
             "restart-required save must leave the candidate mtime unconsumed"
         );
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
         assert!(
-            !serde_json::to_string(&response)
+            persisted.contains("new-literal-secret"),
+            "persisted candidate: {persisted}"
+        );
+        assert!(!persisted.contains("old-literal-secret"));
+        assert_config_is_private(&state.config_runtime.config_path);
+        let retry_yaml = response
+            .raw_yaml
+            .as_deref()
+            .expect("restart-required response should describe the persisted candidate");
+        assert!(retry_yaml.contains(restart_root));
+        assert!(retry_yaml.contains(REDACTED_SECRET));
+        assert_response_hides_secret(&response, "old-literal-secret");
+        assert_response_hides_secret(&response, "new-literal-secret");
+
+        let retry_yaml = retry_yaml.replace(
+            restart_root,
+            &crate::config::ensemble::default_workspace_root(),
+        );
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retry_yaml,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(
+            persisted.contains("new-literal-secret"),
+            "persisted candidate: {persisted}"
+        );
+        assert!(!persisted.contains("old-literal-secret"));
+        assert!(!persisted.contains(REDACTED_SECRET));
+        assert_response_hides_secret(&response, "new-literal-secret");
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn guided_retry_preserves_restart_required_candidate_secret_generation() {
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
+
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retryable_secret_yaml(
+                    &todo_path,
+                    2000,
+                    "new-literal-secret",
+                    Some("/tmp/guided-restart-root"),
+                    "builder",
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+
+        let mut form = response
+            .guided_form
+            .expect("restart-required response should include the candidate form");
+        assert_eq!(form.tracker.api_key, SecretDisplay::Redacted);
+        form.runtime.workspace.root = None;
+        let (status, Json(response)) = save_guided_form(
+            axum::extract::State(state.clone()),
+            Json(SaveGuidedFormRequest {
+                base_raw_yaml: response
+                    .raw_yaml
+                    .expect("restart-required response should include candidate YAML"),
+                form,
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(persisted.contains("new-literal-secret"));
+        assert!(!persisted.contains("old-literal-secret"));
+        assert!(!persisted.contains(REDACTED_SECRET));
+        assert_response_hides_secret(&response, "new-literal-secret");
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn config_save_rejected_retry_preserves_new_literal_secret_generation() {
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
+
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &retryable_secret_yaml(
+                &todo_path,
+                2000,
+                "new-literal-secret",
+                None,
+                "missing-agent",
+            ),
+        )
+        .unwrap();
+        let _reload = state.config_runtime.reload_coordinator.lock().await;
+        let candidate = persisted_config_state(&state).unwrap();
+        let (status, Json(response)) =
+            finish_saved_config_transaction(&state, candidate, true).await;
+        drop(_reload);
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "response: {}",
+            serde_json::to_string(&response).unwrap()
+        );
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
                 .unwrap()
-                .contains(restart_root),
-            "restart diagnostics must not echo candidate values"
+                .polling
+                .interval_ms,
+            1000
+        );
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(
+            persisted.contains("new-literal-secret"),
+            "persisted candidate: {persisted}"
+        );
+        assert!(!persisted.contains("old-literal-secret"));
+        let retry_yaml = response
+            .raw_yaml
+            .as_deref()
+            .expect("rejected response should describe the persisted candidate");
+        assert!(retry_yaml.contains("agent: missing-agent"));
+        assert!(retry_yaml.contains(REDACTED_SECRET));
+        assert_response_hides_secret(&response, "new-literal-secret");
+
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retry_yaml.to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let retry_yaml = response
+            .raw_yaml
+            .as_deref()
+            .expect("validation failure should retain the persisted candidate");
+        assert!(retry_yaml.contains("agent: missing-agent"));
+        assert!(retry_yaml.contains(REDACTED_SECRET));
+        assert_response_hides_secret(&response, "new-literal-secret");
+
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retry_yaml.replace("agent: missing-agent", "agent: builder"),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(persisted.contains("new-literal-secret"));
+        assert!(!persisted.contains(REDACTED_SECRET));
+        assert_config_is_private(&state.config_runtime.config_path);
+        assert_response_hides_secret(&response, "new-literal-secret");
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn failed_save_response_uses_the_evaluated_candidate_snapshot() {
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &retryable_secret_yaml(&todo_path, 2000, "evaluated-secret", None, "builder"),
+        )
+        .unwrap();
+        let evaluated = persisted_config_state(&state).unwrap();
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &retryable_secret_yaml(&todo_path, 3000, "later-secret", None, "builder"),
+        )
+        .unwrap();
+
+        let _reload = state.config_runtime.reload_coordinator.lock().await;
+        let (status, Json(response)) =
+            finish_saved_config_transaction(&state, evaluated, true).await;
+        drop(_reload);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        let response_yaml = response.raw_yaml.as_deref().unwrap();
+        assert!(response_yaml.contains("interval_ms: 2000"));
+        assert!(!response_yaml.contains("interval_ms: 3000"));
+        assert!(response_yaml.contains(REDACTED_SECRET));
+        assert_response_hides_secret(&response, "evaluated-secret");
+        assert_response_hides_secret(&response, "later-secret");
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .polling
+                .interval_ms,
+            1000
         );
 
-        if let Some(runtime) = take_registered_orchestrator(&state) {
-            runtime.shutdown().await;
-        }
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn missing_persisted_generation_metadata_blocks_candidate_commit() {
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &retryable_secret_yaml(&todo_path, 2000, "uncommitted-secret", None, "builder"),
+        )
+        .unwrap();
+        let candidate = persisted_config_state(&state).unwrap();
+        std::fs::remove_file(&state.config_runtime.config_path).unwrap();
+
+        let _reload = state.config_runtime.reload_coordinator.lock().await;
+        let (status, Json(response)) =
+            finish_saved_config_transaction(&state, candidate, true).await;
+        drop(_reload);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_response_hides_secret(&response, "uncommitted-secret");
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .polling
+                .interval_ms,
+            1000
+        );
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn transactional_setup_activation_external_edit_prevents_companion_publication() {
+        let (state, temp_dir, todo_path) = active_retry_secret_state().await;
+        let setup_todo_path = temp_dir.path().join("setup/TODO.md");
+        let request = todo_setup_request(setup_todo_path.clone());
+        let artifacts = crate::config::setup::build_setup_artifacts(&request);
+        let generation = crate::config::setup_transaction::stage_setup_generation(
+            &state.config_runtime.config_path,
+            &request,
+            &artifacts,
+        )
+        .unwrap();
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &artifacts.raw_yaml,
+        )
+        .unwrap();
+        let candidate = generation.prepare_candidate(&artifacts.raw_yaml).unwrap();
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &retryable_secret_yaml(&todo_path, 3000, "external-secret", None, "builder"),
+        )
+        .unwrap();
+
+        let _reload = state.config_runtime.reload_coordinator.lock().await;
+        let (status, Json(response)) =
+            finish_saved_config_transaction(&state, candidate, false).await;
+        drop(_reload);
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!setup_todo_path.exists());
+        assert!(!temp_dir.path().join("templates/build.liquid").exists());
+        assert_response_hides_secret(&response, "external-secret");
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn setup_preserve_uses_latest_persisted_secret_generation() {
+        let (state, _temp_dir) = test_app_state();
+        let config_yaml = |secret: &str| {
+            format!(
+                "tracker:\n  kind: github\n  repository: acme/repo\n  project_number: 9\n  api_key: {secret}\n  active_states:\n    - Todo\n    - In Progress\n  terminal_states:\n    - Done\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n"
+            )
+        };
+        let old_yaml = config_yaml("old-literal-secret");
+        let new_yaml = config_yaml("new-literal-secret");
+        *state.config_runtime.document_state.write().await =
+            parse_raw_yaml(state.config_runtime.config_path.clone(), old_yaml);
+        crate::config::draft::persist_config_atomically(
+            &state.config_runtime.config_path,
+            &new_yaml,
+        )
+        .unwrap();
+
+        let request = SaveSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::GitHub {
+                    repository: "acme/repo".to_string(),
+                    project_number: Some(9),
+                    api_key: SecretDisplay::Redacted,
+                    api_key_edit: SecretEdit::Preserve,
+                    api_token: None,
+                    active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                    terminal_states: vec!["Done".to_string()],
+                },
+                repos: vec![],
+                agents: vec![crate::config::setup::SetupAgent {
+                    role: "builder".to_string(),
+                    acpx_agent: "claude".to_string(),
+                    model: None,
+                    reasoning_level: None,
+                    permission_mode: None,
+                    prompt: Some("Build it.".to_string()),
+                    prompt_file: None,
+                }],
+                steps: vec![crate::config::setup::SetupStep {
+                    name: "build".to_string(),
+                    agent_role: "builder".to_string(),
+                    kind: None,
+                    depends: vec![],
+                    tracker_state: None,
+                }],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+        let (status, Json(response)) = save_setup_with_checks(state.clone(), request, |_| async {
+            vec![crate::config::setup::SetupCheck {
+                kind: crate::config::setup::SetupCheckKind::Config,
+                label: "stub".to_string(),
+                passed: true,
+                detail: "valid".to_string(),
+            }]
+        })
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(persisted.contains("new-literal-secret"));
+        assert!(!persisted.contains("old-literal-secret"));
+        assert!(!persisted.contains(REDACTED_SECRET));
+        assert_config_is_private(&state.config_runtime.config_path);
+        assert_response_hides_secret(&response, "new-literal-secret");
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .and_then(|config| config.tracker.api_key.as_deref()),
+            Some("new-literal-secret")
+        );
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn transactional_setup_activation_runtime_busy_defers_secret_companions_until_commit() {
+        let _env = EnvGuard::lock(&["ENSEMBLE_SETUP_RETRY_TOKEN"]);
+        let (state, _temp_dir, _todo_path) = active_retry_secret_state().await;
+        let cancellation = CancellationToken::new();
+        let (completion_tx, completion_rx) = watch::channel(false);
+        register_worker(
+            &state.cancellation_registry,
+            WorkerIdentity {
+                issue_id: "setup-busy-issue".to_string(),
+                run_id: "setup-busy-run".to_string(),
+                cycle: 1,
+                step_name: "build".to_string(),
+                started_at: Utc::now(),
+            },
+            cancellation,
+            completion_rx,
+        );
+        assert!(matches!(
+            start_or_replace_registered_orchestrator_with_timeout(
+                &state,
+                Duration::from_millis(20),
+            )
+            .await,
+            Err(crate::error::EnsembleError::RuntimeBusy)
+        ));
+
+        let request = SaveSetupRequest {
+            setup: crate::config::setup::SetupRequest {
+                tracker: crate::config::setup::SetupTracker::GitHub {
+                    repository: "acme/repo".to_string(),
+                    project_number: Some(9),
+                    api_key: SecretDisplay::Environment {
+                        variable: "ENSEMBLE_SETUP_RETRY_TOKEN".to_string(),
+                    },
+                    api_key_edit: SecretEdit::SetEnvironment {
+                        variable: "ENSEMBLE_SETUP_RETRY_TOKEN".to_string(),
+                    },
+                    api_token: Some(crate::config::secrets::SecretValue::new(
+                        "setup-candidate-secret",
+                    )),
+                    active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                    terminal_states: vec!["Done".to_string()],
+                },
+                repos: vec![],
+                agents: vec![crate::config::setup::SetupAgent {
+                    role: "builder".to_string(),
+                    acpx_agent: "claude".to_string(),
+                    model: None,
+                    reasoning_level: None,
+                    permission_mode: None,
+                    prompt: Some("Build it.".to_string()),
+                    prompt_file: None,
+                }],
+                steps: vec![crate::config::setup::SetupStep {
+                    name: "build".to_string(),
+                    agent_role: "builder".to_string(),
+                    kind: None,
+                    depends: vec![],
+                    tracker_state: None,
+                }],
+                on_success: "Done".to_string(),
+                on_failure: "Failed".to_string(),
+            },
+        };
+        let checks = |_| async {
+            vec![crate::config::setup::SetupCheck {
+                kind: crate::config::setup::SetupCheckKind::Config,
+                label: "stub".to_string(),
+                passed: true,
+                detail: "valid".to_string(),
+            }]
+        };
+        let (status, Json(mut response)) =
+            save_setup_with_checks(state.clone(), request.clone(), checks).await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!state
+            .config_runtime
+            .config_path
+            .parent()
+            .unwrap()
+            .join(".env")
+            .exists());
+        assert_response_hides_secret(&response, "setup-candidate-secret");
+
+        completion_tx.send(true).unwrap();
+        response = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let (status, Json(next_response)) =
+                    save_setup_with_checks(state.clone(), request.clone(), checks).await;
+                if status == StatusCode::OK {
+                    break next_response;
+                }
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("quiescing runtime should become replaceable");
+
+        let env_path = state
+            .config_runtime
+            .config_path
+            .parent()
+            .unwrap()
+            .join(".env");
+        assert_eq!(
+            std::fs::read_to_string(&env_path).unwrap(),
+            "ENSEMBLE_SETUP_RETRY_TOKEN=setup-candidate-secret\n"
+        );
+        assert_config_is_private(&env_path);
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .and_then(|config| config.tracker.api_key.as_deref()),
+            Some("setup-candidate-secret")
+        );
+        assert_response_hides_secret(&response, "setup-candidate-secret");
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn config_save_restart_required_retry_preserves_new_environment_secret_generation() {
+        let _env = EnvGuard::lock(&["ENSEMBLE_RETRY_TOKEN"]);
+        std::env::set_var("ENSEMBLE_RETRY_TOKEN", "new-environment-secret");
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
+
+        let restart_root = "/tmp/private-environment-restart-root";
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retryable_secret_yaml(
+                    &todo_path,
+                    2000,
+                    "$ENSEMBLE_RETRY_TOKEN",
+                    Some(restart_root),
+                    "builder",
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let response_json = serde_json::to_string(&response).unwrap();
+        assert!(response_json.contains("$ENSEMBLE_RETRY_TOKEN"));
+        assert!(!response_json.contains("new-environment-secret"));
+        let retry_yaml = response.raw_yaml.as_deref().unwrap().replace(
+            restart_root,
+            &crate::config::ensemble::default_workspace_root(),
+        );
+
+        let (status, Json(response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retry_yaml,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(persisted.contains("$ENSEMBLE_RETRY_TOKEN"));
+        assert!(!persisted.contains("new-environment-secret"));
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .tracker
+                .api_key
+                .as_deref(),
+            Some("new-environment-secret")
+        );
+        assert_config_is_private(&state.config_runtime.config_path);
+        assert_response_hides_secret(&response, "new-environment-secret");
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
+    }
+
+    #[tokio::test]
+    async fn config_save_runtime_busy_retry_preserves_new_environment_secret_generation() {
+        let _env = EnvGuard::lock(&["ENSEMBLE_BUSY_RETRY_TOKEN"]);
+        std::env::set_var("ENSEMBLE_BUSY_RETRY_TOKEN", "busy-environment-secret");
+        let (state, _temp_dir, todo_path) = active_retry_secret_state().await;
+
+        let cancellation = CancellationToken::new();
+        let (completion_tx, completion_rx) = watch::channel(false);
+        register_worker(
+            &state.cancellation_registry,
+            WorkerIdentity {
+                issue_id: "busy-issue".to_string(),
+                run_id: "busy-run".to_string(),
+                cycle: 1,
+                step_name: "build".to_string(),
+                started_at: Utc::now(),
+            },
+            cancellation.clone(),
+            completion_rx,
+        );
+        assert!(matches!(
+            start_or_replace_registered_orchestrator_with_timeout(
+                &state,
+                Duration::from_millis(20),
+            )
+            .await,
+            Err(crate::error::EnsembleError::RuntimeBusy)
+        ));
+        assert!(cancellation.is_cancelled());
+
+        let (status, Json(mut response)) = save_yaml(
+            axum::extract::State(state.clone()),
+            Json(SaveYamlRequest {
+                raw_yaml: retryable_secret_yaml(
+                    &todo_path,
+                    2000,
+                    "$ENSEMBLE_BUSY_RETRY_TOKEN",
+                    None,
+                    "builder",
+                ),
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .polling
+                .interval_ms,
+            1000
+        );
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(persisted.contains("$ENSEMBLE_BUSY_RETRY_TOKEN"));
+        assert!(!persisted.contains("old-literal-secret"));
+        assert_response_hides_secret(&response, "busy-environment-secret");
+
+        completion_tx.send(true).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let retry_yaml = response
+                    .raw_yaml
+                    .clone()
+                    .expect("busy response should describe the persisted candidate");
+                let (status, Json(next_response)) = save_yaml(
+                    axum::extract::State(state.clone()),
+                    Json(SaveYamlRequest {
+                        raw_yaml: retry_yaml,
+                    }),
+                )
+                .await;
+                response = next_response;
+                if status == StatusCode::OK {
+                    break response;
+                }
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("quiescing runtime should become replaceable");
+        let persisted = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
+        assert!(persisted.contains("$ENSEMBLE_BUSY_RETRY_TOKEN"));
+        assert!(!persisted.contains("busy-environment-secret"));
+        assert_eq!(
+            state
+                .config_runtime
+                .document_state
+                .read()
+                .await
+                .active_config
+                .as_ref()
+                .unwrap()
+                .tracker
+                .api_key
+                .as_deref(),
+            Some("busy-environment-secret")
+        );
+        assert_config_is_private(&state.config_runtime.config_path);
+        assert_response_hides_secret(&response, "busy-environment-secret");
+
+        crate::api::bootstrap::clear_registered_orchestrator(&state).await;
     }
 
     #[tokio::test]
