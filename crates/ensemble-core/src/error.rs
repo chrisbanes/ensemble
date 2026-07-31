@@ -56,6 +56,18 @@ pub enum ConfigError {
 pub enum WorkspaceError {
     #[error("workspace creation failed: {reason}")]
     CreationFailed { reason: String },
+    #[error("workspace metadata is unavailable at {path}: {reason}")]
+    MetadataUnavailable { path: String, reason: String },
+    #[error(
+        "workspace ownership mismatch at {path}: expected {expected_issue_id} ({expected_identifier}), found {actual_issue_id} ({actual_identifier})"
+    )]
+    OwnershipMismatch {
+        path: String,
+        expected_issue_id: String,
+        expected_identifier: String,
+        actual_issue_id: String,
+        actual_identifier: String,
+    },
     #[error("hook failed: {hook} — {reason}")]
     HookFailed { hook: String, reason: String },
     #[error("hook timed out: {hook} after {timeout_ms}ms")]

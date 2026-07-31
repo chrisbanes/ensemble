@@ -2,8 +2,9 @@
 
 use ensemble_core::config::ensemble::{parse_config, EnsembleConfig, RepoConfig};
 use ensemble_core::config::template::render_prompt;
-use ensemble_core::tracker::model::{sanitize_workspace_key, Issue};
+use ensemble_core::tracker::model::Issue;
 use ensemble_core::workspace::hooks::run_hook;
+use ensemble_core::workspace::key::issue_workspace_key;
 use ensemble_core::workspace::manager::WorkspaceManager;
 use tempfile::TempDir;
 
@@ -85,21 +86,29 @@ async fn test_full_config_flow() {
 
     // 3. Create workspace
     let mgr = WorkspaceManager::new(&ws_root, None).unwrap();
-    let ws = mgr.prepare_workspace(&issue.identifier).await.unwrap();
+    let ws = mgr
+        .prepare_workspace(&issue.id, &issue.identifier)
+        .await
+        .unwrap();
     assert!(ws.created_now);
     assert!(ws.base_path.is_dir());
     assert_eq!(
         ws.workspace_key,
-        sanitize_workspace_key(&issue.identifier).unwrap()
+        issue_workspace_key(&issue.id, &issue.identifier)
     );
 
     // 4. Reuse workspace
-    let ws2 = mgr.prepare_workspace(&issue.identifier).await.unwrap();
+    let ws2 = mgr
+        .prepare_workspace(&issue.id, &issue.identifier)
+        .await
+        .unwrap();
     assert!(!ws2.created_now);
     assert_eq!(ws.base_path, ws2.base_path);
 
     // 5. Cleanup
-    mgr.remove_workspace(&issue.identifier).await.unwrap();
+    mgr.remove_workspace(&issue.id, &issue.identifier)
+        .await
+        .unwrap();
     assert!(!ws.base_path.exists());
 }
 
@@ -107,7 +116,10 @@ async fn test_full_config_flow() {
 async fn test_hook_in_workspace() {
     let dir = TempDir::new().unwrap();
     let mgr = WorkspaceManager::new(dir.path(), None).unwrap();
-    let ws = mgr.prepare_workspace("hook-test#1").await.unwrap();
+    let ws = mgr
+        .prepare_workspace("NODE_HOOK", "hook-test#1")
+        .await
+        .unwrap();
 
     // Run a hook that creates a file
     run_hook(
@@ -166,7 +178,10 @@ async fn test_workflow_with_worktrees() {
     let issue = sample_issue();
 
     // Create workspace with worktrees
-    let ws = mgr.prepare_workspace(&issue.identifier).await.unwrap();
+    let ws = mgr
+        .prepare_workspace(&issue.id, &issue.identifier)
+        .await
+        .unwrap();
     assert!(ws.created_now);
     assert!(ws.base_path.is_dir());
     assert!(!ws.worktrees.is_empty());
@@ -178,7 +193,10 @@ async fn test_workflow_with_worktrees() {
     assert!(worktree_info.path.join("README.md").exists());
 
     // Reuse workspace
-    let ws2 = mgr.prepare_workspace(&issue.identifier).await.unwrap();
+    let ws2 = mgr
+        .prepare_workspace(&issue.id, &issue.identifier)
+        .await
+        .unwrap();
     assert!(!ws2.created_now);
     let worktree_info2 = ws2.worktrees.get(repo_key).unwrap();
     assert!(!worktree_info2.created_now);
@@ -186,7 +204,49 @@ async fn test_workflow_with_worktrees() {
 
     // Cleanup
     let wt_path = worktree_info.path.clone();
-    mgr.remove_workspace(&issue.identifier).await.unwrap();
+    mgr.remove_workspace(&issue.id, &issue.identifier)
+        .await
+        .unwrap();
     assert!(!ws.base_path.exists());
     assert!(!wt_path.exists());
+}
+
+#[tokio::test]
+async fn collision_resistant_issue_workspace_lifecycle() {
+    let root = TempDir::new().unwrap();
+    let manager = WorkspaceManager::new(root.path(), None).unwrap();
+    let first = Issue {
+        id: "NODE_A".to_string(),
+        identifier: "a#b".to_string(),
+        ..sample_issue()
+    };
+    let second = Issue {
+        id: "NODE_B".to_string(),
+        identifier: "a_b".to_string(),
+        ..sample_issue()
+    };
+
+    let first_workspace = manager
+        .prepare_workspace(&first.id, &first.identifier)
+        .await
+        .unwrap();
+    let second_workspace = manager
+        .prepare_workspace(&second.id, &second.identifier)
+        .await
+        .unwrap();
+    assert_ne!(first_workspace.base_path, second_workspace.base_path);
+
+    let reused = manager
+        .prepare_workspace(&first.id, &first.identifier)
+        .await
+        .unwrap();
+    assert_eq!(reused.base_path, first_workspace.base_path);
+    assert!(!reused.created_now);
+
+    manager
+        .remove_workspace(&first.id, &first.identifier)
+        .await
+        .unwrap();
+    assert!(!first_workspace.base_path.exists());
+    assert!(second_workspace.base_path.exists());
 }

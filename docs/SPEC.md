@@ -255,13 +255,14 @@ Pipeline step definition:
 
 #### 4.1.5 Workspace
 
-Filesystem workspace assigned to one issue identifier.
+Filesystem workspace assigned to one immutable issue identity.
 
 Fields (logical):
 
 - `path` (workspace path; current runtime typically uses absolute paths, but relative roots are
   possible if configured without path separators)
-- `workspace_key` (sanitized issue identifier)
+- `workspace_key` (bounded readable identifier prefix plus a stable identity digest)
+- `issue_id` and `issue_identifier` (persisted owner identity)
 - `created_now` (boolean, used to gate `after_create` hook)
 
 #### 4.1.6 Pipeline Run
@@ -1303,7 +1304,8 @@ Part B: Tracker state refresh
 - Fetch current issue states for all running issue IDs.
 - For each running issue:
   - If tracker state is terminal: drain and revalidate the worker, then release state and clean the
-    workspace.
+    workspace using both the immutable issue ID and identifier. Cleanup fails closed if persisted
+    workspace ownership does not match.
   - If tracker state is still active: update the in-memory issue snapshot.
   - If tracker state is neither active nor terminal: drain and revalidate the worker, then release
     state without workspace cleanup.
@@ -1327,10 +1329,12 @@ confirmed `Released` without waiting for an in-memory worker.
 When the service starts:
 
 1. Query tracker for issues in terminal states.
-2. For each returned issue identifier, remove the corresponding workspace directory.
+2. For each returned issue identity, resolve the workspace from both its immutable ID and
+   identifier, verify its persisted owner metadata, and remove the corresponding directory.
 3. If the terminal-issues fetch fails, log a warning and continue startup.
 
-This prevents stale terminal workspaces from accumulating after restarts.
+An absent canonical workspace is already clean. A workspace with missing, malformed, ownerless, or
+mismatched metadata is left untouched and reported as a cleanup failure; startup continues.
 
 ## 9. Workspace Management and Safety
 
@@ -1343,25 +1347,41 @@ Workspace root:
 
 Per-issue workspace path:
 
-- `<workspace.root>/<sanitized_issue_identifier>`
+- `<workspace.root>/<readable_identifier_prefix>--<identity_sha256>`
+
+The readable prefix contains only `[A-Za-z0-9._-]`, is capped at 80 bytes, and falls back to
+`issue` when the sanitized result would be empty, `.` or `..`. The lowercase SHA-256 suffix hashes
+the length-framed UTF-8 bytes of `(issue.id, issue.identifier)`, so punctuation collisions and
+identical readable identifiers with different immutable IDs remain distinct. The resulting path
+component is at most 146 bytes.
 
 Workspace persistence:
 
-- Workspaces are reused across runs for the same issue.
+- Workspaces are reused across runs for the same exact issue identity.
 - Successful runs do not auto-delete workspaces.
+- `.ensemble-workspace.json` stores `issue_id`, `issue_identifier`, and the branch date used for
+  repository worktrees.
 
 ### 9.2 Workspace Creation and Reuse
 
-Input: `issue.identifier`
+Input: `issue.id` and `issue.identifier`
 
 Algorithm summary:
 
-1. Sanitize identifier to `workspace_key`.
+1. Derive the bounded readable-plus-digest `workspace_key` from both identity fields.
 2. Compute workspace path under workspace root.
-3. Ensure the workspace path exists as a directory.
-4. Mark `created_now=true` only if the directory was created during this call; otherwise
+3. For a new directory, persist exact owner metadata before hooks or repository worktree
+   preparation.
+4. For an existing directory, load owner metadata and require both fields to match before reuse,
+   metadata changes, hooks, or repository worktree preparation.
+5. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
-5. If `created_now=true`, run `after_create` hook if configured.
+6. If `created_now=true`, run `after_create` hook if configured.
+
+Missing, malformed, ownerless legacy, or mismatched metadata is not repaired or adopted. Reuse and
+removal fail before any workspace side effect. Removing an absent canonical workspace remains
+idempotent. Implementations do not scan, migrate, rename, or remove legacy identifier-only
+directories as part of normal workspace lifecycle.
 
 Notes:
 
@@ -1424,10 +1444,17 @@ Invariant 2: Workspace path must stay inside workspace root.
 - Require `workspace_path` to have `workspace_root` as a prefix directory.
 - Reject any path outside the workspace root.
 
-Invariant 3: Workspace key is sanitized.
+Invariant 3: Workspace key is safe and collision-resistant.
 
 - Only `[A-Za-z0-9._-]` allowed in workspace directory names.
-- Replace all other characters with `_`.
+- Bound the readable prefix and append the full stable identity digest.
+
+Invariant 4: Existing workspace ownership is proven before reuse or deletion.
+
+- Require readable, valid owner metadata containing both `issue.id` and `issue.identifier`.
+- Require both persisted fields to exactly equal the requested identity.
+- Treat missing, malformed, ownerless, or mismatched metadata as a fail-closed error before hooks,
+  repository worktree operations, metadata repair, or recursive deletion.
 
 ## 10. Agent Runner Protocol (ACP Integration)
 

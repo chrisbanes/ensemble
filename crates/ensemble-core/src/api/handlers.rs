@@ -10,7 +10,7 @@ use crate::observability::snapshot::{
     RepoFinalizeSnapshot, RetryRow, RunningDetail, RuntimeSnapshot, StepDetailSnapshot,
     WorkflowStepInfo, WorkspaceInfo,
 };
-use crate::tracker::model::sanitize_workspace_key;
+use crate::workspace::key::issue_workspace_key;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -182,7 +182,6 @@ async fn build_issue_snapshot_from_history(
     Ok(issue_snapshot_from_history_record(
         &record,
         workspace_root,
-        identifier,
         step_kinds,
     ))
 }
@@ -207,7 +206,6 @@ async fn latest_history_record(
 fn issue_snapshot_from_history_record(
     record: &HistoryRecord,
     workspace_root: &str,
-    identifier: &str,
     step_kinds: HashMap<String, StepKind>,
 ) -> Option<IssueDetailSnapshot> {
     let status = match record.outcome.as_str() {
@@ -218,8 +216,7 @@ fn issue_snapshot_from_history_record(
     };
 
     let workspace_path = if record.workspace_path.is_empty() {
-        let key = sanitize_workspace_key(identifier);
-        let key = key?;
+        let key = issue_workspace_key(&record.issue_id, &record.issue_identifier);
         format!("{}/{}", workspace_root, key)
     } else {
         record.workspace_path.clone()
@@ -803,7 +800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_issue_detail_history_fallback_rejects_unsafe_workspace_key() {
+    async fn workspace_identity_path_history_fallback_uses_record_identity() {
         let mut app_state = build_empty_state();
         let tmp = NamedTempFile::new().unwrap();
         let history_path = tmp.path().to_path_buf();
@@ -838,7 +835,13 @@ mod tests {
             .await
             .into_response();
 
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let path = json["workspace"]["path"].as_str().unwrap();
+        assert!(path.ends_with(&issue_workspace_key("dot", ".")));
     }
 
     #[tokio::test]
