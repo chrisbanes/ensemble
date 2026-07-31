@@ -32,6 +32,12 @@ pub struct InteractionStore {
     create_mutex: Arc<Mutex<()>>,
     #[cfg(test)]
     write_failures: Arc<AtomicUsize>,
+    #[cfg(test)]
+    retire_waiting_state_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    #[cfg(test)]
+    restore_waiting_state_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
 }
 
 impl InteractionStore {
@@ -41,12 +47,34 @@ impl InteractionStore {
             create_mutex: Arc::new(Mutex::new(())),
             #[cfg(test)]
             write_failures: Arc::new(AtomicUsize::new(0)),
+            #[cfg(test)]
+            retire_waiting_state_test_barriers: None,
+            #[cfg(test)]
+            restore_waiting_state_test_barriers: None,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn fail_next_writes(&self, count: usize) {
         self.write_failures.store(count, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_retire_waiting_state_test_barriers(
+        &mut self,
+        ready: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) {
+        self.retire_waiting_state_test_barriers = Some((ready, release));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_restore_waiting_state_test_barriers(
+        &mut self,
+        ready: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    ) {
+        self.restore_waiting_state_test_barriers = Some((ready, release));
     }
 
     fn record_lock_for(&self, id: &str) -> RecordLock {
@@ -351,6 +379,11 @@ impl InteractionStore {
             }
         }
         self.write_interaction(&interaction).await?;
+        #[cfg(test)]
+        if let Some((ready, release)) = &self.retire_waiting_state_test_barriers {
+            ready.wait().await;
+            release.wait().await;
+        }
         Ok((previous, interaction))
     }
 
@@ -359,7 +392,13 @@ impl InteractionStore {
         expected_cleared: &InteractionRequest,
         previous: &InteractionRequest,
     ) -> Result<(), InteractionError> {
-        self.replace_if_current(expected_cleared, previous).await
+        self.replace_if_current(expected_cleared, previous).await?;
+        #[cfg(test)]
+        if let Some((ready, release)) = &self.restore_waiting_state_test_barriers {
+            ready.wait().await;
+            release.wait().await;
+        }
+        Ok(())
     }
 
     pub(crate) async fn reapply_retired_state_after_failed_owner_restore(

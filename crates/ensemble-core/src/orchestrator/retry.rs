@@ -104,7 +104,7 @@ pub(crate) async fn queue_manual_step_retry(
     let retired_interaction =
         retire_waiting_interaction(interaction_store, previous_waiting.as_ref()).await?;
 
-    let (retry_entry, transition, mutated_run) = {
+    let mutation = {
         let mut state = state.write().await;
         let owner_is_current = state.retry_attempts.get(request.issue_id)
             == previous_retry.as_ref()
@@ -117,63 +117,75 @@ pub(crate) async fn queue_manual_step_retry(
                 .is_some_and(|run| run.to_snapshot() == previous_run.to_snapshot())
             && state.is_claimed(request.issue_id) == was_claimed;
         if !owner_is_current {
-            return Err(ManualStepRetryError::OwnerChanged);
+            None
+        } else {
+            resume_was_requested |= state.is_resume_requested(request.issue_id);
+            let identifier = previous_retry
+                .as_ref()
+                .map(|entry| entry.identifier.clone())
+                .or_else(|| {
+                    previous_waiting
+                        .as_ref()
+                        .map(|entry| entry.identifier.clone())
+                })
+                .unwrap_or_else(|| request.identifier.to_string());
+            let run_id = previous_waiting
+                .as_ref()
+                .and_then(|entry| entry.run_id.clone())
+                .or_else(|| state.issue_run_ids.get(request.issue_id).cloned());
+
+            let disposition = schedule_manual_failure_retry(
+                &mut state,
+                FailureRetryRequest {
+                    issue_id: request.issue_id,
+                    identifier: &identifier,
+                    attempt: requested_attempt,
+                    max_backoff_ms: request.max_backoff_ms,
+                    max_cycles: request.max_cycles,
+                    error: "manual step-level retry",
+                    retry_from_step: Some(request.step_name.to_string()),
+                    with_fixup: false,
+                },
+            );
+            let FailureRetryDisposition::Scheduled(retry_entry) = disposition else {
+                return Err(ManualStepRetryError::MaxCyclesExhausted);
+            };
+
+            state
+                .get_pipeline_run_mut(request.issue_id)
+                .expect("pipeline run was validated before retry scheduling")
+                .retry_from_step(request.step_name);
+            state.remove_waiting_on_human(request.issue_id);
+            state.clear_resume_request(request.issue_id);
+            let run = state
+                .get_pipeline_run(request.issue_id)
+                .expect("pipeline run remains present while retry is scheduled");
+            let mutated_run = run.to_snapshot();
+            let transition = PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRetryScheduled,
+                issue_id: request.issue_id.to_string(),
+                identifier,
+                run_id,
+                cycle: run.cycle,
+                step: Some(request.step_name.to_string()),
+                reason: retry_entry.error.clone(),
+                retry: Some(retry_entry.clone()),
+                snapshot: Some(mutated_run.clone()),
+                terminal_transition: None,
+            };
+            Some((retry_entry, transition, mutated_run))
         }
-        resume_was_requested |= state.is_resume_requested(request.issue_id);
-        let identifier = previous_retry
-            .as_ref()
-            .map(|entry| entry.identifier.clone())
-            .or_else(|| {
-                previous_waiting
-                    .as_ref()
-                    .map(|entry| entry.identifier.clone())
-            })
-            .unwrap_or_else(|| request.identifier.to_string());
-        let run_id = previous_waiting
-            .as_ref()
-            .and_then(|entry| entry.run_id.clone())
-            .or_else(|| state.issue_run_ids.get(request.issue_id).cloned());
-
-        let disposition = schedule_manual_failure_retry(
-            &mut state,
-            FailureRetryRequest {
-                issue_id: request.issue_id,
-                identifier: &identifier,
-                attempt: requested_attempt,
-                max_backoff_ms: request.max_backoff_ms,
-                max_cycles: request.max_cycles,
-                error: "manual step-level retry",
-                retry_from_step: Some(request.step_name.to_string()),
-                with_fixup: false,
-            },
-        );
-        let FailureRetryDisposition::Scheduled(retry_entry) = disposition else {
-            return Err(ManualStepRetryError::MaxCyclesExhausted);
-        };
-
-        state
-            .get_pipeline_run_mut(request.issue_id)
-            .expect("pipeline run was validated before retry scheduling")
-            .retry_from_step(request.step_name);
-        state.remove_waiting_on_human(request.issue_id);
-        state.clear_resume_request(request.issue_id);
-        let run = state
-            .get_pipeline_run(request.issue_id)
-            .expect("pipeline run remains present while retry is scheduled");
-        let mutated_run = run.to_snapshot();
-        let transition = PipelineTransitionInput {
-            kind: PipelineTransitionKind::StepRetryScheduled,
-            issue_id: request.issue_id.to_string(),
-            identifier,
-            run_id,
-            cycle: run.cycle,
-            step: Some(request.step_name.to_string()),
-            reason: retry_entry.error.clone(),
-            retry: Some(retry_entry.clone()),
-            snapshot: Some(mutated_run.clone()),
-            terminal_transition: None,
-        };
-        (retry_entry, transition, mutated_run)
+    };
+    let Some((retry_entry, transition, mutated_run)) = mutation else {
+        restore_retired_after_owner_change(
+            state,
+            interaction_store,
+            request.issue_id,
+            retired_interaction.as_ref(),
+            previous_waiting.as_ref(),
+        )
+        .await?;
+        return Err(ManualStepRetryError::OwnerChanged);
     };
 
     let transition_for_reconciliation = transition.clone();
@@ -307,7 +319,7 @@ pub(crate) async fn queue_manual_whole_issue_retry(
     let retired_interaction =
         retire_waiting_interaction(interaction_store, previous_waiting.as_ref()).await?;
 
-    {
+    let owner_mutated = {
         let mut state = state.write().await;
         let config_is_current = match (
             state.pipeline_configs.get(request.issue_id),
@@ -330,14 +342,27 @@ pub(crate) async fn queue_manual_whole_issue_retry(
             && config_is_current
             && state.is_claimed(request.issue_id) == was_claimed;
         if !owner_is_current {
-            return Err(ManualStepRetryError::OwnerChanged);
+            false
+        } else {
+            resume_was_requested |= state.is_resume_requested(request.issue_id);
+            state.remove_retry(request.issue_id);
+            state.remove_waiting_on_human(request.issue_id);
+            state.remove_claimed(request.issue_id);
+            state.clear_resume_request(request.issue_id);
+            state.remove_pipeline_run(request.issue_id);
+            true
         }
-        resume_was_requested |= state.is_resume_requested(request.issue_id);
-        state.remove_retry(request.issue_id);
-        state.remove_waiting_on_human(request.issue_id);
-        state.remove_claimed(request.issue_id);
-        state.clear_resume_request(request.issue_id);
-        state.remove_pipeline_run(request.issue_id);
+    };
+    if !owner_mutated {
+        restore_retired_after_owner_change(
+            state,
+            interaction_store,
+            request.issue_id,
+            retired_interaction.as_ref(),
+            previous_waiting.as_ref(),
+        )
+        .await?;
+        return Err(ManualStepRetryError::OwnerChanged);
     }
 
     let transition = PipelineTransitionInput {
@@ -472,11 +497,48 @@ async fn retire_waiting_interaction(
     let Some(waiting) = waiting else {
         return Ok(None);
     };
-    let (previous, cleared) = interaction_store
+    let (previous, cleared) = match interaction_store
         .retire_waiting_state(&waiting.interaction_request_id)
         .await
-        .map_err(ManualStepRetryError::Interaction)?;
+    {
+        Ok(retired) => retired,
+        Err(InteractionError::NotFound { .. }) if is_synthetic_halted_waiter(waiting) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(ManualStepRetryError::Interaction(error)),
+    };
     Ok(Some(RetiredInteraction { previous, cleared }))
+}
+
+fn is_synthetic_halted_waiter(waiting: &super::state::WaitingOnHumanEntry) -> bool {
+    waiting.kind == crate::interaction::InteractionKind::Handoff
+        && waiting.interaction_request_id
+            == format!("halted:{}:{}", waiting.issue_id, waiting.step_name)
+}
+
+async fn restore_retired_after_owner_change(
+    state: &Arc<RwLock<OrchestratorState>>,
+    interaction_store: &InteractionStore,
+    issue_id: &str,
+    retired: Option<&RetiredInteraction>,
+    previous_waiting: Option<&super::state::WaitingOnHumanEntry>,
+) -> Result<(), ManualStepRetryError> {
+    let previous_wait_owned_before_restore = {
+        let state = state.read().await;
+        waiting_owner_matches(state.waiting_on_human.get(issue_id), previous_waiting)
+    };
+    if !previous_wait_owned_before_restore {
+        return Ok(());
+    }
+    restore_retired_interaction(interaction_store, retired).await?;
+    let previous_wait_owned_after_restore = {
+        let state = state.read().await;
+        waiting_owner_matches(state.waiting_on_human.get(issue_id), previous_waiting)
+    };
+    if !previous_wait_owned_after_restore {
+        reapply_retired_interaction(interaction_store, retired).await?;
+    }
+    Ok(())
 }
 
 async fn restore_retired_interaction(
@@ -834,6 +896,257 @@ mod tests {
             .await
             .unwrap();
         store
+    }
+
+    #[tokio::test]
+    async fn step_retry_owner_race_restores_original_waiting_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let state = manual_retry_state();
+        let mut store = manual_retry_store(dir.path()).await;
+        store.set_retire_waiting_state_test_barriers(Arc::clone(&ready), Arc::clone(&release));
+        let store = Arc::new(store);
+        let journal = PipelineRunJournal::new(dir.path());
+
+        let retry = tokio::spawn({
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            async move {
+                queue_manual_step_retry(
+                    &state,
+                    &journal,
+                    &store,
+                    ManualStepRetryRequest {
+                        issue_id: "issue-1",
+                        identifier: "repo#1",
+                        step_name: "build",
+                        max_backoff_ms: 300_000,
+                        max_cycles: 5,
+                    },
+                )
+                .await
+            }
+        });
+
+        ready.wait().await;
+        state
+            .write()
+            .await
+            .get_pipeline_run_mut("issue-1")
+            .unwrap()
+            .cycle = 2;
+        release.wait().await;
+
+        assert!(matches!(
+            retry.await.unwrap(),
+            Err(ManualStepRetryError::OwnerChanged)
+        ));
+        assert!(state.read().await.is_waiting_on_human("issue-1"));
+        assert!(
+            store
+                .get("halted:issue-1:build")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn whole_issue_retry_owner_race_keeps_retirement_for_new_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let state = manual_retry_state();
+        let mut store = manual_retry_store(dir.path()).await;
+        store.set_retire_waiting_state_test_barriers(Arc::clone(&ready), Arc::clone(&release));
+        let store = Arc::new(store);
+        let journal = PipelineRunJournal::new(dir.path());
+
+        let retry = tokio::spawn({
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            async move {
+                queue_manual_whole_issue_retry(
+                    &state,
+                    &journal,
+                    &store,
+                    ManualWholeIssueRetryRequest {
+                        issue_id: "issue-1",
+                        identifier: "repo#1",
+                    },
+                )
+                .await
+            }
+        });
+
+        ready.wait().await;
+        state.write().await.remove_waiting_on_human("issue-1");
+        store.fail_next_writes(1);
+        release.wait().await;
+
+        assert!(matches!(
+            retry.await.unwrap(),
+            Err(ManualStepRetryError::OwnerChanged)
+        ));
+        assert!(!state.read().await.is_waiting_on_human("issue-1"));
+        assert!(
+            !store
+                .get("halted:issue-1:build")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_change_during_restore_reapplies_retired_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let retire_ready = Arc::new(tokio::sync::Barrier::new(2));
+        let retire_release = Arc::new(tokio::sync::Barrier::new(2));
+        let restore_ready = Arc::new(tokio::sync::Barrier::new(2));
+        let restore_release = Arc::new(tokio::sync::Barrier::new(2));
+        let state = manual_retry_state();
+        let mut store = manual_retry_store(dir.path()).await;
+        store.set_retire_waiting_state_test_barriers(
+            Arc::clone(&retire_ready),
+            Arc::clone(&retire_release),
+        );
+        store.set_restore_waiting_state_test_barriers(
+            Arc::clone(&restore_ready),
+            Arc::clone(&restore_release),
+        );
+        let store = Arc::new(store);
+        let journal = PipelineRunJournal::new(dir.path());
+
+        let retry = tokio::spawn({
+            let state = Arc::clone(&state);
+            let store = Arc::clone(&store);
+            async move {
+                queue_manual_step_retry(
+                    &state,
+                    &journal,
+                    &store,
+                    ManualStepRetryRequest {
+                        issue_id: "issue-1",
+                        identifier: "repo#1",
+                        step_name: "build",
+                        max_backoff_ms: 300_000,
+                        max_cycles: 5,
+                    },
+                )
+                .await
+            }
+        });
+
+        retire_ready.wait().await;
+        state
+            .write()
+            .await
+            .get_pipeline_run_mut("issue-1")
+            .unwrap()
+            .cycle = 2;
+        retire_release.wait().await;
+        restore_ready.wait().await;
+        state.write().await.remove_waiting_on_human("issue-1");
+        restore_release.wait().await;
+
+        assert!(matches!(
+            retry.await.unwrap(),
+            Err(ManualStepRetryError::OwnerChanged)
+        ));
+        assert!(!state.read().await.is_waiting_on_human("issue-1"));
+        assert!(
+            !store
+                .get("halted:issue-1:build")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn synthetic_halt_step_retry_does_not_require_sidecar_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = manual_retry_state();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        let scheduled = queue_manual_step_retry(
+            &state,
+            &PipelineRunJournal::new(dir.path()),
+            &store,
+            ManualStepRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+                step_name: "build",
+                max_backoff_ms: 300_000,
+                max_cycles: 5,
+            },
+        )
+        .await
+        .expect("synthetic halt retry should not require a sidecar");
+
+        assert_eq!(scheduled.attempt, 2);
+        assert!(!state.read().await.is_waiting_on_human("issue-1"));
+    }
+
+    #[tokio::test]
+    async fn synthetic_halt_whole_issue_retry_does_not_require_sidecar_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = manual_retry_state();
+        let store = InteractionStore::new(dir.path().to_path_buf());
+        queue_manual_whole_issue_retry(
+            &state,
+            &PipelineRunJournal::new(dir.path()),
+            &store,
+            ManualWholeIssueRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+            },
+        )
+        .await
+        .expect("synthetic whole-issue retry should not require a sidecar");
+
+        let state = state.read().await;
+        assert!(!state.is_waiting_on_human("issue-1"));
+        assert!(!state.is_claimed("issue-1"));
+        assert!(state.get_pipeline_run("issue-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn persisted_interaction_retry_still_fails_closed_when_sidecar_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = manual_retry_state();
+        {
+            let mut state = state.write().await;
+            let waiting = state.waiting_on_human.get_mut("issue-1").unwrap();
+            waiting.interaction_request_id = "question-1".to_string();
+            waiting.kind = InteractionKind::Question;
+        }
+        let store = InteractionStore::new(dir.path().to_path_buf());
+
+        let error = queue_manual_step_retry(
+            &state,
+            &PipelineRunJournal::new(dir.path()),
+            &store,
+            ManualStepRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+                step_name: "build",
+                max_backoff_ms: 300_000,
+                max_cycles: 5,
+            },
+        )
+        .await
+        .expect_err("persisted interactions must remain fail-closed");
+
+        assert!(matches!(
+            error,
+            ManualStepRetryError::Interaction(InteractionError::NotFound { .. })
+        ));
+        assert!(state.read().await.is_waiting_on_human("issue-1"));
     }
 
     #[tokio::test]
