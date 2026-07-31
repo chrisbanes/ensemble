@@ -59,6 +59,7 @@ fn build_app_state(
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
+            reload_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             last_loaded_mtime: Arc::new(RwLock::new(None)),
         },
         cancellation_registry: new_cancellation_registry(),
@@ -692,7 +693,8 @@ on_failure: Failed
 #[tokio::test]
 async fn test_guided_form_save_round_trips_permission_request_policy() {
     let (state, _temp_dir) = build_app_state_without_config();
-    let raw_yaml = r#"
+    let raw_yaml = format!(
+        r#"
 tracker:
   kind: todo_file
   path: TODO.md
@@ -712,14 +714,18 @@ agent:
     option_id: manual
 on_success: Done
 on_failure: Failed
-"#;
-    std::fs::write(&state.config_runtime.config_path, raw_yaml).unwrap();
+workspace:
+  root: {}
+"#,
+        state.workspace_root
+    );
+    std::fs::write(&state.config_runtime.config_path, &raw_yaml).unwrap();
     *state.config_runtime.document_state.write().await = ConfigDocumentState {
         path: state.config_runtime.config_path.clone(),
         kind: ConfigStateKind::Parsed,
-        raw_yaml: Some(raw_yaml.to_string()),
+        raw_yaml: Some(raw_yaml.clone()),
         document: None,
-        active_config: Some(ensemble_core::config::ensemble::parse_config(raw_yaml).unwrap()),
+        active_config: Some(ensemble_core::config::ensemble::parse_config(&raw_yaml).unwrap()),
         validation: DraftValidationReport::default(),
     };
 
@@ -758,7 +764,8 @@ on_failure: Failed
 #[tokio::test]
 async fn test_guided_form_save_preserves_explicit_agent_runtime() {
     let (state, _temp_dir) = build_app_state_without_config();
-    let raw_yaml = r#"
+    let raw_yaml = format!(
+        r#"
 tracker:
   kind: todo_file
   path: TODO.md
@@ -773,14 +780,18 @@ steps:
     agent: builder
 on_success: Done
 on_failure: Failed
-"#;
-    std::fs::write(&state.config_runtime.config_path, raw_yaml).unwrap();
+workspace:
+  root: {}
+"#,
+        state.workspace_root
+    );
+    std::fs::write(&state.config_runtime.config_path, &raw_yaml).unwrap();
     *state.config_runtime.document_state.write().await = ConfigDocumentState {
         path: state.config_runtime.config_path.clone(),
         kind: ConfigStateKind::Parsed,
-        raw_yaml: Some(raw_yaml.to_string()),
+        raw_yaml: Some(raw_yaml.clone()),
         document: None,
-        active_config: Some(ensemble_core::config::ensemble::parse_config(raw_yaml).unwrap()),
+        active_config: Some(ensemble_core::config::ensemble::parse_config(&raw_yaml).unwrap()),
         validation: DraftValidationReport::default(),
     };
 

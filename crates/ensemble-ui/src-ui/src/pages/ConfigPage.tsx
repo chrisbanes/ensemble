@@ -1,7 +1,10 @@
 import { useConfigStateQuery, useValidateGuidedFormMutation, useSaveGuidedFormMutation, useValidateYamlDraftMutation, useSaveYamlDraftMutation } from "@/hooks";
 import type { GuidedConfigForm } from "@/generated/models";
 import type { ValidationIssue } from "@/generated/models";
-import SetupWizard from "@/components/config/SetupWizard";
+import SetupWizard, { type SetupWizardCompletion } from "@/components/config/SetupWizard";
+import RestartRequiredNotice, {
+  restartRequiredMessage,
+} from "@/components/config/RestartRequiredNotice";
 import YamlEditor from "@/components/config/YamlEditor";
 import GuidedEditor, { type GuidedForm } from "@/components/config/GuidedEditor";
 import { useState, useMemo } from "react";
@@ -94,12 +97,22 @@ export default function ConfigPage() {
   const [activeTab, setActiveTab] = useState<"guided" | "yaml">("guided");
   const [comparisonMode, setComparisonMode] = useState(false);
   const [displayedIssues, setDisplayedIssues] = useState<ValidationIssue[]>([]);
+  const [restartMessage, setRestartMessage] = useState<string | null>(null);
   const issues = data?.issues ?? [];
 
   const validateGuidedFormMutation = useValidateGuidedFormMutation();
   const saveGuidedFormMutation = useSaveGuidedFormMutation();
   const validateYamlMutation = useValidateYamlDraftMutation();
   const saveYamlMutation = useSaveYamlDraftMutation();
+
+  const handleRestartRequired = async (error: unknown) => {
+    const message = restartRequiredMessage(error);
+    if (!message) {
+      throw error;
+    }
+    setRestartMessage(message);
+    await refetch();
+  };
 
   const handleValidateGuided = async (form: GuidedForm, baseRawYaml: string): Promise<ValidationIssue[]> => {
     const response = await validateGuidedFormMutation.mutateAsync({
@@ -119,9 +132,13 @@ export default function ConfigPage() {
         kind: step.kind && step.kind !== "agent" ? step.kind : undefined,
       })),
     };
-    await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form: normalizedForm });
-    setDisplayedIssues([]);
-    await refetch();
+    try {
+      await saveGuidedFormMutation.mutateAsync({ baseRawYaml, form: normalizedForm });
+      setDisplayedIssues([]);
+      await refetch();
+    } catch (error) {
+      await handleRestartRequired(error);
+    }
   };
 
   const handleValidateYaml = async (yaml: string): Promise<ValidationIssue[]> => {
@@ -132,9 +149,21 @@ export default function ConfigPage() {
   };
 
   const handleSaveYaml = async (yaml: string) => {
-    await saveYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
-    setDisplayedIssues([]);
-    await refetch();
+    try {
+      await saveYamlMutation.mutateAsync({ data: { raw_yaml: yaml } });
+      setDisplayedIssues([]);
+      await refetch();
+    } catch (error) {
+      await handleRestartRequired(error);
+    }
+  };
+
+  const handleSetupComplete = (completion?: SetupWizardCompletion) => {
+    setShowSetupWizard(false);
+    if (completion?.restartRequiredMessage) {
+      setRestartMessage(completion.restartRequiredMessage);
+      void refetch();
+    }
   };
 
   const guidedForm = data?.guided_form;
@@ -159,6 +188,15 @@ export default function ConfigPage() {
   const isEditable = state === "parsed";
   const bannerIssues = displayedIssues.length > 0 ? displayedIssues : issues;
 
+  if (restartMessage) {
+    return (
+      <div className="space-y-6">
+        <h1 className="text-2xl font-bold">Configuration</h1>
+        <RestartRequiredNotice message={restartMessage} />
+      </div>
+    );
+  }
+
   // Missing config - show setup mode
   if (state === "missing" || showSetupWizard) {
     return (
@@ -166,7 +204,7 @@ export default function ConfigPage() {
         <h1 className="text-2xl font-bold">Configuration</h1>
         <SetupWizard 
           mode={state === "missing" ? "create" : "reconfigure"}
-          onComplete={() => setShowSetupWizard(false)}
+          onComplete={handleSetupComplete}
         />
       </div>
     );

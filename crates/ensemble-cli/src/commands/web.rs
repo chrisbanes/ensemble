@@ -7,7 +7,7 @@ use ensemble_core::api::bootstrap::{
     build_app_state, clear_registered_orchestrator, start_or_replace_registered_orchestrator,
 };
 use ensemble_core::api::router::create_api_router;
-use ensemble_core::config::draft::load_config_document_or_missing;
+use ensemble_core::config::draft::recover_and_load_config_state;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
 use ensemble_core::config_watcher::start_config_watcher;
 use ensemble_core::observability::events::EventBus;
@@ -73,7 +73,14 @@ pub async fn execute(args: WebArgs) -> ExitCode {
         "starting ensemble in web mode"
     );
 
-    let document_state = load_config_document_or_missing(&resolved.config_path);
+    let document_state = match recover_and_load_config_state(&resolved.config_path) {
+        Ok(state) => state,
+        Err(error) => {
+            error!(error = %error, "failed to recover or load config");
+            eprintln!("error: failed to recover or load config: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let prepared = build_app_state(
         resolved.config_path.clone(),
         document_state,

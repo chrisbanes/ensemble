@@ -378,8 +378,6 @@ impl Orchestrator {
         config_dir: &Path,
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
-        let (worker_tx, worker_rx) = mpsc::channel(1000);
-        let (command_tx, command_rx) = mpsc::channel(100);
         let history_store = futures::executor::block_on(HistoryStore::new(
             parts.workspace_root.join(".ensemble").join("history.db"),
         ))
@@ -391,6 +389,17 @@ impl Orchestrator {
             error
         })
         .ok();
+        Self::new_with_state_and_history(parts, config_dir, shutdown_rx, history_store)
+    }
+
+    pub(crate) fn new_with_state_and_history(
+        parts: OrchestratorRuntimeParts,
+        config_dir: &Path,
+        shutdown_rx: mpsc::Receiver<()>,
+        history_store: Option<HistoryStore>,
+    ) -> Self {
+        let (worker_tx, worker_rx) = mpsc::channel(1000);
+        let (command_tx, command_rx) = mpsc::channel(100);
         let timeline_persistence = history_store.clone().map(TimelinePersistence::new);
 
         Self {
@@ -459,6 +468,25 @@ impl Orchestrator {
 
     pub(crate) fn command_sender_owner(&self) -> mpsc::Sender<OrchestratorCommand> {
         self.command_tx.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_timeline_for_test(
+        &self,
+        record: crate::timeline::model::TimelineEventRecord,
+    ) {
+        self.timeline_persistence
+            .as_ref()
+            .expect("test orchestrator should have timeline persistence")
+            .send(record);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_transcript_for_test(&self, request: TranscriptPersistRequest) {
+        self.transcript_persistence
+            .as_ref()
+            .expect("test orchestrator should have transcript persistence")
+            .send(request);
     }
 
     async fn handle_command(&self, command: OrchestratorCommand) {

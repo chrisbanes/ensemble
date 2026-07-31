@@ -3,14 +3,39 @@ export class FetchError extends Error {
   body: unknown;
 
   constructor(status: number, body: unknown) {
-    const message =
-      (body as Record<string, Record<string, string>>)?.error?.message ??
-      `HTTP ${status}`;
+    const message = responseMessage(body) ?? `HTTP ${status}`;
     super(message);
     this.name = "FetchError";
     this.status = status;
     this.body = body;
   }
+}
+
+function responseMessage(body: unknown): string | undefined {
+  if (!body || typeof body !== "object") {
+    return undefined;
+  }
+
+  const response = body as Record<string, unknown>;
+  if (response.error && typeof response.error === "object") {
+    const message = (response.error as Record<string, unknown>).message;
+    if (typeof message === "string") {
+      return message;
+    }
+  }
+
+  if (Array.isArray(response.issues)) {
+    for (const issue of response.issues) {
+      if (issue && typeof issue === "object") {
+        const message = (issue as Record<string, unknown>).message;
+        if (typeof message === "string") {
+          return message;
+        }
+      }
+    }
+  }
+
+  return undefined;
 }
 
 export const customFetch = async <T>(

@@ -46,21 +46,25 @@ pub struct WorkspaceResult {
     pub created_now: bool,
 }
 
+pub(crate) fn resolve_workspace_root(root: &Path) -> Result<PathBuf, WorkspaceError> {
+    if root.is_absolute() {
+        Ok(root.to_path_buf())
+    } else {
+        let current_dir =
+            std::env::current_dir().map_err(|error| WorkspaceError::CreationFailed {
+                reason: format!("cannot resolve relative root: {error}"),
+            })?;
+        Ok(current_dir.join(root))
+    }
+}
+
 impl WorkspaceManager {
     /// Create a new WorkspaceManager with the given workspace root.
     /// The root is normalized to an absolute path.
     /// Pass `repos` to enable worktree-based workspace isolation.
     /// Repo names are derived from path basenames.
     pub fn new(root: &Path, repos: Option<Vec<RepoConfig>>) -> Result<Self, WorkspaceError> {
-        let root = if root.is_absolute() {
-            root.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map_err(|e| WorkspaceError::CreationFailed {
-                    reason: format!("cannot resolve relative root: {e}"),
-                })?
-                .join(root)
-        };
+        let root = resolve_workspace_root(root)?;
 
         let repos_map = repos
             .filter(|r| !r.is_empty())

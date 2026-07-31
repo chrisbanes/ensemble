@@ -45,6 +45,7 @@ pub(crate) fn app_state_with_document_state(document_state: ConfigDocumentState)
         config_runtime: ConfigRuntime {
             config_path: document_state.path.clone(),
             document_state: Arc::new(RwLock::new(document_state)),
+            reload_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             last_loaded_mtime: Arc::new(RwLock::new(None)),
         },
         cancellation_registry: new_cancellation_registry(),
@@ -71,6 +72,7 @@ pub(crate) fn app_state_with_missing_config(
         config_runtime: ConfigRuntime {
             config_path: config_path.clone(),
             document_state: Arc::new(RwLock::new(missing_config_state(config_path))),
+            reload_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             last_loaded_mtime: Arc::new(RwLock::new(None)),
         },
         cancellation_registry: new_cancellation_registry(),

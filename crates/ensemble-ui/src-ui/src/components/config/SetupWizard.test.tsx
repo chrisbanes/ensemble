@@ -4,10 +4,10 @@ import userEvent from "@testing-library/user-event";
 import SetupWizard from "./SetupWizard";
 import { renderWithProviders } from "@/test/render";
 
-function jsonResponse(data: unknown) {
+function jsonResponse(data: unknown, status = 200) {
   return Promise.resolve({
-    ok: true,
-    status: 200,
+    ok: status >= 200 && status < 300,
+    status,
     json: () => Promise.resolve(data),
   } as Response);
 }
@@ -365,6 +365,81 @@ describe("SetupWizard", () => {
       model: "sonnet",
       reasoning_level: "high",
       permission_mode: "approve_reads",
+    });
+  });
+
+  it("completes setup with a restart-required notice when the saved config returns 409", async () => {
+    const user = userEvent.setup();
+    const onComplete = vi.fn();
+    const restartMessage = "Configuration saved; restart Ensemble to apply it";
+
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("/api/v1/config/setup/defaults")) {
+        return jsonResponse({
+          has_existing_config: true,
+          defaults: {
+            tracker: { kind: "todo_file", path: "/tmp/TODO.md" },
+            repos: [{ path: "/repo", branch: "main" }],
+            agents: [{ role: "implement", acpx_agent: "builder", model: null }],
+            steps: [
+              {
+                name: "implement",
+                agent_role: "implement",
+                depends: [],
+                tracker_state: null,
+              },
+            ],
+            onSuccess: "Done",
+            onFailure: "Failed",
+          },
+        });
+      }
+      if (url.includes("/api/v1/config/setup/validate")) {
+        return jsonResponse({
+          can_save: true,
+          checks: [{ label: "Configuration", passed: true, detail: "Ready" }],
+        });
+      }
+      if (url.includes("/api/v1/config/setup/save")) {
+        return jsonResponse(
+          {
+            state: "parsed",
+            config_path: "/tmp/config.yaml",
+            raw_yaml: "tracker:\n  kind: todo_file\n",
+            issues: [
+              {
+                kind: "Config",
+                section: "runtime",
+                message: restartMessage,
+                field: null,
+                path: null,
+              },
+            ],
+            guided_form: null,
+          },
+          409,
+        );
+      }
+      return jsonResponse({});
+    }));
+
+    renderWithProviders(
+      <SetupWizard mode="reconfigure" onComplete={onComplete} />,
+      { route: "/config" },
+    );
+
+    expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
+    for (let step = 0; step < 4; step += 1) {
+      await user.click(screen.getByRole("button", { name: /next/i }));
+    }
+    await user.click(screen.getByRole("button", { name: /validate/i }));
+    expect(await screen.findByText("Validation Passed")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    expect(await screen.findByText("Restart Required")).toBeInTheDocument();
+    expect(screen.getByText(restartMessage)).toBeInTheDocument();
+    expect(onComplete).toHaveBeenCalledWith({
+      restartRequiredMessage: restartMessage,
     });
   });
 

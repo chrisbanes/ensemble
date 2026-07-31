@@ -68,7 +68,7 @@ pub enum HumanResumeMode {
 }
 
 /// A repository to be managed by the workspace (path + branch).
-#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct RepoConfig {
     pub path: String,
     pub branch: String,
