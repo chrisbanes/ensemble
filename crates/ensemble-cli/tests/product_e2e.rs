@@ -88,13 +88,13 @@ async fn web_cli_runs_todo_issue_to_completion_with_mock_acpx() {
         "history record should include implement step: {history:#?}"
     );
 
-    wait_for_timeline_artifact(&fixture.workspace_root)
-        .await
-        .expect("timeline artifact should be persisted");
-
-    wait_for_transcript_artifact(&fixture.workspace_root)
+    let run_id = wait_for_transcript_artifact(&fixture.workspace_root)
         .await
         .expect("step transcript artifact should be persisted");
+
+    wait_for_timeline_event(&client, &base_url, &run_id)
+        .await
+        .expect("timeline event should be queryable");
 
     let todo = fs::read_to_string(&fixture.todo_path).expect("read TODO.md");
     assert!(
@@ -347,56 +347,50 @@ async fn wait_for_history_record(
     }
 }
 
-async fn wait_for_timeline_artifact(workspace_root: &Path) -> Result<(), String> {
+async fn wait_for_timeline_event(
+    client: &reqwest::Client,
+    base_url: &str,
+    run_id: &str,
+) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(10);
+    let url = format!("{base_url}/api/v1/{ISSUE_ID}/timeline?run_id={run_id}");
     loop {
-        if let Some(contents) = read_first_timeline_file(workspace_root)? {
-            if contents.contains(ISSUE_ID) && contents.contains("step_started") {
-                return Ok(());
-            }
+        let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let timeline = response.json::<Value>().await.map_err(|e| e.to_string())?;
+        if timeline["events"].as_array().is_some_and(|events| {
+            events.iter().any(|event| {
+                event["issue_identifier"] == ISSUE_ID && event["event_type"] == "step_started"
+            })
+        }) {
+            return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "timeline artifact not found under {}",
-                workspace_root.display()
+                "timeline event not found before timeout: {timeline:#?}"
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-fn read_first_timeline_file(workspace_root: &Path) -> Result<Option<String>, String> {
-    let runs_dir = workspace_root.join(".ensemble").join("runs");
-    let entries = match fs::read_dir(&runs_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-    };
-
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path().join("events.jsonl");
-        match fs::read_to_string(&path) {
-            Ok(contents) => return Ok(Some(contents)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error.to_string()),
-        }
-    }
-
-    Ok(None)
-}
-
-async fn wait_for_transcript_artifact(workspace_root: &Path) -> Result<(), String> {
+async fn wait_for_transcript_artifact(workspace_root: &Path) -> Result<String, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
 
     loop {
         match read_first_transcript_file(workspace_root)? {
-            Some((_, contents))
+            Some((path, contents))
                 if contents.contains("\"assistant_message\"")
                     && contents.contains("\"tool_call\"")
                     && contents.contains("\"read_file\"") =>
             {
-                return Ok(());
+                return path
+                    .parent()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent)
+                    .and_then(Path::file_name)
+                    .and_then(|run_id| run_id.to_str())
+                    .map(ToString::to_string)
+                    .ok_or_else(|| "transcript path did not contain a UTF-8 run id".to_string());
             }
             Some((path, contents)) => {
                 if Instant::now() >= deadline {

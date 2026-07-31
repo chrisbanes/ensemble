@@ -30,6 +30,7 @@ axum = { version = "0.8.9", features = ["ws"] }
 futures-util = "0.3.33"
 async-stream = "0.3.6"
 tower-http = { version = "0.7.0", features = ["cors", "fs"] }
+tower = "0.5.3"
 clap = { version = "4.6.4", features = ["derive", "env"] }
 inquire = "0.9.4"
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
