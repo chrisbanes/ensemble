@@ -211,7 +211,7 @@ Parsed `config.yaml` payload:
 - `concurrency` (ConcurrencyConfig)
   - `max_concurrent_agents` (global cap) and `max_step_parallelism` (per-issue cap).
 - `max_cycles` (integer, default 3)
-  - Maximum times an issue can re-enter the pipeline.
+  - Maximum pipeline cycle number an issue can enter. Scheduler deferrals do not consume cycles.
 
 #### 4.1.3 Agent Config
 
@@ -304,6 +304,16 @@ Pipeline run recovery:
 - Dispatch-time restore never creates new candidates; it only applies to issues already returned by
   the tracker as dispatch-eligible candidates.
 - Restored retry and waiting records stay parked until their normal resume or retry path.
+- A retry entry's `attempt` is the next pipeline cycle to dispatch. Tracker polling failures,
+  capacity pressure, and shutdown quiescence defer the exact same retry entry while preserving its
+  claim, attempt, step/fixup scope, and failure context.
+- Automated failures that exhaust `max_cycles` transfer ownership to the same durable pending
+  terminal transition used by normal terminal outcomes; they are never represented by an absent
+  retry alone.
+- Reconciliation keeps the exact cancelled worker drain-owned until it has fully drained and the
+  post-drain retry disposition is committed. A scheduled disposition transfers ownership to its
+  retry entry; an exhausted disposition persists the pending terminal transition before clearing
+  the superseded running worker and drain handle.
 - Once pipeline execution and required finalization produce a terminal outcome, Ensemble appends a
   pending terminal transition containing the configured target tracker state, outcome, retry
   metadata, completion history, and pipeline snapshot before finalization returns control to the
@@ -395,7 +405,7 @@ Fields:
 
 - `issue_id`
 - `identifier` (best-effort human ID for status surfaces/logs)
-- `attempt` (integer, 1-based for retry queue)
+- `attempt` (integer, 1-based next pipeline cycle to dispatch)
 - `due_at_ms` (monotonic clock timestamp)
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)

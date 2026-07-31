@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tracing::warn;
 
 use crate::history::model::HistoryRecord;
@@ -10,6 +12,55 @@ use crate::pipeline::engine::PipelineRunSnapshot;
 use crate::tracker::model::RetryEntry;
 
 const SCHEMA_VERSION: u32 = 1;
+type IssueAppendLock = tokio::sync::Mutex<()>;
+type IssueAppendLockRegistry = Mutex<HashMap<PathBuf, Weak<IssueAppendLock>>>;
+static ISSUE_APPEND_LOCKS: OnceLock<IssueAppendLockRegistry> = OnceLock::new();
+
+pub(crate) struct PipelineIssueJournalTransaction<'a> {
+    journal: &'a PipelineRunJournal,
+    issue_id: String,
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl PipelineIssueJournalTransaction<'_> {
+    pub(crate) async fn append(
+        &self,
+        input: PipelineTransitionInput,
+    ) -> Result<PipelineTransitionRecord, std::io::Error> {
+        if input.issue_id != self.issue_id {
+            return Err(invalid_data(format!(
+                "issue transaction for '{}' cannot append record for '{}'",
+                self.issue_id, input.issue_id
+            )));
+        }
+        #[cfg(test)]
+        if let Some((ready, release)) = &self.journal.transaction_append_test_barriers {
+            ready.wait().await;
+            release.wait().await;
+        }
+        let record = self.journal.append_unlocked(input).await?;
+        #[cfg(test)]
+        if self.journal.transaction_append_late_error {
+            return Err(std::io::Error::other(
+                "injected error after a valid record became visible",
+            ));
+        }
+        Ok(record)
+    }
+
+    pub(crate) async fn latest_record_matches(
+        &self,
+        input: &PipelineTransitionInput,
+    ) -> Result<bool, std::io::Error> {
+        let latest = self
+            .journal
+            .read_last_valid_record(&self.journal.path_for_issue(&self.issue_id))
+            .await?;
+        Ok(latest
+            .as_ref()
+            .is_some_and(|record| record.matches_input(input)))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +120,21 @@ pub struct PipelineTransitionRecord {
     pub written_at: DateTime<Utc>,
 }
 
+impl PipelineTransitionRecord {
+    fn matches_input(&self, input: &PipelineTransitionInput) -> bool {
+        self.kind == input.kind
+            && self.issue_id == input.issue_id
+            && self.identifier == input.identifier
+            && self.run_id == input.run_id
+            && self.cycle == input.cycle
+            && self.step == input.step
+            && self.reason == input.reason
+            && self.retry == input.retry
+            && self.snapshot == input.snapshot
+            && self.terminal_transition == input.terminal_transition
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PipelineTransitionInput {
     pub kind: PipelineTransitionKind,
@@ -86,12 +152,26 @@ pub struct PipelineTransitionInput {
 #[derive(Debug, Clone)]
 pub struct PipelineRunJournal {
     root: PathBuf,
+    #[cfg(test)]
+    conditional_release_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    #[cfg(test)]
+    pub(super) transaction_append_test_barriers:
+        Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    #[cfg(test)]
+    pub(super) transaction_append_late_error: bool,
 }
 
 impl PipelineRunJournal {
     pub fn new(config_dir: impl Into<PathBuf>) -> Self {
         Self {
             root: config_dir.into().join("state").join("pipeline-runs"),
+            #[cfg(test)]
+            conditional_release_test_barriers: None,
+            #[cfg(test)]
+            transaction_append_test_barriers: None,
+            #[cfg(test)]
+            transaction_append_late_error: false,
         }
     }
 
@@ -108,8 +188,30 @@ impl PipelineRunJournal {
         &self,
         input: PipelineTransitionInput,
     ) -> Result<PipelineTransitionRecord, std::io::Error> {
+        self.begin_issue_transition(&input.issue_id)
+            .await
+            .append(input)
+            .await
+    }
+
+    pub(crate) async fn begin_issue_transition(
+        &self,
+        issue_id: &str,
+    ) -> PipelineIssueJournalTransaction<'_> {
+        PipelineIssueJournalTransaction {
+            journal: self,
+            issue_id: issue_id.to_string(),
+            _guard: self.issue_append_lock(issue_id).lock_owned().await,
+        }
+    }
+
+    async fn append_unlocked(
+        &self,
+        input: PipelineTransitionInput,
+    ) -> Result<PipelineTransitionRecord, std::io::Error> {
         tokio::fs::create_dir_all(&self.root).await?;
         let path = self.path_for_issue(&input.issue_id);
+        self.repair_trailing_record(&path).await?;
         let seq = self
             .read_last_valid_record(&path)
             .await?
@@ -135,14 +237,65 @@ impl PipelineRunJournal {
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
+            .write(true)
             .open(path)
             .await?;
-        let line =
-            serde_json::to_string(&record).map_err(|error| invalid_data(error.to_string()))?;
-        file.write_all(line.as_bytes()).await?;
-        file.write_all(b"\n").await?;
+        let original_len = file.metadata().await?.len();
+        let mut line =
+            serde_json::to_vec(&record).map_err(|error| invalid_data(error.to_string()))?;
+        line.push(b'\n');
+        if let Err(write_error) = file.write_all(&line).await {
+            if let Err(truncate_error) = file.set_len(original_len).await {
+                return Err(std::io::Error::other(format!(
+                    "journal append failed: {write_error}; failed to truncate partial record: {truncate_error}"
+                )));
+            }
+            return Err(write_error);
+        }
         file.flush().await?;
         Ok(record)
+    }
+
+    async fn repair_trailing_record(&self, path: &Path) -> Result<(), std::io::Error> {
+        let bytes = match tokio::fs::read(path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if bytes.is_empty() || bytes.ends_with(b"\n") {
+            return Ok(());
+        }
+
+        let tail_start = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |position| position + 1);
+        let tail = &bytes[tail_start..];
+        let valid_complete_record = serde_json::from_slice::<PipelineTransitionRecord>(tail)
+            .is_ok_and(|record| record.schema_version == SCHEMA_VERSION);
+        let mut file = tokio::fs::OpenOptions::new().write(true).open(path).await?;
+        if valid_complete_record {
+            file.seek(std::io::SeekFrom::End(0)).await?;
+            file.write_all(b"\n").await?;
+        } else {
+            file.set_len(tail_start as u64).await?;
+        }
+        file.flush().await
+    }
+
+    fn issue_append_lock(&self, issue_id: &str) -> Arc<IssueAppendLock> {
+        let path = self.path_for_issue(issue_id);
+        let mut locks = ISSUE_APPEND_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(&path).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(IssueAppendLock::new(()));
+        locks.insert(path, Arc::downgrade(&lock));
+        lock
     }
 
     pub async fn append_released(
@@ -165,6 +318,44 @@ impl PipelineRunJournal {
             terminal_transition: None,
         })
         .await
+    }
+
+    pub async fn append_released_if_latest_retry_matches(
+        &self,
+        expected_retry: &RetryEntry,
+        run_id: Option<String>,
+        reason: &str,
+    ) -> Result<Option<PipelineTransitionRecord>, std::io::Error> {
+        let issue_lock = self.issue_append_lock(&expected_retry.issue_id);
+        let _guard = issue_lock.lock().await;
+        let path = self.path_for_issue(&expected_retry.issue_id);
+        let latest_retry = self
+            .read_last_valid_record(&path)
+            .await?
+            .and_then(|record| record.retry);
+        if latest_retry.as_ref() != Some(expected_retry) {
+            return Ok(None);
+        }
+        #[cfg(test)]
+        if let Some((ready, release)) = &self.conditional_release_test_barriers {
+            ready.wait().await;
+            release.wait().await;
+        }
+
+        self.append_unlocked(PipelineTransitionInput {
+            kind: PipelineTransitionKind::Released,
+            issue_id: expected_retry.issue_id.clone(),
+            identifier: expected_retry.identifier.clone(),
+            run_id,
+            cycle: 0,
+            step: None,
+            reason: Some(reason.to_string()),
+            retry: None,
+            snapshot: None,
+            terminal_transition: None,
+        })
+        .await
+        .map(Some)
     }
 
     pub async fn read_records_for_issue(
@@ -403,6 +594,161 @@ mod tests {
         assert_eq!(records[0].seq, 1);
         assert_eq!(records[1].seq, 2);
         assert_eq!(records[1].kind, PipelineTransitionKind::StepCompleted);
+    }
+
+    #[tokio::test]
+    async fn conditional_release_cannot_erase_a_concurrent_newer_retry() {
+        let dir = tempdir().unwrap();
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let mut journal = PipelineRunJournal::new(dir.path());
+        journal.conditional_release_test_barriers =
+            Some((Arc::clone(&ready), Arc::clone(&release)));
+        let old_retry = RetryEntry {
+            issue_id: "issue/1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 2,
+            due_at_ms: 1,
+            error: Some("old failure".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
+        };
+        let newer_retry = RetryEntry {
+            attempt: 3,
+            due_at_ms: 2,
+            error: Some("new failure".to_string()),
+            ..old_retry.clone()
+        };
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRetryScheduled,
+                issue_id: old_retry.issue_id.clone(),
+                identifier: old_retry.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: old_retry.attempt,
+                step: None,
+                reason: old_retry.error.clone(),
+                retry: Some(old_retry.clone()),
+                snapshot: Some(snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+
+        let release_task = tokio::spawn({
+            let journal = journal.clone();
+            let old_retry = old_retry.clone();
+            async move {
+                journal
+                    .append_released_if_latest_retry_matches(
+                        &old_retry,
+                        Some("run-1".to_string()),
+                        "retry_candidate_missing",
+                    )
+                    .await
+            }
+        });
+        ready.wait().await;
+
+        let mut newer_retry_task = tokio::spawn({
+            let journal = PipelineRunJournal::new(dir.path());
+            let newer_retry = newer_retry.clone();
+            async move {
+                journal
+                    .append(PipelineTransitionInput {
+                        kind: PipelineTransitionKind::StepRetryScheduled,
+                        issue_id: newer_retry.issue_id.clone(),
+                        identifier: newer_retry.identifier.clone(),
+                        run_id: Some("run-1".to_string()),
+                        cycle: newer_retry.attempt,
+                        step: None,
+                        reason: newer_retry.error.clone(),
+                        retry: Some(newer_retry),
+                        snapshot: Some(snapshot()),
+                        terminal_transition: None,
+                    })
+                    .await
+            }
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut newer_retry_task)
+                .await
+                .is_err(),
+            "newer retry append must wait for the same issue's conditional release"
+        );
+
+        release.wait().await;
+        assert!(release_task.await.unwrap().unwrap().is_some());
+        newer_retry_task.await.unwrap().unwrap();
+
+        let latest = journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap()
+            .expect("newer retry remains live for restart");
+        assert_eq!(latest.kind, PipelineTransitionKind::StepRetryScheduled);
+        assert_eq!(latest.retry, Some(newer_retry));
+    }
+
+    #[tokio::test]
+    async fn append_repairs_a_malformed_partial_tail_before_the_next_owner() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::RunStarted,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: Some(snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(journal.path_for_issue("issue/1"))
+            .await
+            .unwrap();
+        file.write_all(br#"{"schema_version":1,"seq":"#)
+            .await
+            .unwrap();
+        file.flush().await.unwrap();
+        drop(file);
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRetryScheduled,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 2,
+                step: Some("build".to_string()),
+                reason: Some("retry".to_string()),
+                retry: Some(RetryEntry {
+                    issue_id: "issue/1".to_string(),
+                    identifier: "repo#1".to_string(),
+                    attempt: 2,
+                    due_at_ms: 1,
+                    error: Some("retry".to_string()),
+                    retry_from_step: Some("build".to_string()),
+                    with_fixup: false,
+                }),
+                snapshot: Some(snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+
+        let records = journal.read_records_for_issue("issue/1").await.unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].seq, 1);
+        assert_eq!(records[1].seq, 2);
+        assert_eq!(records[1].kind, PipelineTransitionKind::StepRetryScheduled);
     }
 
     #[tokio::test]

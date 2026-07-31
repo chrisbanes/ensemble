@@ -75,7 +75,9 @@ use reconciler::{
     startup_terminal_cleanup, ReconcileAction,
 };
 use retry::{
-    current_time_ms, get_due_retries, next_attempt, schedule_failure_retry, FailureRetryRequest,
+    current_time_ms, defer_retry, get_due_retries, next_attempt, queue_manual_step_retry,
+    schedule_failure_retry, FailureRetryDisposition, FailureRetryRequest, ManualStepRetryError,
+    ManualStepRetryRequest,
 };
 use scheduler::{
     has_available_slots, is_dispatch_eligible, is_resume_dispatch_eligible, sort_for_dispatch,
@@ -95,6 +97,37 @@ struct StepDispatchContext<'a> {
     interaction_response: Option<InteractionResponseEnvelope>,
     workspace_path: std::path::PathBuf,
     step_outputs: StepOutputTemplateContext,
+}
+
+struct ExhaustedRetryTerminal {
+    issue: Issue,
+    target_state: String,
+    history_record: Option<HistoryRecord>,
+}
+
+enum WholeIssueFailureRetry {
+    Scheduled(Option<Box<PipelineTransitionInput>>),
+    Exhausted(Box<ExhaustedRetryTerminal>),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ManualStepRetryCommand {
+    pub issue_id: String,
+    pub identifier: String,
+    pub step_name: String,
+}
+
+pub(crate) enum OrchestratorCommand {
+    QueueManualStepRetry {
+        command: ManualStepRetryCommand,
+        response: tokio::sync::oneshot::Sender<Result<RetryEntry, ManualStepRetryError>>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum ScheduledRetryPipeline {
+    Preserve,
+    Release,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,6 +246,8 @@ pub struct Orchestrator {
     transcript_persistence: Option<TranscriptPersistence>,
     worker_tx: mpsc::Sender<OrchestratorWorkerEvent>,
     worker_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<OrchestratorWorkerEvent>>>,
+    command_tx: mpsc::Sender<OrchestratorCommand>,
+    command_rx: mpsc::Receiver<OrchestratorCommand>,
     shutdown_rx: mpsc::Receiver<()>,
     quiescing: QuiescingLatch,
     #[cfg(test)]
@@ -346,6 +381,7 @@ impl Orchestrator {
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(1000);
+        let (command_tx, command_rx) = mpsc::channel(100);
         let history_store = futures::executor::block_on(HistoryStore::new(
             parts.workspace_root.join(".ensemble").join("history.db"),
         ))
@@ -380,6 +416,8 @@ impl Orchestrator {
             )),
             worker_tx,
             worker_rx: Arc::new(tokio::sync::Mutex::new(worker_rx)),
+            command_tx,
+            command_rx,
             shutdown_rx,
             quiescing: QuiescingLatch::default(),
             #[cfg(test)]
@@ -419,6 +457,38 @@ impl Orchestrator {
 
     pub(crate) fn quiescing_latch_owner(&self) -> QuiescingLatch {
         self.quiescing.clone()
+    }
+
+    pub(crate) fn command_sender_owner(&self) -> mpsc::Sender<OrchestratorCommand> {
+        self.command_tx.clone()
+    }
+
+    async fn handle_command(&self, command: OrchestratorCommand) {
+        match command {
+            OrchestratorCommand::QueueManualStepRetry { command, response } => {
+                if self.quiescing.is_requested() {
+                    let _ = response.send(Err(ManualStepRetryError::RuntimeUnavailable));
+                    return;
+                }
+                let (max_backoff_ms, max_cycles) = {
+                    let config = self.config.read().await;
+                    (config.agent.max_retry_backoff_ms, config.max_cycles)
+                };
+                let result = queue_manual_step_retry(
+                    &self.state,
+                    &self.pipeline_journal,
+                    ManualStepRetryRequest {
+                        issue_id: &command.issue_id,
+                        identifier: &command.identifier,
+                        step_name: &command.step_name,
+                        max_backoff_ms,
+                        max_cycles,
+                    },
+                )
+                .await;
+                let _ = response.send(result);
+            }
+        }
     }
 
     /// Run the orchestrator main loop.
@@ -504,6 +574,10 @@ impl Orchestrator {
                     let quiesced = self.cancel_active_runs().await;
                     info!("received shutdown signal, stopping orchestrator");
                     break quiesced;
+                }
+
+                Some(command) = self.command_rx.recv() => {
+                    self.handle_command(command).await;
                 }
 
                 // Poll timer
@@ -882,6 +956,32 @@ impl Orchestrator {
         attempt: Option<u32>,
         permit: &DispatchPermit,
     ) {
+        self.dispatch_issue_with_owned_retry(issue, attempt, None, permit)
+            .await;
+    }
+
+    async fn dispatch_retry_issue_with_permit(
+        &self,
+        issue: &Issue,
+        retry_entry: &RetryEntry,
+        permit: &DispatchPermit,
+    ) {
+        self.dispatch_issue_with_owned_retry(
+            issue,
+            Some(retry_entry.attempt),
+            Some(retry_entry),
+            permit,
+        )
+        .await;
+    }
+
+    async fn dispatch_issue_with_owned_retry(
+        &self,
+        issue: &Issue,
+        attempt: Option<u32>,
+        expected_retry: Option<&RetryEntry>,
+        permit: &DispatchPermit,
+    ) {
         let cycle = attempt.unwrap_or(1);
 
         {
@@ -891,6 +991,11 @@ impl Orchestrator {
 
                 let (config_snapshot, action, effective_cycle, effective_attempt, finalize_attempt) = {
                     let mut state = self.state.write().await;
+                    if expected_retry.is_some_and(|expected| {
+                        state.retry_attempts.get(&issue.id) != Some(expected)
+                    }) {
+                        return;
+                    }
                     let existing_cycle = state
                         .get_pipeline_run(&issue.id)
                         .map(|run| run.cycle)
@@ -1038,25 +1143,18 @@ impl Orchestrator {
                                         if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
                                             run.step_failed(&req.step_name, error.to_string());
                                         }
-                                        if let Some(entry) = state.remove_running(&issue.id) {
-                                            state.add_runtime_seconds(&entry);
-                                            schedule_failure_retry(
-                                                &mut state,
-                                                FailureRetryRequest {
-                                                    issue_id: &issue.id,
-                                                    identifier: &entry.identifier,
-                                                    attempt: next_attempt(entry.retry_attempt),
-                                                    max_backoff_ms: config_snapshot
-                                                        .agent
-                                                        .max_retry_backoff_ms,
-                                                    max_cycles: config_snapshot.max_cycles,
-                                                    error: &error.to_string(),
-                                                    retry_from_step: None,
-                                                    with_fixup: false,
-                                                },
-                                            );
-                                        }
-                                        state.remove_pipeline_run(&issue.id);
+                                        let terminal =
+                                            state.remove_running(&issue.id).map(|entry| {
+                                                self.schedule_whole_issue_failure_retry(
+                                                    &mut state,
+                                                    &config_snapshot,
+                                                    entry,
+                                                    &error.to_string(),
+                                                    ScheduledRetryPipeline::Release,
+                                                )
+                                            });
+                                        drop(state);
+                                        self.commit_whole_issue_failure_retry(terminal).await;
                                         return;
                                     }
                                 };
@@ -1133,6 +1231,11 @@ impl Orchestrator {
 
         let run_started_transition = {
             let mut state = self.state.write().await;
+            if expected_retry
+                .is_some_and(|expected| state.retry_attempts.get(&issue.id) != Some(expected))
+            {
+                return;
+            }
             state.add_running(issue, attempt);
             state.insert_pipeline_run(&issue.id, pipeline_run, Arc::clone(&config_snapshot));
             Self::transition_input_for_run(
@@ -1166,23 +1269,17 @@ impl Orchestrator {
                             if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
                                 run.step_failed(&req.step_name, error.to_string());
                             }
-                            if let Some(entry) = state.remove_running(&issue.id) {
-                                state.add_runtime_seconds(&entry);
-                                schedule_failure_retry(
+                            let terminal = state.remove_running(&issue.id).map(|entry| {
+                                self.schedule_whole_issue_failure_retry(
                                     &mut state,
-                                    FailureRetryRequest {
-                                        issue_id: &issue.id,
-                                        identifier: &entry.identifier,
-                                        attempt: next_attempt(entry.retry_attempt),
-                                        max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
-                                        max_cycles: config_snapshot.max_cycles,
-                                        error: &error.to_string(),
-                                        retry_from_step: None,
-                                        with_fixup: false,
-                                    },
-                                );
-                            }
-                            state.remove_pipeline_run(&issue.id);
+                                    &config_snapshot,
+                                    entry,
+                                    &error.to_string(),
+                                    ScheduledRetryPipeline::Release,
+                                )
+                            });
+                            drop(state);
+                            self.commit_whole_issue_failure_retry(terminal).await;
                             return;
                         }
                     };
@@ -1862,9 +1959,9 @@ impl Orchestrator {
                 } else {
                     "worker cancelled during reconciliation"
                 };
-                let (max_retry_backoff_ms, max_cycles) = {
+                let retry_config = {
                     let config = self.config.read().await;
-                    (config.agent.max_retry_backoff_ms, config.max_cycles)
+                    config.clone()
                 };
                 let mut state = self.state.write().await;
                 if !drained.owner.is_current(&state, issue_id) {
@@ -1874,23 +1971,17 @@ impl Orchestrator {
                     );
                     return;
                 }
-                if let Some(entry) = state.remove_running(issue_id) {
-                    state.add_runtime_seconds(&entry);
-                    schedule_failure_retry(
+                let terminal = state.remove_running(issue_id).map(|entry| {
+                    self.schedule_whole_issue_failure_retry(
                         &mut state,
-                        FailureRetryRequest {
-                            issue_id,
-                            identifier: &entry.identifier,
-                            attempt: next_attempt(entry.retry_attempt),
-                            max_backoff_ms: max_retry_backoff_ms,
-                            max_cycles,
-                            error,
-                            retry_from_step: None,
-                            with_fixup: false,
-                        },
-                    );
-                }
+                        &retry_config,
+                        entry,
+                        error,
+                        ScheduledRetryPipeline::Preserve,
+                    )
+                });
                 drop(state);
+                self.commit_whole_issue_failure_retry(terminal).await;
                 remove_drained_workers(&self.cancellation_registry, &drained.handles);
             }
         }
@@ -2206,25 +2297,18 @@ impl Orchestrator {
                                             {
                                                 run.step_failed(&req.step_name, error.to_string());
                                             }
-                                            if let Some(entry) = state.remove_running(issue_id) {
-                                                state.add_runtime_seconds(&entry);
-                                                schedule_failure_retry(
-                                                    &mut state,
-                                                    FailureRetryRequest {
-                                                        issue_id,
-                                                        identifier: &entry.identifier,
-                                                        attempt: next_attempt(entry.retry_attempt),
-                                                        max_backoff_ms: config_snapshot
-                                                            .agent
-                                                            .max_retry_backoff_ms,
-                                                        max_cycles: config_snapshot.max_cycles,
-                                                        error: &error.to_string(),
-                                                        retry_from_step: None,
-                                                        with_fixup: false,
-                                                    },
-                                                );
-                                            }
-                                            state.remove_pipeline_run(issue_id);
+                                            let terminal =
+                                                state.remove_running(issue_id).map(|entry| {
+                                                    self.schedule_whole_issue_failure_retry(
+                                                        &mut state,
+                                                        &config_snapshot,
+                                                        entry,
+                                                        &error.to_string(),
+                                                        ScheduledRetryPipeline::Release,
+                                                    )
+                                                });
+                                            drop(state);
+                                            self.commit_whole_issue_failure_retry(terminal).await;
                                             return;
                                         }
                                     };
@@ -2384,7 +2468,6 @@ impl Orchestrator {
                                         run.retry_from_step(&step);
                                     }
                                     if let Some(entry) = state.remove_running(issue_id) {
-                                        state.add_runtime_seconds(&entry);
                                         terminal_issue = Some(entry.issue.clone());
                                         let attempt = next_attempt(entry.retry_attempt);
                                         let retry_scheduled = schedule_failure_retry(
@@ -2400,7 +2483,7 @@ impl Orchestrator {
                                                 with_fixup: false,
                                             },
                                         );
-                                        final_failure = retry_scheduled.is_none();
+                                        final_failure = retry_scheduled.is_exhausted();
                                         if final_failure {
                                             history_record =
                                                 state.get_pipeline_run(issue_id).map(|run| {
@@ -2424,7 +2507,7 @@ impl Orchestrator {
                                                     )
                                                 });
                                         }
-                                        if let Some(due_at_ms) = retry_scheduled {
+                                        if let Some(retry_entry) = retry_scheduled.scheduled() {
                                             if let Some(input) = Self::transition_input_for_run(
                                                 &state,
                                                 issue_id,
@@ -2432,18 +2515,15 @@ impl Orchestrator {
                                                 PipelineTransitionKind::StepRetryScheduled,
                                                 Some(step.clone()),
                                                 Some(reason.clone()),
-                                                Some(RetryEntry {
-                                                    issue_id: issue_id.to_string(),
-                                                    identifier: entry.identifier.clone(),
-                                                    attempt,
-                                                    due_at_ms,
-                                                    error: Some(reason.clone()),
-                                                    retry_from_step: Some(step.clone()),
-                                                    with_fixup: false,
-                                                }),
+                                                Some(retry_entry.clone()),
                                             ) {
                                                 post_failure_transitions.push(input);
                                             }
+                                        }
+                                        if final_failure {
+                                            state.running.insert(issue_id.to_string(), entry);
+                                        } else {
+                                            state.add_runtime_seconds(&entry);
                                         }
                                     }
                                 }
@@ -2471,7 +2551,6 @@ impl Orchestrator {
                                         run.retry_from_step_with_fixup(&step, fixup_agent);
                                     }
                                     if let Some(entry) = state.remove_running(issue_id) {
-                                        state.add_runtime_seconds(&entry);
                                         terminal_issue = Some(entry.issue.clone());
                                         let attempt = next_attempt(entry.retry_attempt);
                                         let retry_scheduled = schedule_failure_retry(
@@ -2487,7 +2566,7 @@ impl Orchestrator {
                                                 with_fixup: true,
                                             },
                                         );
-                                        final_failure = retry_scheduled.is_none();
+                                        final_failure = retry_scheduled.is_exhausted();
                                         if final_failure {
                                             history_record =
                                                 state.get_pipeline_run(issue_id).map(|run| {
@@ -2511,7 +2590,7 @@ impl Orchestrator {
                                                     )
                                                 });
                                         }
-                                        if let Some(due_at_ms) = retry_scheduled {
+                                        if let Some(retry_entry) = retry_scheduled.scheduled() {
                                             if let Some(input) = Self::transition_input_for_run(
                                                 &state,
                                                 issue_id,
@@ -2519,18 +2598,15 @@ impl Orchestrator {
                                                 PipelineTransitionKind::FixupRetryScheduled,
                                                 Some(step.clone()),
                                                 Some(reason.clone()),
-                                                Some(RetryEntry {
-                                                    issue_id: issue_id.to_string(),
-                                                    identifier: entry.identifier.clone(),
-                                                    attempt,
-                                                    due_at_ms,
-                                                    error: Some(reason.clone()),
-                                                    retry_from_step: Some(step.clone()),
-                                                    with_fixup: true,
-                                                }),
+                                                Some(retry_entry.clone()),
                                             ) {
                                                 post_failure_transitions.push(input);
                                             }
+                                        }
+                                        if final_failure {
+                                            state.running.insert(issue_id.to_string(), entry);
+                                        } else {
+                                            state.add_runtime_seconds(&entry);
                                         }
                                     }
                                 }
@@ -2582,7 +2658,6 @@ impl Orchestrator {
                                 }
                                 OnFailure::RetryIssue => {
                                     if let Some(entry) = state.remove_running(issue_id) {
-                                        state.add_runtime_seconds(&entry);
                                         terminal_issue = Some(entry.issue.clone());
                                         let attempt = next_attempt(entry.retry_attempt);
                                         let retry_scheduled = schedule_failure_retry(
@@ -2598,7 +2673,7 @@ impl Orchestrator {
                                                 with_fixup: false,
                                             },
                                         );
-                                        final_failure = retry_scheduled.is_none();
+                                        final_failure = retry_scheduled.is_exhausted();
                                         if final_failure {
                                             history_record =
                                                 state.get_pipeline_run(issue_id).map(|run| {
@@ -2622,9 +2697,23 @@ impl Orchestrator {
                                                     )
                                                 });
                                         }
-                                    }
-                                    if !final_failure {
-                                        state.remove_pipeline_run(issue_id);
+                                        if let Some(retry_entry) = retry_scheduled.scheduled() {
+                                            if let Some(input) = Self::prepare_whole_issue_retry(
+                                                &mut state,
+                                                &config,
+                                                issue_id,
+                                                &entry.identifier,
+                                                &reason,
+                                                retry_entry.clone(),
+                                            ) {
+                                                post_failure_transitions.push(input);
+                                            }
+                                        }
+                                        if final_failure {
+                                            state.running.insert(issue_id.to_string(), entry);
+                                        } else {
+                                            state.add_runtime_seconds(&entry);
+                                        }
                                     }
                                 }
                             }
@@ -2683,23 +2772,17 @@ impl Orchestrator {
                                 if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                                     run.step_failed(&step, error.to_string());
                                 }
-                                if let Some(entry) = state.remove_running(issue_id) {
-                                    state.add_runtime_seconds(&entry);
-                                    schedule_failure_retry(
+                                let terminal = state.remove_running(issue_id).map(|entry| {
+                                    self.schedule_whole_issue_failure_retry(
                                         &mut state,
-                                        FailureRetryRequest {
-                                            issue_id,
-                                            identifier: &entry.identifier,
-                                            attempt: next_attempt(entry.retry_attempt),
-                                            max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                            max_cycles: config.max_cycles,
-                                            error: &error.to_string(),
-                                            retry_from_step: None,
-                                            with_fixup: false,
-                                        },
-                                    );
-                                }
-                                state.remove_pipeline_run(issue_id);
+                                        &config,
+                                        entry,
+                                        &error.to_string(),
+                                        ScheduledRetryPipeline::Release,
+                                    )
+                                });
+                                drop(state);
+                                self.commit_whole_issue_failure_retry(terminal).await;
                             }
                         }
                         PipelineAction::Waiting => {
@@ -2740,23 +2823,17 @@ impl Orchestrator {
                     if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                         run.step_failed(step_name, error.to_string());
                     }
-                    if let Some(entry) = state.remove_running(issue_id) {
-                        state.add_runtime_seconds(&entry);
-                        schedule_failure_retry(
+                    let terminal = state.remove_running(issue_id).map(|entry| {
+                        self.schedule_whole_issue_failure_retry(
                             &mut state,
-                            FailureRetryRequest {
-                                issue_id,
-                                identifier: &entry.identifier,
-                                attempt: next_attempt(entry.retry_attempt),
-                                max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                max_cycles: config.max_cycles,
-                                error: &error.to_string(),
-                                retry_from_step: None,
-                                with_fixup: false,
-                            },
-                        );
-                    }
-                    state.remove_pipeline_run(issue_id);
+                            &config,
+                            entry,
+                            &error.to_string(),
+                            ScheduledRetryPipeline::Release,
+                        )
+                    });
+                    drop(state);
+                    self.commit_whole_issue_failure_retry(terminal).await;
                 }
             }
             WorkerResult::Failed { error, kind } => {
@@ -2789,13 +2866,14 @@ impl Orchestrator {
                 let mut final_failure = false;
                 let mut history_record = None;
                 let mut terminal_issue = None;
+                let mut retry_transition = None;
 
                 if let Some(entry) = state.running.get(issue_id).cloned() {
                     terminal_issue = Some(entry.issue.clone());
                     let retry_scheduled = if retry::is_non_retryable_failure(&error) {
                         None
                     } else {
-                        schedule_failure_retry(
+                        Some(schedule_failure_retry(
                             &mut state,
                             FailureRetryRequest {
                                 issue_id,
@@ -2807,9 +2885,11 @@ impl Orchestrator {
                                 retry_from_step: None,
                                 with_fixup: false,
                             },
-                        )
+                        ))
                     };
-                    final_failure = retry_scheduled.is_none();
+                    final_failure = retry_scheduled
+                        .as_ref()
+                        .is_none_or(FailureRetryDisposition::is_exhausted);
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             self.build_history_record(RunningHistoryRecordInput {
@@ -2822,18 +2902,29 @@ impl Orchestrator {
                                 artifacts: state.artifacts.get(issue_id).cloned(),
                             })
                         });
+                    } else if let Some(retry_entry) =
+                        retry_scheduled.as_ref().and_then(|retry| retry.scheduled())
+                    {
+                        if let Some(entry) = state.remove_running(issue_id) {
+                            state.add_runtime_seconds(&entry);
+                        }
+                        retry_transition = Self::prepare_whole_issue_retry(
+                            &mut state,
+                            &config,
+                            issue_id,
+                            &entry.identifier,
+                            &error,
+                            retry_entry.clone(),
+                        );
                     }
-                    if let Some(entry) = state.remove_running(issue_id) {
-                        state.add_runtime_seconds(&entry);
-                    }
-                }
-                if !final_failure {
-                    state.remove_pipeline_run(issue_id);
                 }
 
                 let target_state = config.on_failure.clone();
                 drop(state);
                 drop(config);
+                if let Some(input) = retry_transition {
+                    self.append_pipeline_transition(input).await;
+                }
                 if final_failure {
                     if let Some(issue) = terminal_issue {
                         self.begin_terminal_transition(
@@ -2846,6 +2937,120 @@ impl Orchestrator {
                     }
                 }
             }
+        }
+    }
+
+    fn schedule_whole_issue_failure_retry(
+        &self,
+        state: &mut OrchestratorState,
+        config: &EnsembleConfig,
+        entry: crate::tracker::model::RunningEntry,
+        error: &str,
+        scheduled_pipeline: ScheduledRetryPipeline,
+    ) -> WholeIssueFailureRetry {
+        let issue_id = entry.issue.id.clone();
+        let disposition = schedule_failure_retry(
+            state,
+            FailureRetryRequest {
+                issue_id: &issue_id,
+                identifier: &entry.identifier,
+                attempt: next_attempt(entry.retry_attempt),
+                max_backoff_ms: config.agent.max_retry_backoff_ms,
+                max_cycles: config.max_cycles,
+                error,
+                retry_from_step: None,
+                with_fixup: false,
+            },
+        );
+
+        match disposition {
+            FailureRetryDisposition::Scheduled(retry_entry) => {
+                state.add_runtime_seconds(&entry);
+                let transition = if matches!(scheduled_pipeline, ScheduledRetryPipeline::Release) {
+                    Self::prepare_whole_issue_retry(
+                        state,
+                        config,
+                        &issue_id,
+                        &entry.identifier,
+                        error,
+                        retry_entry,
+                    )
+                } else {
+                    Self::transition_input_for_run(
+                        state,
+                        &issue_id,
+                        &entry.identifier,
+                        PipelineTransitionKind::StepRetryScheduled,
+                        None,
+                        Some(error.to_string()),
+                        Some(retry_entry),
+                    )
+                };
+                WholeIssueFailureRetry::Scheduled(transition.map(Box::new))
+            }
+            FailureRetryDisposition::Exhausted => {
+                state.running.insert(issue_id.clone(), entry.clone());
+                let history_record = state.get_pipeline_run(&issue_id).map(|run| {
+                    self.build_history_record(RunningHistoryRecordInput {
+                        issue_id: &issue_id,
+                        outcome: HISTORY_OUTCOME_FAILED,
+                        last_error: Some(error.to_string()),
+                        running_entry: &entry,
+                        run,
+                        completed_at: Utc::now(),
+                        artifacts: state.artifacts.get(&issue_id).cloned(),
+                    })
+                });
+                WholeIssueFailureRetry::Exhausted(Box::new(ExhaustedRetryTerminal {
+                    issue: entry.issue.clone(),
+                    target_state: config.on_failure.clone(),
+                    history_record,
+                }))
+            }
+        }
+    }
+
+    fn prepare_whole_issue_retry(
+        state: &mut OrchestratorState,
+        config: &EnsembleConfig,
+        issue_id: &str,
+        identifier: &str,
+        error: &str,
+        retry_entry: RetryEntry,
+    ) -> Option<PipelineTransitionInput> {
+        let dag = build_dag(&config.steps).ok()?;
+        state.insert_pipeline_run(
+            issue_id,
+            PipelineRun::new(issue_id.to_string(), retry_entry.attempt, dag),
+            Arc::new(config.clone()),
+        );
+        Self::transition_input_for_run(
+            state,
+            issue_id,
+            identifier,
+            PipelineTransitionKind::StepRetryScheduled,
+            None,
+            Some(error.to_string()),
+            Some(retry_entry),
+        )
+    }
+
+    async fn commit_whole_issue_failure_retry(&self, outcome: Option<WholeIssueFailureRetry>) {
+        match outcome {
+            Some(WholeIssueFailureRetry::Scheduled(Some(input))) => {
+                self.append_pipeline_transition(*input).await;
+            }
+            Some(WholeIssueFailureRetry::Exhausted(terminal)) => {
+                let terminal = *terminal;
+                self.begin_terminal_transition(
+                    &terminal.issue,
+                    TerminalOutcome::Failed,
+                    terminal.target_state,
+                    terminal.history_record,
+                )
+                .await;
+            }
+            Some(WholeIssueFailureRetry::Scheduled(None)) | None => {}
         }
     }
 
@@ -2897,7 +3102,6 @@ impl Orchestrator {
                     run.retry_from_step(step);
                 }
                 if let Some(entry) = state.remove_running(issue_id) {
-                    state.add_runtime_seconds(&entry);
                     terminal_issue = Some(entry.issue.clone());
                     let attempt = next_attempt(entry.retry_attempt);
                     let retry_scheduled = schedule_failure_retry(
@@ -2913,7 +3117,7 @@ impl Orchestrator {
                             with_fixup: false,
                         },
                     );
-                    final_failure = retry_scheduled.is_none();
+                    final_failure = retry_scheduled.is_exhausted();
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
@@ -2928,7 +3132,7 @@ impl Orchestrator {
                             })
                         });
                     }
-                    if let Some(due_at_ms) = retry_scheduled {
+                    if let Some(retry_entry) = retry_scheduled.scheduled() {
                         if let Some(input) = Self::transition_input_for_run(
                             &state,
                             issue_id,
@@ -2936,18 +3140,15 @@ impl Orchestrator {
                             PipelineTransitionKind::StepRetryScheduled,
                             Some(step_name.clone()),
                             Some(reason.clone()),
-                            Some(RetryEntry {
-                                issue_id: issue_id.to_string(),
-                                identifier: entry.identifier.clone(),
-                                attempt,
-                                due_at_ms,
-                                error: Some(reason.clone()),
-                                retry_from_step: Some(step_name.clone()),
-                                with_fixup: false,
-                            }),
+                            Some(retry_entry.clone()),
                         ) {
                             post_failure_transitions.push(input);
                         }
+                    }
+                    if final_failure {
+                        state.running.insert(issue_id.to_string(), entry);
+                    } else {
+                        state.add_runtime_seconds(&entry);
                     }
                 }
             }
@@ -2973,7 +3174,6 @@ impl Orchestrator {
                     run.retry_from_step_with_fixup(step, fixup_agent);
                 }
                 if let Some(entry) = state.remove_running(issue_id) {
-                    state.add_runtime_seconds(&entry);
                     terminal_issue = Some(entry.issue.clone());
                     let attempt = next_attempt(entry.retry_attempt);
                     let retry_scheduled = schedule_failure_retry(
@@ -2989,7 +3189,7 @@ impl Orchestrator {
                             with_fixup: true,
                         },
                     );
-                    final_failure = retry_scheduled.is_none();
+                    final_failure = retry_scheduled.is_exhausted();
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
@@ -3004,7 +3204,7 @@ impl Orchestrator {
                             })
                         });
                     }
-                    if let Some(due_at_ms) = retry_scheduled {
+                    if let Some(retry_entry) = retry_scheduled.scheduled() {
                         if let Some(input) = Self::transition_input_for_run(
                             &state,
                             issue_id,
@@ -3012,18 +3212,15 @@ impl Orchestrator {
                             PipelineTransitionKind::FixupRetryScheduled,
                             Some(step_name.clone()),
                             Some(reason.clone()),
-                            Some(RetryEntry {
-                                issue_id: issue_id.to_string(),
-                                identifier: entry.identifier.clone(),
-                                attempt,
-                                due_at_ms,
-                                error: Some(reason.clone()),
-                                retry_from_step: Some(step_name.clone()),
-                                with_fixup: true,
-                            }),
+                            Some(retry_entry.clone()),
                         ) {
                             post_failure_transitions.push(input);
                         }
+                    }
+                    if final_failure {
+                        state.running.insert(issue_id.to_string(), entry);
+                    } else {
+                        state.add_runtime_seconds(&entry);
                     }
                 }
             }
@@ -3073,7 +3270,6 @@ impl Orchestrator {
             }
             OnFailure::RetryIssue => {
                 if let Some(entry) = state.remove_running(issue_id) {
-                    state.add_runtime_seconds(&entry);
                     terminal_issue = Some(entry.issue.clone());
                     let attempt = next_attempt(entry.retry_attempt);
                     let retry_scheduled = schedule_failure_retry(
@@ -3089,7 +3285,7 @@ impl Orchestrator {
                             with_fixup: false,
                         },
                     );
-                    final_failure = retry_scheduled.is_none();
+                    final_failure = retry_scheduled.is_exhausted();
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
@@ -3104,9 +3300,23 @@ impl Orchestrator {
                             })
                         });
                     }
-                }
-                if !final_failure {
-                    state.remove_pipeline_run(issue_id);
+                    if let Some(retry_entry) = retry_scheduled.scheduled() {
+                        if let Some(input) = Self::prepare_whole_issue_retry(
+                            &mut state,
+                            &config,
+                            issue_id,
+                            &entry.identifier,
+                            &reason,
+                            retry_entry.clone(),
+                        ) {
+                            post_failure_transitions.push(input);
+                        }
+                    }
+                    if final_failure {
+                        state.running.insert(issue_id.to_string(), entry);
+                    } else {
+                        state.add_runtime_seconds(&entry);
+                    }
                 }
             }
         }
@@ -6093,16 +6303,12 @@ impl Orchestrator {
     /// Handle a single retry fire.
     async fn handle_single_retry(&self, retry_entry: &crate::tracker::model::RetryEntry) {
         if self.quiescing.is_requested() {
+            self.defer_single_retry(retry_entry, "orchestrator quiescing")
+                .await;
             return;
         }
 
         let issue_id = &retry_entry.issue_id;
-
-        // Remove the retry entry
-        {
-            let mut state = self.state.write().await;
-            state.remove_retry(issue_id);
-        }
 
         // Fetch active candidates
         let candidates = match self.tracker.fetch_candidate_issues().await {
@@ -6113,21 +6319,8 @@ impl Orchestrator {
                     error = %e,
                     "retry poll failed, rescheduling"
                 );
-                let mut state = self.state.write().await;
-                let config = self.config.read().await;
-                schedule_failure_retry(
-                    &mut state,
-                    FailureRetryRequest {
-                        issue_id,
-                        identifier: &retry_entry.identifier,
-                        attempt: retry_entry.attempt + 1,
-                        max_backoff_ms: config.agent.max_retry_backoff_ms,
-                        max_cycles: config.max_cycles,
-                        error: "retry poll failed",
-                        retry_from_step: retry_entry.retry_from_step.clone(),
-                        with_fixup: retry_entry.with_fixup,
-                    },
-                );
+                self.defer_single_retry(retry_entry, "retry poll failed")
+                    .await;
                 return;
             }
         };
@@ -6143,47 +6336,131 @@ impl Orchestrator {
                     identifier = %retry_entry.identifier,
                     "issue not found in candidates on retry, releasing claim"
                 );
-                let mut state = self.state.write().await;
-                state.release_claim(issue_id);
-            }
-            Some(issue) => {
-                // Check if we have slots
-                let has_slots = {
+                let release_run_id = {
                     let state = self.state.read().await;
-                    has_available_slots(&state)
+                    (state.retry_attempts.get(issue_id) == Some(retry_entry))
+                        .then(|| state.issue_run_ids.get(issue_id).cloned())
                 };
-
-                if has_slots {
-                    let Some(permit) = self.quiescing.begin_dispatch() else {
-                        self.state.write().await.add_retry(retry_entry.clone());
-                        return;
+                if let Some(run_id) = release_run_id {
+                    let release_appended = match self
+                        .pipeline_journal
+                        .append_released_if_latest_retry_matches(
+                            retry_entry,
+                            run_id,
+                            "retry_candidate_missing",
+                        )
+                        .await
+                    {
+                        Ok(Some(_)) => true,
+                        Ok(None) => {
+                            warn!(
+                                issue_id = %issue_id,
+                                "durable retry owner changed before release; retaining current ownership"
+                            );
+                            false
+                        }
+                        Err(error) => {
+                            warn!(
+                                issue_id = %issue_id,
+                                error = %error,
+                                "failed to durably release missing retry candidate; retaining ownership"
+                            );
+                            false
+                        }
                     };
-                    self.dispatch_issue_with_permit(issue, Some(retry_entry.attempt), &permit)
-                        .await;
-                } else {
-                    // No slots — requeue
-                    info!(
-                        issue_id = %issue_id,
-                        identifier = %retry_entry.identifier,
-                        "no slots available for retry, requeuing"
-                    );
-                    let mut state = self.state.write().await;
-                    let config = self.config.read().await;
-                    schedule_failure_retry(
-                        &mut state,
-                        FailureRetryRequest {
-                            issue_id,
-                            identifier: &retry_entry.identifier,
-                            attempt: retry_entry.attempt + 1,
-                            max_backoff_ms: config.agent.max_retry_backoff_ms,
-                            max_cycles: config.max_cycles,
-                            error: "no available orchestrator slots",
-                            retry_from_step: retry_entry.retry_from_step.clone(),
-                            with_fixup: retry_entry.with_fixup,
-                        },
-                    );
+
+                    if release_appended {
+                        let mut state = self.state.write().await;
+                        if state.retry_attempts.get(issue_id) == Some(retry_entry) {
+                            state.release_claim(issue_id);
+                            state.remove_pipeline_run(issue_id);
+                        } else {
+                            warn!(
+                                issue_id = %issue_id,
+                                "retry owner changed during durable release; retaining current ownership"
+                            );
+                        }
+                    }
                 }
             }
+            Some(issue) => {
+                let max_backoff_ms = self.config.read().await.agent.max_retry_backoff_ms;
+                let (ready_for_dispatch, transition) = {
+                    let mut state = self.state.write().await;
+                    if state.retry_attempts.get(issue_id) != Some(retry_entry) {
+                        return;
+                    }
+                    if has_available_slots(&state) {
+                        (true, None)
+                    } else {
+                        info!(
+                            issue_id = %issue_id,
+                            identifier = %retry_entry.identifier,
+                            "no slots available for retry, requeuing"
+                        );
+                        let transition = Self::defer_owned_retry(
+                            &mut state,
+                            retry_entry,
+                            max_backoff_ms,
+                            "no available orchestrator slots",
+                        );
+                        (false, transition)
+                    }
+                };
+                if let Some(input) = transition {
+                    self.append_pipeline_transition(input).await;
+                }
+
+                if ready_for_dispatch {
+                    let Some(permit) = self.quiescing.begin_dispatch() else {
+                        self.defer_single_retry(retry_entry, "orchestrator quiescing")
+                            .await;
+                        return;
+                    };
+                    self.dispatch_retry_issue_with_permit(issue, retry_entry, &permit)
+                        .await;
+                }
+            }
+        }
+    }
+
+    fn defer_owned_retry(
+        state: &mut OrchestratorState,
+        retry_entry: &RetryEntry,
+        max_backoff_ms: u64,
+        reason: &str,
+    ) -> Option<PipelineTransitionInput> {
+        if state.retry_attempts.get(&retry_entry.issue_id) != Some(retry_entry) {
+            return None;
+        }
+        let deferred = defer_retry(state, retry_entry, max_backoff_ms, reason);
+        let issue_id = deferred.issue_id.clone();
+        let identifier = deferred.identifier.clone();
+        let retry_from_step = deferred.retry_from_step.clone();
+        let transition_reason = deferred.error.clone();
+        Self::transition_input_for_run(
+            state,
+            &issue_id,
+            &identifier,
+            if deferred.with_fixup {
+                PipelineTransitionKind::FixupRetryScheduled
+            } else {
+                PipelineTransitionKind::StepRetryScheduled
+            },
+            retry_from_step,
+            transition_reason,
+            Some(deferred),
+        )
+    }
+
+    async fn defer_single_retry(&self, retry_entry: &RetryEntry, reason: &str) {
+        let max_backoff_ms = self.config.read().await.agent.max_retry_backoff_ms;
+        let transition = {
+            let mut state = self.state.write().await;
+            Self::defer_owned_retry(&mut state, retry_entry, max_backoff_ms, reason)
+        };
+        if let Some(input) = transition {
+            self.append_pipeline_transition(input).await;
         }
     }
 
@@ -6645,6 +6922,8 @@ mod tests {
         release_fetch: Arc<tokio::sync::Notify>,
     }
 
+    struct FailingCandidateTracker;
+
     struct CommandMockTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
         comments: Arc<RwLock<Vec<crate::tracker::model::TrackerComment>>>,
@@ -6778,6 +7057,29 @@ mod tests {
                 .filter(|issue| ids.contains(&issue.id))
                 .cloned()
                 .collect())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for FailingCandidateTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Err(TrackerError::ApiRequestFailed {
+                reason: "candidate fetch failed".to_string(),
+            })
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            _states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            _ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
         }
     }
 
@@ -7305,6 +7607,7 @@ mod tests {
             retry_from_step: None,
             with_fixup: false,
         };
+        let original_due_at_ms = retry.due_at_ms;
         orchestrator.state.write().await.add_retry(retry.clone());
         let quiescing = orchestrator.quiescing_latch_owner();
 
@@ -7320,7 +7623,8 @@ mod tests {
         let state = orchestrator.state.read().await;
         let retained = state.retry_attempts.get("1").unwrap();
         assert_eq!(retained.attempt, 2);
-        assert_eq!(retained.error.as_deref(), Some("retry"));
+        assert_eq!(retained.error.as_deref(), Some("orchestrator quiescing"));
+        assert!(retained.due_at_ms > original_due_at_ms);
         assert_eq!(runs.load(Ordering::SeqCst), 0);
     }
 
@@ -9609,7 +9913,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn terminal_rejection_posts_one_tracker_comment_after_retries_are_exhausted() {
+    async fn retry_exhaustion_posts_one_terminal_rejection_comment() {
         let mut raw_config = make_config();
         raw_config.max_cycles = 2;
         let config = Arc::new(RwLock::new(raw_config));
@@ -9638,13 +9942,13 @@ agent:
             shutdown_rx,
         );
 
-        for attempt in [None, Some(1)] {
+        for attempt in [None, Some(2)] {
             {
                 let cfg = config.read().await;
                 let mut state = orchestrator.state.write().await;
                 state.add_running(&test_issue("1", "Todo"), attempt);
                 let dag = build_dag(&cfg.steps).unwrap();
-                let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+                let mut pipeline_run = PipelineRun::new("1".to_string(), attempt.unwrap_or(1), dag);
                 pipeline_run.start();
                 pipeline_run.mark_running("build", "session-1".to_string());
                 state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
@@ -10006,9 +10310,10 @@ agent:
         let retry = state.retry_attempts.get("1").unwrap();
         assert_eq!(retry.attempt, 3); // incremented from 2
         assert_eq!(retry.error.as_deref(), Some("agent crashed"));
-        assert!(
-            state.get_pipeline_run("1").is_none(),
-            "pipeline run should be removed"
+        assert_eq!(
+            state.get_pipeline_run("1").map(|run| run.cycle),
+            Some(3),
+            "whole-issue retry should install the fresh pipeline cycle"
         );
     }
 
@@ -10186,21 +10491,6 @@ agent:
             shutdown_rx,
         );
 
-        // Add a claimed retry
-        {
-            let mut state = orchestrator.state.write().await;
-            state.add_retry(crate::tracker::model::RetryEntry {
-                issue_id: "gone".to_string(),
-                identifier: "repo#gone".to_string(),
-                attempt: 1,
-                due_at_ms: 0,
-                error: None,
-                retry_from_step: None,
-                with_fixup: false,
-            });
-        }
-
-        // Handle the retry
         let retry_entry = crate::tracker::model::RetryEntry {
             issue_id: "gone".to_string(),
             identifier: "repo#gone".to_string(),
@@ -10210,6 +10500,30 @@ agent:
             retry_from_step: None,
             with_fixup: false,
         };
+
+        // Add a claimed retry with its durable owner record.
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_retry(retry_entry.clone());
+        }
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRetryScheduled,
+                issue_id: retry_entry.issue_id.clone(),
+                identifier: retry_entry.identifier.clone(),
+                run_id: None,
+                cycle: retry_entry.attempt,
+                step: None,
+                reason: retry_entry.error.clone(),
+                retry: Some(retry_entry.clone()),
+                snapshot: None,
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+
+        // Handle the retry
         orchestrator.handle_single_retry(&retry_entry).await;
 
         let state = orchestrator.state.read().await;
@@ -16018,6 +16332,51 @@ agent:
     }
 
     #[tokio::test]
+    async fn retry_exhaustion_waits_for_reconciliation_drain_before_terminal_transition() {
+        let (orchestrator, _dir, _issues, cancelled, release) =
+            blocking_drain_test_orchestrator().await;
+        {
+            let mut config = orchestrator.config.write().await;
+            config.agent.stall_timeout_ms = 1;
+            config.max_cycles = 1;
+        }
+        {
+            let mut state = orchestrator.state.write().await;
+            state.running.get_mut("1").unwrap().last_agent_timestamp =
+                Some(Utc::now() - chrono::Duration::seconds(1));
+        }
+
+        let tick = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.handle_tick().await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), cancelled)
+            .await
+            .expect("stall reconciliation should cancel the active worker")
+            .unwrap();
+        tokio::task::yield_now().await;
+
+        assert!(!tick.is_finished());
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_running("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            assert!(!state.retry_attempts.contains_key("1"));
+            assert!(!state.pending_terminal_transitions.contains_key("1"));
+        }
+
+        release.add_permits(1);
+        tick.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        assert!(!state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
     async fn reconciliation_drain_stalled_timeout_retains_owner_then_retries_once() {
         let (orchestrator, _dir, _issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
@@ -16199,5 +16558,656 @@ agent:
             0,
             "shutdown must discard queued events"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_fire_tracker_failure_defers_the_same_pipeline_cycle() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(FailingCandidateTracker);
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let retry = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 3,
+            due_at_ms: 0,
+            error: Some("agent crashed".to_string()),
+            retry_from_step: Some("review".to_string()),
+            with_fixup: true,
+        };
+        orchestrator.state.write().await.add_retry(retry.clone());
+
+        orchestrator.handle_single_retry(&retry).await;
+
+        let state = orchestrator.state.read().await;
+        let deferred = state.retry_attempts.get("1").unwrap();
+        assert_eq!(deferred.attempt, retry.attempt);
+        assert_eq!(deferred.error.as_deref(), Some("retry poll failed"));
+        assert_eq!(deferred.retry_from_step, retry.retry_from_step);
+        assert_eq!(deferred.with_fixup, retry.with_fixup);
+        assert!(state.is_claimed("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_fire_stale_candidate_result_does_not_release_a_newer_retry() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let fetch_started = Arc::new(tokio::sync::Notify::new());
+        let release_fetch = Arc::new(tokio::sync::Notify::new());
+        let tracker: Arc<dyn IssueTracker> = Arc::new(BlockingCandidateTracker {
+            issues: Arc::new(RwLock::new(Vec::new())),
+            fetch_started: Arc::clone(&fetch_started),
+            release_fetch: Arc::clone(&release_fetch),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Arc::new(Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        ));
+        let fired = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 2,
+            due_at_ms: 0,
+            error: Some("old failure".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
+        };
+        orchestrator.state.write().await.add_retry(fired.clone());
+
+        let retry_fire = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            async move { orchestrator.handle_single_retry(&fired).await }
+        });
+        fetch_started.notified().await;
+        let replacement = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 4,
+            due_at_ms: current_time_ms() + 60_000,
+            error: Some("new failure".to_string()),
+            retry_from_step: Some("review".to_string()),
+            with_fixup: true,
+        };
+        orchestrator
+            .state
+            .write()
+            .await
+            .add_retry(replacement.clone());
+        release_fetch.notify_one();
+        retry_fire.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.retry_attempts.get("1"), Some(&replacement));
+        assert!(state.is_claimed("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_fire_quiescing_defers_the_same_pipeline_cycle() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let fetch_started = Arc::new(tokio::sync::Notify::new());
+        let release_fetch = Arc::new(tokio::sync::Notify::new());
+        let tracker: Arc<dyn IssueTracker> = Arc::new(BlockingCandidateTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+            fetch_started: Arc::clone(&fetch_started),
+            release_fetch: Arc::clone(&release_fetch),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Arc::new(Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        ));
+        let retry = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 3,
+            due_at_ms: 0,
+            error: Some("agent crashed".to_string()),
+            retry_from_step: Some("review".to_string()),
+            with_fixup: true,
+        };
+        orchestrator.state.write().await.add_retry(retry.clone());
+
+        let retry_fire = tokio::spawn({
+            let orchestrator = Arc::clone(&orchestrator);
+            let retry = retry.clone();
+            async move { orchestrator.handle_single_retry(&retry).await }
+        });
+        fetch_started.notified().await;
+        orchestrator.quiescing.request();
+        release_fetch.notify_one();
+        retry_fire.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        let deferred = state.retry_attempts.get("1").unwrap();
+        assert_eq!(deferred.issue_id, retry.issue_id);
+        assert_eq!(deferred.identifier, retry.identifier);
+        assert_eq!(deferred.attempt, retry.attempt);
+        assert_eq!(deferred.error.as_deref(), Some("orchestrator quiescing"));
+        assert_eq!(deferred.retry_from_step, retry.retry_from_step);
+        assert_eq!(deferred.with_fixup, retry.with_fixup);
+        assert!(deferred.due_at_ms > retry.due_at_ms);
+        assert!(state.is_claimed("1"));
+        assert!(!state.is_running("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_fire_capacity_deferral_does_not_consume_a_pipeline_cycle() {
+        let mut raw_config = make_config();
+        raw_config.concurrency.max_concurrent_agents = 1;
+        let config = Arc::new(RwLock::new(raw_config));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let retry = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 3,
+            due_at_ms: 0,
+            error: Some("agent crashed".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
+        };
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("2", "Todo"), None);
+            state.add_retry(retry.clone());
+        }
+
+        orchestrator.handle_single_retry(&retry).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.retry_attempts.get("1").map(|entry| entry.attempt),
+            Some(retry.attempt)
+        );
+        assert!(state.is_claimed("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_fire_eventual_dispatch_uses_the_intended_attempt_once() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let retry = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 3,
+            due_at_ms: 0,
+            error: Some("agent crashed".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
+        };
+        orchestrator.state.write().await.add_retry(retry.clone());
+
+        orchestrator.handle_single_retry(&retry).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.get_running("1").and_then(|entry| entry.retry_attempt),
+            Some(retry.attempt)
+        );
+        assert!(!state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_exhaustion_during_workspace_setup_becomes_durable_terminal_state() {
+        let mut raw_config = make_config();
+        raw_config.max_cycles = 1;
+        raw_config.hooks.after_create = Some("exit 1".to_string());
+        let config = Arc::new(RwLock::new(raw_config));
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(FailingWriteTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        orchestrator.dispatch_issue(&issue, Some(1)).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.pending_terminal_transitions.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        assert!(!state.retry_attempts.contains_key("1"));
+        drop(state);
+
+        let record = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .expect("durable pending terminal record");
+        assert_eq!(
+            record.kind,
+            PipelineTransitionKind::PendingTerminalTransition
+        );
+        assert_eq!(
+            record
+                .terminal_transition
+                .as_ref()
+                .map(|transition| transition.outcome),
+            Some(TerminalOutcome::Failed)
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_recovery_restores_exhausted_terminal_intent_after_restart() {
+        let mut raw_config = make_config();
+        raw_config.max_cycles = 1;
+        raw_config.hooks.after_create = Some("exit 1".to_string());
+        let config = Arc::new(RwLock::new(raw_config));
+        let issue = test_issue("1", "Todo");
+        let issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let dir = tempfile::TempDir::new().unwrap();
+
+        {
+            let tracker: Arc<dyn IssueTracker> = Arc::new(FailingWriteTracker {
+                issues: Arc::clone(&issues),
+            });
+            let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            });
+            let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+            let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+            let orchestrator = Orchestrator::new(
+                Arc::clone(&config),
+                tracker,
+                runner,
+                workspace_mgr,
+                dir.path(),
+                shutdown_rx,
+            );
+            orchestrator.dispatch_issue(&issue, Some(1)).await;
+            assert!(orchestrator
+                .state
+                .read()
+                .await
+                .pending_terminal_transitions
+                .contains_key("1"));
+        }
+
+        let tracker: Arc<dyn IssueTracker> = Arc::new(FailingWriteTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let restarted = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        restarted.restore_pipeline_runs_from_journal().await;
+        restarted.reconcile_pending_terminal_transitions().await;
+
+        let state = restarted.state.read().await;
+        assert!(state.pending_terminal_transitions.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        assert!(!state.retry_attempts.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_recovery_restores_same_cycle_deferred_retry_after_restart() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let dir = tempfile::TempDir::new().unwrap();
+        let retry = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 3,
+            due_at_ms: 0,
+            error: Some("agent crashed".to_string()),
+            retry_from_step: Some("build".to_string()),
+            with_fixup: true,
+        };
+
+        {
+            let tracker: Arc<dyn IssueTracker> = Arc::new(FailingCandidateTracker);
+            let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            });
+            let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+            let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+            let orchestrator = Orchestrator::new(
+                Arc::clone(&config),
+                tracker,
+                runner,
+                workspace_mgr,
+                dir.path(),
+                shutdown_rx,
+            );
+            {
+                let cfg = config.read().await;
+                let dag = build_dag(&cfg.steps).unwrap();
+                let mut run = PipelineRun::new("1".to_string(), 2, dag);
+                run.start();
+                run.retry_from_step_with_fixup("build", "builder");
+                let mut state = orchestrator.state.write().await;
+                state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+                state.add_retry(retry.clone());
+            }
+            orchestrator.handle_single_retry(&retry).await;
+        }
+
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let restarted = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        restarted.restore_pipeline_runs_from_journal().await;
+
+        let state = restarted.state.read().await;
+        let restored = state.retry_attempts.get("1").unwrap();
+        assert_eq!(restored.attempt, retry.attempt);
+        assert_eq!(restored.retry_from_step, retry.retry_from_step);
+        assert_eq!(restored.with_fixup, retry.with_fixup);
+        assert_eq!(restored.error.as_deref(), Some("retry poll failed"));
+        assert!(state.is_claimed("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_recovery_does_not_restore_a_missing_candidate_release() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let dir = tempfile::TempDir::new().unwrap();
+        let retry = RetryEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            attempt: 2,
+            due_at_ms: 0,
+            error: Some("agent crashed".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
+        };
+
+        {
+            let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+                issues: Arc::new(RwLock::new(vec![])),
+            });
+            let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            });
+            let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+            let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+            let orchestrator = Orchestrator::new(
+                Arc::clone(&config),
+                tracker,
+                runner,
+                workspace_mgr,
+                dir.path(),
+                shutdown_rx,
+            );
+            let transition = {
+                let cfg = config.read().await;
+                let dag = build_dag(&cfg.steps).unwrap();
+                let mut state = orchestrator.state.write().await;
+                state.insert_pipeline_run(
+                    "1",
+                    PipelineRun::new("1".to_string(), retry.attempt, dag),
+                    Arc::new(cfg.clone()),
+                );
+                state.add_retry(retry.clone());
+                Orchestrator::transition_input_for_run(
+                    &state,
+                    "1",
+                    "repo#1",
+                    PipelineTransitionKind::StepRetryScheduled,
+                    None,
+                    retry.error.clone(),
+                    Some(retry.clone()),
+                )
+                .unwrap()
+            };
+            orchestrator.append_pipeline_transition(transition).await;
+
+            orchestrator.handle_single_retry(&retry).await;
+
+            let state = orchestrator.state.read().await;
+            assert!(!state.retry_attempts.contains_key("1"));
+            assert!(!state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_none());
+            drop(state);
+
+            let record = orchestrator
+                .pipeline_journal
+                .read_records_for_issue("1")
+                .await
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(record.kind, PipelineTransitionKind::Released);
+        }
+
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let restarted = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        restarted.restore_pipeline_runs_from_journal().await;
+
+        let state = restarted.state.read().await;
+        assert!(!state.retry_attempts.contains_key("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+    }
+
+    #[tokio::test]
+    async fn whole_issue_retry_recovery_restores_the_fresh_pipeline_cycle() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issue = test_issue("1", "Todo");
+        let issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let dir = tempfile::TempDir::new().unwrap();
+
+        {
+            let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+                issues: Arc::clone(&issues),
+            });
+            let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            });
+            let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+            let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+            let orchestrator = Orchestrator::new(
+                Arc::clone(&config),
+                tracker,
+                runner,
+                workspace_mgr,
+                dir.path(),
+                shutdown_rx,
+            );
+            {
+                let cfg = config.read().await;
+                let dag = build_dag(&cfg.steps).unwrap();
+                let mut run = PipelineRun::new("1".to_string(), 1, dag);
+                run.start();
+                run.mark_running("build", "session-1".to_string());
+                let mut state = orchestrator.state.write().await;
+                state.add_running(&issue, None);
+                state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+            }
+
+            orchestrator
+                .handle_worker_exit(
+                    "1",
+                    "build",
+                    WorkerResult::Failed {
+                        error: "agent crashed".to_string(),
+                        kind: WorkerFailureKind::Runtime,
+                    },
+                )
+                .await;
+
+            let state = orchestrator.state.read().await;
+            assert_eq!(
+                state.retry_attempts.get("1").map(|entry| entry.attempt),
+                Some(2)
+            );
+            assert_eq!(state.get_pipeline_run("1").map(|run| run.cycle), Some(2));
+        }
+
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let restarted = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        restarted.restore_pipeline_runs_from_journal().await;
+
+        let state = restarted.state.read().await;
+        assert_eq!(
+            state.retry_attempts.get("1").map(|entry| entry.attempt),
+            Some(2)
+        );
+        assert_eq!(state.get_pipeline_run("1").map(|run| run.cycle), Some(2));
+        assert!(state.is_claimed("1"));
     }
 }
