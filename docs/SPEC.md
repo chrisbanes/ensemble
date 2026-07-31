@@ -2956,6 +2956,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Config file changes are detected and trigger re-read/re-apply without restart
 - Invalid config reload keeps last known good effective configuration and emits an
   operator-visible error
+- Watcher reloads and API saves serialize candidate acquisition, secret-safe file writes,
+preparation, exact-runtime quiescence, and commit so config generations cannot interleave
+- A valid reload is prepared without publishing candidate values, drains the exact active runtime
+including workers and timeline/transcript persistence, and atomically commits the document,
+observed mtime, config-derived orchestrator state, and an unlaunched replacement before allowing
+the replacement to execute
+- Invalid candidates, preparation failures, and `RuntimeBusy` retain the complete last-known-good
+generation and do not consume the candidate mtime; the same on-disk candidate remains retryable
+- A timed-out replacement leaves its exact one-way-quiescing runtime registered until positive
+completion is proven; it is never relaunched, detached, or replaced concurrently
+- Effective `workspace.root` or ordered `repos` configuration changes are restart-required and must not
+change live workspace, SQLite history/timeline, transcript, journal, or other root-scoped
+resources; API saves return `409 Conflict` and watcher diagnostics expose no candidate values
 - Missing `<config_dir>/config.yaml` returns typed error
 - Invalid YAML returns typed error
 - Root non-map returns typed error

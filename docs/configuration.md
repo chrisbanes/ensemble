@@ -52,6 +52,30 @@ All relative paths in `config.yaml` are resolved relative to the configuration d
 
 This makes configurations portable and self-contained.
 
+## Live reload boundary
+
+The file watcher and all web/desktop save paths share one serialized config
+transaction. Ensemble parses and prepares a candidate without publishing it,
+quiesces the exact active orchestrator runtime, waits for its workers and
+timeline/transcript persistence to drain, and then commits the config document,
+observed file mtime, config-derived orchestrator values, and prepared runtime as
+one generation. The replacement runtime cannot start until that commit is
+complete.
+
+Invalid candidates, preparation failures, and a busy runtime leave the complete
+last-known-good generation active. Their file mtime is not consumed, so the same
+on-disk candidate is retried by a later watcher event or save without requiring
+another edit. A runtime that timed out while quiescing is not relaunched; it
+remains the registered owner until it finishes, after which a retry may replace
+it.
+
+`workspace.root` and the complete ordered `repos` configuration define process-scoped
+filesystem resources. Changing either while Ensemble is running is saved to
+disk but not activated: API saves return `409 Conflict`, and watcher reloads
+emit a restart-required diagnostic. Restart Ensemble to apply the candidate.
+Diagnostics identify only the safe failure category and never include candidate
+values or resolved secrets.
+
 ## Minimal example
 
 The smallest working config uses a local TODO file and a single agent:

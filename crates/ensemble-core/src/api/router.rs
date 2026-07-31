@@ -24,6 +24,9 @@ use utoipa::OpenApi;
 pub struct ConfigRuntime {
     pub config_path: PathBuf,
     pub document_state: Arc<RwLock<ConfigDocumentState>>,
+    /// Serializes candidate acquisition, safe file writes, runtime handover,
+    /// and generation commit so watcher and API reloads cannot interleave.
+    pub reload_coordinator: Arc<tokio::sync::Mutex<()>>,
     /// mtime of the last config file content we have already applied.
     /// The watcher uses this to skip filesystem events whose mtime matches
     /// the content we already loaded, which prevents the watcher from
