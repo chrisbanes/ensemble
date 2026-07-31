@@ -87,8 +87,8 @@ impl WorkspaceManager {
     }
 
     /// Get the workspace path for an immutable issue identity without creating it.
-    pub fn workspace_path(&self, issue_id: &str, identifier: &str) -> PathBuf {
-        self.root.join(issue_workspace_key(issue_id, identifier))
+    pub fn workspace_path(&self, issue_id: &str) -> PathBuf {
+        self.root.join(issue_workspace_key(issue_id))
     }
 
     fn metadata_path(base_path: &Path) -> PathBuf {
@@ -137,17 +137,14 @@ impl WorkspaceManager {
         base_path: &Path,
         metadata: &WorkspaceMetadata,
         issue_id: &str,
-        identifier: &str,
     ) -> Result<(), WorkspaceError> {
-        if metadata.issue_id == issue_id && metadata.issue_identifier == identifier {
+        if metadata.issue_id == issue_id {
             return Ok(());
         }
         Err(WorkspaceError::OwnershipMismatch {
             path: base_path.display().to_string(),
             expected_issue_id: issue_id.to_string(),
-            expected_identifier: identifier.to_string(),
             actual_issue_id: metadata.issue_id.clone(),
-            actual_identifier: metadata.issue_identifier.clone(),
         })
     }
 
@@ -163,7 +160,7 @@ impl WorkspaceManager {
             issue_identifier = identifier,
             "preparing workspace"
         );
-        let workspace_key = issue_workspace_key(issue_id, identifier);
+        let workspace_key = issue_workspace_key(issue_id);
         let base_path = self.root.join(&workspace_key);
 
         // Safety: ensure workspace path is inside root
@@ -178,8 +175,13 @@ impl WorkspaceManager {
                     ),
                 });
             }
-            let metadata = self.load_metadata(&base_path).await?;
-            Self::verify_ownership(&base_path, &metadata, issue_id, identifier)?;
+            let mut metadata = self.load_metadata(&base_path).await?;
+            Self::verify_ownership(&base_path, &metadata, issue_id)?;
+            if metadata.issue_identifier != identifier {
+                self.save_metadata(&base_path, issue_id, identifier, &metadata.branch_date)
+                    .await?;
+                metadata.issue_identifier = identifier.to_string();
+            }
             (false, metadata)
         } else {
             std::fs::create_dir_all(&base_path).map_err(|e| WorkspaceError::CreationFailed {
@@ -217,7 +219,7 @@ impl WorkspaceManager {
                 base_path.clone(),
             );
             info!(workspace = %base_path.display(), "preparing worktrees inside workspace");
-            match coordinator.prepare_worktrees(identifier).await {
+            match coordinator.prepare_worktrees(issue_id).await {
                 Ok(worktrees) => worktrees,
                 Err(e) => {
                     warn!(
@@ -257,12 +259,8 @@ impl WorkspaceManager {
     }
 
     /// Remove a workspace directory and its worktrees for the given immutable issue identity.
-    pub async fn remove_workspace(
-        &self,
-        issue_id: &str,
-        identifier: &str,
-    ) -> Result<(), WorkspaceError> {
-        let workspace_key = issue_workspace_key(issue_id, identifier);
+    pub async fn remove_workspace(&self, issue_id: &str) -> Result<(), WorkspaceError> {
+        let workspace_key = issue_workspace_key(issue_id);
         let base_path = self.root.join(&workspace_key);
 
         self.validate_path_inside_root(&base_path)?;
@@ -270,7 +268,7 @@ impl WorkspaceManager {
             return Ok(());
         }
         let metadata = self.load_metadata(&base_path).await?;
-        Self::verify_ownership(&base_path, &metadata, issue_id, identifier)?;
+        Self::verify_ownership(&base_path, &metadata, issue_id)?;
 
         // Clean up worktrees first - use persisted branch date to avoid date drift
         if !self.repos.is_empty() {
@@ -280,12 +278,11 @@ impl WorkspaceManager {
                 base_path.clone(),
             );
             warn!(workspace = %base_path.display(), "cleaning up worktrees");
-            coordinator
-                .cleanup_worktrees(identifier)
-                .await
-                .map_err(|e| WorkspaceError::CreationFailed {
+            coordinator.cleanup_worktrees(issue_id).await.map_err(|e| {
+                WorkspaceError::CreationFailed {
                     reason: format!("worktree cleanup failed: {e}"),
-                })?;
+                }
+            })?;
         }
 
         // Remove base workspace
@@ -446,10 +443,7 @@ mod tests {
         let sentinel = base_path.join("sentinel");
         std::fs::write(&sentinel, "untouched").unwrap();
 
-        let error = mgr
-            .remove_workspace("NODE_42", "my-repo#42")
-            .await
-            .unwrap_err();
+        let error = mgr.remove_workspace("NODE_42").await.unwrap_err();
 
         assert!(matches!(error, WorkspaceError::OwnershipMismatch { .. }));
         assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");
@@ -458,7 +452,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_ownership_malformed_metadata_blocks_reuse_and_removal() {
         let (_dir, mgr) = setup();
-        let base_path = mgr.workspace_path("NODE_42", "my-repo#42");
+        let base_path = mgr.workspace_path("NODE_42");
         std::fs::create_dir_all(&base_path).unwrap();
         std::fs::write(WorkspaceManager::metadata_path(&base_path), "{not-json").unwrap();
         let sentinel = base_path.join("sentinel");
@@ -469,7 +463,7 @@ mod tests {
             Err(WorkspaceError::MetadataUnavailable { .. })
         ));
         assert!(matches!(
-            mgr.remove_workspace("NODE_42", "my-repo#42").await,
+            mgr.remove_workspace("NODE_42").await,
             Err(WorkspaceError::MetadataUnavailable { .. })
         ));
         assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");
@@ -483,10 +477,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.created_now);
-        assert_eq!(
-            result.workspace_key,
-            issue_workspace_key("NODE_42", "my-repo#42")
-        );
+        assert_eq!(result.workspace_key, issue_workspace_key("NODE_42"));
         assert!(result.base_path.is_dir());
     }
 
@@ -508,15 +499,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prepare_sanitizes_identifier() {
+    async fn workspace_ownership_reuses_and_removes_workspace_after_identifier_changes() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+
+        let first = mgr
+            .prepare_workspace("NODE_42", "old-repo#42")
+            .await
+            .unwrap();
+        let second = mgr
+            .prepare_workspace("NODE_42", "renamed-repo#42")
+            .await
+            .unwrap();
+
+        assert_eq!(first.base_path, second.base_path);
+        assert!(!second.created_now);
+        let first_worktree = first.worktrees.values().next().unwrap();
+        let second_worktree = second.worktrees.values().next().unwrap();
+        assert_eq!(first_worktree.path, second_worktree.path);
+        assert_eq!(first_worktree.branch, second_worktree.branch);
+        let metadata = mgr.load_metadata(&second.base_path).await.unwrap();
+        assert_eq!(metadata.issue_id, "NODE_42");
+        assert_eq!(metadata.issue_identifier, "renamed-repo#42");
+
+        mgr.remove_workspace("NODE_42").await.unwrap();
+        assert!(!first.base_path.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_ownership_distinct_ids_with_colliding_readable_forms_isolate_worktrees() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+
+        let first = mgr.prepare_workspace("a#b", "repo#1").await.unwrap();
+        let second = mgr.prepare_workspace("a_b", "repo#2").await.unwrap();
+        let first_worktree = first.worktrees.values().next().unwrap();
+        let second_worktree = second.worktrees.values().next().unwrap();
+
+        assert_ne!(first.base_path, second.base_path);
+        assert_ne!(first_worktree.path, second_worktree.path);
+        assert_ne!(first_worktree.branch, second_worktree.branch);
+        assert!(first_worktree.path.exists());
+        assert!(second_worktree.path.exists());
+
+        mgr.remove_workspace("a#b").await.unwrap();
+        mgr.remove_workspace("a_b").await.unwrap();
+        assert!(!first.base_path.exists());
+        assert!(!second.base_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_prepare_sanitizes_issue_id() {
         let (_dir, mgr) = setup();
         let result = mgr
-            .prepare_workspace("NODE_123", "acme/repo 123!@#")
+            .prepare_workspace("acme/NODE 123!@#", "acme/repo#123")
             .await
             .unwrap();
         assert_eq!(
             result.workspace_key,
-            issue_workspace_key("NODE_123", "acme/repo 123!@#")
+            issue_workspace_key("acme/NODE 123!@#")
         );
         assert!(result.base_path.is_dir());
     }
@@ -542,20 +585,17 @@ mod tests {
             .await
             .unwrap();
 
-        let ws_path = mgr.workspace_path("NODE_42", "my-repo#42");
+        let ws_path = mgr.workspace_path("NODE_42");
         assert!(ws_path.exists());
 
-        mgr.remove_workspace("NODE_42", "my-repo#42").await.unwrap();
+        mgr.remove_workspace("NODE_42").await.unwrap();
         assert!(!ws_path.exists());
     }
 
     #[tokio::test]
     async fn test_remove_nonexistent_is_ok() {
         let (_dir, mgr) = setup();
-        assert!(mgr
-            .remove_workspace("NODE_MISSING", "nonexistent")
-            .await
-            .is_ok());
+        assert!(mgr.remove_workspace("NODE_MISSING").await.is_ok());
     }
 
     #[tokio::test]
@@ -568,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_at_workspace_path_errors() {
         let (_dir, mgr) = setup();
-        let file_path = mgr.workspace_path("NODE_42", "my-repo#42");
+        let file_path = mgr.workspace_path("NODE_42");
         std::fs::write(&file_path, "not a directory").unwrap();
 
         let result = mgr.prepare_workspace("NODE_42", "my-repo#42").await;
@@ -576,16 +616,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_dot_identifier_uses_safe_workspace_key() {
+    async fn test_dot_issue_id_uses_safe_workspace_key() {
         let (_dir, mgr) = setup();
-        let result = mgr.prepare_workspace("NODE_DOT", ".").await.unwrap();
+        let result = mgr.prepare_workspace(".", "repo#dot").await.unwrap();
         assert!(result.base_path.is_dir());
     }
 
     #[tokio::test]
-    async fn test_dotdot_identifier_uses_safe_workspace_key() {
+    async fn test_dotdot_issue_id_uses_safe_workspace_key() {
         let (_dir, mgr) = setup();
-        let result = mgr.prepare_workspace("NODE_DOTDOT", "..").await.unwrap();
+        let result = mgr.prepare_workspace("..", "repo#dotdot").await.unwrap();
         assert!(result.base_path.is_dir());
     }
 
@@ -615,9 +655,8 @@ mod tests {
     async fn test_remove_workspace_uses_persisted_branch_date() {
         let dir = TempDir::new().unwrap();
 
-        let identifier = "test-issue";
         let issue_id = "NODE_TEST";
-        let workspace_key = issue_workspace_key(issue_id, identifier);
+        let workspace_key = issue_workspace_key(issue_id);
         let test_path = dir.path().join(&workspace_key);
         std::fs::create_dir_all(&test_path).unwrap();
 
@@ -636,7 +675,7 @@ mod tests {
         }];
         let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
 
-        let result = mgr.remove_workspace(issue_id, identifier).await;
+        let result = mgr.remove_workspace(issue_id).await;
         assert!(result.is_err());
         assert!(test_path.exists());
     }
@@ -652,7 +691,7 @@ mod tests {
         }];
         let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
 
-        let ws_path = mgr.workspace_path("NODE_CLEANUP", "cleanup-test");
+        let ws_path = mgr.workspace_path("NODE_CLEANUP");
         std::fs::create_dir_all(&ws_path).unwrap();
         let metadata_path = ws_path.join(".ensemble-workspace.json");
         std::fs::write(
@@ -661,7 +700,7 @@ mod tests {
         )
         .unwrap();
 
-        let remove_result = mgr.remove_workspace("NODE_CLEANUP", "cleanup-test").await;
+        let remove_result = mgr.remove_workspace("NODE_CLEANUP").await;
         assert!(remove_result.is_err());
 
         assert!(
@@ -678,7 +717,7 @@ mod tests {
 
         let identifier = "legacy#42";
         let issue_id = "NODE_LEGACY";
-        let workspace_key = issue_workspace_key(issue_id, identifier);
+        let workspace_key = issue_workspace_key(issue_id);
         let base_path = root.path().join(workspace_key);
         std::fs::create_dir_all(&base_path).unwrap();
 
@@ -692,7 +731,7 @@ mod tests {
             Err(WorkspaceError::MetadataUnavailable { .. })
         ));
         assert!(matches!(
-            mgr.remove_workspace(issue_id, identifier).await,
+            mgr.remove_workspace(issue_id).await,
             Err(WorkspaceError::MetadataUnavailable { .. })
         ));
         assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");
@@ -706,7 +745,7 @@ mod tests {
 
         let identifier = "legacy#43";
         let issue_id = "NODE_LEGACY_METADATA";
-        let workspace_key = issue_workspace_key(issue_id, identifier);
+        let workspace_key = issue_workspace_key(issue_id);
         let base_path = root.path().join(workspace_key);
         std::fs::create_dir_all(&base_path).unwrap();
         std::fs::write(
@@ -722,7 +761,7 @@ mod tests {
             Err(WorkspaceError::MetadataUnavailable { .. })
         ));
         assert!(matches!(
-            mgr.remove_workspace(issue_id, identifier).await,
+            mgr.remove_workspace(issue_id).await,
             Err(WorkspaceError::MetadataUnavailable { .. })
         ));
         assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");

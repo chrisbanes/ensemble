@@ -92,10 +92,7 @@ async fn test_full_config_flow() {
         .unwrap();
     assert!(ws.created_now);
     assert!(ws.base_path.is_dir());
-    assert_eq!(
-        ws.workspace_key,
-        issue_workspace_key(&issue.id, &issue.identifier)
-    );
+    assert_eq!(ws.workspace_key, issue_workspace_key(&issue.id));
 
     // 4. Reuse workspace
     let ws2 = mgr
@@ -106,9 +103,7 @@ async fn test_full_config_flow() {
     assert_eq!(ws.base_path, ws2.base_path);
 
     // 5. Cleanup
-    mgr.remove_workspace(&issue.id, &issue.identifier)
-        .await
-        .unwrap();
+    mgr.remove_workspace(&issue.id).await.unwrap();
     assert!(!ws.base_path.exists());
 }
 
@@ -204,9 +199,7 @@ async fn test_workflow_with_worktrees() {
 
     // Cleanup
     let wt_path = worktree_info.path.clone();
-    mgr.remove_workspace(&issue.id, &issue.identifier)
-        .await
-        .unwrap();
+    mgr.remove_workspace(&issue.id).await.unwrap();
     assert!(!ws.base_path.exists());
     assert!(!wt_path.exists());
 }
@@ -243,10 +236,7 @@ async fn collision_resistant_issue_workspace_lifecycle() {
     assert_eq!(reused.base_path, first_workspace.base_path);
     assert!(!reused.created_now);
 
-    manager
-        .remove_workspace(&first.id, &first.identifier)
-        .await
-        .unwrap();
+    manager.remove_workspace(&first.id).await.unwrap();
     assert!(!first_workspace.base_path.exists());
     assert!(second_workspace.base_path.exists());
 }

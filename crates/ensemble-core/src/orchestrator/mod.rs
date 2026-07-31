@@ -1891,11 +1891,7 @@ impl Orchestrator {
                 };
                 remove_drained_workers(&self.cancellation_registry, &drained.handles);
                 self.cancel_open_interaction(result.1).await;
-                if let Err(error) = self
-                    .workspace_mgr
-                    .remove_workspace(issue_id, &result.0)
-                    .await
-                {
+                if let Err(error) = self.workspace_mgr.remove_workspace(issue_id).await {
                     warn!(
                         identifier = %result.0,
                         error = %error,
@@ -5555,10 +5551,7 @@ impl Orchestrator {
 
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(
-                &input.running_entry.issue_id,
-                &input.running_entry.identifier,
-            )
+            .workspace_path(&input.running_entry.issue_id)
             .display()
             .to_string();
 
@@ -5599,10 +5592,7 @@ impl Orchestrator {
             .max(0) as u64;
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(
-                &input.waiting_entry.issue_id,
-                &input.waiting_entry.identifier,
-            )
+            .workspace_path(&input.waiting_entry.issue_id)
             .display()
             .to_string();
 
@@ -8071,13 +8061,10 @@ agent:
         assert_eq!(
             orchestrator
                 .workspace_mgr
-                .workspace_path(&restored_retry.issue_id, &restored_retry.identifier),
+                .workspace_path(&restored_retry.issue_id),
             temp.path()
                 .join("workspaces")
-                .join(crate::workspace::key::issue_workspace_key(
-                    &issue.id,
-                    &issue.identifier
-                ))
+                .join(crate::workspace::key::issue_workspace_key(&issue.id))
         );
     }
 
@@ -9889,7 +9876,7 @@ agent:
             state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
         }
 
-        let workspace = orchestrator.workspace_mgr.workspace_path("1", "repo#1");
+        let workspace = orchestrator.workspace_mgr.workspace_path("1");
         tokio::fs::create_dir_all(workspace.join(".ensemble"))
             .await
             .unwrap();
@@ -9963,7 +9950,7 @@ agent:
                 state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
             }
 
-            let workspace = orchestrator.workspace_mgr.workspace_path("1", "repo#1");
+            let workspace = orchestrator.workspace_mgr.workspace_path("1");
             tokio::fs::create_dir_all(workspace.join(".ensemble"))
                 .await
                 .unwrap();
@@ -14061,7 +14048,7 @@ agent:
             .prepare_workspace("1", "repo#1")
             .await
             .unwrap();
-        let workspace_path = workspace_mgr.workspace_path("1", "repo#1");
+        let workspace_path = workspace_mgr.workspace_path("1");
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
@@ -14124,7 +14111,7 @@ agent:
         });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
-        let workspace_path = workspace_mgr.workspace_path("1", "repo#1");
+        let workspace_path = workspace_mgr.workspace_path("1");
         std::fs::create_dir_all(&workspace_path).unwrap();
         std::fs::write(
             workspace_path.join(".ensemble-workspace.json"),
@@ -14315,7 +14302,7 @@ agent:
         );
         let workspace_path = orchestrator
             .workspace_mgr
-            .workspace_path("1", "repo#1")
+            .workspace_path("1")
             .display()
             .to_string();
 
@@ -14720,7 +14707,7 @@ agent:
             .prepare_workspace("1", "repo#1")
             .await
             .unwrap();
-        let workspace_path = workspace_mgr.workspace_path("1", "repo#1");
+        let workspace_path = workspace_mgr.workspace_path("1");
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
@@ -16290,7 +16277,7 @@ agent:
     async fn reconciliation_drain_terminal_waits_before_release_and_cleanup() {
         let (orchestrator, dir, issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
-        let workspace_path = orchestrator.workspace_mgr.workspace_path("1", "repo#1");
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("1");
         assert!(workspace_path.exists());
         issues.write().await[0].state = "Done".to_string();
 
@@ -16337,7 +16324,7 @@ agent:
     async fn reconciliation_drain_inactive_waits_before_release_without_cleanup() {
         let (orchestrator, dir, issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
-        let workspace_path = orchestrator.workspace_mgr.workspace_path("1", "repo#1");
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("1");
         issues.write().await[0].state = "Backlog".to_string();
 
         let tick = tokio::spawn({
@@ -16467,7 +16454,7 @@ agent:
     async fn reconciliation_drain_stalled_timeout_retains_owner_then_retries_once() {
         let (orchestrator, _dir, _issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
-        let workspace_path = orchestrator.workspace_mgr.workspace_path("1", "repo#1");
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("1");
         orchestrator.config.write().await.agent.stall_timeout_ms = 1;
         let identity = {
             let mut state = orchestrator.state.write().await;

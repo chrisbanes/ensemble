@@ -1,5 +1,6 @@
 use crate::config::ensemble::RepoConfig;
 use crate::error::WorktreeError;
+use crate::workspace::key::issue_workspace_key;
 use crate::workspace::worktree::{
     attach_worktree, branch_exists, create_worktree, delete_branch_if_exists, pull_worktree,
     remove_orphaned_worktree, remove_worktree, sanitize_branch_name, worktree_exists,
@@ -243,7 +244,7 @@ impl WorktreeCoordinator {
     }
 
     fn format_branch_name(&self, issue_id: &str) -> String {
-        let sanitized = sanitize_branch_name(issue_id);
+        let sanitized = sanitize_branch_name(&issue_workspace_key(issue_id));
         format!("ensemble-{}-{}", self.base_date, sanitized)
     }
 
@@ -283,6 +284,9 @@ mod tests {
         );
 
         let branch = coordinator.format_branch_name("my-repo#42");
-        assert_eq!(branch, "ensemble-2026-03-30-my-repo-42");
+        assert_eq!(
+            branch,
+            "ensemble-2026-03-30-my-repo-42-cd63d98cfaa29e655eee811690c95794e4c23c8abc06242fc0b41f72e8687ef5"
+        );
     }
 }

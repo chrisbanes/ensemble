@@ -16,6 +16,7 @@ use ensemble_core::observability::events::EventBus;
 use ensemble_core::orchestrator::state::{OrchestratorState, WaitingOnHumanEntry};
 use ensemble_core::tracker::model::{Issue, RetryEntry, RunningEntry};
 use ensemble_core::transcript::events::TranscriptEventBus;
+use ensemble_core::workspace::key::issue_workspace_key;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
@@ -293,7 +294,10 @@ async fn test_get_issue_detail_running() {
     // Verify workspace info
     let workspace = json.get("workspace").unwrap();
     assert!(workspace.get("path").is_some());
-    assert!(workspace["path"].as_str().unwrap().contains("my-repo_42"));
+    assert!(workspace["path"]
+        .as_str()
+        .unwrap()
+        .ends_with(&issue_workspace_key("NODE_123")));
 
     // Verify attempts info
     let attempts = json.get("attempts").unwrap();

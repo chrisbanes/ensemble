@@ -216,7 +216,7 @@ fn issue_snapshot_from_history_record(
     };
 
     let workspace_path = if record.workspace_path.is_empty() {
-        let key = issue_workspace_key(&record.issue_id, &record.issue_identifier);
+        let key = issue_workspace_key(&record.issue_id);
         format!("{}/{}", workspace_root, key)
     } else {
         record.workspace_path.clone()
@@ -841,7 +841,7 @@ mod tests {
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let path = json["workspace"]["path"].as_str().unwrap();
-        assert!(path.ends_with(&issue_workspace_key("dot", ".")));
+        assert!(path.ends_with(&issue_workspace_key("dot")));
     }
 
     #[tokio::test]

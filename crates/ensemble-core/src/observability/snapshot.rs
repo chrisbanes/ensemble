@@ -531,7 +531,7 @@ pub async fn build_issue_snapshot(
         (entry.issue_id.clone(), entry.identifier.clone())
     };
 
-    let workspace_key = issue_workspace_key(&issue_id, &issue_identifier);
+    let workspace_key = issue_workspace_key(&issue_id);
     let workspace_path = format!("{}/{}", workspace_root, workspace_key);
 
     let status = if running_entry.is_some() {
@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_identity_path_running_snapshot_uses_identity_pair() {
+    async fn workspace_identity_path_running_snapshot_uses_immutable_issue_id() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None).await;
 
@@ -1188,10 +1188,7 @@ mod tests {
         assert_eq!(detail.status, "running");
         assert_eq!(
             detail.workspace.path,
-            format!(
-                "/tmp/workspaces/{}",
-                issue_workspace_key("NODE_123", "my-repo#42")
-            )
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_123"))
         );
         assert!(detail.running.is_some());
         assert!(detail.retry.is_none());
@@ -1202,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_identity_path_retry_snapshot_uses_identity_pair() {
+    async fn workspace_identity_path_retry_snapshot_uses_immutable_issue_id() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#99", "/tmp/workspaces", None).await;
 
@@ -1213,10 +1210,7 @@ mod tests {
         assert_eq!(detail.status, "retrying");
         assert_eq!(
             detail.workspace.path,
-            format!(
-                "/tmp/workspaces/{}",
-                issue_workspace_key("NODE_456", "my-repo#99")
-            )
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_456"))
         );
         assert!(detail.running.is_none());
         assert!(detail.retry.is_some());
@@ -1234,7 +1228,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_identity_path_waiting_snapshot_uses_identity_pair() {
+    async fn workspace_identity_path_waiting_snapshot_uses_immutable_issue_id() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces", None)
             .await
@@ -1243,10 +1237,7 @@ mod tests {
         assert_eq!(detail.status, "waiting_on_human");
         assert_eq!(
             detail.workspace.path,
-            format!(
-                "/tmp/workspaces/{}",
-                issue_workspace_key("NODE_789", "my-repo#77")
-            )
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_789"))
         );
         let interaction = detail.current_interaction.unwrap();
         assert_eq!(interaction.interaction_request_id, "interaction-1");
@@ -1254,7 +1245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_identity_path_finalizing_snapshot_uses_identity_pair() {
+    async fn workspace_identity_path_finalizing_snapshot_uses_immutable_issue_id() {
         let mut state = build_test_state();
         state.set_finalize_state(
             "NODE_FINAL",
@@ -1271,10 +1262,7 @@ mod tests {
 
         assert_eq!(
             detail.workspace.path,
-            format!(
-                "/tmp/workspaces/{}",
-                issue_workspace_key("NODE_FINAL", "my-repo#final")
-            )
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_FINAL"))
         );
     }
 
@@ -1409,10 +1397,7 @@ mod tests {
         assert_eq!(detail.workflow_steps[1].state, "running");
         assert_eq!(
             detail.workspace.path,
-            format!(
-                "/tmp/workspaces/{}",
-                issue_workspace_key("NODE_123", "my-repo#42")
-            )
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_123"))
         );
     }
 
