@@ -44,6 +44,10 @@ enum Command {
         /// HTTP server port.
         #[arg(long, env = "PORT")]
         port: Option<u16>,
+
+        /// Allow an unauthenticated, unsupported non-loopback HTTP listener.
+        #[arg(long)]
+        unsafe_allow_remote: bool,
     },
     /// Open the ensemble configuration directory in the system file manager.
     OpenConfigDir,
@@ -137,11 +141,16 @@ async fn main() -> ExitCode {
         }
         Some(Command::Run) => commands::run::execute(commands::run::RunArgs { config_dir }).await,
         #[cfg(feature = "web-ui")]
-        Some(Command::Web { host, port }) => {
+        Some(Command::Web {
+            host,
+            port,
+            unsafe_allow_remote,
+        }) => {
             commands::web::execute(commands::web::WebArgs {
                 config_dir,
                 host,
                 port,
+                unsafe_allow_remote,
             })
             .await
         }
@@ -245,10 +254,15 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "web"]);
         match cli.command {
-            Some(Command::Web { host: h, port: p }) => {
+            Some(Command::Web {
+                host: h,
+                port: p,
+                unsafe_allow_remote,
+            }) => {
                 assert_eq!(cli.config.config_dir, None);
                 assert_eq!(h, "127.0.0.1");
                 assert_eq!(p, None);
+                assert!(!unsafe_allow_remote);
             }
             other => panic!("expected Web subcommand, got {:?}", other),
         }
@@ -270,11 +284,31 @@ mod tests {
             "8080",
         ]);
         match cli.command {
-            Some(Command::Web { host: h, port: p }) => {
+            Some(Command::Web {
+                host: h,
+                port: p,
+                unsafe_allow_remote,
+            }) => {
                 assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")));
                 assert_eq!(h, "0.0.0.0");
                 assert_eq!(p, Some(8080));
+                assert!(!unsafe_allow_remote);
             }
+            other => panic!("expected Web subcommand, got {:?}", other),
+        }
+        restore_env(host, port);
+    }
+
+    #[cfg(feature = "web-ui")]
+    #[test]
+    fn test_cli_parse_web_unsafe_allow_remote() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from(["ensemble", "web", "--unsafe-allow-remote"]);
+        match cli.command {
+            Some(Command::Web {
+                unsafe_allow_remote,
+                ..
+            }) => assert!(unsafe_allow_remote),
             other => panic!("expected Web subcommand, got {:?}", other),
         }
         restore_env(host, port);

@@ -4,6 +4,7 @@
 use chrono::Utc;
 use ensemble_core::agent::cancellation::new_cancellation_registry;
 use ensemble_core::api::router::{create_api_router, AppState, ConfigRuntime};
+use ensemble_core::api::security::ApiExposure;
 use ensemble_core::config::draft::{ConfigDocumentState, ConfigStateKind, DraftValidationReport};
 use ensemble_core::config::ensemble::ConcurrencyConfig;
 use ensemble_core::history_store::store::HistoryStore;
@@ -20,6 +21,7 @@ use ensemble_core::workspace::key::issue_workspace_key;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 use tokio::time::{timeout, Duration};
 
@@ -188,7 +190,7 @@ async fn create_interaction(app_state: &AppState, interaction: InteractionReques
 
 /// Start an axum test server and return the base URL.
 async fn start_test_server(app_state: AppState) -> String {
-    let router = create_api_router(app_state);
+    let router = create_api_router(app_state, ApiExposure::TrustedLocal);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let base_url = format!("http://{}", addr);
@@ -198,6 +200,66 @@ async fn start_test_server(app_state: AppState) -> String {
     });
 
     base_url
+}
+
+async fn raw_websocket_handshake(
+    base_url: &str,
+    host: &str,
+    origin: &str,
+) -> axum::http::StatusCode {
+    let addr = base_url
+        .strip_prefix("http://")
+        .unwrap()
+        .parse::<std::net::SocketAddr>()
+        .unwrap();
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "GET /ws/events/my-repo%2342 HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Origin: {origin}\r\n\
+         Connection: Upgrade\r\n\
+         Upgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+         \r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+
+    let mut response = [0_u8; 1024];
+    let read = timeout(Duration::from_secs(2), stream.read(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    let response = String::from_utf8_lossy(&response[..read]);
+    let status_line = response.lines().next().unwrap();
+    let status = status_line.split_whitespace().nth(1).unwrap();
+    axum::http::StatusCode::from_bytes(status.as_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn websocket_security_accepts_local_same_origin_handshake() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    let base_url = start_test_server(app_state).await;
+    let authority = base_url.strip_prefix("http://").unwrap();
+
+    let status = raw_websocket_handshake(&base_url, authority, &base_url).await;
+
+    assert_eq!(status, axum::http::StatusCode::SWITCHING_PROTOCOLS);
+}
+
+#[tokio::test]
+async fn websocket_security_rejects_foreign_origin_and_host_before_upgrade() {
+    let (app_state, _temp_dir) = build_populated_app_state();
+    let base_url = start_test_server(app_state).await;
+    let authority = base_url.strip_prefix("http://").unwrap();
+
+    let foreign_origin =
+        raw_websocket_handshake(&base_url, authority, "http://attacker.example").await;
+    let hostile_host =
+        raw_websocket_handshake(&base_url, "attacker.example", "http://attacker.example").await;
+
+    assert_eq!(foreign_origin, axum::http::StatusCode::FORBIDDEN);
+    assert_eq!(hostile_host, axum::http::StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

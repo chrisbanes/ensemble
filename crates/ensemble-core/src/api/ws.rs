@@ -1,4 +1,5 @@
 use crate::api::router::AppState;
+use crate::api::security::{validate_websocket_headers, ApiExposure};
 use crate::interaction::store::InteractionStore;
 use crate::observability::events::PipelineEvent;
 use crate::observability::snapshot::{
@@ -7,7 +8,9 @@ use crate::observability::snapshot::{
 use crate::transcript::model::TranscriptRecord;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
-use axum::response::IntoResponse;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Extension;
 use futures_util::stream::StreamExt;
 use futures_util::SinkExt;
 use serde::Serialize;
@@ -37,8 +40,16 @@ pub async fn ws_events(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path(identifier): Path<String>,
-) -> impl IntoResponse {
+    Extension(exposure): Extension<ApiExposure>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = validate_websocket_headers(exposure, &headers) {
+        warn!(%error, "rejecting WebSocket upgrade");
+        return (StatusCode::FORBIDDEN, error.to_string()).into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_ws(socket, state, identifier))
+        .into_response()
 }
 
 async fn handle_ws(socket: WebSocket, state: AppState, identifier: String) {

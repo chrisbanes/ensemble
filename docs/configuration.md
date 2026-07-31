@@ -38,6 +38,25 @@ This opens the resolved configuration directory in your system's file manager. I
 
 **Legacy note:** The old `ENSEMBLE_CONFIG` environment variable and `--config` flag are no longer supported. Use `ENSEMBLE_CONFIG_DIR` and `--config-dir` instead.
 
+## Web listener security
+
+HTTP listener settings are command-line runtime settings, not `config.yaml` fields. The web and
+desktop dashboards expose unauthenticated control and configuration APIs for one trusted local
+operator. `ensemble web` defaults to `127.0.0.1` and rejects a resolved non-loopback `--host`
+before loading configuration, starting watchers, or starting the orchestrator. The desktop host is
+always loopback-only.
+
+Remote binding is available only as this conspicuous opt-in:
+
+```sh
+ensemble web --host 192.168.1.20 --port 3000 --unsafe-allow-remote
+```
+
+`--unsafe-allow-remote` does not enable authentication, authorization, TLS, reverse-proxy trust, or
+multi-user operation. It is unsupported and should only be used when the network boundary is fully
+trusted. WebSocket upgrades require a syntactically valid HTTP(S) `Origin` whose authority exactly
+matches `Host`; trusted-local listeners additionally accept only `localhost` or loopback IP hosts.
+
 ## Auto-loading .env
 
 If a `.env` file exists in the configuration directory, Ensemble automatically loads it before expanding `$VAR` references in the configuration. This means you don't need to manually source `.env` files—environment variables defined there are automatically available for config expansion.
