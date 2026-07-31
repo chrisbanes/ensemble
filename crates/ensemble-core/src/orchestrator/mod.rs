@@ -758,6 +758,16 @@ impl Orchestrator {
                     self.dispatch_issue(issue, None).await;
                 }
                 Ok(CandidateRestoreOutcome::Parked) => {}
+                Err(
+                    error @ EnsembleError::Agent(AgentError::DurableSequenceUnavailable { .. }),
+                ) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        identifier = %issue.identifier,
+                        error = %error,
+                        "failed to restore live pipeline journal before dispatch, leaving issue undispatched"
+                    );
+                }
                 Err(error) => {
                     warn!(
                         issue_id = %issue.id,
@@ -3940,6 +3950,36 @@ impl Orchestrator {
         if !is_pending_terminal {
             run.normalize_stale_running_steps();
         }
+        {
+            let state = self.state.read().await;
+            if state.get_pipeline_run(&record.issue_id).is_some()
+                || state.is_running(&record.issue_id)
+            {
+                return Ok(());
+            }
+        }
+        let restored_timeline_sequence = if is_pending_terminal {
+            None
+        } else if let Some(run_id) = &record.run_id {
+            let history_store = self.history_store.as_ref().ok_or_else(|| {
+                AgentError::DurableSequenceUnavailable {
+                    run_id: run_id.clone(),
+                    reason: "history store is unavailable".to_string(),
+                }
+            })?;
+            Some(
+                history_store
+                    .max_timeline_sequence(run_id)
+                    .await
+                    .map_err(|error| AgentError::DurableSequenceUnavailable {
+                        run_id: run_id.clone(),
+                        reason: error.to_string(),
+                    })?
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
 
         let mut state = self.state.write().await;
         if state.get_pipeline_run(&record.issue_id).is_some() || state.is_running(&record.issue_id)
@@ -3954,6 +3994,9 @@ impl Orchestrator {
         }
         state.add_claimed(&record.issue_id);
         if let Some(run_id) = record.run_id.clone() {
+            if let Some(maximum) = restored_timeline_sequence {
+                state.seed_timeline_sequence(&run_id, maximum);
+            }
             state.issue_run_ids.insert(record.issue_id.clone(), run_id);
         }
 
@@ -7411,6 +7454,166 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    fn make_restart_test_orchestrator(
+        temp: &tempfile::TempDir,
+        cfg: &EnsembleConfig,
+        issue: &Issue,
+    ) -> (Orchestrator, Arc<RwLock<OrchestratorState>>) {
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let workspace_root = temp.path().join("workspaces");
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config: Arc::new(RwLock::new(cfg.clone())),
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root,
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+        (orchestrator, state)
+    }
+
+    #[tokio::test]
+    async fn restore_pipeline_run_continues_timeline_sequence_across_restarts() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_retry_step_config();
+        let issue = test_issue("1", "Todo");
+        let (setup, _) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        setup
+            .history_store
+            .as_ref()
+            .unwrap()
+            .append_timeline_event(&crate::timeline::model::TimelineEventRecord {
+                run_id: "run-1".to_string(),
+                issue_identifier: issue.identifier.clone(),
+                sequence: 7,
+                timestamp: Utc::now(),
+                event_type: "output".to_string(),
+                step_name: Some("build".to_string()),
+                attempt: 1,
+                detail: "before restart".to_string(),
+                verdict: None,
+                tool_name: None,
+            })
+            .await
+            .unwrap();
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_failed("build", "manual halt".to_string());
+        setup
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("manual halt".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        drop(setup);
+
+        let (mut first_restart, first_state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        first_restart.restore_pipeline_runs_from_journal().await;
+        let first_sequence = first_state.write().await.next_timeline_sequence("run-1");
+        assert_eq!(first_sequence, 8);
+        first_restart
+            .publish_pipeline_event(
+                Some("run-1".to_string()),
+                Some(first_sequence),
+                1,
+                PipelineEvent::Output {
+                    issue_identifier: issue.identifier.clone(),
+                    timestamp: Utc::now(),
+                    step_name: "build".to_string(),
+                    detail: "after first restart".to_string(),
+                },
+            )
+            .await;
+        first_restart
+            .timeline_persistence
+            .as_mut()
+            .unwrap()
+            .flush()
+            .await;
+        drop(first_restart);
+
+        let (second_restart, second_state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        second_restart.restore_pipeline_runs_from_journal().await;
+        let second_sequence = second_state.write().await.next_timeline_sequence("run-1");
+        assert_eq!(second_sequence, 9);
+    }
+
+    #[tokio::test]
+    async fn handle_tick_does_not_fresh_dispatch_when_timeline_restore_fails() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_retry_step_config();
+        let issue = test_issue("1", "Todo");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_failed("build", "manual halt".to_string());
+        let halted_record = orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("manual halt".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        orchestrator.history_store = None;
+
+        orchestrator.handle_tick().await;
+
+        let state = state.read().await;
+        assert!(state.get_pipeline_run(&issue.id).is_none());
+        assert!(!state.is_claimed(&issue.id));
+        assert!(!state.is_running(&issue.id));
+        drop(state);
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert!(!records.iter().any(|record| {
+            record.seq > halted_record.seq && record.kind == PipelineTransitionKind::StepRunning
+        }));
     }
 
     #[tokio::test]

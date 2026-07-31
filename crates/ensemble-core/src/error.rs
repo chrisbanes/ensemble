@@ -106,6 +106,8 @@ pub enum AgentError {
     SessionStartupFailed { reason: String },
     #[error("io error: {reason}")]
     IoError { reason: String },
+    #[error("durable sequence unavailable for run '{run_id}': {reason}")]
+    DurableSequenceUnavailable { run_id: String, reason: String },
     #[error("invalid agent command '{command}': {reason}")]
     InvalidAgentCommand { command: String, reason: String },
     #[error("hook failed: {reason}")]

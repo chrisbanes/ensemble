@@ -275,6 +275,14 @@ impl OrchestratorState {
         *entry
     }
 
+    pub fn seed_timeline_sequence(&mut self, run_id: &str, maximum: u64) {
+        let entry = self
+            .timeline_sequences
+            .entry(run_id.to_string())
+            .or_insert(maximum);
+        *entry = (*entry).max(maximum);
+    }
+
     /// Add an issue ID to the claimed set.
     pub fn add_claimed(&mut self, issue_id: &str) {
         self.claimed.insert(issue_id.to_string());
