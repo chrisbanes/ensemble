@@ -275,12 +275,7 @@ mod tests {
         start_or_replace_registered_orchestrator(&prepared.app_state)
             .await
             .unwrap();
-        assert!(prepared
-            .app_state
-            .orchestrator_runtime
-            .lock()
-            .unwrap()
-            .is_some());
+        assert!(prepared.app_state.orchestrator_runtime.is_registered());
 
         std::fs::write(&config_path, "tracker: [").unwrap();
 
@@ -297,12 +292,7 @@ mod tests {
             doc.active_config.as_ref().unwrap().polling.interval_ms,
             1000
         );
-        assert!(prepared
-            .app_state
-            .orchestrator_runtime
-            .lock()
-            .unwrap()
-            .is_some());
+        assert!(prepared.app_state.orchestrator_runtime.is_registered());
         drop(doc);
 
         let runtime = take_registered_orchestrator(&prepared.app_state)

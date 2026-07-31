@@ -1073,6 +1073,17 @@ claim state.
    - Claim removed because issue is terminal, non-active, missing, or retry path completed without
      re-dispatch.
 
+Every live worker is also registered by an exact in-memory identity:
+`issue_id`, stable pipeline `run_id`, pipeline `cycle`, `step_name`, and the owning
+`RunningEntry.started_at`. The registry retains that identity's cancellation and completion handles
+until the worker's local event channel has closed and every event has been forwarded. More than one
+identity-distinct handle may temporarily exist for an issue, and issue-wide cancellation signals all
+of them. Worker event channels remain bounded; while reconciliation or shutdown awaits bridge
+completion, the lifecycle authority continues consuming the orchestrator-facing queue so forwarding
+can quiesce without bypassing that memory bound. Reconciliation discards events for the issue whose
+disposition it owns and applies normal identity checks to unrelated events; shutdown discards all
+worker events after marking every live handle as drain-owned.
+
 Important nuance:
 
 - A successful worker exit does not mean the issue is done forever.
@@ -1131,15 +1142,30 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
 
 - `Reconciliation State Refresh`
-  - Stop runs whose issue states are terminal or no longer active.
+  - Mark every registered worker for the issue as reconciliation-owned.
+  - Cancel and drain those workers, then revalidate the exact running attempt and pipeline cycle.
+  - Only after successful revalidation, stop runs whose issue states are terminal or no longer
+    active.
 
 - `Stall Timeout`
-  - Kill worker and schedule retry.
+  - Mark, cancel, and drain every worker for the issue.
+  - Revalidate the exact owner before removing the running entry and scheduling its retry.
 
 ### 7.4 Idempotency and Recovery Rules
 
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are required before launching any worker.
+- Worker updates and exits are accepted only when their full worker identity still owns the running
+  entry, pipeline cycle, and running step. Events from superseded identities are ignored, and a
+  reconciliation-owned exit never enters normal success, failure, or retry handling.
+- Graceful shutdown enters a quiescing runtime state: it stops polling and dispatch, marks and
+  cancels every registered worker, retains the sole orchestrator event receiver, and pumps while
+  discarding events until every bridge completes. Persistence flush and runtime completion happen
+  only after this proof, and only successfully drained handles are removed.
+- Runtime replacement publishes the old runtime as quiescing before it waits. A bounded replacement
+  wait that times out or is cancelled leaves that exact runtime, receiver, and task registered and
+  returns a typed busy error; no replacement launches until a later caller observes both semantic
+  quiescence and completion of the exact registered runtime task.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (no durable orchestrator DB required).
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
@@ -1250,17 +1276,41 @@ Part A: Stall detection
 - For each running issue, compute `elapsed_ms` since:
   - `last_agent_timestamp` if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > agent.stall_timeout_ms`, terminate the worker and queue a retry.
+- If `elapsed_ms > agent.stall_timeout_ms`, mark every registered worker for the issue as
+  reconciliation-owned, signal cancellation, and await all captured completion handles.
+- Completion means each local worker event channel has closed and every event, including the final
+  exit, has been forwarded to the orchestrator.
+- Recheck each candidate against its current activity timestamp immediately before cancellation,
+  because draining an earlier issue may apply a newer event for a later candidate.
+- Refresh each terminal or non-active tracker candidate immediately before cancellation, because
+  draining an earlier issue may apply an event that changes a later candidate's tracker state.
+- After draining, revalidate the same running attempt and pipeline cycle before removing the running
+  entry and queueing the existing failure retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
 
 - Fetch current issue states for all running issue IDs.
 - For each running issue:
-  - If tracker state is terminal: terminate worker and clean workspace.
+  - If tracker state is terminal: drain and revalidate the worker, then release state and clean the
+    workspace.
   - If tracker state is still active: update the in-memory issue snapshot.
-  - If tracker state is neither active nor terminal: terminate worker without workspace cleanup.
+  - If tracker state is neither active nor terminal: drain and revalidate the worker, then release
+    state without workspace cleanup.
 - If state refresh fails, keep workers running and try again on the next tick.
+
+The drain wait never holds the worker-registry mutex or an orchestrator-state guard. If draining
+times out or ownership changes before commit, reconciliation leaves the running entry, claim,
+pipeline snapshot, workspace, and marked worker handles intact; a later tick may retry. This
+pending drain is revisited before fresh stall and tracker scans even if its original trigger has
+cleared. After quiescence, reconciliation refreshes tracker state and stall activity again. It
+commits the current terminal, inactive, or stalled disposition; if the issue is active after its
+worker was already cancelled, it uses the existing failure-retry path rather than leaving a
+workerless running claim. Each successful disposition removes its exact handles and appends history,
+schedules retry, or starts cleanup once. This live-worker boundary is separate from persisted
+pending-terminal reconciliation: configured
+completion has already ended agent work and follows the journaled terminal-transition path through
+confirmed `Released` without waiting for an in-memory worker.
 
 ### 8.6 Startup Terminal Workspace Cleanup
 
@@ -2337,6 +2387,18 @@ API design notes:
   - Keep current workers.
   - Retry on next tick.
 
+- Reconciliation worker-drain timeout or ownership mismatch:
+  - Retain the running entry, claim, pipeline snapshot, workspace, and reconciliation-owned worker
+    handles.
+  - Do not append stopped history, schedule a replacement, release state, or remove files.
+  - Retry reconciliation on a later tick.
+
+- Runtime replacement timeout or cancelled wait:
+  - Keep the exact old runtime registered as quiescing with its event receiver and task.
+  - Return a typed runtime-busy error.
+  - Do not abort the old runtime, clear active-worker handles, or launch a replacement.
+  - A later replacement attempt may proceed only after old-runtime completion is observed.
+
 - Dashboard/log failures:
   - Do not crash the orchestrator.
 
@@ -2348,6 +2410,8 @@ After restart:
 
 - No retry timers are restored from prior process memory.
 - No running sessions are assumed recoverable.
+- Active-worker identities, cancellation tokens, and completion handles are intentionally
+  in-memory; stale `Running` steps are normalized rather than restored as live workers.
 - Service recovers by:
   - startup restoration of live pipeline journal snapshots
   - retrying pending terminal tracker transitions before candidate dispatch, without rerunning
@@ -2363,9 +2427,12 @@ Operators can control behavior by:
 
 - Editing `config.yaml` (pipeline config and most runtime settings).
 - `config.yaml` changes should be detected and re-applied automatically without restart.
+- If applying a configuration change requires replacing a runtime that is still quiescing, surface
+  the typed busy error and keep the old runtime registered. Transactional configuration-document
+  rollback is a separate concern.
 - Changing issue states in the tracker:
-  - terminal state -> running session is stopped and workspace cleaned when reconciled
-  - non-active state -> running session is stopped without cleanup
+  - terminal state -> running session is cancelled and drained before release and workspace cleanup
+  - non-active state -> running session is cancelled and drained before release without cleanup
 - Restarting the service for process recovery or deployment (not as the normal path for applying
   workflow config changes).
 
@@ -2531,7 +2598,29 @@ on_tick(state):
 
 ```text
 function reconcile_running_issues(state):
-  state = reconcile_stalled_runs(state)
+  for issue_id in registry.pending_reconciliation_issue_ids():
+    owner = capture_running_attempt_and_pipeline_cycle(state, issue_id)
+    handles = registry.mark_and_cancel_all(issue_id)
+    if not await_all_completion(handles, timeout=worker_drain_timeout):
+      continue
+    disposition = refresh_tracker_and_stall_disposition(issue_id)
+    if not owner_still_matches(state, issue_id, owner):
+      continue
+    state = commit_current_disposition_once(state, issue_id, disposition)
+    registry.remove_exact(handles)
+
+  for issue_id in find_stalled_runs(state):
+    if not issue_is_still_stalled(state, issue_id):
+      continue
+    owner = capture_running_attempt_and_pipeline_cycle(state, issue_id)
+    handles = registry.mark_and_cancel_all(issue_id)
+    if not await_all_completion(handles, timeout=worker_drain_timeout):
+      continue
+    disposition = refresh_tracker_and_stall_disposition(issue_id)
+    if not owner_still_matches(state, issue_id, owner):
+      continue
+    state = commit_current_disposition_once(state, issue_id, disposition)
+    registry.remove_exact(handles)
 
   running_ids = keys(state.running)
   if running_ids is empty:
@@ -2544,32 +2633,27 @@ function reconcile_running_issues(state):
 
   for issue in refreshed:
     if issue.state in terminal_states:
-      state = terminate_running_issue(state, issue.id, cleanup_workspace=true)
+      state = drain_revalidate_and_terminate(state, issue.id, cleanup_workspace=true)
     else if issue.state in reconciliation_active_states:
       state.running[issue.id].issue = issue
     else:
-      state = terminate_running_issue(state, issue.id, cleanup_workspace=false)
+      state = drain_revalidate_and_terminate(state, issue.id, cleanup_workspace=false)
 
   return state
 ```
+
+`drain_revalidate_and_terminate` captures the running attempt and pipeline cycle, marks and cancels
+every issue worker, waits outside all locks while pumping the bounded event receiver, refreshes the
+current tracker/stall disposition, and mutates state only if the captured owner still matches.
+Timeout or mismatch retains all state and handles. Workspace removal, if requested, begins only
+after the successful drain and ownership commit.
 
 ### 16.4 Dispatch One Issue
 
 ```text
 function dispatch_issue(issue, state, attempt):
-  worker = spawn_worker(
-    fn -> run_agent_attempt(issue, attempt, parent_orchestrator_pid) end
-  )
-
-  if worker spawn failed:
-    return schedule_retry(state, issue.id, next_attempt(attempt), {
-      identifier: issue.identifier,
-      error: "failed to spawn agent"
-    })
-
+  attempt_started_at = now_utc()
   state.running[issue.id] = {
-    worker_handle,
-    monitor_handle,
     identifier: issue.identifier,
     issue,
     session_id: null,
@@ -2584,18 +2668,47 @@ function dispatch_issue(issue, state, attempt):
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
     retry_attempt: normalize_attempt(attempt),
-    started_at: now_utc()
+    started_at: attempt_started_at
   }
-
   state.claimed.add(issue.id)
   state.retry_attempts.remove(issue.id)
+
+  identity = {
+    issue_id: issue.id,
+    run_id: state.pipeline_runs[issue.id].run_id,
+    cycle: state.pipeline_runs[issue.id].cycle,
+    step_name: selected_step.name,
+    started_at: attempt_started_at
+  }
+  local_events = create_worker_event_channel()
+  completion = create_completion_signal()
+  registry.register(identity, cancellation_token, completion)
+  bridge(local_events, fn:
+    for event in local_events:
+      if not send(orchestrator_channel, {identity, event}):
+        return_without_signalling_completion
+    signal(completion)
+  )
+
+  worker = spawn_worker(
+    fn -> run_agent_attempt(issue, attempt, local_events) end
+  )
+
+  if worker spawn failed:
+    registry.remove_exact(identity)
+    state.running.remove(issue.id)
+    return schedule_retry(state, issue.id, next_attempt(attempt), {
+      identifier: issue.identifier,
+      error: "failed to spawn agent"
+    })
+
   return state
 ```
 
 ### 16.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
-function run_agent_attempt(issue, attempt, orchestrator_channel):
+function run_agent_attempt(issue, attempt, local_events):
   workspace = workspace_manager.create_for_issue(issue.identifier)
   if workspace failed:
     fail_worker("workspace error")
@@ -2622,7 +2735,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       session=session,
       prompt=prompt,
       issue=issue,
-      on_message=(msg) -> send(orchestrator_channel, {agent_update, issue.id, msg})
+      on_message=(msg) -> send(local_events, {agent_update, issue.id, msg})
     )
 
     if turn_result failed:
@@ -2649,8 +2762,14 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   acp_client.cancel_session(session)
   run_hook_best_effort("after_run", workspace.path)
 
-  exit_normal()
+  send(local_events, {worker_exit, issue.id, normal})
+  close(local_events)
 ```
+
+The worker sends its final exit through the same local channel. The bridge signals completion only
+after that channel closes and all prior events have been forwarded. The orchestrator validates the
+envelope's full identity before applying an update or exit; it ignores stale events and acknowledges
+a reconciliation-owned exit without normal exit or retry transitions.
 
 ### 16.6 Worker Exit and Retry Handling
 
@@ -2701,6 +2820,44 @@ on_retry_timer(issue_id, state):
 
   return dispatch_issue(issue, state, attempt=retry_entry.attempt)
 ```
+
+### 16.7 Runtime Quiescence and Replacement
+
+```text
+function replace_registered_runtime(prepared_runtime, timeout):
+  lock registered_runtime:
+    if current is quiescing_for_shutdown:
+      return runtime_busy
+    if current is quiescing_for_replacement and not complete:
+      return runtime_busy
+    if current is running:
+      current.phase = quiescing_for_replacement
+      current.request_shutdown()
+    old_identity = current.identity
+    old_completion = current.completion_observer
+  unlock registered_runtime
+
+  if not await_completion(old_completion, timeout):
+    return runtime_busy
+
+  lock registered_runtime:
+    if current is not the same completed quiescing_for_replacement runtime:
+      return runtime_busy
+    retire current
+    register prepared_runtime as running
+  unlock registered_runtime
+```
+
+The shutdown request synchronously closes a shared dispatch gate before it is queued, so an
+in-progress tick cannot begin another candidate or retry dispatch after quiescence is published.
+The quiescing runtime performs no further polling, retry dispatch, or candidate dispatch. It retains
+the sole worker-event receiver, cancels every exact worker handle, and pumps/discards bounded events
+until every bridge proves completion. Semantic completion is necessary but insufficient for
+retirement: the exact registered runtime task must also be observed finished. Timeout or
+cancellation of the replacement wait never removes the registered runtime. Graceful host shutdown
+uses a distinct quiescing-for-shutdown phase, retains the slot until exact completion, and rejects
+concurrent replacement. A closed-but-false completion signal cannot prove quiescence, so the runtime
+remains fail-closed and busy until host-level hard process termination.
 
 ## 17. Test and Validation Matrix
 
@@ -2778,14 +2935,28 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
 - Active-state issue refresh updates running entry state
-- Non-active state stops running agent without workspace cleanup
-- Terminal state stops running agent and cleans workspace
+- Non-active state cancels and drains every issue worker before releasing state without workspace
+  cleanup
+- Terminal state cancels and drains every issue worker before releasing state and beginning
+  workspace cleanup
+- Stalled state cancels and drains every issue worker before scheduling a replacement
+- Drain timeout retains the current running/claimed/pipeline/workspace owner and schedules no retry
+- Pending drain ownership is retried even when the original trigger clears; an active issue whose
+  worker was already cancelled follows the existing failure-retry path
+- Exact attempt and pipeline-cycle revalidation rejects a superseded reconciliation owner
+- Late updates and exits from drained or superseded identities cannot mutate a replacement attempt
+- Reconciliation-owned exits do not enter normal worker-exit or retry handling
+- Shutdown stops polling and dispatch, retains and pumps the bounded receiver, and completes only
+  after every exact worker bridge quiesces
+- Runtime replacement timeout or wait cancellation retains the same quiescing runtime and returns
+  typed busy; one later retry launches a replacement only after observed completion
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
 - Abnormal worker exit increments retries with 10s-based exponential backoff
 - Retry backoff cap uses configured `agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
-- Stall detection kills stalled sessions and schedules retry
+- Stall detection cancels and drains stalled sessions, revalidates their exact owner, then schedules
+  retry
 - Slot exhaustion requeues retries with explicit error reason
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
   limits

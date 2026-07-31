@@ -7,22 +7,24 @@ use crate::error::{ConfigError, EnsembleError};
 use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
 use crate::orchestrator::state::OrchestratorState;
-use crate::orchestrator::{Orchestrator, OrchestratorRuntimeParts};
+use crate::orchestrator::{Orchestrator, OrchestratorRuntimeParts, QuiescingLatch};
 use crate::tracker::{create_tracker, IssueTracker};
 use crate::transcript::events::TranscriptEventBus;
 use crate::workspace::manager::WorkspaceManager;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use std::time::Duration;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
 /// Maximum time the orchestrator restart path will wait for the previous runtime
-/// to shut down gracefully before forcing an abort.
+/// to quiesce before returning a retryable busy error.
 const ORCHESTRATOR_RESTART_TIMEOUT: Duration = Duration::from_secs(10);
+static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
 
 pub struct PreparedApp {
     pub app_state: AppState,
@@ -30,14 +32,42 @@ pub struct PreparedApp {
 }
 
 pub struct OrchestratorRuntime {
+    id: u64,
     shutdown_tx: mpsc::Sender<()>,
+    completion: watch::Receiver<bool>,
+    quiescing: QuiescingLatch,
+    _worker_event_receiver:
+        Arc<tokio::sync::Mutex<mpsc::Receiver<crate::agent::events::OrchestratorWorkerEvent>>>,
     task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuntimePhase {
+    Running,
+    QuiescingForReplacement,
+    QuiescingForShutdown,
+}
+
+struct RegisteredRuntime {
+    phase: RuntimePhase,
+    runtime: OrchestratorRuntime,
 }
 
 /// `std::sync::Mutex` is sufficient here because runtime registration only swaps an `Option`
 /// and never holds the mutex guard across `.await`. A tokio mutex would add async overhead
 /// without improving correctness for these tiny critical sections.
-pub type RegisteredOrchestrator = Arc<std::sync::Mutex<Option<OrchestratorRuntime>>>;
+#[derive(Clone, Default)]
+pub struct RegisteredOrchestrator(Arc<std::sync::Mutex<Option<RegisteredRuntime>>>);
+
+impl RegisteredOrchestrator {
+    #[cfg(test)]
+    pub(crate) fn is_registered(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+}
 
 struct PreparedOrchestratorRuntime {
     orchestrator: Orchestrator,
@@ -46,6 +76,7 @@ struct PreparedOrchestratorRuntime {
 
 impl OrchestratorRuntime {
     pub fn request_shutdown(&self) {
+        self.quiescing.request();
         // Capacity is 1; if a shutdown request is already queued, nothing else is needed.
         let _ = self.shutdown_tx.try_send(());
     }
@@ -60,23 +91,8 @@ impl OrchestratorRuntime {
         let _ = self.task.await;
     }
 
-    /// Attempt a graceful shutdown within `timeout`. If the runtime task does not
-    /// exit before the timeout elapses, the task is aborted so it cannot keep
-    /// polling or running agents concurrently with a replacement orchestrator.
-    pub async fn shutdown_with_timeout(self, timeout: Duration) {
-        self.request_shutdown();
-        let abort_handle = self.task.abort_handle();
-        let join_result = tokio::time::timeout(timeout, self.task).await;
-        match join_result {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) | Err(_) => {
-                abort_handle.abort();
-                warn!(
-                    timeout_secs = timeout.as_secs(),
-                    "orchestrator runtime did not shut down within timeout; aborted"
-                );
-            }
-        }
+    fn is_complete(&self) -> bool {
+        *self.completion.borrow() && self.task.is_finished()
     }
 }
 
@@ -134,7 +150,7 @@ pub fn build_app_state(
 
     let app_state = AppState {
         orchestrator_state: orchestrator_state_from_document(&document_state),
-        orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
+        orchestrator_runtime: RegisteredOrchestrator::default(),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root,
         history_path,
@@ -166,9 +182,10 @@ fn config_dir_for_path(config_path: &Path) -> Result<PathBuf, ConfigError> {
 
 fn registered_orchestrator_guard(
     app_state: &AppState,
-) -> MutexGuard<'_, Option<OrchestratorRuntime>> {
+) -> MutexGuard<'_, Option<RegisteredRuntime>> {
     app_state
         .orchestrator_runtime
+        .0
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -212,7 +229,7 @@ async fn prepare_orchestrator_runtime(
             agent_runner,
             workspace_mgr,
             refresh_requested: Arc::clone(&app_state.refresh_requested),
-            cancellation_registry: Arc::clone(&app_state.cancellation_registry),
+            cancellation_registry: app_state.cancellation_registry.clone(),
             event_bus: app_state.event_bus.clone(),
             transcript_event_bus: app_state.transcript_event_bus.clone(),
             workspace_root: PathBuf::from(&app_state.workspace_root),
@@ -232,11 +249,24 @@ fn launch_orchestrator_runtime(prepared: PreparedOrchestratorRuntime) -> Orchest
         mut orchestrator,
         shutdown_tx,
     } = prepared;
+    let worker_event_receiver = orchestrator.worker_event_receiver_owner();
+    let quiescing = orchestrator.quiescing_latch_owner();
+    let (completion_tx, completion) = watch::channel(false);
     let task = tokio::spawn(async move {
-        orchestrator.run().await;
+        let quiesced = orchestrator.run().await;
+        if quiesced {
+            let _ = completion_tx.send(true);
+        }
     });
 
-    OrchestratorRuntime { shutdown_tx, task }
+    OrchestratorRuntime {
+        id: NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+        shutdown_tx,
+        completion,
+        quiescing,
+        _worker_event_receiver: worker_event_receiver,
+        task,
+    }
 }
 
 pub async fn start_orchestrator_for_app(
@@ -248,31 +278,138 @@ pub async fn start_orchestrator_for_app(
 }
 
 pub fn take_registered_orchestrator(app_state: &AppState) -> Option<OrchestratorRuntime> {
-    registered_orchestrator_guard(app_state).take()
+    registered_orchestrator_guard(app_state)
+        .take()
+        .map(|registered| registered.runtime)
 }
 
 pub async fn clear_registered_orchestrator(app_state: &AppState) {
-    if let Some(runtime) = take_registered_orchestrator(app_state) {
-        runtime.shutdown().await;
+    let (runtime_id, completion) = {
+        let mut registered = registered_orchestrator_guard(app_state);
+        let Some(existing) = registered.as_mut() else {
+            return;
+        };
+        existing.phase = RuntimePhase::QuiescingForShutdown;
+        existing.runtime.request_shutdown();
+        (existing.runtime.id, existing.runtime.completion.clone())
+    };
+
+    await_registered_runtime_completion(app_state, runtime_id, completion).await;
+
+    let retired = {
+        let mut registered = registered_orchestrator_guard(app_state);
+        let removable = registered.as_ref().is_some_and(|existing| {
+            existing.phase == RuntimePhase::QuiescingForShutdown
+                && existing.runtime.id == runtime_id
+                && existing.runtime.is_complete()
+        });
+        removable.then(|| registered.take()).flatten()
+    };
+    if let Some(retired) = retired {
+        retired.runtime.shutdown().await;
     }
 }
 
 pub async fn start_or_replace_registered_orchestrator(
     app_state: &AppState,
 ) -> Result<bool, EnsembleError> {
+    start_or_replace_registered_orchestrator_with_timeout(app_state, ORCHESTRATOR_RESTART_TIMEOUT)
+        .await
+}
+
+async fn start_or_replace_registered_orchestrator_with_timeout(
+    app_state: &AppState,
+    restart_timeout: Duration,
+) -> Result<bool, EnsembleError> {
     let prepared = prepare_orchestrator_runtime(app_state).await?;
     let started = prepared.is_some();
 
-    if let Some(runtime) = take_registered_orchestrator(app_state) {
-        // Bounded graceful shutdown so a misbehaving orchestrator cannot block
-        // the restart path indefinitely (which would stall Ctrl+C shutdown).
-        runtime
-            .shutdown_with_timeout(ORCHESTRATOR_RESTART_TIMEOUT)
-            .await;
+    let (runtime_id, completion) = {
+        let mut registered = registered_orchestrator_guard(app_state);
+        let Some(existing) = registered.as_mut() else {
+            *registered = prepared.map(|prepared| RegisteredRuntime {
+                phase: RuntimePhase::Running,
+                runtime: launch_orchestrator_runtime(prepared),
+            });
+            return Ok(started);
+        };
+
+        match existing.phase {
+            RuntimePhase::QuiescingForShutdown => return Err(EnsembleError::RuntimeBusy),
+            RuntimePhase::QuiescingForReplacement if !existing.runtime.is_complete() => {
+                return Err(EnsembleError::RuntimeBusy);
+            }
+            RuntimePhase::Running | RuntimePhase::QuiescingForReplacement => {}
+        }
+        existing.phase = RuntimePhase::QuiescingForReplacement;
+        existing.runtime.request_shutdown();
+        (existing.runtime.id, existing.runtime.completion.clone())
+    };
+
+    if !wait_for_registered_runtime_completion(app_state, runtime_id, completion, restart_timeout)
+        .await
+    {
+        return Err(EnsembleError::RuntimeBusy);
     }
 
-    *registered_orchestrator_guard(app_state) = prepared.map(launch_orchestrator_runtime);
+    let retired = {
+        let mut registered = registered_orchestrator_guard(app_state);
+        let replaceable = registered.as_ref().is_some_and(|existing| {
+            existing.phase == RuntimePhase::QuiescingForReplacement
+                && existing.runtime.id == runtime_id
+                && existing.runtime.is_complete()
+        });
+        if !replaceable {
+            return Err(EnsembleError::RuntimeBusy);
+        }
+        let retired = registered.take();
+        *registered = prepared.map(|prepared| RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime: launch_orchestrator_runtime(prepared),
+        });
+        retired
+    };
+    drop(retired);
     Ok(started)
+}
+
+async fn wait_for_registered_runtime_completion(
+    app_state: &AppState,
+    runtime_id: u64,
+    completion: watch::Receiver<bool>,
+    wait: Duration,
+) -> bool {
+    tokio::time::timeout(
+        wait,
+        await_registered_runtime_completion(app_state, runtime_id, completion),
+    )
+    .await
+    .is_ok()
+}
+
+async fn await_registered_runtime_completion(
+    app_state: &AppState,
+    runtime_id: u64,
+    mut completion: watch::Receiver<bool>,
+) {
+    loop {
+        let exact_runtime_finished = registered_orchestrator_guard(app_state)
+            .as_ref()
+            .is_some_and(|registered| {
+                registered.runtime.id == runtime_id && registered.runtime.is_complete()
+            });
+        if exact_runtime_finished {
+            return;
+        }
+
+        if *completion.borrow() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        } else if completion.changed().await.is_err() {
+            // Closed without a positive quiescence proof is intentionally
+            // fail-closed. Retain the registered owner forever.
+            futures::future::pending::<()>().await;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -411,16 +548,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        *built.app_state.orchestrator_runtime.lock().unwrap() = Some(runtime);
+        *registered_orchestrator_guard(&built.app_state) = Some(RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime,
+        });
 
         clear_registered_orchestrator(&built.app_state).await;
 
-        assert!(built
-            .app_state
-            .orchestrator_runtime
-            .lock()
-            .unwrap()
-            .is_none());
+        assert!(registered_orchestrator_guard(&built.app_state).is_none());
     }
 
     #[tokio::test]
@@ -439,7 +574,10 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        *built.app_state.orchestrator_runtime.lock().unwrap() = Some(runtime);
+        *registered_orchestrator_guard(&built.app_state) = Some(RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime,
+        });
 
         let bad_yaml = "tracker:\n  kind: todo_file\n  path: /definitely/missing/dir/TODO.md\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n";
         let next_state = parse_raw_yaml(config_path, bad_yaml.to_string());
@@ -449,12 +587,7 @@ mod tests {
 
         assert!(result.is_err(), "expected restart to fail");
         assert!(
-            built
-                .app_state
-                .orchestrator_runtime
-                .lock()
-                .unwrap()
-                .is_some(),
+            registered_orchestrator_guard(&built.app_state).is_some(),
             "expected existing runtime to stay registered on restart failure"
         );
 
@@ -484,32 +617,316 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_with_timeout_unblocks_when_task_ignores_shutdown() {
-        // Construct an OrchestratorRuntime whose task ignores the shutdown signal
-        // entirely. shutdown_with_timeout should still return after the timeout.
+    async fn runtime_replacement_timeout_retains_quiescing_owner_until_later_retry() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+        let document_state = parse_raw_yaml(config_path, valid_config_yaml(None));
+        let built = build_app_state(
+            temp_dir.path().join("config.yaml"),
+            document_state,
+            EventBus::new(),
+        );
+
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
-        let task = tokio::spawn(async {
-            // Sleep forever; never observe shutdown_rx.
-            futures::future::pending::<()>().await;
+        let (completion_tx, completion) = watch::channel(false);
+        let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
+        let (quiesce_tx, quiesce_rx) = tokio::sync::oneshot::channel();
+        let (tail_release_tx, tail_release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = quiesce_rx.await;
+            let _ = completion_tx.send(true);
+            let _ = tail_release_rx.await;
         });
-        let runtime = OrchestratorRuntime { shutdown_tx, task };
+        let old_runtime = OrchestratorRuntime {
+            id: NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+            shutdown_tx,
+            completion,
+            quiescing: QuiescingLatch::default(),
+            _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
+            task,
+        };
+        let old_id = old_runtime.id;
+        *registered_orchestrator_guard(&built.app_state) = Some(RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime: old_runtime,
+        });
 
-        let started = std::time::Instant::now();
-        runtime
-            .shutdown_with_timeout(std::time::Duration::from_millis(200))
+        let first = start_or_replace_registered_orchestrator_with_timeout(
+            &built.app_state,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(matches!(first, Err(EnsembleError::RuntimeBusy)));
+        {
+            let registered = registered_orchestrator_guard(&built.app_state);
+            let retained = registered.as_ref().unwrap();
+            assert_eq!(retained.phase, RuntimePhase::QuiescingForReplacement);
+            assert_eq!(retained.runtime.id, old_id);
+            assert!(!retained.runtime.task.is_finished());
+        }
+
+        let concurrent = start_or_replace_registered_orchestrator_with_timeout(
+            &built.app_state,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(matches!(concurrent, Err(EnsembleError::RuntimeBusy)));
+
+        quiesce_tx.send(()).unwrap();
+        let old_completion = {
+            registered_orchestrator_guard(&built.app_state)
+                .as_ref()
+                .unwrap()
+                .runtime
+                .completion
+                .clone()
+        };
+        let mut completion_observer = old_completion.clone();
+        completion_observer.changed().await.unwrap();
+        assert!(*old_completion.borrow());
+        assert!(
+            matches!(
+                start_or_replace_registered_orchestrator_with_timeout(
+                    &built.app_state,
+                    Duration::from_millis(20),
+                )
+                .await,
+                Err(EnsembleError::RuntimeBusy)
+            ),
+            "semantic quiescence alone must not retire a still-running task"
+        );
+        tail_release_tx.send(()).unwrap();
+        assert!(
+            wait_for_registered_runtime_completion(
+                &built.app_state,
+                old_id,
+                old_completion,
+                Duration::from_secs(1),
+            )
+            .await,
+            "old runtime should become quiescent"
+        );
+
+        assert!(start_or_replace_registered_orchestrator_with_timeout(
+            &built.app_state,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap());
+        {
+            let registered = registered_orchestrator_guard(&built.app_state);
+            let replacement = registered.as_ref().unwrap();
+            assert_eq!(replacement.phase, RuntimePhase::Running);
+            assert_ne!(replacement.runtime.id, old_id);
+        }
+
+        if let Some(runtime) = take_registered_orchestrator(&built.app_state) {
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_replacement_cancelled_wait_retains_quiescing_owner() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+        let document_state = parse_raw_yaml(config_path.clone(), valid_config_yaml(None));
+        let built = build_app_state(config_path, document_state, EventBus::new());
+
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (completion_tx, completion) = watch::channel(false);
+        let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = release_rx.await;
+            let _ = completion_tx.send(true);
+        });
+        let old_runtime = OrchestratorRuntime {
+            id: NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+            shutdown_tx,
+            completion,
+            quiescing: QuiescingLatch::default(),
+            _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
+            task,
+        };
+        let old_id = old_runtime.id;
+        *registered_orchestrator_guard(&built.app_state) = Some(RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime: old_runtime,
+        });
+
+        let replacement_wait = tokio::spawn({
+            let app_state = built.app_state.clone();
+            async move {
+                start_or_replace_registered_orchestrator_with_timeout(
+                    &app_state,
+                    Duration::from_secs(5),
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let quiescing = registered_orchestrator_guard(&built.app_state)
+                    .as_ref()
+                    .is_some_and(|registered| {
+                        registered.phase == RuntimePhase::QuiescingForReplacement
+                    });
+                if quiescing {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("replacement should publish quiescing state before waiting");
+        replacement_wait.abort();
+        assert!(replacement_wait.await.unwrap_err().is_cancelled());
+
+        {
+            let registered = registered_orchestrator_guard(&built.app_state);
+            let retained = registered.as_ref().unwrap();
+            assert_eq!(retained.phase, RuntimePhase::QuiescingForReplacement);
+            assert_eq!(retained.runtime.id, old_id);
+            assert!(!retained.runtime.task.is_finished());
+        }
+
+        release_tx.send(()).unwrap();
+        let old_completion = {
+            registered_orchestrator_guard(&built.app_state)
+                .as_ref()
+                .unwrap()
+                .runtime
+                .completion
+                .clone()
+        };
+        assert!(
+            wait_for_registered_runtime_completion(
+                &built.app_state,
+                old_id,
+                old_completion,
+                Duration::from_secs(1),
+            )
+            .await
+        );
+        assert!(start_or_replace_registered_orchestrator_with_timeout(
+            &built.app_state,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap());
+
+        if let Some(runtime) = take_registered_orchestrator(&built.app_state) {
+            runtime.shutdown().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_replacement_cannot_race_registered_shutdown() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+        let document_state = parse_raw_yaml(config_path.clone(), valid_config_yaml(None));
+        let built = build_app_state(config_path, document_state, EventBus::new());
+
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (completion_tx, completion) = watch::channel(false);
+        let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _ = release_rx.await;
+            let _ = completion_tx.send(true);
+        });
+        let old_runtime = OrchestratorRuntime {
+            id: NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+            shutdown_tx,
+            completion,
+            quiescing: QuiescingLatch::default(),
+            _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
+            task,
+        };
+        let old_id = old_runtime.id;
+        *registered_orchestrator_guard(&built.app_state) = Some(RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime: old_runtime,
+        });
+
+        let shutdown = tokio::spawn({
+            let app_state = built.app_state.clone();
+            async move { clear_registered_orchestrator(&app_state).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let shutdown_owner_retained = registered_orchestrator_guard(&built.app_state)
+                    .as_ref()
+                    .is_some_and(|registered| {
+                        registered.phase == RuntimePhase::QuiescingForShutdown
+                            && registered.runtime.id == old_id
+                    });
+                if shutdown_owner_retained {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registered shutdown should retain and publish its exact owner");
+
+        assert!(matches!(
+            start_or_replace_registered_orchestrator_with_timeout(
+                &built.app_state,
+                Duration::from_millis(20),
+            )
+            .await,
+            Err(EnsembleError::RuntimeBusy)
+        ));
+
+        release_tx.send(()).unwrap();
+        shutdown.await.unwrap();
+        assert!(registered_orchestrator_guard(&built.app_state).is_none());
+    }
+
+    #[tokio::test]
+    async fn runtime_replacement_closed_incomplete_owner_remains_fail_closed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.yaml");
+        let document_state = parse_raw_yaml(config_path.clone(), valid_config_yaml(None));
+        let built = build_app_state(config_path, document_state, EventBus::new());
+
+        let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (completion_tx, completion) = watch::channel(false);
+        drop(completion_tx);
+        let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
+        let task = tokio::spawn(async {});
+        let old_runtime = OrchestratorRuntime {
+            id: NEXT_RUNTIME_ID.fetch_add(1, Ordering::Relaxed),
+            shutdown_tx,
+            completion,
+            quiescing: QuiescingLatch::default(),
+            _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
+            task,
+        };
+        let old_id = old_runtime.id;
+        *registered_orchestrator_guard(&built.app_state) = Some(RegisteredRuntime {
+            phase: RuntimePhase::Running,
+            runtime: old_runtime,
+        });
+
+        for _ in 0..2 {
+            let result = start_or_replace_registered_orchestrator_with_timeout(
+                &built.app_state,
+                Duration::from_millis(20),
+            )
             .await;
-        let elapsed = started.elapsed();
+            assert!(matches!(result, Err(EnsembleError::RuntimeBusy)));
+            let registered = registered_orchestrator_guard(&built.app_state);
+            let retained = registered.as_ref().unwrap();
+            assert_eq!(retained.phase, RuntimePhase::QuiescingForReplacement);
+            assert_eq!(retained.runtime.id, old_id);
+            assert!(!retained.runtime.is_complete());
+        }
 
-        assert!(
-            elapsed >= std::time::Duration::from_millis(200),
-            "shutdown_with_timeout waited {:?} (expected >= 200ms)",
-            elapsed
-        );
-        assert!(
-            elapsed < std::time::Duration::from_millis(2_000),
-            "shutdown_with_timeout took {:?}; expected < 2s",
-            elapsed
-        );
+        take_registered_orchestrator(&built.app_state)
+            .unwrap()
+            .abort();
     }
 
     #[test]
@@ -520,10 +937,10 @@ mod tests {
             missing_config_state(config_path),
             EventBus::new(),
         );
-        let runtime_registry = Arc::clone(&built.app_state.orchestrator_runtime);
+        let runtime_registry = built.app_state.orchestrator_runtime.clone();
 
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = runtime_registry.lock().unwrap();
+            let _guard = runtime_registry.0.lock().unwrap();
             panic!("poison orchestrator runtime mutex");
         }));
 

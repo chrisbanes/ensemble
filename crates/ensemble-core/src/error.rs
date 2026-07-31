@@ -16,6 +16,8 @@ pub enum EnsembleError {
     Agent(#[from] AgentError),
     #[error(transparent)]
     Interaction(#[from] crate::interaction::error::InteractionError),
+    #[error("orchestrator runtime is still quiescing; retry later")]
+    RuntimeBusy,
 }
 
 #[derive(Debug, Error)]

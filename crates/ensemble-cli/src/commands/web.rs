@@ -5,7 +5,6 @@ use tracing::{error, info, warn};
 
 use ensemble_core::api::bootstrap::{
     build_app_state, clear_registered_orchestrator, start_or_replace_registered_orchestrator,
-    take_registered_orchestrator,
 };
 use ensemble_core::api::router::create_api_router;
 use ensemble_core::config::draft::load_config_document_or_missing;
@@ -226,10 +225,8 @@ pub async fn execute(args: WebArgs) -> ExitCode {
 
     // Clean shutdown
     server_handle.abort();
-    if let Some(runtime) = take_registered_orchestrator(&app_state) {
-        runtime.shutdown().await;
-    }
     watcher.abort();
+    clear_registered_orchestrator(&app_state).await;
     info!("HTTP server stopped");
 
     info!("ensemble shut down cleanly");
