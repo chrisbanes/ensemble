@@ -535,16 +535,69 @@ fn restore_operation(
     operation: &Operation,
 ) -> Result<(), ConfigError> {
     validate_operation_parent(config_dir, operation)?;
-    match &operation.before {
-        Some(before) => {
-            let contents = read_private_payload(journal_dir, before)?;
-            write_file_atomically(
-                &operation.destination,
-                &contents,
-                operation.before_mode.unwrap_or(0o600),
-                "setup before-image",
-            )
+    let current = match std::fs::symlink_metadata(&operation.destination) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            Some((
+                std::fs::read(&operation.destination).map_err(|error| {
+                    transaction_error(format!(
+                        "failed to inspect setup destination '{}': {error}",
+                        operation.destination.display()
+                    ))
+                })?,
+                file_mode(&operation.destination)?,
+            ))
         }
+        Ok(_) => {
+            return Err(transaction_error(format!(
+                "setup destination '{}' changed after publication; refusing to overwrite it during rollback",
+                operation.destination.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(transaction_error(format!(
+                "failed to inspect setup destination '{}': {error}",
+                operation.destination.display()
+            )))
+        }
+    };
+    let published = read_private_payload(journal_dir, &operation.payload)?;
+    let matches_published = current.as_ref().is_some_and(|(contents, mode)| {
+        contents == &published && mode_matches(*mode, operation.required_mode)
+    });
+
+    let before = operation
+        .before
+        .as_deref()
+        .map(|name| read_private_payload(journal_dir, name))
+        .transpose()?;
+    let matches_before = match (&current, &before) {
+        (None, None) => true,
+        (Some((current, mode)), Some(before)) => {
+            current == before
+                && operation
+                    .before_mode
+                    .is_some_and(|before_mode| mode_matches(*mode, before_mode))
+        }
+        _ => false,
+    };
+    if matches_before {
+        return Ok(());
+    }
+    if !matches_published {
+        return Err(transaction_error(format!(
+            "setup destination '{}' changed after publication; refusing to overwrite it during rollback",
+            operation.destination.display()
+        )));
+    }
+
+    match before {
+        Some(contents) => write_file_atomically(
+            &operation.destination,
+            &contents,
+            operation.before_mode.unwrap_or(0o600),
+            "setup before-image",
+        ),
         None => match std::fs::remove_file(&operation.destination) {
             Ok(()) => {
                 sync_parent(&operation.destination)?;
@@ -818,6 +871,16 @@ fn transaction_error(reason: impl Into<String>) -> ConfigError {
 }
 
 #[cfg(unix)]
+fn mode_matches(actual: u32, expected: u32) -> bool {
+    actual == expected
+}
+
+#[cfg(not(unix))]
+fn mode_matches(_actual: u32, _expected: u32) -> bool {
+    true
+}
+
+#[cfg(unix)]
 fn file_mode(path: &Path) -> Result<u32, ConfigError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
@@ -1064,6 +1127,67 @@ mod tests {
             "GITHUB_TOKEN=old\n"
         );
         assert!(!generation.journal_dir.exists());
+    }
+
+    #[test]
+    fn pending_setup_generation_does_not_overwrite_externally_rotated_environment() {
+        let root = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.yaml");
+        let dotenv_path = root.path().join(".env");
+        std::fs::write(&dotenv_path, "GITHUB_TOKEN=old\n").unwrap();
+        set_mode(&dotenv_path, 0o600, "test dotenv").unwrap();
+        let request = github_request("candidate");
+        let artifacts = crate::config::setup::build_setup_artifacts(&request);
+        let generation = stage_setup_generation(&config_path, &request, &artifacts).unwrap();
+        crate::config::draft::persist_config_atomically(&config_path, &artifacts.raw_yaml).unwrap();
+        generation.publish(&artifacts.raw_yaml).unwrap();
+        std::fs::write(&dotenv_path, "GITHUB_TOKEN=rotated\n").unwrap();
+        set_mode(&dotenv_path, 0o600, "test dotenv").unwrap();
+        crate::config::draft::persist_config_atomically(&config_path, "tracker: invalid\n")
+            .unwrap();
+
+        let error = recover_setup_before_load(&config_path).unwrap_err();
+
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert!(!error.to_string().contains("candidate"));
+        assert_eq!(
+            std::fs::read_to_string(&dotenv_path).unwrap(),
+            "GITHUB_TOKEN=rotated\n"
+        );
+        assert!(generation.journal_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_setup_generation_does_not_follow_externally_replaced_environment_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let config_path = root.path().join("config.yaml");
+        let dotenv_path = root.path().join(".env");
+        let request = github_request("candidate");
+        let artifacts = crate::config::setup::build_setup_artifacts(&request);
+        let generation = stage_setup_generation(&config_path, &request, &artifacts).unwrap();
+        crate::config::draft::persist_config_atomically(&config_path, &artifacts.raw_yaml).unwrap();
+        generation.publish(&artifacts.raw_yaml).unwrap();
+        std::fs::remove_file(&dotenv_path).unwrap();
+        let outside_dotenv = outside.path().join(".env");
+        std::fs::write(&outside_dotenv, artifacts.env_file.as_ref().unwrap()).unwrap();
+        set_mode(&outside_dotenv, 0o600, "test dotenv").unwrap();
+        symlink(&outside_dotenv, &dotenv_path).unwrap();
+        crate::config::draft::persist_config_atomically(&config_path, "tracker: invalid\n")
+            .unwrap();
+
+        let error = recover_setup_before_load(&config_path).unwrap_err();
+
+        assert!(error.to_string().contains("refusing to overwrite"));
+        assert!(dotenv_path.is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&outside_dotenv).unwrap(),
+            artifacts.env_file.unwrap()
+        );
+        assert!(generation.journal_dir.exists());
     }
 
     #[test]

@@ -92,11 +92,14 @@ API retries, filesystem watcher retries, offline CLI setup, and process startup
 all consume that same pending generation. Startup recovery completes before
 workspace, history, timeline, transcript, or orchestrator resources are opened.
 A matching partial publication resumes forward; an externally replaced config
-causes every published destination to be restored from its before-image. A
-malformed journal, unsafe permissions, or incomplete rollback blocks startup
-rather than launching against mixed config and companion generations. Prepared
-runtimes retain the final configured template and TODO paths and remain
-start-gated until publication and the active-state commit finish.
+causes destinations that still match the published generation to be restored
+from their before-images. If a destination changed independently after
+publication, recovery preserves it and blocks startup rather than overwriting
+the newer contents. A malformed journal, unsafe permissions, or incomplete
+rollback likewise blocks startup rather than launching against mixed config and
+companion generations. Prepared runtimes retain the final configured template
+and TODO paths and remain start-gated until publication and the active-state
+commit finish.
 
 `workspace.root` and the complete ordered `repos` configuration define process-scoped
 filesystem resources. Changing either while Ensemble is running is saved to

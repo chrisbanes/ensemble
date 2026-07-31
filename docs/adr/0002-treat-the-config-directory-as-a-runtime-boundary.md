@@ -37,8 +37,9 @@ after exact runtime quiescence and before the retained synchronous commit.
 
 All hosts recover the setup journal before parsing config or constructing
 workspace, history, timeline, transcript, and orchestrator resources. Matching
-staged or partially published generations resume forward. Digest drift restores
-all before-images, and malformed state, unsafe permissions, or incomplete
-rollback fails closed. API saves, watcher reloads, offline CLI setup, and
-startup therefore share one recovery owner rather than separate staging
-semantics.
+staged or partially published generations resume forward. On digest drift,
+rollback restores only destinations that still match the published generation;
+independently changed destinations are preserved and recovery fails closed.
+Malformed state, unsafe permissions, or incomplete rollback also fails closed.
+API saves, watcher reloads, offline CLI setup, and startup therefore share one
+recovery owner rather than separate staging semantics.
