@@ -276,7 +276,7 @@ impl HistoryStore {
                 .map_err(io::Error::other)?;
 
             let page: Vec<TimelineEventRecord> = rows
-                .map(|r| r.map_err(io::Error::other))
+                .map(|row| row.map_err(io::Error::other))
                 .collect::<Result<_, _>>()?;
             let next_cursor = if cursor + page.len() < total {
                 Some(cursor + page.len())
@@ -292,6 +292,57 @@ impl HistoryStore {
         })
         .await
         .map_err(io::Error::other)?
+    }
+
+    pub(crate) async fn read_recent_step_events(
+        &self,
+        run_id: &str,
+        issue_identifier: &str,
+        step_name: &str,
+        limit: usize,
+    ) -> Result<Vec<TimelineEventRecord>, io::Error> {
+        let store = self.clone();
+        let run_id = run_id.to_string();
+        let issue_identifier = issue_identifier.to_string();
+        let step_name = step_name.to_string();
+        tokio::task::spawn_blocking(move || {
+            store.read_recent_step_events_blocking(&run_id, &issue_identifier, &step_name, limit)
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
+    pub(crate) fn read_recent_step_events_blocking(
+        &self,
+        run_id: &str,
+        issue_identifier: &str,
+        step_name: &str,
+        limit: usize,
+    ) -> Result<Vec<TimelineEventRecord>, io::Error> {
+        let conn = Connection::open(&self.db_path).map_err(io::Error::other)?;
+        crate::history_store::schema::apply_pragmas(&conn).map_err(io::Error::other)?;
+        let limit = i64::try_from(limit).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidInput, "limit does not fit in i64")
+        })?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT run_id, issue_identifier, sequence, timestamp, event_type, step_name, \
+                 attempt, detail, verdict, tool_name FROM run_events \
+                 WHERE run_id = ?1 AND issue_identifier = ?2 AND step_name = ?3 \
+                 ORDER BY sequence DESC LIMIT ?4",
+            )
+            .map_err(io::Error::other)?;
+        let rows = stmt
+            .query_map(
+                params![run_id, issue_identifier, step_name, limit],
+                crate::history_store::model::row_to_timeline_record,
+            )
+            .map_err(io::Error::other)?;
+        let mut events = rows
+            .map(|row| row.map_err(io::Error::other))
+            .collect::<Result<Vec<_>, _>>()?;
+        events.reverse();
+        Ok(events)
     }
 }
 
@@ -427,6 +478,39 @@ mod tests {
         assert_eq!(response.total, 2);
         assert_eq!(response.events[0].sequence, 1);
         assert_eq!(response.events[1].sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn recent_step_events_are_filtered_limited_and_chronological() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
+
+        for sequence in 1..=4 {
+            let mut event = sample_event("run-1", "repo#1", sequence);
+            if sequence == 3 {
+                event.step_name = Some("review".into());
+            }
+            store.append_timeline_event(&event).await.unwrap();
+        }
+        store
+            .append_timeline_event(&sample_event("run-1", "repo#other", 5))
+            .await
+            .unwrap();
+
+        let events = store
+            .read_recent_step_events("run-1", "repo#1", "build", 2)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.sequence)
+                .collect::<Vec<_>>(),
+            vec![2, 4]
+        );
     }
 
     #[tokio::test]

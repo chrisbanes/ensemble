@@ -50,7 +50,8 @@ pub struct AppState {
     pub history_path: PathBuf,
     /// Path to the global history sqlite database.
     pub history_db_path: PathBuf,
-    /// Shared history store initialized at app bootstrap. Falls back to JSONL readers when absent.
+    /// Shared history store initialized at app bootstrap. Completed-run history can fall back to
+    /// JSONL when absent; timeline reads require this store.
     pub history_store: Option<HistoryStore>,
     /// Event bus for pipeline event broadcasting.
     pub event_bus: EventBus,

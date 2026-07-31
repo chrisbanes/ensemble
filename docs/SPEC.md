@@ -1485,6 +1485,22 @@ Line handling requirements:
 
 ### 10.4 Per-Step Conversation Transcripts
 
+Ensemble persists coarse run timeline events in the `run_events` table of:
+
+```text
+{workspace}/.ensemble/history.db
+```
+
+The runtime must publish each event to live subscribers before offering its compact timeline record
+to a bounded, non-blocking persistence queue. The queue writes to SQLite off the orchestrator hot
+path; queue saturation or a database failure is warned and must not suppress live delivery.
+Accepted records are keyed idempotently by `(run_id, sequence)` and read in sequence order. This
+table is the sole durable timeline source for new events: there is no per-run timeline JSONL
+dual-write, fallback read, or historical migration.
+
+The in-memory timeline sequence counter is not restored from persisted maxima after restart.
+Restart sequence recovery is a separate concern.
+
 For each pipeline step, Ensemble persists a typed JSONL transcript at:
 
 ```text
@@ -2188,6 +2204,13 @@ Minimum endpoints:
       "operations": ["poll", "reconcile"]
     }
     ```
+
+- `GET /api/v1/<issue_identifier>/timeline?run_id=<run_id>`
+  - Returns timeline events from the SQLite `run_events` table for exactly the requested issue and
+    run, ordered by sequence.
+  - Repeated persistence of the same `(run_id, sequence)` is idempotent.
+  - The endpoint and runtime persistence must use the same canonical
+    `{workspace}/.ensemble/history.db`; per-run timeline JSONL is not a fallback source.
 
 - `POST /api/v1/interactions/{id}/respond`
   - Attempts to resolve a specific open human interaction. The body is typed by interaction kind and

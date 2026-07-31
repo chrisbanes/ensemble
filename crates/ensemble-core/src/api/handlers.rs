@@ -287,6 +287,7 @@ fn issue_snapshot_from_history_record(
 
 async fn build_step_detail_from_history(
     history_path: &FsPath,
+    history_store: Option<&crate::history_store::store::HistoryStore>,
     workspace_root: &str,
     identifier: &str,
     step_name: &str,
@@ -325,7 +326,7 @@ async fn build_step_detail_from_history(
                 .map(|artifacts| artifacts.run_id.clone())
         });
     let recent_events = if let Some(run_id) = run_id.as_deref() {
-        read_recent_step_events(workspace_root, run_id, identifier, step_name).await
+        read_recent_step_events(history_store, run_id, identifier, step_name).await
     } else {
         Vec::new()
     };
@@ -370,34 +371,17 @@ async fn build_step_detail_from_history(
 }
 
 async fn read_recent_step_events(
-    workspace_root: &str,
+    history_store: Option<&crate::history_store::store::HistoryStore>,
     run_id: &str,
     identifier: &str,
     step_name: &str,
 ) -> Vec<crate::timeline::model::TimelineEventRecord> {
-    let timeline_path = std::path::PathBuf::from(workspace_root)
-        .join(".ensemble")
-        .join("runs")
-        .join(run_id)
-        .join("events.jsonl");
-    tokio::fs::read_to_string(&timeline_path)
+    let Some(history_store) = history_store else {
+        return Vec::new();
+    };
+    history_store
+        .read_recent_step_events(run_id, identifier, step_name, 50)
         .await
-        .ok()
-        .map(|contents| {
-            contents
-                .lines()
-                .rev()
-                .filter_map(|line| {
-                    serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line).ok()
-                })
-                .filter(|event| event.issue_identifier == identifier)
-                .filter(|event| event.step_name.as_deref() == Some(step_name))
-                .take(50)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect()
-        })
         .unwrap_or_default()
 }
 
@@ -454,6 +438,7 @@ pub async fn get_step_detail(
     let Some(detail_state) = detail_state else {
         return match build_step_detail_from_history(
             &state.history_path,
+            state.history_store.as_ref(),
             &state.workspace_root,
             &identifier,
             &step_name,
@@ -479,9 +464,15 @@ pub async fn get_step_detail(
         };
     };
 
-    // Do I/O outside the state lock using tokio::fs
+    // Do I/O outside the state lock.
     let recent_events = if let Some(ref run_id) = detail_state.run_id {
-        read_recent_step_events(&state.workspace_root, run_id, &identifier, &step_name).await
+        read_recent_step_events(
+            state.history_store.as_ref(),
+            run_id,
+            &identifier,
+            &step_name,
+        )
+        .await
     } else {
         vec![]
     };

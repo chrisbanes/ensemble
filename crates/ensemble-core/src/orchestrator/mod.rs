@@ -258,6 +258,18 @@ impl Orchestrator {
         shutdown_rx: mpsc::Receiver<()>,
     ) -> Self {
         let (worker_tx, worker_rx) = mpsc::channel(1000);
+        let history_store = futures::executor::block_on(HistoryStore::new(
+            parts.workspace_root.join(".ensemble").join("history.db"),
+        ))
+        .map_err(|error| {
+            warn!(
+                error = %error,
+                "failed to initialize sqlite history store; continuing without durable history or timeline persistence"
+            );
+            error
+        })
+        .ok();
+        let timeline_persistence = history_store.clone().map(TimelinePersistence::new);
 
         Self {
             state: parts.state,
@@ -269,21 +281,11 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            history_store: futures::executor::block_on(HistoryStore::new(
-                parts.workspace_root.join(".ensemble").join("history.db"),
-            ))
-            .map_err(|error| {
-                warn!(
-                    error = %error,
-                    "failed to initialize sqlite history store; continuing with file persistence only"
-                );
-                error
-            })
-            .ok(),
+            history_store,
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             pipeline_journal_restored: AtomicBool::new(false),
             event_bus: parts.event_bus,
-            timeline_persistence: Some(TimelinePersistence::new(parts.workspace_root.clone())),
+            timeline_persistence,
             transcript_persistence: Some(TranscriptPersistence::new_with_event_bus(
                 parts.workspace_root,
                 parts.transcript_event_bus,
@@ -5581,19 +5583,16 @@ impl Orchestrator {
         event: PipelineEvent,
     ) {
         let timeline_entry = if let (Some(run_id), Some(sequence)) = (run_id, sequence) {
-            Some((
-                run_id.clone(),
-                event.to_timeline_record(&run_id, sequence, attempt),
-            ))
+            Some(event.to_timeline_record(&run_id, sequence, attempt))
         } else {
             None
         };
 
         self.event_bus.publish(event);
 
-        if let Some((run_id, record)) = timeline_entry {
+        if let Some(record) = timeline_entry {
             if let Some(ref persistence) = self.timeline_persistence {
-                persistence.send(run_id, record);
+                persistence.send(record);
             }
         }
     }
@@ -5938,6 +5937,9 @@ mod tests {
     use crate::tracker::model::RetryEntry;
     use crate::tracker::TrackerError;
     use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
 
     /// Mock tracker for orchestrator tests.
     struct MockTracker {
@@ -13452,17 +13454,12 @@ agent:
             .expect("event should be published despite persist failure")
             .expect("receiver should get event");
         assert_eq!(received.issue_identifier(), "repo#1");
-        let path = dir
-            .path()
-            .join(".ensemble")
-            .join("runs")
-            .join("run-1")
-            .join("events.jsonl");
-        assert!(!path.exists());
+        assert!(orchestrator.history_store.is_none());
+        assert!(orchestrator.timeline_persistence.is_none());
     }
 
     #[tokio::test]
-    async fn publish_pipeline_event_persists_and_broadcasts_with_run_context() {
+    async fn published_timeline_event_is_visible_through_timeline_api() {
         let config = Arc::new(RwLock::new(make_config()));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![])),
@@ -13487,19 +13484,26 @@ agent:
         );
         let mut rx = orchestrator.event_bus.subscribe();
 
-        orchestrator
-            .publish_pipeline_event(
-                Some("run-1".into()),
-                Some(11),
-                3,
-                PipelineEvent::Output {
-                    issue_identifier: "repo#1".into(),
-                    timestamp: Utc::now(),
-                    step_name: "build".into(),
-                    detail: "streamed output".into(),
-                },
-            )
-            .await;
+        for (sequence, issue_identifier, detail) in [
+            (2, "repo#1", "second"),
+            (1, "repo#1", "first"),
+            (1, "repo#1", "duplicate"),
+            (3, "repo#other", "other issue"),
+        ] {
+            orchestrator
+                .publish_pipeline_event(
+                    Some("run-1".into()),
+                    Some(sequence),
+                    3,
+                    PipelineEvent::Output {
+                        issue_identifier: issue_identifier.into(),
+                        timestamp: Utc::now(),
+                        step_name: "build".into(),
+                        detail: detail.into(),
+                    },
+                )
+                .await;
+        }
 
         let received = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
@@ -13510,21 +13514,56 @@ agent:
         if let Some(ref mut persistence) = orchestrator.timeline_persistence {
             persistence.flush().await;
         }
+        drop(orchestrator);
 
-        let path = dir
-            .path()
-            .join(".ensemble")
-            .join("runs")
-            .join("run-1")
-            .join("events.jsonl");
-        assert!(path.exists(), "file should exist after flush");
-        let contents = tokio::fs::read_to_string(path).await.unwrap();
-        let record: crate::timeline::model::TimelineEventRecord =
-            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
-        assert_eq!(record.sequence, 11);
-        assert_eq!(record.attempt, 3);
-        assert_eq!(record.event_type, "output");
-        assert_eq!(record.step_name.as_deref(), Some("build"));
+        let mut api_config = make_config();
+        api_config.workspace.root = Some(dir.path().to_string_lossy().into_owned());
+        let config_path = dir.path().join("config.yaml");
+        let document_state = crate::config::draft::ConfigDocumentState {
+            path: config_path.clone(),
+            kind: crate::config::draft::ConfigStateKind::Parsed,
+            raw_yaml: None,
+            document: None,
+            active_config: Some(api_config),
+            validation: crate::config::draft::DraftValidationReport::default(),
+        };
+        let prepared =
+            crate::api::bootstrap::build_app_state(config_path, document_state, EventBus::new());
+        assert_eq!(
+            prepared.app_state.history_db_path,
+            dir.path().join(".ensemble").join("history.db")
+        );
+        let app = crate::api::router::create_api_router(prepared.app_state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/repo%231/timeline?run_id=run-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let timeline: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(timeline["total"], 2);
+        assert_eq!(
+            timeline["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|event| event["sequence"].as_u64().unwrap())
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(timeline["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["issue_identifier"] == "repo#1"));
     }
 
     #[tokio::test]
@@ -13797,12 +13836,21 @@ agent:
             persistence.flush().await;
         }
 
-        let contents =
-            tokio::fs::read_to_string(dir.path().join(".ensemble/runs/run-1/events.jsonl"))
-                .await
-                .unwrap();
-        let record: crate::timeline::model::TimelineEventRecord =
-            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        let timeline = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_timeline(
+                &crate::timeline::TimelineQuery {
+                    run_id: "run-1".to_string(),
+                    cursor: None,
+                    limit: None,
+                },
+                Some("repo#1"),
+            )
+            .await
+            .unwrap();
+        let record = &timeline.events[0];
         assert_eq!(record.sequence, 1);
         assert_eq!(record.event_type, "output");
     }
@@ -14143,33 +14191,27 @@ agent:
         };
 
         if let Some(run_id) = run_id {
-            let events_path = dir
-                .path()
-                .join(".ensemble")
-                .join("runs")
-                .join(&run_id)
-                .join("events.jsonl");
-            assert!(
-                events_path.exists(),
-                "timeline events file should exist after flush"
-            );
-            let contents = tokio::fs::read_to_string(&events_path).await.unwrap();
+            let timeline = orchestrator
+                .history_store
+                .as_ref()
+                .unwrap()
+                .read_timeline(
+                    &crate::timeline::TimelineQuery {
+                        run_id,
+                        cursor: None,
+                        limit: None,
+                    },
+                    Some("repo#1"),
+                )
+                .await
+                .unwrap();
             let mut question_asked_sequence: Option<u64> = None;
             let mut input_requested_sequence: Option<u64> = None;
 
-            for line in contents.lines() {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
-                    continue;
-                };
-                let event_type = value
-                    .get("event_type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let sequence = value.get("sequence").and_then(|v| v.as_u64());
-
-                match event_type {
-                    "question_asked" => question_asked_sequence = sequence,
-                    "input_requested" => input_requested_sequence = sequence,
+            for event in timeline.events {
+                match event.event_type.as_str() {
+                    "question_asked" => question_asked_sequence = Some(event.sequence),
+                    "input_requested" => input_requested_sequence = Some(event.sequence),
                     _ => {}
                 }
             }

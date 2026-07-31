@@ -443,30 +443,18 @@ pub fn build_step_detail_snapshot(
     let detail_state = extract_step_detail_state(state, identifier, step_name)?;
 
     let recent_events = if let Some(ref run_id) = detail_state.run_id {
-        let timeline_path = std::path::PathBuf::from(workspace_root)
-            .join(".ensemble")
-            .join("runs")
-            .join(run_id)
-            .join("events.jsonl");
-        std::fs::read_to_string(&timeline_path)
-            .ok()
-            .map(|contents| {
-                contents
-                    .lines()
-                    .rev() // Start from the end to get most recent events
-                    .filter_map(|line| {
-                        serde_json::from_str::<crate::timeline::model::TimelineEventRecord>(line)
-                            .ok()
-                    })
-                    .filter(|event| event.issue_identifier == identifier)
-                    .filter(|event| event.step_name.as_deref() == Some(step_name))
-                    .take(max_events)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev() // Restore chronological order
-                    .collect()
-            })
-            .unwrap_or_default()
+        crate::history_store::store::HistoryStore::new_blocking(
+            std::path::PathBuf::from(workspace_root)
+                .join(".ensemble")
+                .join("history.db"),
+        )
+        .ok()
+        .and_then(|store| {
+            store
+                .read_recent_step_events_blocking(run_id, identifier, step_name, max_events)
+                .ok()
+        })
+        .unwrap_or_default()
     } else {
         vec![]
     };
@@ -1399,8 +1387,10 @@ mod tests {
             .get("NODE_123")
             .and_then(|entry| entry.run_id.clone())
             .expect("run id should exist");
-        let timeline_dir = temp_dir.path().join(".ensemble").join("runs").join(&run_id);
-        std::fs::create_dir_all(&timeline_dir).unwrap();
+        let store = crate::history_store::store::HistoryStore::new_blocking(
+            temp_dir.path().join(".ensemble").join("history.db"),
+        )
+        .unwrap();
         let record = TimelineEventRecord {
             run_id: run_id.clone(),
             issue_identifier: "my-repo#42".to_string(),
@@ -1413,8 +1403,10 @@ mod tests {
             verdict: None,
             tool_name: None,
         };
-        let line = serde_json::to_string(&record).unwrap();
-        std::fs::write(timeline_dir.join("events.jsonl"), format!("{line}\n")).unwrap();
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(store.append_timeline_event(&record))
+            .unwrap();
 
         let detail = build_step_detail_snapshot(
             &state,

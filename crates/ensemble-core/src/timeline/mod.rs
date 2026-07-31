@@ -1,6 +1,5 @@
 pub mod model;
 pub mod persistence;
-pub mod writer;
 
 use serde::{Deserialize, Serialize};
 
