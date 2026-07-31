@@ -3,6 +3,7 @@ use crate::interaction::store::InteractionStore;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
 use crate::pipeline::engine::{PipelineRun, StepState};
 use crate::tracker::model::{RetryEntry, RunningEntry};
+use crate::workspace::key::issue_workspace_key;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -530,7 +531,7 @@ pub async fn build_issue_snapshot(
         (entry.issue_id.clone(), entry.identifier.clone())
     };
 
-    let workspace_key = crate::tracker::model::sanitize_workspace_key(identifier)?;
+    let workspace_key = issue_workspace_key(&issue_id);
     let workspace_path = format!("{}/{}", workspace_root, workspace_key);
 
     let status = if running_entry.is_some() {
@@ -1176,7 +1177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_issue_snapshot_found_running() {
+    async fn workspace_identity_path_running_snapshot_uses_immutable_issue_id() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None).await;
 
@@ -1185,7 +1186,10 @@ mod tests {
         assert_eq!(detail.issue_identifier, "my-repo#42");
         assert_eq!(detail.issue_id, "NODE_123");
         assert_eq!(detail.status, "running");
-        assert_eq!(detail.workspace.path, "/tmp/workspaces/my-repo_42");
+        assert_eq!(
+            detail.workspace.path,
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_123"))
+        );
         assert!(detail.running.is_some());
         assert!(detail.retry.is_none());
 
@@ -1195,7 +1199,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_issue_snapshot_found_retrying() {
+    async fn workspace_identity_path_retry_snapshot_uses_immutable_issue_id() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#99", "/tmp/workspaces", None).await;
 
@@ -1204,6 +1208,10 @@ mod tests {
         assert_eq!(detail.issue_identifier, "my-repo#99");
         assert_eq!(detail.issue_id, "NODE_456");
         assert_eq!(detail.status, "retrying");
+        assert_eq!(
+            detail.workspace.path,
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_456"))
+        );
         assert!(detail.running.is_none());
         assert!(detail.retry.is_some());
         assert_eq!(
@@ -1220,16 +1228,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn issue_detail_snapshot_includes_current_interaction_summary() {
+    async fn workspace_identity_path_waiting_snapshot_uses_immutable_issue_id() {
         let state = build_test_state();
         let detail = build_issue_snapshot(&state, "my-repo#77", "/tmp/workspaces", None)
             .await
             .unwrap();
 
         assert_eq!(detail.status, "waiting_on_human");
+        assert_eq!(
+            detail.workspace.path,
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_789"))
+        );
         let interaction = detail.current_interaction.unwrap();
         assert_eq!(interaction.interaction_request_id, "interaction-1");
         assert_eq!(interaction.step_name, "review");
+    }
+
+    #[tokio::test]
+    async fn workspace_identity_path_finalizing_snapshot_uses_immutable_issue_id() {
+        let mut state = build_test_state();
+        state.set_finalize_state(
+            "NODE_FINAL",
+            crate::orchestrator::state::IssueFinalizeState {
+                issue_identifier: "my-repo#final".to_string(),
+                status: FinalizeStatus::InProgress,
+                repos: Vec::new(),
+            },
+        );
+
+        let detail = build_issue_snapshot(&state, "my-repo#final", "/tmp/workspaces", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            detail.workspace.path,
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_FINAL"))
+        );
     }
 
     #[tokio::test]
@@ -1342,7 +1376,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_issue_snapshot_retains_issue_and_workflow_details() {
+    async fn workspace_identity_path_completed_snapshot_retains_identity_and_workflow() {
         let mut state = build_test_state();
         attach_pipeline_state(&mut state, "NODE_123");
         state.complete_issue("NODE_123", Some("completed_succeeded".to_string()), None);
@@ -1361,6 +1395,10 @@ mod tests {
         assert_eq!(detail.workflow_steps[0].state, "passed");
         assert_eq!(detail.workflow_steps[1].name, "review");
         assert_eq!(detail.workflow_steps[1].state, "running");
+        assert_eq!(
+            detail.workspace.path,
+            format!("/tmp/workspaces/{}", issue_workspace_key("NODE_123"))
+        );
     }
 
     #[test]

@@ -223,7 +223,7 @@ pub async fn startup_terminal_cleanup(
                 .filter(|issue| !excluded_issue_ids.contains(&issue.id))
                 .collect::<Vec<_>>();
             for issue in &cleanup_issues {
-                match workspace_mgr.remove_workspace(&issue.identifier).await {
+                match workspace_mgr.remove_workspace(&issue.id).await {
                     Ok(()) => {
                         debug!(
                             identifier = %issue.identifier,
@@ -515,8 +515,12 @@ mod tests {
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
 
         // Create a workspace
-        workspace_mgr.prepare_workspace("repo#42").await.unwrap();
-        assert!(dir.path().join("repo_42").exists());
+        workspace_mgr
+            .prepare_workspace("42", "repo#42")
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path("42");
+        assert!(workspace_path.exists());
 
         let tracker = MockTrackerForReconcile {
             issues: vec![test_issue("42", "Done")],
@@ -532,14 +536,17 @@ mod tests {
         .await;
 
         // Workspace should be cleaned up
-        assert!(!dir.path().join("repo_42").exists());
+        assert!(!workspace_path.exists());
     }
 
     #[tokio::test]
     async fn startup_terminal_cleanup_retains_pending_reconciliation_workspace() {
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
-        workspace_mgr.prepare_workspace("repo#42").await.unwrap();
+        workspace_mgr
+            .prepare_workspace("42", "repo#42")
+            .await
+            .unwrap();
 
         let tracker = MockTrackerForReconcile {
             issues: vec![test_issue("42", "Done")],
@@ -553,7 +560,36 @@ mod tests {
         )
         .await;
 
-        assert!(dir.path().join("repo_42").exists());
+        assert!(workspace_mgr.workspace_path("42").exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_identity_lifecycle_startup_cleanup_refuses_mismatched_owner() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let workspace_path = workspace_mgr.workspace_path("42");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        std::fs::write(
+            workspace_path.join(".ensemble-workspace.json"),
+            r#"{"issue_id":"other","issue_identifier":"other#7","branch_date":"2024-01-01"}"#,
+        )
+        .unwrap();
+        let sentinel = workspace_path.join("sentinel");
+        std::fs::write(&sentinel, "untouched").unwrap();
+
+        let tracker = MockTrackerForReconcile {
+            issues: vec![test_issue("42", "Done")],
+            should_fail: false,
+        };
+        startup_terminal_cleanup(
+            &tracker,
+            &default_terminal(),
+            &workspace_mgr,
+            &HashSet::new(),
+        )
+        .await;
+
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");
     }
 
     #[tokio::test]

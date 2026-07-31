@@ -304,7 +304,6 @@ pub struct OrchestratorRuntimeParts {
 }
 
 struct RunningHistoryRecordInput<'a> {
-    issue_id: &'a str,
     outcome: &'a str,
     last_error: Option<String>,
     running_entry: &'a crate::tracker::model::RunningEntry,
@@ -314,7 +313,6 @@ struct RunningHistoryRecordInput<'a> {
 }
 
 struct WaitingHistoryRecordInput<'a> {
-    issue_id: &'a str,
     outcome: &'a str,
     last_error: Option<String>,
     waiting_entry: &'a WaitingOnHumanEntry,
@@ -1072,7 +1070,6 @@ impl Orchestrator {
                                 .zip(state.get_pipeline_run(&issue.id))
                                 .map(|(entry, run)| {
                                     self.build_history_record(RunningHistoryRecordInput {
-                                        issue_id: &issue.id,
                                         outcome: HISTORY_OUTCOME_SUCCEEDED,
                                         last_error: None,
                                         running_entry: entry,
@@ -1324,7 +1321,7 @@ impl Orchestrator {
     ) -> Result<std::path::PathBuf, EnsembleError> {
         let workspace = self
             .workspace_mgr
-            .prepare_workspace(&issue.identifier)
+            .prepare_workspace(&issue.id, &issue.identifier)
             .await?;
 
         if workspace.created_now {
@@ -1864,7 +1861,6 @@ impl Orchestrator {
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(issue_id).map(|run| {
                             self.build_history_record(RunningHistoryRecordInput {
-                                issue_id,
                                 outcome: HISTORY_OUTCOME_STOPPED,
                                 last_error: None,
                                 running_entry: entry,
@@ -1895,7 +1891,7 @@ impl Orchestrator {
                 };
                 remove_drained_workers(&self.cancellation_registry, &drained.handles);
                 self.cancel_open_interaction(result.1).await;
-                if let Err(error) = self.workspace_mgr.remove_workspace(&result.0).await {
+                if let Err(error) = self.workspace_mgr.remove_workspace(issue_id).await {
                     warn!(
                         identifier = %result.0,
                         error = %error,
@@ -1924,7 +1920,6 @@ impl Orchestrator {
                     let history_record = running_entry.as_ref().and_then(|entry| {
                         state.get_pipeline_run(issue_id).map(|run| {
                             self.build_history_record(RunningHistoryRecordInput {
-                                issue_id,
                                 outcome: HISTORY_OUTCOME_STOPPED,
                                 last_error: None,
                                 running_entry: entry,
@@ -2379,7 +2374,6 @@ impl Orchestrator {
                                     .zip(state.get_pipeline_run(issue_id))
                                     .map(|(entry, run)| {
                                         self.build_history_record(RunningHistoryRecordInput {
-                                            issue_id,
                                             outcome: HISTORY_OUTCOME_SUCCEEDED,
                                             last_error: None,
                                             running_entry: entry,
@@ -2493,7 +2487,6 @@ impl Orchestrator {
                                                         );
                                                     self.build_history_record(
                                                         RunningHistoryRecordInput {
-                                                            issue_id,
                                                             outcome: HISTORY_OUTCOME_FAILED,
                                                             last_error: Some(reason.clone()),
                                                             running_entry: &entry,
@@ -2576,7 +2569,6 @@ impl Orchestrator {
                                                         );
                                                     self.build_history_record(
                                                         RunningHistoryRecordInput {
-                                                            issue_id,
                                                             outcome: HISTORY_OUTCOME_FAILED,
                                                             last_error: Some(reason.clone()),
                                                             running_entry: &entry,
@@ -2683,7 +2675,6 @@ impl Orchestrator {
                                                         );
                                                     self.build_history_record(
                                                         RunningHistoryRecordInput {
-                                                            issue_id,
                                                             outcome: HISTORY_OUTCOME_FAILED,
                                                             last_error: Some(reason.clone()),
                                                             running_entry: &entry,
@@ -2893,7 +2884,6 @@ impl Orchestrator {
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             self.build_history_record(RunningHistoryRecordInput {
-                                issue_id,
                                 outcome: HISTORY_OUTCOME_FAILED,
                                 last_error: Some(error.clone()),
                                 running_entry: &entry,
@@ -2992,7 +2982,6 @@ impl Orchestrator {
                 state.running.insert(issue_id.clone(), entry.clone());
                 let history_record = state.get_pipeline_run(&issue_id).map(|run| {
                     self.build_history_record(RunningHistoryRecordInput {
-                        issue_id: &issue_id,
                         outcome: HISTORY_OUTCOME_FAILED,
                         last_error: Some(error.to_string()),
                         running_entry: &entry,
@@ -3122,7 +3111,6 @@ impl Orchestrator {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
                             self.build_history_record(RunningHistoryRecordInput {
-                                issue_id,
                                 outcome: HISTORY_OUTCOME_FAILED,
                                 last_error: Some(reason.clone()),
                                 running_entry: &entry,
@@ -3194,7 +3182,6 @@ impl Orchestrator {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
                             self.build_history_record(RunningHistoryRecordInput {
-                                issue_id,
                                 outcome: HISTORY_OUTCOME_FAILED,
                                 last_error: Some(reason.clone()),
                                 running_entry: &entry,
@@ -3290,7 +3277,6 @@ impl Orchestrator {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
                             self.build_history_record(RunningHistoryRecordInput {
-                                issue_id,
                                 outcome: HISTORY_OUTCOME_FAILED,
                                 last_error: Some(reason.clone()),
                                 running_entry: &entry,
@@ -4919,7 +4905,6 @@ impl Orchestrator {
                     .get(issue_id)
                     .map(|entry| {
                         self.build_history_record(RunningHistoryRecordInput {
-                            issue_id,
                             outcome: match outcome {
                                 TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
                                 TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
@@ -4934,7 +4919,6 @@ impl Orchestrator {
                     .or_else(|| {
                         state.waiting_on_human.get(issue_id).map(|entry| {
                             self.build_history_record_from_waiting(WaitingHistoryRecordInput {
-                                issue_id,
                                 outcome: match outcome {
                                     TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
                                     TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
@@ -4979,7 +4963,11 @@ impl Orchestrator {
             .any(|repo| repo.finalize.enabled && !matches!(repo.finalize.mode, FinalizeMode::None));
 
         let prepared_workspace = if requires_workspace {
-            match self.workspace_mgr.prepare_workspace(issue_identifier).await {
+            match self
+                .workspace_mgr
+                .prepare_workspace(issue_id, issue_identifier)
+                .await
+            {
                 Ok(workspace) => Some(workspace),
                 Err(error) => {
                     return IssueFinalizeState {
@@ -5168,7 +5156,11 @@ impl Orchestrator {
             return;
         }
 
-        let workspace = match self.workspace_mgr.prepare_workspace(issue_identifier).await {
+        let workspace = match self
+            .workspace_mgr
+            .prepare_workspace(issue_id, issue_identifier)
+            .await
+        {
             Ok(workspace) => workspace,
             Err(error) => {
                 {
@@ -5559,13 +5551,13 @@ impl Orchestrator {
 
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(&input.running_entry.identifier)
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
+            .workspace_path(&input.running_entry.issue_id)
+            .display()
+            .to_string();
 
         HistoryRecord {
             issue_identifier: input.running_entry.identifier.clone(),
-            issue_id: input.issue_id.to_string(),
+            issue_id: input.running_entry.issue_id.clone(),
             outcome: input.outcome.to_string(),
             steps_traversed,
             attempts: input.running_entry.retry_attempt.unwrap_or(1),
@@ -5600,13 +5592,13 @@ impl Orchestrator {
             .max(0) as u64;
         let workspace_path = self
             .workspace_mgr
-            .workspace_path(&input.waiting_entry.identifier)
-            .map(|path| path.display().to_string())
-            .unwrap_or_default();
+            .workspace_path(&input.waiting_entry.issue_id)
+            .display()
+            .to_string();
 
         HistoryRecord {
             issue_identifier: input.waiting_entry.identifier.clone(),
-            issue_id: input.issue_id.to_string(),
+            issue_id: input.waiting_entry.issue_id.clone(),
             outcome: input.outcome.to_string(),
             steps_traversed,
             attempts: input.waiting_entry.retry_attempt.unwrap_or(1),
@@ -6154,7 +6146,6 @@ impl Orchestrator {
                                     state.get_pipeline_run(&issue.id).map(|run| {
                                         self.build_history_record_from_waiting(
                                             WaitingHistoryRecordInput {
-                                                issue_id: &issue.id,
                                                 outcome: HISTORY_OUTCOME_SUCCEEDED,
                                                 last_error: None,
                                                 waiting_entry: entry,
@@ -6213,7 +6204,6 @@ impl Orchestrator {
                                 state.get_pipeline_run(&issue.id).map(|run| {
                                     self.build_history_record_from_waiting(
                                         WaitingHistoryRecordInput {
-                                            issue_id: &issue.id,
                                             outcome: HISTORY_OUTCOME_FAILED,
                                             last_error: Some(reason.clone()),
                                             waiting_entry: entry,
@@ -7989,7 +7979,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn restore_pipeline_runs_from_journal_restores_step_retry_entry() {
+    async fn workspace_identity_lifecycle_retry_journal_restoration_uses_same_path() {
         let temp = tempfile::tempdir().unwrap();
         let cfg = make_retry_step_config();
         let issue = test_issue("1", "Todo");
@@ -8066,6 +8056,15 @@ agent:
                 .get(&issue.id)
                 .and_then(|entry| entry.retry_from_step.as_deref()),
             Some("build")
+        );
+        let restored_retry = lock.retry_attempts.get(&issue.id).unwrap();
+        assert_eq!(
+            orchestrator
+                .workspace_mgr
+                .workspace_path(&restored_retry.issue_id),
+            temp.path()
+                .join("workspaces")
+                .join(crate::workspace::key::issue_workspace_key(&issue.id))
         );
     }
 
@@ -9877,10 +9876,7 @@ agent:
             state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
         }
 
-        let workspace = orchestrator
-            .workspace_mgr
-            .workspace_path("repo#1")
-            .expect("workspace path");
+        let workspace = orchestrator.workspace_mgr.workspace_path("1");
         tokio::fs::create_dir_all(workspace.join(".ensemble"))
             .await
             .unwrap();
@@ -9954,10 +9950,7 @@ agent:
                 state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
             }
 
-            let workspace = orchestrator
-                .workspace_mgr
-                .workspace_path("repo#1")
-                .expect("workspace path");
+            let workspace = orchestrator.workspace_mgr.workspace_path("1");
             tokio::fs::create_dir_all(workspace.join(".ensemble"))
                 .await
                 .unwrap();
@@ -14051,7 +14044,11 @@ agent:
         });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
-        workspace_mgr.prepare_workspace("repo#1").await.unwrap();
+        workspace_mgr
+            .prepare_workspace("1", "repo#1")
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path("1");
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
@@ -14098,7 +14095,76 @@ agent:
         assert!(!state.is_claimed("1"));
         assert!(!state.is_waiting_on_human("1"));
         assert!(state.get_pipeline_run("1").is_none());
-        assert!(!dir.path().join("repo_1").exists());
+        assert!(!workspace_path.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_identity_lifecycle_active_cleanup_refuses_mismatched_owner() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Done")]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let workspace_path = workspace_mgr.workspace_path("1");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        std::fs::write(
+            workspace_path.join(".ensemble-workspace.json"),
+            r#"{"issue_id":"other","issue_identifier":"other#7","branch_date":"2024-01-01"}"#,
+        )
+        .unwrap();
+        let sentinel = workspace_path.join("sentinel");
+        std::fs::write(&sentinel, "untouched").unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            pipeline_run.start();
+            pipeline_run.step_blocked_on_human("build", "interaction-1".to_string());
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", pipeline_run, Arc::new(cfg.clone()));
+            state.add_claimed("1");
+            state.add_waiting_on_human(crate::orchestrator::state::WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                kind: crate::interaction::model::InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: None,
+                issue: None,
+            });
+        }
+
+        orchestrator.handle_tick().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_claimed("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        assert_eq!(std::fs::read_to_string(sentinel).unwrap(), "untouched");
     }
 
     #[tokio::test]
@@ -14197,7 +14263,6 @@ agent:
         drop(state);
 
         let record = orchestrator.build_history_record(RunningHistoryRecordInput {
-            issue_id: "1",
             outcome: "succeeded",
             last_error: None,
             running_entry: &entry,
@@ -14213,7 +14278,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn build_history_record_preserves_run_artifacts() {
+    async fn workspace_identity_path_history_and_artifacts_use_canonical_owner() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
@@ -14235,6 +14300,11 @@ agent:
             dir.path(),
             shutdown_rx,
         );
+        let workspace_path = orchestrator
+            .workspace_mgr
+            .workspace_path("1")
+            .display()
+            .to_string();
 
         let cfg = config.read().await;
         let dag = build_dag(&cfg.steps).unwrap();
@@ -14245,7 +14315,7 @@ agent:
         );
         let artifacts = RunArtifacts {
             run_id: "run-1".to_string(),
-            workspace_path: dir.path().display().to_string(),
+            workspace_path: workspace_path.clone(),
             repos: Vec::new(),
             transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
                 step_name: "build".to_string(),
@@ -14259,7 +14329,6 @@ agent:
         drop(state);
 
         let record = orchestrator.build_history_record(RunningHistoryRecordInput {
-            issue_id: "1",
             outcome: "succeeded",
             last_error: None,
             running_entry: &entry,
@@ -14268,6 +14337,7 @@ agent:
             artifacts: Some(artifacts.clone()),
         });
 
+        assert_eq!(record.workspace_path, workspace_path);
         assert_eq!(record.artifacts, Some(artifacts));
     }
 
@@ -14633,7 +14703,11 @@ agent:
         });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
-        workspace_mgr.prepare_workspace("repo#1").await.unwrap();
+        workspace_mgr
+            .prepare_workspace("1", "repo#1")
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path("1");
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
@@ -14680,7 +14754,7 @@ agent:
         assert!(!state.is_claimed("1"));
         assert!(!state.is_waiting_on_human("1"));
         assert!(state.get_pipeline_run("1").is_none());
-        assert!(dir.path().join("repo_1").exists());
+        assert!(workspace_path.exists());
     }
 
     #[tokio::test]
@@ -16203,7 +16277,7 @@ agent:
     async fn reconciliation_drain_terminal_waits_before_release_and_cleanup() {
         let (orchestrator, dir, issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
-        let workspace_path = orchestrator.workspace_mgr.workspace_path("repo#1").unwrap();
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("1");
         assert!(workspace_path.exists());
         issues.write().await[0].state = "Done".to_string();
 
@@ -16250,7 +16324,7 @@ agent:
     async fn reconciliation_drain_inactive_waits_before_release_without_cleanup() {
         let (orchestrator, dir, issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
-        let workspace_path = orchestrator.workspace_mgr.workspace_path("repo#1").unwrap();
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("1");
         issues.write().await[0].state = "Backlog".to_string();
 
         let tick = tokio::spawn({
@@ -16380,7 +16454,7 @@ agent:
     async fn reconciliation_drain_stalled_timeout_retains_owner_then_retries_once() {
         let (orchestrator, _dir, _issues, cancelled, release) =
             blocking_drain_test_orchestrator().await;
-        let workspace_path = orchestrator.workspace_mgr.workspace_path("repo#1").unwrap();
+        let workspace_path = orchestrator.workspace_mgr.workspace_path("1");
         orchestrator.config.write().await.agent.stall_timeout_ms = 1;
         let identity = {
             let mut state = orchestrator.state.write().await;
