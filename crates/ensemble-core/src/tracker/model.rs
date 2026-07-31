@@ -68,7 +68,7 @@ pub struct RunningEntry {
     pub started_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RetryEntry {
     pub issue_id: String,
     pub identifier: String,

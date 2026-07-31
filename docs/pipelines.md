@@ -167,6 +167,14 @@ max_cycles: 3  # default
 - After cycle 3: Issue moves to `on_failure` state
 
 Retries use exponential backoff: 10s, 20s, 40s, ... capped at `agent.max_retry_backoff_ms` (default 5 minutes).
+The queued retry's `attempt` is the next pipeline cycle to dispatch. Scheduler work such as fetching
+tracker candidates, waiting for agent capacity, or entering shutdown quiescence can defer that same
+queued entry, but does not consume another pipeline cycle or release its claim.
+
+When an automated failure reaches `max_cycles`, Ensemble durably records the configured
+`on_failure` transition before attempting the tracker write. The issue remains claimed with its
+pipeline snapshot and completion history until terminal reconciliation succeeds. A restart restores
+that pending transition instead of rerunning the pipeline or silently dropping the exhausted retry.
 
 The workspace persists across retries, so agents can see previous work and build on it. The `attempt` variable is available in prompt templates for retry-aware prompts.
 

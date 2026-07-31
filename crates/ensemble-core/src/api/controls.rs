@@ -3,8 +3,9 @@ use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
 use crate::orchestrator::pipeline_journal::PipelineRunJournal;
-use crate::orchestrator::retry::{next_attempt, schedule_failure_retry, FailureRetryRequest};
+use crate::orchestrator::retry::ManualStepRetryError;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
+use crate::orchestrator::ManualStepRetryCommand;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -316,7 +317,9 @@ pub async fn post_stop(
     responses(
         (status = 200, description = "Retry queued", body = RetryResponse),
         (status = 404, description = "Not found", body = ApiError),
-        (status = 409, description = "Not retrying", body = ApiError)
+        (status = 409, description = "Not retrying", body = ApiError),
+        (status = 500, description = "Retry could not be persisted", body = ApiError),
+        (status = 503, description = "Orchestrator runtime unavailable", body = ApiError)
     ),
     tag = "controls"
 )]
@@ -325,23 +328,18 @@ pub async fn post_retry(
     Path(identifier): Path<String>,
     Query(query): Query<RetryQuery>,
 ) -> impl IntoResponse {
-    let retry_settings = if query.step.is_some() {
+    if query.step.is_some() {
         let document_state = state.config_runtime.document_state.read().await;
-        match document_state.active_config.as_ref() {
-            Some(config) => Some((config.agent.max_retry_backoff_ms, config.max_cycles)),
-            None => {
-                return issue_error_response(
-                    StatusCode::CONFLICT,
-                    "no_active_config",
-                    "cannot schedule step-level retry without an active config",
-                );
-            }
+        if document_state.active_config.is_none() {
+            return issue_error_response(
+                StatusCode::CONFLICT,
+                "no_active_config",
+                "cannot schedule step-level retry without an active config",
+            );
         }
-    } else {
-        None
-    };
+    }
 
-    let mut lock = state.orchestrator_state.write().await;
+    let lock = state.orchestrator_state.write().await;
 
     let issue_id = match find_issue_presence(&lock, &identifier) {
         IssuePresence::Retrying(id) => id,
@@ -377,69 +375,78 @@ pub async fn post_retry(
         },
     };
 
-    let mut release_record: Option<(String, String, Option<String>, &'static str)> = None;
-
     if let Some(step_name) = query.step.as_ref() {
-        let Some(run) = lock.get_pipeline_run_mut(&issue_id) else {
-            return issue_error_response(
-                StatusCode::CONFLICT,
-                "no_pipeline_run",
-                format!("issue '{}' has no resumable pipeline run", identifier),
-            );
-        };
-        if !run.step_states.contains_key(step_name) {
-            return issue_error_response(
-                StatusCode::NOT_FOUND,
-                "step_not_found",
-                format!(
-                    "issue '{}' has no pipeline step '{}'",
-                    identifier, step_name
-                ),
-            );
+        drop(lock);
+        match state
+            .orchestrator_runtime
+            .queue_manual_step_retry(ManualStepRetryCommand {
+                issue_id: issue_id.clone(),
+                identifier: identifier.clone(),
+                step_name: step_name.clone(),
+            })
+            .await
+        {
+            Ok(_) => {}
+            Err(ManualStepRetryError::RuntimeUnavailable) => {
+                return issue_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "orchestrator_unavailable",
+                    "the orchestrator runtime is not available to queue this retry",
+                );
+            }
+            Err(ManualStepRetryError::NoPipelineRun) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "no_pipeline_run",
+                    format!("issue '{}' has no resumable pipeline run", identifier),
+                );
+            }
+            Err(ManualStepRetryError::StepNotFound) => {
+                return issue_error_response(
+                    StatusCode::NOT_FOUND,
+                    "step_not_found",
+                    format!(
+                        "issue '{}' has no pipeline step '{}'",
+                        identifier, step_name
+                    ),
+                );
+            }
+            Err(ManualStepRetryError::MaxCyclesExhausted) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "max_cycles_exhausted",
+                    format!(
+                        "issue '{}' has reached the configured maximum pipeline cycles",
+                        identifier
+                    ),
+                );
+            }
+            Err(ManualStepRetryError::OwnerChanged) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "not_retrying",
+                    format!("issue '{}' is no longer retryable", identifier),
+                );
+            }
+            Err(ManualStepRetryError::Persistence(error)) => {
+                tracing::warn!(
+                    issue_id = %issue_id,
+                    error = %error,
+                    "failed to persist manual step retry"
+                );
+                return issue_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "retry_persistence_failed",
+                    format!(
+                        "failed to durably queue step-level retry for issue '{}'",
+                        identifier
+                    ),
+                );
+            }
         }
-        run.retry_from_step(step_name);
-
-        let identifier_copy = lock
-            .retry_attempts
-            .get(&issue_id)
-            .map(|entry| entry.identifier.clone())
-            .or_else(|| {
-                lock.waiting_on_human
-                    .get(&issue_id)
-                    .map(|entry| entry.identifier.clone())
-            })
-            .unwrap_or_else(|| identifier.clone());
-        let attempt = lock
-            .retry_attempts
-            .get(&issue_id)
-            .map(|entry| entry.attempt + 1)
-            .or_else(|| {
-                lock.waiting_on_human
-                    .get(&issue_id)
-                    .map(|entry| next_attempt(entry.retry_attempt))
-            })
-            .unwrap_or(1);
-        let (max_backoff_ms, max_cycles) =
-            retry_settings.expect("retry settings loaded for step-level retry");
-
-        lock.remove_retry(&issue_id);
-        lock.remove_waiting_on_human(&issue_id);
-        schedule_failure_retry(
-            &mut lock,
-            FailureRetryRequest {
-                issue_id: &issue_id,
-                identifier: &identifier_copy,
-                attempt,
-                max_backoff_ms,
-                max_cycles,
-                error: "manual step-level retry",
-                retry_from_step: Some(step_name.clone()),
-                with_fixup: false,
-            },
-        );
     } else {
+        let mut lock = lock;
         // Whole-issue retry: release the claim so the next poll can pick it up fresh.
-        let release_identifier = identifier.clone();
         let release_run_id = lock
             .get_running(&issue_id)
             .and_then(|entry| entry.run_id.clone())
@@ -452,17 +459,15 @@ pub async fn post_retry(
         lock.remove_waiting_on_human(&issue_id);
         lock.remove_claimed(&issue_id);
         lock.remove_pipeline_run(&issue_id);
-        release_record = Some((
-            issue_id.clone(),
-            release_identifier,
+        drop(lock);
+        append_release_record(
+            &state,
+            &issue_id,
+            &identifier,
             release_run_id,
             "whole_issue_retry",
-        ));
-    }
-    drop(lock);
-
-    if let Some((issue_id, identifier, run_id, reason)) = release_record {
-        append_release_record(&state, &issue_id, &identifier, run_id, reason).await;
+        )
+        .await;
     }
 
     // Signal the orchestrator to poll immediately so it picks up the now-unclaimed issue
@@ -824,11 +829,13 @@ mod tests {
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::{ConcurrencyConfig, OnFailure, StepConfig, StepKind};
     use crate::interaction::model::InteractionKind;
-    use crate::orchestrator::pipeline_journal::PipelineTransitionKind;
+    use crate::orchestrator::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind};
+    use crate::orchestrator::retry::{queue_manual_step_retry, ManualStepRetryRequest};
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
         WaitingOnHumanEntry,
     };
+    use crate::orchestrator::OrchestratorCommand;
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
@@ -1023,6 +1030,36 @@ mod tests {
         let mut app_state = app_state_with_document_state(document_state);
         app_state.orchestrator_state = Arc::new(RwLock::new(state));
         app_state
+    }
+
+    fn install_test_retry_runtime(state: &AppState) {
+        let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(16);
+        state
+            .orchestrator_runtime
+            .install_test_command_sender(command_tx);
+        let orchestrator_state = Arc::clone(&state.orchestrator_state);
+        let journal = pipeline_journal(state);
+        tokio::spawn(async move {
+            while let Some(command) = command_rx.recv().await {
+                match command {
+                    OrchestratorCommand::QueueManualStepRetry { command, response } => {
+                        let result = queue_manual_step_retry(
+                            &orchestrator_state,
+                            &journal,
+                            ManualStepRetryRequest {
+                                issue_id: &command.issue_id,
+                                identifier: &command.identifier,
+                                step_name: &command.step_name,
+                                max_backoff_ms: 300_000,
+                                max_cycles: 3,
+                            },
+                        )
+                        .await;
+                        let _ = response.send(result);
+                    }
+                }
+            }
+        });
     }
 
     fn build_app_state_with_finalize_failed() -> AppState {
@@ -1281,7 +1318,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_retry_waiting_issue_with_step_queues_step_retry() {
-        let state = build_app_state_with_waiting_pipeline();
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_waiting_pipeline();
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+        install_test_retry_runtime(&state);
         let response = post_retry(
             State(state.clone()),
             Path("my-repo#42".to_string()),
@@ -1307,6 +1347,141 @@ mod tests {
         assert!(!retry.with_fixup);
         assert_eq!(retry.attempt, 2);
         assert!(lock.is_claimed("NODE_123"));
+        drop(lock);
+
+        let record = PipelineRunJournal::new(temp.path())
+            .latest_live_record_for_issue("NODE_123")
+            .await
+            .unwrap()
+            .expect("manual step retry should be durable");
+        assert_eq!(record.kind, PipelineTransitionKind::StepRetryScheduled);
+        assert_eq!(record.retry.map(|retry| retry.attempt), Some(2));
+    }
+
+    #[tokio::test]
+    async fn manual_step_retry_exhaustion_preserves_the_existing_owner() {
+        let state = build_app_state_with_waiting_pipeline();
+        install_test_retry_runtime(&state);
+        {
+            let mut lock = state.orchestrator_state.write().await;
+            lock.waiting_on_human
+                .get_mut("NODE_123")
+                .unwrap()
+                .retry_attempt = Some(2);
+        }
+
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("build".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "max_cycles_exhausted");
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.waiting_on_human.contains_key("NODE_123"));
+        assert!(!lock.retry_attempts.contains_key("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_some());
+        assert!(lock.is_claimed("NODE_123"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn manual_step_retry_persistence_failure_restores_restart_safe_owner() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_waiting_pipeline();
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+        let journal = PipelineRunJournal::new(temp.path());
+        let previous_snapshot = state
+            .orchestrator_state
+            .read()
+            .await
+            .get_pipeline_run("NODE_123")
+            .unwrap()
+            .to_snapshot();
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: "NODE_123".to_string(),
+                identifier: "my-repo#42".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("manual repair needed".to_string()),
+                retry: None,
+                snapshot: Some(previous_snapshot.clone()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        let journal_path = journal.path_for_issue("NODE_123");
+        std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        install_test_retry_runtime(&state);
+
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("build".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "retry_persistence_failed");
+
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.waiting_on_human.contains_key("NODE_123"));
+        assert!(!lock.retry_attempts.contains_key("NODE_123"));
+        assert!(lock.is_claimed("NODE_123"));
+        assert_eq!(
+            lock.get_pipeline_run("NODE_123").unwrap().to_snapshot(),
+            previous_snapshot
+        );
+        drop(lock);
+
+        let latest = journal
+            .latest_live_record_for_issue("NODE_123")
+            .await
+            .unwrap()
+            .expect("previous durable owner remains recoverable after restart");
+        assert_eq!(latest.kind, PipelineTransitionKind::PipelineHalted);
+        assert!(latest.retry.is_none());
+        assert_eq!(latest.snapshot, Some(previous_snapshot));
+    }
+
+    #[tokio::test]
+    async fn manual_step_retry_requires_runtime_authority_and_preserves_owner() {
+        let state = build_app_state_with_waiting_pipeline();
+
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("build".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "orchestrator_unavailable");
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.waiting_on_human.contains_key("NODE_123"));
+        assert!(!lock.retry_attempts.contains_key("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_some());
     }
 
     #[tokio::test]

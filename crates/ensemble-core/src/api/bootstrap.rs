@@ -6,8 +6,13 @@ use crate::config::ensemble::{default_workspace_root, ConcurrencyConfig, Polling
 use crate::error::{ConfigError, EnsembleError};
 use crate::history_store::store::HistoryStore;
 use crate::observability::events::EventBus;
+use crate::orchestrator::retry::ManualStepRetryError;
 use crate::orchestrator::state::OrchestratorState;
-use crate::orchestrator::{Orchestrator, OrchestratorRuntimeParts, QuiescingLatch};
+use crate::orchestrator::{
+    ManualStepRetryCommand, Orchestrator, OrchestratorCommand, OrchestratorRuntimeParts,
+    QuiescingLatch,
+};
+use crate::tracker::model::RetryEntry;
 use crate::tracker::{create_tracker, IssueTracker};
 use crate::transcript::events::TranscriptEventBus;
 use crate::workspace::manager::WorkspaceManager;
@@ -36,6 +41,7 @@ pub struct OrchestratorRuntime {
     shutdown_tx: mpsc::Sender<()>,
     completion: watch::Receiver<bool>,
     quiescing: QuiescingLatch,
+    command_tx: mpsc::Sender<OrchestratorCommand>,
     _worker_event_receiver:
         Arc<tokio::sync::Mutex<mpsc::Receiver<crate::agent::events::OrchestratorWorkerEvent>>>,
     task: JoinHandle<()>,
@@ -57,15 +63,64 @@ struct RegisteredRuntime {
 /// and never holds the mutex guard across `.await`. A tokio mutex would add async overhead
 /// without improving correctness for these tiny critical sections.
 #[derive(Clone, Default)]
-pub struct RegisteredOrchestrator(Arc<std::sync::Mutex<Option<RegisteredRuntime>>>);
+pub struct RegisteredOrchestrator {
+    inner: Arc<std::sync::Mutex<Option<RegisteredRuntime>>>,
+    #[cfg(test)]
+    test_command_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<OrchestratorCommand>>>>,
+}
 
 impl RegisteredOrchestrator {
     #[cfg(test)]
     pub(crate) fn is_registered(&self) -> bool {
-        self.0
+        self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_some()
+    }
+
+    pub(crate) async fn queue_manual_step_retry(
+        &self,
+        command: ManualStepRetryCommand,
+    ) -> Result<RetryEntry, ManualStepRetryError> {
+        let command_tx = {
+            let registered = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            registered
+                .as_ref()
+                .filter(|registered| registered.phase == RuntimePhase::Running)
+                .map(|registered| registered.runtime.command_tx.clone())
+        };
+        #[cfg(test)]
+        let command_tx = command_tx.or_else(|| {
+            self.test_command_tx
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        });
+        let Some(command_tx) = command_tx else {
+            return Err(ManualStepRetryError::RuntimeUnavailable);
+        };
+        let (response, result) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(OrchestratorCommand::QueueManualStepRetry { command, response })
+            .await
+            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?;
+        result
+            .await
+            .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_command_sender(
+        &self,
+        command_tx: mpsc::Sender<OrchestratorCommand>,
+    ) {
+        *self
+            .test_command_tx
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(command_tx);
     }
 }
 
@@ -185,7 +240,7 @@ fn registered_orchestrator_guard(
 ) -> MutexGuard<'_, Option<RegisteredRuntime>> {
     app_state
         .orchestrator_runtime
-        .0
+        .inner
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -251,6 +306,7 @@ fn launch_orchestrator_runtime(prepared: PreparedOrchestratorRuntime) -> Orchest
     } = prepared;
     let worker_event_receiver = orchestrator.worker_event_receiver_owner();
     let quiescing = orchestrator.quiescing_latch_owner();
+    let command_tx = orchestrator.command_sender_owner();
     let (completion_tx, completion) = watch::channel(false);
     let task = tokio::spawn(async move {
         let quiesced = orchestrator.run().await;
@@ -264,6 +320,7 @@ fn launch_orchestrator_runtime(prepared: PreparedOrchestratorRuntime) -> Orchest
         shutdown_tx,
         completion,
         quiescing,
+        command_tx,
         _worker_event_receiver: worker_event_receiver,
         task,
     }
@@ -533,6 +590,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn orchestrator_runtime_processes_manual_retry_commands() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let todo_path = temp_dir.path().join("TODO.md");
+        let config_path = temp_dir.path().join("config.yaml");
+        let yaml = format!(
+            "tracker:\n  kind: todo_file\n  path: {}\n  active_states: [Todo]\n  terminal_states: [Done]\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\npolling:\n  interval_ms: 60000\n",
+            todo_path.display()
+        );
+        let document_state = parse_raw_yaml(config_path.clone(), yaml);
+        let built = build_app_state(config_path, document_state, EventBus::new());
+        let runtime = start_orchestrator_for_app(&built.app_state)
+            .await
+            .unwrap()
+            .unwrap();
+        let (response, result) = tokio::sync::oneshot::channel();
+
+        runtime
+            .command_tx
+            .send(OrchestratorCommand::QueueManualStepRetry {
+                command: ManualStepRetryCommand {
+                    issue_id: "missing".to_string(),
+                    identifier: "repo#404".to_string(),
+                    step_name: "build".to_string(),
+                },
+                response,
+            })
+            .await
+            .unwrap();
+        let command_result = tokio::time::timeout(Duration::from_secs(2), result)
+            .await
+            .expect("orchestrator command should be handled")
+            .expect("orchestrator should return a command result");
+
+        runtime.shutdown().await;
+        assert!(matches!(
+            command_result,
+            Err(ManualStepRetryError::NoPipelineRun)
+        ));
+    }
+
+    #[tokio::test]
     async fn clear_registered_orchestrator_removes_stored_runtime() {
         let temp_dir = tempfile::tempdir().unwrap();
         let todo_path = temp_dir.path().join("TODO.md");
@@ -628,6 +726,7 @@ mod tests {
         );
 
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
         let (completion_tx, completion) = watch::channel(false);
         let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
         let (quiesce_tx, quiesce_rx) = tokio::sync::oneshot::channel();
@@ -642,6 +741,7 @@ mod tests {
             shutdown_tx,
             completion,
             quiescing: QuiescingLatch::default(),
+            command_tx,
             _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
             task,
         };
@@ -733,6 +833,7 @@ mod tests {
         let built = build_app_state(config_path, document_state, EventBus::new());
 
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
         let (completion_tx, completion) = watch::channel(false);
         let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -745,6 +846,7 @@ mod tests {
             shutdown_tx,
             completion,
             quiescing: QuiescingLatch::default(),
+            command_tx,
             _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
             task,
         };
@@ -828,6 +930,7 @@ mod tests {
         let built = build_app_state(config_path, document_state, EventBus::new());
 
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
         let (completion_tx, completion) = watch::channel(false);
         let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
         let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -840,6 +943,7 @@ mod tests {
             shutdown_tx,
             completion,
             quiescing: QuiescingLatch::default(),
+            command_tx,
             _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
             task,
         };
@@ -892,6 +996,7 @@ mod tests {
         let built = build_app_state(config_path, document_state, EventBus::new());
 
         let (shutdown_tx, _shutdown_rx) = mpsc::channel(1);
+        let (command_tx, _command_rx) = mpsc::channel(1);
         let (completion_tx, completion) = watch::channel(false);
         drop(completion_tx);
         let (_worker_event_tx, worker_event_rx) = mpsc::channel(1);
@@ -901,6 +1006,7 @@ mod tests {
             shutdown_tx,
             completion,
             quiescing: QuiescingLatch::default(),
+            command_tx,
             _worker_event_receiver: Arc::new(tokio::sync::Mutex::new(worker_event_rx)),
             task,
         };
@@ -940,7 +1046,7 @@ mod tests {
         let runtime_registry = built.app_state.orchestrator_runtime.clone();
 
         let _ = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = runtime_registry.0.lock().unwrap();
+            let _guard = runtime_registry.inner.lock().unwrap();
             panic!("poison orchestrator runtime mutex");
         }));
 
