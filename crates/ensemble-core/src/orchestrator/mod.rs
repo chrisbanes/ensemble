@@ -76,8 +76,9 @@ use reconciler::{
 };
 use retry::{
     current_time_ms, defer_retry, get_due_retries, next_attempt, queue_manual_step_retry,
-    schedule_failure_retry, FailureRetryDisposition, FailureRetryRequest, ManualStepRetryError,
-    ManualStepRetryRequest,
+    queue_manual_whole_issue_retry, schedule_failure_retry, FailureRetryDisposition,
+    FailureRetryRequest, ManualStepRetryError, ManualStepRetryRequest,
+    ManualWholeIssueRetryRequest,
 };
 use scheduler::{
     has_available_slots, is_dispatch_eligible, is_resume_dispatch_eligible, sort_for_dispatch,
@@ -95,8 +96,17 @@ struct StepDispatchContext<'a> {
     attempt: Option<u32>,
     timeout_ms: u64,
     interaction_response: Option<InteractionResponseEnvelope>,
+    interaction_resume_id: Option<&'a str>,
+    interaction_to_retire: Option<&'a str>,
+    interaction_retirement_rollback: Option<PipelineTransitionInput>,
     workspace_path: std::path::PathBuf,
     step_outputs: StepOutputTemplateContext,
+}
+
+const INTERACTION_RESUME_REASON_PREFIX: &str = "interaction_resume:";
+
+fn interaction_id_from_resume_reason(reason: Option<&str>) -> Option<&str> {
+    reason?.strip_prefix(INTERACTION_RESUME_REASON_PREFIX)
 }
 
 struct ExhaustedRetryTerminal {
@@ -117,10 +127,19 @@ pub(crate) struct ManualStepRetryCommand {
     pub step_name: String,
 }
 
+pub(crate) struct ManualWholeIssueRetryCommand {
+    pub issue_id: String,
+    pub identifier: String,
+}
+
 pub(crate) enum OrchestratorCommand {
     QueueManualStepRetry {
         command: ManualStepRetryCommand,
         response: tokio::sync::oneshot::Sender<Result<RetryEntry, ManualStepRetryError>>,
+    },
+    QueueManualWholeIssueRetry {
+        command: ManualWholeIssueRetryCommand,
+        response: tokio::sync::oneshot::Sender<Result<(), ManualStepRetryError>>,
     },
 }
 
@@ -503,12 +522,30 @@ impl Orchestrator {
                 let result = queue_manual_step_retry(
                     &self.state,
                     &self.pipeline_journal,
+                    &self.interaction_store,
                     ManualStepRetryRequest {
                         issue_id: &command.issue_id,
                         identifier: &command.identifier,
                         step_name: &command.step_name,
                         max_backoff_ms,
                         max_cycles,
+                    },
+                )
+                .await;
+                let _ = response.send(result);
+            }
+            OrchestratorCommand::QueueManualWholeIssueRetry { command, response } => {
+                if self.quiescing.is_requested() {
+                    let _ = response.send(Err(ManualStepRetryError::RuntimeUnavailable));
+                    return;
+                }
+                let result = queue_manual_whole_issue_retry(
+                    &self.state,
+                    &self.pipeline_journal,
+                    &self.interaction_store,
+                    ManualWholeIssueRetryRequest {
+                        issue_id: &command.issue_id,
+                        identifier: &command.identifier,
                     },
                 )
                 .await;
@@ -706,6 +743,52 @@ impl Orchestrator {
             )
         };
 
+        let resume_issue_ids = {
+            let state = self.state.read().await;
+            state.resume_requested.iter().cloned().collect::<Vec<_>>()
+        };
+        if !resume_issue_ids.is_empty() {
+            match self
+                .tracker
+                .fetch_issue_states_by_ids(&resume_issue_ids)
+                .await
+            {
+                Ok(issues) => {
+                    for issue in issues {
+                        let still_requested = {
+                            let state = self.state.read().await;
+                            state.is_resume_requested(&issue.id)
+                        };
+                        if !still_requested {
+                            continue;
+                        }
+
+                        match self.resume_blocked_issue(&issue).await {
+                            Ok(()) => {
+                                let mut state = self.state.write().await;
+                                state.clear_resume_request(&issue.id);
+                            }
+                            Err(error) => {
+                                warn!(
+                                    issue_id = %issue.id,
+                                    issue_identifier = %issue.identifier,
+                                    error = %error,
+                                    "failed to process explicit resume request"
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        issue_ids = ?resume_issue_ids,
+                        error = %error,
+                        "failed to refresh explicit resume requests"
+                    );
+                }
+            }
+        }
+
         for issue_id in pending_reconciliation_issue_ids(&self.cancellation_registry) {
             self.resume_pending_reconciliation(&issue_id, &reconcile_active_lower, &terminal_lower)
                 .await;
@@ -785,32 +868,6 @@ impl Orchestrator {
 
         // 4. Sort by dispatch priority
         sort_for_dispatch(&mut candidates);
-
-        let resume_candidates = {
-            let state = self.state.read().await;
-            candidates
-                .iter()
-                .filter(|issue| state.is_resume_requested(&issue.id))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-
-        for issue in resume_candidates {
-            match self.resume_blocked_issue(&issue).await {
-                Ok(()) => {
-                    let mut state = self.state.write().await;
-                    state.clear_resume_request(&issue.id);
-                }
-                Err(error) => {
-                    warn!(
-                        issue_id = %issue.id,
-                        issue_identifier = %issue.identifier,
-                        error = %error,
-                        "failed to process explicit resume request"
-                    );
-                }
-            }
-        }
 
         // 5. Dispatch eligible issues while slots remain
         for issue in &candidates {
@@ -1153,6 +1210,20 @@ impl Orchestrator {
                         }
                     }
                     PipelineAction::Dispatch(requests) => {
+                        let recovered_interaction = match self
+                            .recovered_interaction_response(&issue.id)
+                            .await
+                        {
+                            Ok(interaction) => interaction,
+                            Err(error) => {
+                                warn!(
+                                    issue_id = %issue.id,
+                                    error = %error,
+                                    "failed to recover durable interaction response; retaining pipeline owner"
+                                );
+                                return;
+                            }
+                        };
                         for req in requests {
                             let workspace_path =
                                 match self.prepare_step_workspace(issue, &config_snapshot).await {
@@ -1192,7 +1263,7 @@ impl Orchestrator {
                                     .unwrap_or_default()
                             };
 
-                            let _ = self
+                            if let Err(error) = self
                                 .dispatch_step(
                                     issue,
                                     Arc::clone(&config_snapshot),
@@ -1206,13 +1277,45 @@ impl Orchestrator {
                                             req.timeout_ms,
                                             &config_snapshot,
                                         ),
-                                        interaction_response: None,
+                                        interaction_response: recovered_interaction
+                                            .as_ref()
+                                            .filter(|(_, step_name, _, _)| {
+                                                step_name == &req.step_name
+                                            })
+                                            .and_then(|(_, _, response, _)| response.clone()),
+                                        interaction_resume_id: recovered_interaction
+                                            .as_ref()
+                                            .filter(|(_, step_name, _, _)| {
+                                                step_name == &req.step_name
+                                            })
+                                            .map(|(interaction_id, _, _, _)| {
+                                                interaction_id.as_str()
+                                            }),
+                                        interaction_to_retire: recovered_interaction
+                                            .as_ref()
+                                            .filter(|(_, step_name, _, awaiting_resume)| {
+                                                step_name == &req.step_name && *awaiting_resume
+                                            })
+                                            .map(|(interaction_id, _, _, _)| {
+                                                interaction_id.as_str()
+                                            }),
+                                        interaction_retirement_rollback: None,
                                         workspace_path,
                                         step_outputs,
                                     },
                                     permit,
                                 )
+                                .await
+                            {
+                                self.handle_step_dispatch_error(
+                                    issue,
+                                    &req.step_name,
+                                    &config_snapshot,
+                                    &error,
+                                )
                                 .await;
+                                return;
+                            }
                         }
                     }
                     PipelineAction::Waiting
@@ -1309,7 +1412,7 @@ impl Orchestrator {
                         }
                     };
 
-                let _ = self
+                if let Err(error) = self
                     .dispatch_step(
                         issue,
                         Arc::clone(&config_snapshot),
@@ -1324,12 +1427,25 @@ impl Orchestrator {
                                 &config_snapshot,
                             ),
                             interaction_response: None,
+                            interaction_resume_id: None,
+                            interaction_to_retire: None,
+                            interaction_retirement_rollback: None,
                             workspace_path,
                             step_outputs: StepOutputTemplateContext::default(),
                         },
                         permit,
                     )
+                    .await
+                {
+                    self.handle_step_dispatch_error(
+                        issue,
+                        &req.step_name,
+                        &config_snapshot,
+                        &error,
+                    )
                     .await;
+                    return;
+                }
             }
         }
 
@@ -1340,6 +1456,133 @@ impl Orchestrator {
             cycle = cycle,
             "issue dispatch setup completed"
         );
+    }
+
+    async fn recovered_interaction_response(
+        &self,
+        issue_id: &str,
+    ) -> Result<Option<(String, String, Option<InteractionResponseEnvelope>, bool)>, EnsembleError>
+    {
+        let record = self
+            .pipeline_journal
+            .latest_live_record_for_issue(issue_id)
+            .await
+            .map_err(|error| AgentError::IoError {
+                reason: format!(
+                    "failed to read the durable pipeline owner for issue {issue_id}: {error}"
+                ),
+            })?;
+        let Some(record) = record else {
+            return Ok(None);
+        };
+        if record.kind != PipelineTransitionKind::StepRunning {
+            return Ok(None);
+        }
+        let Some(interaction_id) = interaction_id_from_resume_reason(record.reason.as_deref())
+        else {
+            return Ok(None);
+        };
+        let interaction = self
+            .interaction_store
+            .get(interaction_id)
+            .await?
+            .ok_or_else(|| AgentError::PromptError {
+                reason: format!(
+                    "durable pipeline owner for issue {issue_id} references missing interaction '{interaction_id}'"
+                ),
+            })?;
+        if interaction.status != InteractionStatus::Resolved {
+            return Err(AgentError::PromptError {
+                reason: format!(
+                    "durable pipeline owner for issue {issue_id} references interaction '{interaction_id}' that is not resolved"
+                ),
+            }
+            .into());
+        }
+        let response = match interaction.resume_strategy {
+            InteractionResumeStrategy::RerunStep => {
+                let response =
+                    interaction
+                        .response
+                        .clone()
+                        .ok_or_else(|| AgentError::PromptError {
+                            reason: format!(
+                                "resolved interaction '{interaction_id}' for issue {issue_id} has no response"
+                            ),
+                        })?;
+                let resolved_at =
+                    interaction
+                        .resolved_at
+                        .ok_or_else(|| AgentError::PromptError {
+                            reason: format!(
+                                "resolved interaction '{interaction_id}' for issue {issue_id} has no resolution timestamp"
+                            ),
+                        })?;
+                Some(InteractionResponseEnvelope::new(
+                    interaction.schema_version,
+                    interaction.id.clone(),
+                    interaction.kind.clone(),
+                    response,
+                    resolved_at,
+                ))
+            }
+            InteractionResumeStrategy::AdvanceAfterStep => None,
+        };
+        Ok(Some((
+            interaction.id.clone(),
+            interaction.step_name,
+            response,
+            interaction.awaiting_resume,
+        )))
+    }
+
+    async fn handle_step_dispatch_error(
+        &self,
+        issue: &Issue,
+        step_name: &str,
+        config_snapshot: &Arc<EnsembleConfig>,
+        error: &EnsembleError,
+    ) {
+        warn!(
+            issue_id = %issue.id,
+            step = step_name,
+            error = %error,
+            "failed to persist step dispatch"
+        );
+        let terminal = {
+            let mut state = self.state.write().await;
+            let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                return;
+            };
+            if matches!(
+                run.step_states.get(step_name),
+                Some(StepState::Running { .. })
+            ) {
+                warn!(
+                    issue_id = %issue.id,
+                    step = step_name,
+                    "retaining ambiguous running owner for restart reconciliation"
+                );
+                return;
+            }
+            if run.step_states.iter().any(|(name, step_state)| {
+                name != step_name && matches!(step_state, StepState::Running { .. })
+            }) {
+                return;
+            }
+
+            run.step_failed(step_name, error.to_string());
+            state.remove_running(&issue.id).map(|entry| {
+                self.schedule_whole_issue_failure_retry(
+                    &mut state,
+                    config_snapshot,
+                    entry,
+                    &error.to_string(),
+                    ScheduledRetryPipeline::Release,
+                )
+            })
+        };
+        self.commit_whole_issue_failure_retry(terminal).await;
     }
 
     async fn prepare_step_workspace(
@@ -1421,8 +1664,23 @@ impl Orchestrator {
             }
         }
 
+        // Reserve this issue's journal ordering before publishing the speculative
+        // in-memory owner. The global state lock is not held during journal I/O.
+        let journal_transaction = self
+            .pipeline_journal
+            .begin_issue_transition(&issue.id)
+            .await;
+
         // Mark step as running in pipeline
-        let (run_id, sequence, attempt_num, step_running_transition, worker_identity) = {
+        let (
+            run_id,
+            sequence,
+            attempt_num,
+            step_running_transition,
+            worker_identity,
+            previous_step_state,
+            running_session_id,
+        ) = {
             let mut state = self.state.write().await;
             let running_entry =
                 state
@@ -1463,20 +1721,21 @@ impl Orchestrator {
                             dispatch.step_name
                         ),
                     })?;
-            run.mark_running(
-                dispatch.step_name,
-                format!(
-                    "{}-{}-{}",
-                    issue.id, dispatch.step_name, dispatch.agent_name
-                ),
+            let previous_step_state = run.step_states.get(dispatch.step_name).cloned();
+            let running_session_id = format!(
+                "{}-{}-{}",
+                issue.id, dispatch.step_name, dispatch.agent_name
             );
+            run.mark_running(dispatch.step_name, running_session_id.clone());
             let transition = Self::transition_input_for_run(
                 &state,
                 &issue.id,
                 &issue.identifier,
                 PipelineTransitionKind::StepRunning,
                 Some(dispatch.step_name.to_string()),
-                None,
+                dispatch.interaction_resume_id.map(|interaction_id| {
+                    format!("{INTERACTION_RESUME_REASON_PREFIX}{interaction_id}")
+                }),
                 None,
             );
             let worker_identity = WorkerIdentity {
@@ -1492,11 +1751,130 @@ impl Orchestrator {
                 run_context.2,
                 transition,
                 worker_identity,
+                previous_step_state,
+                running_session_id,
             )
         };
 
         if let Some(input) = step_running_transition {
-            self.append_pipeline_transition(input).await;
+            let input_for_reconciliation = input.clone();
+            if let Err(error) = journal_transaction.append(input).await {
+                match journal_transaction
+                    .latest_record_matches(&input_for_reconciliation)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let mut state = self.state.write().await;
+                        if state
+                            .get_pipeline_run(&issue.id)
+                            .and_then(|run| run.step_states.get(dispatch.step_name))
+                            == Some(&StepState::Running {
+                                session_id: running_session_id,
+                            })
+                        {
+                            if let Some(previous_step_state) = previous_step_state {
+                                state
+                                    .get_pipeline_run_mut(&issue.id)
+                                    .expect(
+                                        "pipeline run was present while validating dispatch rollback",
+                                    )
+                                    .step_states
+                                    .insert(dispatch.step_name.to_string(), previous_step_state);
+                            }
+                        }
+                        return Err(AgentError::PromptError {
+                            reason: format!(
+                                "failed to persist step '{}' dispatch: {error}",
+                                dispatch.step_name
+                            ),
+                        }
+                        .into());
+                    }
+                    Err(reconciliation_error) => {
+                        warn!(
+                            issue_id = %issue.id,
+                            step = dispatch.step_name,
+                            append_error = %error,
+                            reconciliation_error = %reconciliation_error,
+                            "step dispatch append outcome is ambiguous; retaining the speculative owner"
+                        );
+                        return Err(AgentError::PromptError {
+                            reason: format!(
+                                "failed to confirm step '{}' dispatch persistence after append error: {error}; reconciliation failed: {reconciliation_error}",
+                                dispatch.step_name
+                            ),
+                        }
+                        .into());
+                    }
+                }
+            }
+        }
+
+        if let Some(interaction_id) = dispatch.interaction_to_retire {
+            if let Err(interaction_error) = self
+                .interaction_store
+                .retire_waiting_state(interaction_id)
+                .await
+            {
+                let derived_rollback_transition = {
+                    let mut state = self.state.write().await;
+                    let run = state.get_pipeline_run_mut(&issue.id);
+                    if let Some(run) = run {
+                        if run.step_states.get(dispatch.step_name)
+                            == Some(&StepState::Running {
+                                session_id: running_session_id.clone(),
+                            })
+                        {
+                            if let Some(previous_step_state) = previous_step_state.clone() {
+                                run.step_states
+                                    .insert(dispatch.step_name.to_string(), previous_step_state);
+                            }
+                        }
+                    }
+                    let rollback_kind = match previous_step_state {
+                        Some(StepState::BlockedOnHuman { .. }) => {
+                            Some(PipelineTransitionKind::StepBlockedOnHuman)
+                        }
+                        Some(StepState::AwaitingApproval { .. }) => {
+                            Some(PipelineTransitionKind::StepAwaitingApproval)
+                        }
+                        _ => None,
+                    };
+                    rollback_kind.and_then(|kind| {
+                        Self::transition_input_for_run(
+                            &state,
+                            &issue.id,
+                            &issue.identifier,
+                            kind,
+                            Some(dispatch.step_name.to_string()),
+                            Some(format!(
+                                "interaction '{}' retirement failed: {interaction_error}",
+                                interaction_id
+                            )),
+                            None,
+                        )
+                    })
+                };
+                let rollback_transition = dispatch
+                    .interaction_retirement_rollback
+                    .clone()
+                    .or(derived_rollback_transition);
+                if let Some(rollback_transition) = rollback_transition {
+                    if let Err(rollback_error) =
+                        journal_transaction.append(rollback_transition).await
+                    {
+                        warn!(
+                            issue_id = %issue.id,
+                            step = dispatch.step_name,
+                            interaction_id,
+                            error = %rollback_error,
+                            "failed to persist blocked owner after interaction retirement failure"
+                        );
+                    }
+                }
+                return Err(interaction_error.into());
+            }
         }
 
         self.publish_pipeline_event(
@@ -2336,7 +2714,7 @@ impl Orchestrator {
                                         }
                                     };
 
-                                    let _ = self
+                                    if let Err(error) = self
                                         .dispatch_step(
                                             issue,
                                             Arc::clone(&config_snapshot),
@@ -2351,12 +2729,25 @@ impl Orchestrator {
                                                     &config_snapshot,
                                                 ),
                                                 interaction_response: None,
+                                                interaction_resume_id: None,
+                                                interaction_to_retire: None,
+                                                interaction_retirement_rollback: None,
                                                 workspace_path,
                                                 step_outputs,
                                             },
                                             worker_exit_permit,
                                         )
+                                        .await
+                                    {
+                                        self.handle_step_dispatch_error(
+                                            issue,
+                                            &req.step_name,
+                                            &config_snapshot,
+                                            &error,
+                                        )
                                         .await;
+                                        return;
+                                    }
                                 }
                             }
                         }
@@ -3506,6 +3897,7 @@ impl Orchestrator {
             }
         }
 
+        let journal_transaction = self.pipeline_journal.begin_issue_transition(issue_id).await;
         let mut state = self.state.write().await;
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
         let follow_up_sequence = run_id
@@ -3549,7 +3941,37 @@ impl Orchestrator {
             run_id: waiting_run_id,
             issue: waiting_issue,
         });
+        let blocked_transition = Self::transition_input_for_run(
+            &state,
+            issue_id,
+            &issue.identifier,
+            PipelineTransitionKind::StepBlockedOnHuman,
+            Some(step_name.to_string()),
+            Some(interaction.id.clone()),
+            None,
+        );
         drop(state);
+        if let Some(blocked_transition) = blocked_transition {
+            let expected = blocked_transition.clone();
+            if let Err(error) = journal_transaction.append(blocked_transition).await {
+                match journal_transaction.latest_record_matches(&expected).await {
+                    Ok(true) => {}
+                    Ok(false) => warn!(
+                        issue_id,
+                        interaction_id = %interaction.id,
+                        error = %error,
+                        "blocked interaction checkpoint was not persisted; retaining the durable sidecar owner for reconciliation"
+                    ),
+                    Err(reconciliation_error) => warn!(
+                        issue_id,
+                        interaction_id = %interaction.id,
+                        append_error = %error,
+                        reconciliation_error = %reconciliation_error,
+                        "blocked interaction checkpoint outcome is ambiguous; retaining the durable sidecar owner for reconciliation"
+                    ),
+                }
+            }
+        }
 
         self.publish_pipeline_event(
             run_id.clone(),
@@ -3731,6 +4153,7 @@ impl Orchestrator {
             }
         }
 
+        let journal_transaction = self.pipeline_journal.begin_issue_transition(issue_id).await;
         let mut state = self.state.write().await;
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, issue_id);
         if let Some(run) = state.get_pipeline_run_mut(issue_id) {
@@ -3771,7 +4194,37 @@ impl Orchestrator {
             run_id: waiting_run_id,
             issue: waiting_issue,
         });
+        let approval_transition = Self::transition_input_for_run(
+            &state,
+            issue_id,
+            &issue.identifier,
+            PipelineTransitionKind::StepAwaitingApproval,
+            Some(step_name.to_string()),
+            Some(interaction.id.clone()),
+            None,
+        );
         drop(state);
+        if let Some(approval_transition) = approval_transition {
+            let expected = approval_transition.clone();
+            if let Err(error) = journal_transaction.append(approval_transition).await {
+                match journal_transaction.latest_record_matches(&expected).await {
+                    Ok(true) => {}
+                    Ok(false) => warn!(
+                        issue_id,
+                        interaction_id = %interaction.id,
+                        error = %error,
+                        "approval checkpoint was not persisted; retaining the durable sidecar owner for reconciliation"
+                    ),
+                    Err(reconciliation_error) => warn!(
+                        issue_id,
+                        interaction_id = %interaction.id,
+                        append_error = %error,
+                        reconciliation_error = %reconciliation_error,
+                        "approval checkpoint outcome is ambiguous; retaining the durable sidecar owner for reconciliation"
+                    ),
+                }
+            }
+        }
 
         self.publish_pipeline_event(
             run_id,
@@ -4041,13 +4494,232 @@ impl Orchestrator {
         }
     }
 
+    async fn repair_interaction_checkpoint(
+        &self,
+        interaction: &crate::interaction::model::InteractionRequest,
+    ) -> bool {
+        let journal_transaction = self
+            .pipeline_journal
+            .begin_issue_transition(&interaction.issue_id)
+            .await;
+        let latest_record = match journal_transaction.latest_record().await {
+            Ok(Some(record)) => record,
+            Ok(None) => return true,
+            Err(error) => {
+                warn!(
+                    issue_id = %interaction.issue_id,
+                    interaction_id = %interaction.id,
+                    error = %error,
+                    "cannot inspect the durable owner while repairing interaction checkpoint"
+                );
+                return false;
+            }
+        };
+        let repair_matches_durable_predecessor = match interaction.resume_strategy {
+            InteractionResumeStrategy::RerunStep => {
+                latest_record.kind == PipelineTransitionKind::StepRunning
+                    && latest_record.cycle == interaction.pipeline_cycle
+                    && latest_record.step.as_deref() == Some(interaction.step_name.as_str())
+                    && interaction_id_from_resume_reason(latest_record.reason.as_deref()).is_none()
+            }
+            InteractionResumeStrategy::AdvanceAfterStep => {
+                latest_record.kind == PipelineTransitionKind::StepAwaitingApproval
+                    && latest_record.cycle == interaction.pipeline_cycle
+                    && latest_record.step.as_deref() == Some(interaction.step_name.as_str())
+                    && matches!(
+                        latest_record
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.step_states.get(&interaction.step_name)),
+                        Some(StepState::AwaitingApproval {
+                            interaction_request_id: None
+                        })
+                    )
+            }
+        };
+        if !repair_matches_durable_predecessor {
+            return true;
+        }
+        let transition = {
+            let mut state = self.state.write().await;
+            let Some(run) = state.get_pipeline_run_mut(&interaction.issue_id) else {
+                return true;
+            };
+            let already_bound = match (
+                &interaction.resume_strategy,
+                run.step_states.get(&interaction.step_name),
+            ) {
+                (
+                    InteractionResumeStrategy::RerunStep,
+                    Some(StepState::BlockedOnHuman {
+                        interaction_request_id,
+                    }),
+                ) => interaction_request_id == &interaction.id,
+                (
+                    InteractionResumeStrategy::AdvanceAfterStep,
+                    Some(StepState::AwaitingApproval {
+                        interaction_request_id,
+                    }),
+                ) => interaction_request_id.as_deref() == Some(interaction.id.as_str()),
+                _ => false,
+            };
+            let kind = match interaction.resume_strategy {
+                InteractionResumeStrategy::RerunStep => {
+                    if !already_bound {
+                        run.step_blocked_on_human(&interaction.step_name, interaction.id.clone());
+                    }
+                    PipelineTransitionKind::StepBlockedOnHuman
+                }
+                InteractionResumeStrategy::AdvanceAfterStep => {
+                    if !matches!(
+                        run.step_states.get(&interaction.step_name),
+                        Some(StepState::AwaitingApproval { .. })
+                    ) {
+                        warn!(
+                            issue_id = %interaction.issue_id,
+                            interaction_id = %interaction.id,
+                            step = %interaction.step_name,
+                            "cannot reconstruct approval checkpoint from the durable pipeline state"
+                        );
+                        return false;
+                    }
+                    if !already_bound {
+                        run.bind_approval_interaction(
+                            &interaction.step_name,
+                            interaction.id.clone(),
+                        );
+                    }
+                    PipelineTransitionKind::StepAwaitingApproval
+                }
+            };
+            Self::transition_input_for_run(
+                &state,
+                &interaction.issue_id,
+                &interaction.issue_identifier,
+                kind,
+                Some(interaction.step_name.clone()),
+                Some(interaction.id.clone()),
+                None,
+            )
+        };
+
+        let Some(transition) = transition else {
+            return false;
+        };
+        let expected = transition.clone();
+        if let Err(error) = journal_transaction.append(transition).await {
+            match journal_transaction.latest_record_matches(&expected).await {
+                Ok(true) => return true,
+                Ok(false) => warn!(
+                    issue_id = %interaction.issue_id,
+                    interaction_id = %interaction.id,
+                    error = %error,
+                    "failed to persist reconstructed interaction checkpoint"
+                ),
+                Err(reconciliation_error) => warn!(
+                    issue_id = %interaction.issue_id,
+                    interaction_id = %interaction.id,
+                    append_error = %error,
+                    reconciliation_error = %reconciliation_error,
+                    "reconstructed interaction checkpoint outcome is ambiguous"
+                ),
+            }
+
+            return false;
+        }
+        true
+    }
+
     async fn hydrate_waiting_on_human_from_store(&self) {
-        let interactions = match self.interaction_store.list_awaiting_resume().await {
+        let mut interactions = match self.interaction_store.list_awaiting_resume().await {
             Ok(interactions) => interactions,
             Err(error) => {
                 warn!(error = %error, "failed to hydrate waiting interactions from store");
                 return;
             }
+        };
+        if !interactions.is_empty() {
+            let live_records = match self.pipeline_journal.latest_live_records().await {
+                Ok(records) => records
+                    .into_iter()
+                    .map(|record| (record.issue_id.clone(), record))
+                    .collect::<HashMap<_, _>>(),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "failed to reconcile waiting interactions with pipeline journal"
+                    );
+                    HashMap::new()
+                }
+            };
+            let mut retained = Vec::with_capacity(interactions.len());
+            for interaction in interactions {
+                let step_dispatch_was_reserved = live_records
+                    .get(&interaction.issue_id)
+                    .is_some_and(|record| {
+                        record.kind == PipelineTransitionKind::StepRunning
+                            && interaction.status == InteractionStatus::Resolved
+                            && interaction_id_from_resume_reason(record.reason.as_deref())
+                                == Some(interaction.id.as_str())
+                    });
+                if step_dispatch_was_reserved {
+                    match self
+                        .interaction_store
+                        .retire_waiting_state(&interaction.id)
+                        .await
+                    {
+                        Ok(_) => {
+                            let mut state = self.state.write().await;
+                            state.remove_waiting_on_human(&interaction.issue_id);
+                            state.clear_resume_request(&interaction.issue_id);
+                            continue;
+                        }
+                        Err(error) => {
+                            warn!(
+                                issue_id = %interaction.issue_id,
+                                interaction_id = %interaction.id,
+                                error = %error,
+                                "failed to reconcile interaction after durable step dispatch"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                if !self.repair_interaction_checkpoint(&interaction).await {
+                    continue;
+                }
+                retained.push(interaction);
+            }
+            interactions = retained;
+        }
+        {
+            let state = self.state.read().await;
+            interactions.retain(|interaction| {
+                !state.is_running(&interaction.issue_id)
+                    && !state.is_waiting_on_human(&interaction.issue_id)
+                    && !state
+                        .pending_terminal_transitions
+                        .contains_key(&interaction.issue_id)
+            });
+        }
+
+        let issue_ids = interactions
+            .iter()
+            .map(|interaction| interaction.issue_id.clone())
+            .collect::<Vec<_>>();
+        let issues_by_id = if issue_ids.is_empty() {
+            HashMap::new()
+        } else {
+            self.tracker
+                .fetch_issue_states_by_ids(&issue_ids)
+                .await
+                .map(|issues| {
+                    issues
+                        .into_iter()
+                        .map(|issue| (issue.id.clone(), issue))
+                        .collect::<HashMap<_, _>>()
+                })
+                .unwrap_or_default()
         };
 
         let mut state = self.state.write().await;
@@ -4060,14 +4732,6 @@ impl Orchestrator {
             {
                 continue;
             }
-
-            // Try to get the issue from the tracker
-            let issue = self
-                .tracker
-                .fetch_issue_states_by_ids(std::slice::from_ref(&interaction.issue_id))
-                .await
-                .ok()
-                .and_then(|issues| issues.into_iter().next());
 
             state.add_waiting_on_human(WaitingOnHumanEntry {
                 issue_id: interaction.issue_id.clone(),
@@ -4084,7 +4748,7 @@ impl Orchestrator {
                 agent_total_tokens: interaction.agent_total_tokens,
                 requested_at: interaction.requested_at,
                 run_id: None,
-                issue,
+                issue: issues_by_id.get(&interaction.issue_id).cloned(),
             });
         }
     }
@@ -5705,76 +6369,6 @@ impl Orchestrator {
         }
     }
 
-    async fn restore_blocked_issue_state(
-        &self,
-        issue: &Issue,
-        interaction: &crate::interaction::InteractionRequest,
-        config_snapshot: Arc<EnsembleConfig>,
-    ) -> Result<(), EnsembleError> {
-        let dag = build_dag(&config_snapshot.steps)?;
-
-        if interaction
-            .completed_steps
-            .iter()
-            .any(|completed_step| !dag.steps.iter().any(|step| step.name == *completed_step))
-        {
-            return Err(AgentError::PromptError {
-                reason: format!(
-                    "blocked interaction '{}' references steps that no longer exist",
-                    interaction.id
-                ),
-            }
-            .into());
-        }
-
-        let mut pipeline_run =
-            PipelineRun::new(issue.id.clone(), interaction.pipeline_cycle.max(1), dag);
-        for completed_step in &interaction.completed_steps {
-            pipeline_run.step_states.insert(
-                completed_step.clone(),
-                crate::pipeline::engine::StepState::Passed,
-            );
-        }
-        match interaction.resume_strategy {
-            InteractionResumeStrategy::RerunStep => {
-                pipeline_run.step_blocked_on_human(&interaction.step_name, interaction.id.clone());
-            }
-            InteractionResumeStrategy::AdvanceAfterStep => {
-                pipeline_run.step_states.insert(
-                    interaction.step_name.clone(),
-                    crate::pipeline::engine::StepState::AwaitingApproval {
-                        interaction_request_id: Some(interaction.id.clone()),
-                    },
-                );
-            }
-        }
-
-        let mut state = self.state.write().await;
-        let run_id_for_waiting = state.issue_run_ids.get(&issue.id).cloned();
-        state.insert_pipeline_run(&issue.id, pipeline_run, config_snapshot);
-        // Always update/add the waiting entry with the issue data to ensure it's available
-        // for completion tracking
-        state.add_waiting_on_human(WaitingOnHumanEntry {
-            issue_id: issue.id.clone(),
-            identifier: issue.identifier.clone(),
-            interaction_request_id: interaction.id.clone(),
-            step_name: interaction.step_name.clone(),
-            kind: interaction.kind.clone(),
-            prompt: interaction.title.clone(),
-            agent_name: interaction.agent_name.clone(),
-            retry_attempt: Some(interaction.pipeline_cycle.max(1)),
-            started_at: interaction.waiting_started_at,
-            agent_input_tokens: interaction.agent_input_tokens,
-            agent_output_tokens: interaction.agent_output_tokens,
-            agent_total_tokens: interaction.agent_total_tokens,
-            requested_at: interaction.requested_at,
-            run_id: run_id_for_waiting,
-            issue: Some(issue.clone()),
-        });
-
-        Ok(())
-    }
-
     pub async fn resume_blocked_issue(&self, issue: &Issue) -> Result<(), EnsembleError> {
         let current_config = {
             let config = self.config.read().await;
@@ -5877,58 +6471,59 @@ impl Orchestrator {
 
         {
             let state = self.state.read().await;
-            if let Some(run) = state.get_pipeline_run(&issue.id) {
-                let blocked_step = run
-                    .step_states
-                    .iter()
-                    .find_map(|(step_name, step_state)| match step_state {
-                        crate::pipeline::engine::StepState::BlockedOnHuman {
-                            interaction_request_id,
-                        } if interaction.resume_strategy
-                            == InteractionResumeStrategy::RerunStep =>
-                        {
-                            Some((step_name.clone(), interaction_request_id.clone()))
-                        }
-                        crate::pipeline::engine::StepState::AwaitingApproval {
-                            interaction_request_id: Some(interaction_request_id),
-                        } if interaction.resume_strategy
-                            == InteractionResumeStrategy::AdvanceAfterStep =>
-                        {
-                            Some((step_name.clone(), interaction_request_id.clone()))
-                        }
-                        _ => None,
-                    })
-                    .ok_or_else(|| AgentError::PromptError {
-                        reason: format!(
-                            "issue '{}' is not waiting on a blocked step",
-                            issue.identifier
-                        ),
-                    })?;
-
-                if blocked_step.0 != waiting.step_name {
-                    return Err(AgentError::PromptError {
-                        reason: format!(
-                            "waiting entry step '{}' does not match blocked pipeline step '{}'",
-                            waiting.step_name, blocked_step.0
-                        ),
+            let run = state
+                .get_pipeline_run(&issue.id)
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!(
+                        "issue '{}' is missing its restored blocked pipeline run",
+                        issue.identifier
+                    ),
+                })?;
+            let blocked_step = run
+                .step_states
+                .iter()
+                .find_map(|(step_name, step_state)| match step_state {
+                    crate::pipeline::engine::StepState::BlockedOnHuman {
+                        interaction_request_id,
+                    } if interaction.resume_strategy == InteractionResumeStrategy::RerunStep => {
+                        Some((step_name.clone(), interaction_request_id.clone()))
                     }
-                    .into());
-                }
-
-                if blocked_step.1 != waiting.interaction_request_id {
-                    return Err(AgentError::PromptError {
-                        reason: format!(
-                            "waiting entry interaction '{}' does not match blocked pipeline interaction '{}'",
-                            waiting.interaction_request_id, blocked_step.1
-                        ),
+                    crate::pipeline::engine::StepState::AwaitingApproval {
+                        interaction_request_id: Some(interaction_request_id),
+                    } if interaction.resume_strategy
+                        == InteractionResumeStrategy::AdvanceAfterStep =>
+                    {
+                        Some((step_name.clone(), interaction_request_id.clone()))
                     }
-                    .into());
+                    _ => None,
+                })
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!(
+                        "issue '{}' is not waiting on a blocked step",
+                        issue.identifier
+                    ),
+                })?;
+
+            if blocked_step.0 != waiting.step_name {
+                return Err(AgentError::PromptError {
+                    reason: format!(
+                        "waiting entry step '{}' does not match blocked pipeline step '{}'",
+                        waiting.step_name, blocked_step.0
+                    ),
                 }
+                .into());
+            }
+
+            if blocked_step.1 != waiting.interaction_request_id {
+                return Err(AgentError::PromptError {
+                    reason: format!(
+                        "waiting entry interaction '{}' does not match blocked pipeline interaction '{}'",
+                        waiting.interaction_request_id, blocked_step.1
+                    ),
+                }
+                .into());
             }
         }
-
-        self.restore_blocked_issue_state(issue, &interaction, Arc::clone(&current_config))
-            .await?;
 
         if !current_config.agents.contains_key(&current_step.agent) {
             return Err(AgentError::PromptError {
@@ -5942,10 +6537,11 @@ impl Orchestrator {
 
         {
             let state = self.state.read().await;
+            let workflow_states = build_reconcile_active_states_lower(&current_config);
             if let Some(reason) = is_resume_dispatch_eligible(
                 issue,
                 &state,
-                &current_config.tracker.active_states,
+                &workflow_states,
                 &current_config.tracker.terminal_states,
                 &HashMap::new(),
             ) {
@@ -5960,6 +6556,7 @@ impl Orchestrator {
             return Err(EnsembleError::RuntimeBusy);
         };
 
+        let mut interaction_was_retired = false;
         match interaction.resume_strategy {
             InteractionResumeStrategy::RerunStep => {
                 let response =
@@ -5989,8 +6586,9 @@ impl Orchestrator {
                     resolved_at,
                 );
 
-                let (attempt, step_outputs) = {
+                let (attempt, step_outputs, previous_running) = {
                     let mut state = self.state.write().await;
+                    let previous_running = state.get_running(&issue.id).cloned();
                     let attempt = state
                         .get_pipeline_run(&issue.id)
                         .map(|run| run.cycle)
@@ -6000,7 +6598,7 @@ impl Orchestrator {
                         .and_then(|run| run.output_context_for(&current_step.name))
                         .unwrap_or_default();
                     state.add_running(issue, Some(attempt));
-                    (attempt, step_outputs)
+                    (attempt, step_outputs, previous_running)
                 };
 
                 let workspace_path = match self.prepare_step_workspace(issue, &current_config).await
@@ -6016,26 +6614,54 @@ impl Orchestrator {
                     }
                 };
 
-                self.dispatch_step(
-                    issue,
-                    Arc::clone(&current_config),
-                    StepDispatchContext {
-                        step_name: &current_step.name,
-                        agent_name: &current_step.agent,
-                        step_kind: current_step.kind,
-                        tracker_state: current_step.tracker_state.as_deref(),
-                        attempt: Some(attempt),
-                        timeout_ms: Self::effective_step_timeout_ms(
-                            current_step.timeout_ms,
-                            &current_config,
-                        ),
-                        interaction_response: Some(interaction_response),
-                        workspace_path,
-                        step_outputs,
-                    },
-                    &resume_permit,
-                )
-                .await?;
+                if let Err(error) = self
+                    .dispatch_step(
+                        issue,
+                        Arc::clone(&current_config),
+                        StepDispatchContext {
+                            step_name: &current_step.name,
+                            agent_name: &current_step.agent,
+                            step_kind: current_step.kind,
+                            tracker_state: current_step.tracker_state.as_deref(),
+                            attempt: Some(attempt),
+                            timeout_ms: Self::effective_step_timeout_ms(
+                                current_step.timeout_ms,
+                                &current_config,
+                            ),
+                            interaction_response: Some(interaction_response),
+                            interaction_resume_id: Some(&interaction.id),
+                            interaction_to_retire: Some(&interaction.id),
+                            interaction_retirement_rollback: None,
+                            workspace_path,
+                            step_outputs,
+                        },
+                        &resume_permit,
+                    )
+                    .await
+                {
+                    let dispatch_retains_owner = {
+                        let state = self.state.read().await;
+                        matches!(
+                            state
+                                .get_pipeline_run(&issue.id)
+                                .and_then(|run| run.step_states.get(&current_step.name)),
+                            Some(StepState::Running { .. })
+                        )
+                    };
+                    if !dispatch_retains_owner {
+                        let mut state = self.state.write().await;
+                        match previous_running {
+                            Some(running) => {
+                                state.running.insert(issue.id.clone(), running);
+                            }
+                            None => {
+                                state.remove_running(&issue.id);
+                            }
+                        }
+                    }
+                    return Err(error);
+                }
+                interaction_was_retired = true;
             }
             InteractionResumeStrategy::AdvanceAfterStep => {
                 let response =
@@ -6049,7 +6675,7 @@ impl Orchestrator {
                             ),
                         })?;
 
-                let (action, dispatch_contexts) = {
+                let (action, dispatch_contexts, previous_run) = {
                     let mut state = self.state.write().await;
                     let run = state.get_pipeline_run_mut(&issue.id).ok_or_else(|| {
                         AgentError::PromptError {
@@ -6059,6 +6685,7 @@ impl Orchestrator {
                             ),
                         }
                     })?;
+                    let previous_run = run.clone();
 
                     let action = match response {
                         InteractionResponse::Approval {
@@ -6105,7 +6732,7 @@ impl Orchestrator {
                             vec![]
                         };
 
-                    (action, dispatch_contexts)
+                    (action, dispatch_contexts, previous_run)
                 };
 
                 match action {
@@ -6120,42 +6747,91 @@ impl Orchestrator {
                             attempt
                         };
 
-                        for (req, step_outputs) in dispatch_contexts {
-                            let workspace_path =
-                                match self.prepare_step_workspace(issue, &current_config).await {
-                                    Ok(path) => path,
-                                    Err(error) => {
-                                        let mut state = self.state.write().await;
-                                        state.remove_running(&issue.id);
-                                        state.release_claim(&issue.id);
-                                        state.remove_pipeline_run(&issue.id);
-                                        return Err(AgentError::PromptError {
-                                            reason: format!("workspace error: {error}"),
-                                        }
-                                        .into());
+                        let workspace_path =
+                            match self.prepare_step_workspace(issue, &current_config).await {
+                                Ok(path) => path,
+                                Err(error) => {
+                                    let mut state = self.state.write().await;
+                                    state.remove_running(&issue.id);
+                                    state
+                                        .pipeline_runs
+                                        .insert(issue.id.clone(), previous_run.clone());
+                                    return Err(AgentError::PromptError {
+                                        reason: format!("workspace error: {error}"),
                                     }
-                                };
+                                    .into());
+                                }
+                            };
 
-                            self.dispatch_step(
-                                issue,
-                                Arc::clone(&current_config),
-                                StepDispatchContext {
-                                    step_name: &req.step_name,
-                                    agent_name: &req.agent_name,
-                                    step_kind: req.step_kind,
-                                    tracker_state: req.tracker_state.as_deref(),
-                                    attempt: Some(attempt),
-                                    timeout_ms: Self::effective_step_timeout_ms(
-                                        req.timeout_ms,
-                                        &current_config,
-                                    ),
-                                    interaction_response: None,
-                                    workspace_path,
-                                    step_outputs,
-                                },
-                                &resume_permit,
-                            )
-                            .await?;
+                        let mut dispatched_any = false;
+                        for (req, step_outputs) in dispatch_contexts {
+                            if let Err(error) = self
+                                .dispatch_step(
+                                    issue,
+                                    Arc::clone(&current_config),
+                                    StepDispatchContext {
+                                        step_name: &req.step_name,
+                                        agent_name: &req.agent_name,
+                                        step_kind: req.step_kind,
+                                        tracker_state: req.tracker_state.as_deref(),
+                                        attempt: Some(attempt),
+                                        timeout_ms: Self::effective_step_timeout_ms(
+                                            req.timeout_ms,
+                                            &current_config,
+                                        ),
+                                        interaction_response: None,
+                                        interaction_resume_id: Some(&interaction.id),
+                                        interaction_to_retire: (!interaction_was_retired)
+                                            .then_some(interaction.id.as_str()),
+                                        interaction_retirement_rollback: (!interaction_was_retired)
+                                            .then(|| PipelineTransitionInput {
+                                                kind: PipelineTransitionKind::StepAwaitingApproval,
+                                                issue_id: issue.id.clone(),
+                                                identifier: issue.identifier.clone(),
+                                                run_id: waiting.run_id.clone(),
+                                                cycle: previous_run.cycle,
+                                                step: Some(current_step.name.clone()),
+                                                reason: Some(format!(
+                                                    "interaction '{}' retirement failed",
+                                                    interaction.id
+                                                )),
+                                                retry: None,
+                                                snapshot: Some(previous_run.to_snapshot()),
+                                                terminal_transition: None,
+                                            }),
+                                        workspace_path: workspace_path.clone(),
+                                        step_outputs,
+                                    },
+                                    &resume_permit,
+                                )
+                                .await
+                            {
+                                let failed_dispatch_retains_owner = {
+                                    let state = self.state.read().await;
+                                    matches!(
+                                        state
+                                            .get_pipeline_run(&issue.id)
+                                            .and_then(|run| run.step_states.get(&req.step_name)),
+                                        Some(StepState::Running { .. })
+                                    )
+                                };
+                                if !dispatched_any && !failed_dispatch_retains_owner {
+                                    let mut state = self.state.write().await;
+                                    state.remove_running(&issue.id);
+                                    state
+                                        .pipeline_runs
+                                        .insert(issue.id.clone(), previous_run.clone());
+                                } else if interaction_was_retired {
+                                    let mut state = self.state.write().await;
+                                    state.remove_waiting_on_human(&issue.id);
+                                    state.clear_resume_request(&issue.id);
+                                }
+                                return Err(error);
+                            }
+                            if !interaction_was_retired {
+                                interaction_was_retired = true;
+                            }
+                            dispatched_any = true;
                         }
                     }
                     PipelineAction::Succeeded => {
@@ -6259,7 +6935,9 @@ impl Orchestrator {
             }
         }
 
-        self.interaction_store.mark_resumed(&interaction.id).await?;
+        if !interaction_was_retired {
+            self.interaction_store.mark_resumed(&interaction.id).await?;
+        }
 
         let mut state = self.state.write().await;
         state.remove_waiting_on_human(&issue.id);
@@ -6915,8 +7593,8 @@ mod tests {
     use crate::config::ensemble::{parse_config, ConcurrencyConfig, StepConfig};
     use crate::error::AgentError;
     use crate::interaction::{
-        InteractionKind, InteractionResponse, InteractionResumeStrategy, InteractionStatus,
-        InteractionStore,
+        InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
+        InteractionStatus, InteractionStore,
     };
     use crate::orchestrator::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind};
     use crate::orchestrator::retry::current_time_ms;
@@ -6932,6 +7610,92 @@ mod tests {
     /// Mock tracker for orchestrator tests.
     struct MockTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
+    }
+
+    struct WorkflowStateTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+    }
+
+    struct FailingWorkflowStateTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        id_fetch_failures_remaining: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl IssueTracker for WorkflowStateTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            let states_lower: Vec<String> =
+                states.iter().map(|state| state.to_lowercase()).collect();
+            Ok(issues
+                .iter()
+                .filter(|issue| states_lower.contains(&issue.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|issue| ids.contains(&issue.id))
+                .cloned()
+                .collect())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for FailingWorkflowStateTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            let states_lower: Vec<String> =
+                states.iter().map(|state| state.to_lowercase()).collect();
+            Ok(issues
+                .iter()
+                .filter(|issue| states_lower.contains(&issue.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            if self
+                .id_fetch_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(TrackerError::ApiRequestFailed {
+                    reason: "simulated ID refresh failure".to_string(),
+                });
+            }
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|issue| ids.contains(&issue.id))
+                .cloned()
+                .collect())
+        }
     }
 
     struct BlockingCandidateTracker {
@@ -7383,6 +8147,24 @@ mod tests {
         }
     }
 
+    struct InteractionCaptureRunner {
+        responses: Arc<RwLock<Vec<Option<InteractionResponseEnvelope>>>>,
+    }
+
+    #[async_trait]
+    impl AgentRunner for InteractionCaptureRunner {
+        async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
+            self.responses
+                .write()
+                .await
+                .push(request.interaction_response.clone());
+            Ok(WorkerResult::Success {
+                output: succeeded_step_output(),
+                approval_request: None,
+            })
+        }
+    }
+
     struct RecordingTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
         state_writes: Arc<RwLock<Vec<(String, String)>>>,
@@ -7540,6 +8322,26 @@ mod tests {
 
     fn test_issue(id: &str, state: &str) -> Issue {
         crate::tracker::model::test_helpers::test_issue(id, state)
+    }
+
+    async fn install_approval_waiting_run(
+        orchestrator: &Orchestrator,
+        config: &Arc<RwLock<EnsembleConfig>>,
+        interaction_id: &str,
+    ) {
+        let cfg = config.read().await;
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new("1".to_string(), 1, dag);
+        run.start();
+        run.step_states.insert(
+            "build".to_string(),
+            StepState::AwaitingApproval {
+                interaction_request_id: Some(interaction_id.to_string()),
+            },
+        );
+        let mut state = orchestrator.state.write().await;
+        state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+        state.add_claimed("1");
     }
 
     #[tokio::test]
@@ -7783,14 +8585,23 @@ agent:
         cfg: &EnsembleConfig,
         issue: &Issue,
     ) -> (Orchestrator, Arc<RwLock<OrchestratorState>>) {
-        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
-            issues: Arc::new(RwLock::new(vec![issue.clone()])),
-        });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
             observed_commands: None,
             observed_timeouts: None,
             cancellation_probe: None,
+        });
+        make_restart_test_orchestrator_with_runner(temp, cfg, issue, runner)
+    }
+
+    fn make_restart_test_orchestrator_with_runner(
+        temp: &tempfile::TempDir,
+        cfg: &EnsembleConfig,
+        issue: &Issue,
+        runner: Arc<dyn AgentRunner>,
+    ) -> (Orchestrator, Arc<RwLock<OrchestratorState>>) {
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
         });
         let state = Arc::new(RwLock::new(OrchestratorState::new(
             cfg.polling.interval_ms,
@@ -8260,6 +9071,881 @@ agent:
         assert!(!records.iter().any(|record| {
             record.seq > blocked_record.seq && record.kind == PipelineTransitionKind::StepRunning
         }));
+    }
+
+    #[tokio::test]
+    async fn restart_reconciles_reserved_step_before_hydrating_stale_interaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let responses = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(InteractionCaptureRunner {
+            responses: Arc::clone(&responses),
+        });
+        let (orchestrator, state) =
+            make_restart_test_orchestrator_with_runner(&temp, &cfg, &issue, runner);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.start();
+        run.mark_running("build", "reserved-session".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some(format!("{INTERACTION_RESUME_REASON_PREFIX}interaction-1")),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Resolved,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: Vec::new(),
+                artifacts: Vec::new(),
+                response: Some(InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: Some("staging".to_string()),
+                }),
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let state = state.read().await;
+        assert!(state.is_claimed(&issue.id));
+        assert!(!state.is_waiting_on_human(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(&StepState::Pending)
+        );
+        drop(state);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+
+        orchestrator.dispatch_issue(&issue, None).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let captured = responses.read().await;
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0]
+                .as_ref()
+                .map(|response| serde_json::to_value(response).unwrap()["interaction_id"].clone()),
+            Some(serde_json::json!("interaction-1"))
+        );
+        drop(captured);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            interaction_id_from_resume_reason(latest.reason.as_deref()),
+            Some("interaction-1")
+        );
+        drop(orchestrator);
+
+        let runner: Arc<dyn AgentRunner> = Arc::new(InteractionCaptureRunner {
+            responses: Arc::clone(&responses),
+        });
+        let (second_restart, _) =
+            make_restart_test_orchestrator_with_runner(&temp, &cfg, &issue, runner);
+        second_restart.restore_pipeline_runs_from_journal().await;
+        second_restart.hydrate_waiting_on_human_from_store().await;
+        second_restart.dispatch_issue(&issue, None).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let captured = responses.read().await;
+        assert_eq!(captured.len(), 2);
+        assert_eq!(
+            captured[1]
+                .as_ref()
+                .map(|response| serde_json::to_value(response).unwrap()["interaction_id"].clone()),
+            Some(serde_json::json!("interaction-1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_reconstructs_untagged_question_checkpoint_from_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.start();
+        run.mark_running("build", "crashed-session".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: Vec::new(),
+                artifacts: Vec::new(),
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        {
+            let state = state.read().await;
+            assert!(!state.is_waiting_on_human(&issue.id));
+            assert_eq!(
+                state
+                    .get_pipeline_run(&issue.id)
+                    .unwrap()
+                    .step_states
+                    .get("build"),
+                Some(&StepState::BlockedOnHuman {
+                    interaction_request_id: "interaction-1".to_string(),
+                })
+            );
+        }
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let state = state.read().await;
+        assert!(state.is_waiting_on_human(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(&StepState::BlockedOnHuman {
+                interaction_request_id: "interaction-1".to_string(),
+            })
+        );
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.kind, PipelineTransitionKind::StepBlockedOnHuman);
+        assert_eq!(latest.reason.as_deref(), Some("interaction-1"));
+    }
+
+    #[tokio::test]
+    async fn restart_does_not_bind_stale_interaction_to_newer_pipeline_cycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 2, dag);
+        run.start();
+        run.mark_running("build", "newer-session".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-2".to_string()),
+                cycle: 2,
+                step: Some("build".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        let stale_interaction = InteractionRequest {
+            id: "interaction-1".to_string(),
+            schema_version: 1,
+            issue_id: issue.id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            pipeline_cycle: 1,
+            completed_steps: Vec::new(),
+            step_name: "build".to_string(),
+            agent_name: "builder".to_string(),
+            step_depends: Vec::new(),
+            step_tracker_state: None,
+            kind: InteractionKind::Question,
+            status: InteractionStatus::Open,
+            blocking: true,
+            awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
+            title: "Stale input".to_string(),
+            body: "Old request".to_string(),
+            options: Vec::new(),
+            artifacts: Vec::new(),
+            response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            resolved_at: None,
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: Vec::new(),
+        };
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        assert!(
+            orchestrator
+                .repair_interaction_checkpoint(&stale_interaction)
+                .await
+        );
+
+        let state = state.read().await;
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(&StepState::Pending)
+        );
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.kind, PipelineTransitionKind::StepRunning);
+        assert_eq!(latest.cycle, 2);
+    }
+
+    #[tokio::test]
+    async fn restart_binds_unbound_approval_checkpoint_from_sidecar() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.start();
+        run.step_states.insert(
+            "build".to_string(),
+            StepState::AwaitingApproval {
+                interaction_request_id: None,
+            },
+        );
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepAwaitingApproval,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("succeeded".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: "approval-1".to_string(),
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: None,
+                kind: InteractionKind::ApprovalGate,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::AdvanceAfterStep,
+                title: "Approve build".to_string(),
+                body: "Continue?".to_string(),
+                options: vec!["approve".to_string(), "reject".to_string()],
+                artifacts: Vec::new(),
+                response: None,
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        {
+            let state = state.read().await;
+            assert!(!state.is_waiting_on_human(&issue.id));
+            assert_eq!(
+                state
+                    .get_pipeline_run(&issue.id)
+                    .unwrap()
+                    .step_states
+                    .get("build"),
+                Some(&StepState::AwaitingApproval {
+                    interaction_request_id: Some("approval-1".to_string()),
+                })
+            );
+        }
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let state = state.read().await;
+        assert!(state.is_waiting_on_human(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(&StepState::AwaitingApproval {
+                interaction_request_id: Some("approval-1".to_string()),
+            })
+        );
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.kind, PipelineTransitionKind::StepAwaitingApproval);
+        assert_eq!(latest.reason.as_deref(), Some("approval-1"));
+        let repaired_seq = latest.seq;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue(&issue.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .seq,
+            repaired_seq
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_tick_restores_question_from_step_tracker_state_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = make_retry_step_config();
+        cfg.steps[0].tracker_state = Some("Agent Review".to_string());
+        let issue = test_issue("1", "Agent Review");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(WorkflowStateTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 100,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let workspace_root = temp.path().join("workspaces");
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root,
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        let interaction = InteractionRequest {
+            id: "question-1".to_string(),
+            schema_version: 1,
+            issue_id: issue.id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            pipeline_cycle: 1,
+            completed_steps: Vec::new(),
+            step_name: "build".to_string(),
+            agent_name: "builder".to_string(),
+            step_depends: Vec::new(),
+            step_tracker_state: Some("Agent Review".to_string()),
+            kind: InteractionKind::Question,
+            status: InteractionStatus::Resolved,
+            blocking: true,
+            awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
+            title: "Need input".to_string(),
+            body: "Choose a direction".to_string(),
+            options: Vec::new(),
+            artifacts: Vec::new(),
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: Vec::new(),
+            response: Some(InteractionResponse::Question {
+                response_schema_version: 1,
+                text: "Proceed".to_string(),
+                selected_option: None,
+            }),
+            waiting_started_at: Some(Utc::now()),
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            resolved_at: Some(Utc::now()),
+        };
+        orchestrator
+            .interaction_store
+            .create(interaction)
+            .await
+            .unwrap();
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_blocked_on_human("build", "question-1".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepBlockedOnHuman,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("need input".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+
+        {
+            let mut state = state.write().await;
+            state.queue_resume(&issue.id);
+        }
+
+        orchestrator.handle_tick().await;
+        orchestrator.handle_tick().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(observed_commands.read().await.len(), 1);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("question-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let state = state.read().await;
+        assert!(!state.is_resume_requested(&issue.id));
+        assert!(!state.is_waiting_on_human(&issue.id));
+    }
+
+    #[tokio::test]
+    async fn handle_tick_restores_approval_from_approval_tracker_state_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = make_always_approval_config(10);
+        cfg.tracker.active_states = vec!["Todo".to_string(), "In Progress".to_string()];
+        let issue = test_issue("1", "Plan Review");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(WorkflowStateTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 100,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let workspace_root = temp.path().join("workspaces");
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root,
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: "approval-1".to_string(),
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: None,
+                kind: InteractionKind::Approval,
+                status: InteractionStatus::Resolved,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::AdvanceAfterStep,
+                title: "Approve build".to_string(),
+                body: "Approve the completed build".to_string(),
+                options: Vec::new(),
+                artifacts: Vec::new(),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+                response: Some(InteractionResponse::Approval {
+                    response_schema_version: 1,
+                    approved: true,
+                    reason: Some("looks good".to_string()),
+                }),
+                waiting_started_at: Some(Utc::now()),
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: Some(Utc::now()),
+            })
+            .await
+            .unwrap();
+
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.step_states.insert(
+            "build".to_string(),
+            StepState::AwaitingApproval {
+                interaction_request_id: Some("approval-1".to_string()),
+            },
+        );
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepAwaitingApproval,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-approval".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("approval required".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        {
+            let mut state = state.write().await;
+            state.queue_resume(&issue.id);
+        }
+
+        orchestrator.handle_tick().await;
+        orchestrator.handle_tick().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(observed_commands.read().await.len(), 1);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let state = state.read().await;
+        assert!(!state.is_resume_requested(&issue.id));
+        assert!(!state.is_waiting_on_human(&issue.id));
+        let run = state.get_pipeline_run(&issue.id).unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert!(matches!(
+            run.step_states.get("review"),
+            Some(StepState::Running { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn journal_restored_wait_transfers_through_manual_retry_command() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = make_retry_step_config();
+        cfg.steps[0].tracker_state = Some("Agent Review".to_string());
+        let issue = test_issue("1", "Agent Review");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(WorkflowStateTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let workspace_root = temp.path().join("workspaces");
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: runner,
+                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root,
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: Some("Agent Review".to_string()),
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Open,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: Vec::new(),
+                artifacts: Vec::new(),
+                response: None,
+                waiting_started_at: Some(Utc::now()),
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: None,
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.start();
+        run.step_blocked_on_human("build", "interaction-1".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepBlockedOnHuman,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("waiting for input".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+
+        orchestrator.handle_tick().await;
+        {
+            let state = state.read().await;
+            assert!(state.is_waiting_on_human(&issue.id));
+            assert!(state.get_pipeline_run(&issue.id).is_some());
+        }
+
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::QueueManualStepRetry {
+                command: ManualStepRetryCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                    step_name: "build".to_string(),
+                },
+                response,
+            })
+            .await;
+        let retry = result.await.unwrap().unwrap();
+        assert_eq!(retry.retry_from_step.as_deref(), Some("build"));
+
+        let state = state.read().await;
+        assert!(!state.is_waiting_on_human(&issue.id));
+        assert!(state.retry_attempts.contains_key(&issue.id));
+        assert!(state.is_claimed(&issue.id));
+        drop(state);
+        let interaction = orchestrator
+            .interaction_store
+            .get("interaction-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Cancelled);
+        assert!(!interaction.awaiting_resume);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.kind, PipelineTransitionKind::StepRetryScheduled);
     }
 
     #[tokio::test]
@@ -11284,13 +12970,14 @@ agent:
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
             config_dir.path(),
             shutdown_rx,
         );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
 
         write_raw_interaction(
             config_dir.path(),
@@ -11349,6 +13036,307 @@ agent:
     }
 
     #[tokio::test]
+    async fn approval_fanout_failure_retires_wait_after_first_continuation_starts() {
+        let config = Arc::new(RwLock::new(
+            parse_config(
+                r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo", "In Progress", "Plan Review"]
+  terminal_states: ["Done", "Closed", "Failed"]
+agents:
+  builder:
+    executor: claude
+    model: opus
+    prompt: "Work on {{ issue.identifier }}."
+steps:
+  - name: build
+    agent: builder
+    approval:
+      mode: always
+      state: Plan Review
+  - name: review
+    agent: builder
+    depends: ["build"]
+  - name: docs
+    agent: builder
+    depends: ["build"]
+max_cycles: 10
+on_success: Done
+on_failure: Failed
+concurrency:
+  max_concurrent_agents: 5
+polling:
+  interval_ms: 100
+workspace:
+  root: /tmp/ensemble-test
+agent:
+  max_turns: 3
+  command: "echo test"
+  session_mode: code
+"#,
+            )
+            .unwrap(),
+        ));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 1_000,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
+        write_raw_interaction(
+            config_dir.path(),
+            "approval-1",
+            serde_json::json!({
+                "id": "approval-1",
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": [],
+                "step_name": "build",
+                "agent_name": "builder",
+                "step_depends": [],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve build",
+                "body": "Please review the build output.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true,
+                    "reason": "looks good"
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+        orchestrator.interaction_store.fail_next_writes(1);
+        let retirement_error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("approval interaction retirement must precede worker launch");
+        assert!(
+            retirement_error
+                .to_string()
+                .contains("injected interaction write failure"),
+            "{retirement_error}"
+        );
+        assert!(observed_commands.read().await.is_empty());
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(state.is_waiting_on_human("1"));
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(StepState::AwaitingApproval { .. })
+        ));
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue("1")
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::StepAwaitingApproval
+        );
+
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("the second fan-out dispatch should fail before journal append");
+        assert!(
+            error.to_string().contains("failed to persist step"),
+            "{error}"
+        );
+        tokio::task::yield_now().await;
+
+        assert_eq!(observed_commands.read().await.len(), 1);
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(!state.is_resume_requested("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert!(matches!(
+            run.step_states.get("review"),
+            Some(StepState::Running { .. })
+        ));
+        assert_eq!(run.step_states.get("docs"), Some(&StepState::Pending));
+        drop(state);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        let rollback_seq = records
+            .iter()
+            .rev()
+            .find(|record| record.kind == PipelineTransitionKind::StepAwaitingApproval)
+            .unwrap()
+            .seq;
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| {
+                    record.seq > rollback_seq && record.kind == PipelineTransitionKind::StepRunning
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_resume_workspace_failure_restores_the_waiting_owner() {
+        let config = Arc::new(RwLock::new(make_always_approval_config(10)));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_root = config_dir.path().join("workspaces");
+        let workspace_mgr = WorkspaceManager::new(&workspace_root, None).unwrap();
+        let blocked_workspace = workspace_mgr.workspace_path("1");
+        tokio::fs::create_dir_all(&workspace_root).await.unwrap();
+        tokio::fs::write(&blocked_workspace, b"not a directory")
+            .await
+            .unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
+        let previous_run = orchestrator
+            .state
+            .read()
+            .await
+            .get_pipeline_run("1")
+            .unwrap()
+            .to_snapshot();
+
+        write_raw_interaction(
+            config_dir.path(),
+            "approval-1",
+            serde_json::json!({
+                "id": "approval-1",
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": [],
+                "step_name": "build",
+                "agent_name": "builder",
+                "step_depends": [],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve build",
+                "body": "Please review the build output.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true,
+                    "reason": "looks good"
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("workspace failure must retain the approval owner");
+        assert!(error.to_string().contains("workspace error"), "{error}");
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(state.is_waiting_on_human("1"));
+        assert!(state.is_claimed("1"));
+        assert_eq!(
+            state.get_pipeline_run("1").unwrap().to_snapshot(),
+            previous_run
+        );
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
     async fn terminal_tracker_transition_success_releases_failed_run_once() {
         let config = Arc::new(RwLock::new(make_always_approval_config(1)));
         let tracker_writes = Arc::new(RwLock::new(Vec::new()));
@@ -11367,13 +13355,14 @@ agent:
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
             config_dir.path(),
             shutdown_rx,
         );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
 
         write_raw_interaction(
             config_dir.path(),
@@ -11467,13 +13456,14 @@ agent:
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
             config_dir.path(),
             shutdown_rx,
         );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
 
         write_raw_interaction(
             config_dir.path(),
@@ -12005,13 +13995,14 @@ agent:
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
             dir.path(),
             shutdown_rx,
         );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
 
         write_raw_interaction(
             dir.path(),
@@ -12086,13 +14077,14 @@ agent:
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
             dir.path(),
             shutdown_rx,
         );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
 
         write_raw_interaction(
             dir.path(),
@@ -12168,13 +14160,14 @@ agent:
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
             dir.path(),
             shutdown_rx,
         );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
 
         let requested_at = Utc::now();
         let waiting_started_at = requested_at - chrono::Duration::minutes(3);
@@ -12386,7 +14379,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn resume_requeues_resolved_blocked_issue() {
+    async fn restored_interaction_does_not_resume_when_quiescing() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
@@ -12488,22 +14481,347 @@ agent:
             .await
             .unwrap();
 
-        orchestrator
+        orchestrator.quiescing.request();
+        let error = orchestrator
             .resume_blocked_issue(&test_issue("1", "Todo"))
             .await
-            .expect("resume should succeed");
+            .expect_err("quiescing runtime must reject interaction continuation");
+        assert!(matches!(error, EnsembleError::RuntimeBusy));
 
         let state = orchestrator.state.read().await;
-        assert!(state.is_running("1"));
-        assert!(!state.is_waiting_on_human("1"));
+        assert!(!state.is_running("1"));
+        assert!(state.is_waiting_on_human("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        drop(state);
+        assert!(
+            store
+                .get(&interaction_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restored_interaction_does_not_dispatch_when_running_journal_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("1", "Todo");
+
+        let snapshot = {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+            run.start();
+            run.step_blocked_on_human("build", "interaction-1".to_string());
+            let snapshot = run.to_snapshot();
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+            state.add_claimed(&issue.id);
+            state.add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                kind: InteractionKind::Question,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: Some("run-1".to_string()),
+                issue: Some(issue.clone()),
+            });
+            snapshot
+        };
+
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: "interaction-1".to_string(),
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: None,
+                kind: InteractionKind::Question,
+                status: InteractionStatus::Resolved,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need input".to_string(),
+                body: "Choose environment".to_string(),
+                options: Vec::new(),
+                artifacts: Vec::new(),
+                response: Some(InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "Use staging".to_string(),
+                    selected_option: Some("staging".to_string()),
+                }),
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+            })
+            .await
+            .unwrap();
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("waiting for input".to_string()),
+                retry: None,
+                snapshot: Some(snapshot.clone()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        let journal_path = orchestrator.pipeline_journal.path_for_issue(&issue.id);
+        std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        let error = orchestrator
+            .resume_blocked_issue(&issue)
+            .await
+            .expect_err("a missing running transition must prevent worker dispatch");
+
+        std::fs::set_permissions(&journal_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            error.to_string().contains("failed to persist step"),
+            "{error}"
+        );
+        assert!(observed_commands.read().await.is_empty());
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.is_waiting_on_human(&issue.id));
+        assert!(state.is_claimed(&issue.id));
+        assert_eq!(
+            state.get_pipeline_run(&issue.id).unwrap().to_snapshot(),
+            snapshot
+        );
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+
+        orchestrator.interaction_store.fail_next_writes(1);
+        let retirement_error = orchestrator
+            .resume_blocked_issue(&issue)
+            .await
+            .expect_err("interaction retirement failure must prevent worker launch");
+        assert!(
+            retirement_error
+                .to_string()
+                .contains("injected interaction write failure"),
+            "{retirement_error}"
+        );
+        assert!(observed_commands.read().await.is_empty());
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.is_waiting_on_human(&issue.id));
+        assert_eq!(
+            state.get_pipeline_run(&issue.id).unwrap().to_snapshot(),
+            snapshot
+        );
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue(&issue.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::StepBlockedOnHuman
+        );
+
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        orchestrator
+            .resume_blocked_issue(&issue)
+            .await
+            .expect("an exact visible running record makes a late append error successful");
+        tokio::task::yield_now().await;
+
+        assert_eq!(observed_commands.read().await.len(), 1);
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running(&issue.id));
+        assert!(!state.is_waiting_on_human(&issue.id));
+        assert!(!state.is_resume_requested(&issue.id));
+        drop(state);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
     }
 
     #[tokio::test]
-    async fn explicit_resume_request_requeues_resolved_blocked_issue_on_tick() {
+    async fn initial_dispatch_persistence_failure_schedules_recoverable_retry() {
         let config = Arc::new(RwLock::new(make_config()));
-        let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
-            issues: issues.clone(),
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+        let issue = test_issue("1", "Todo");
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        assert!(observed_commands.read().await.is_empty());
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.retry_attempts.contains_key(&issue.id));
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .expect("the retry must remain restart-visible");
+        assert_eq!(latest.kind, PipelineTransitionKind::StepRetryScheduled);
+    }
+
+    #[tokio::test]
+    async fn restored_pipeline_dispatch_persistence_failure_schedules_recoverable_retry() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("1", "Todo");
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let run = PipelineRun::new(issue.id.clone(), 1, dag);
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+            state.add_claimed(&issue.id);
+        }
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        assert!(observed_commands.read().await.is_empty());
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.retry_attempts.contains_key(&issue.id));
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .expect("the retry must remain restart-visible");
+        assert_eq!(latest.kind, PipelineTransitionKind::StepRetryScheduled);
+    }
+
+    #[tokio::test]
+    async fn restored_interaction_refresh_failure_and_missing_result_retain_owner() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issues = Arc::new(RwLock::new(Vec::new()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(FailingWorkflowStateTracker {
+            issues: Arc::clone(&issues),
+            id_fetch_failures_remaining: AtomicUsize::new(1),
         });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
             delay_ms: 0,
@@ -12597,6 +14915,34 @@ agent:
             .await
             .unwrap();
 
+        orchestrator.handle_tick().await;
+
+        {
+            let state = orchestrator.state.read().await;
+            assert!(!state.is_running("1"));
+            assert!(state.is_waiting_on_human("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            assert!(state.is_resume_requested("1"));
+        }
+        assert!(
+            store
+                .get(&interaction_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+
+        orchestrator.handle_tick().await;
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_waiting_on_human("1"));
+            assert!(state.is_claimed("1"));
+            assert!(state.is_resume_requested("1"));
+        }
+
+        issues.write().await.push(test_issue("1", "Todo"));
         orchestrator.handle_tick().await;
 
         let state = orchestrator.state.read().await;
@@ -12738,6 +15084,7 @@ agent:
         {
             let mut state = orchestrator.state.write().await;
             state.remove_waiting_on_human("1");
+            state.clear_resume_request("1");
             assert!(!state.is_resume_requested("1"));
         }
         let resumed = store.mark_resumed("interaction-1").await.unwrap();
@@ -13408,7 +15755,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn resume_requeues_resolved_blocked_issue_after_restart_without_pipeline_state() {
+    async fn resume_without_restored_pipeline_state_retains_the_durable_owner() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
@@ -13480,21 +15827,25 @@ agent:
             .await
             .unwrap();
 
-        orchestrator
+        let error = orchestrator
             .resume_blocked_issue(&test_issue("1", "Todo"))
             .await
-            .expect("resume should succeed from durable interaction state alone");
+            .expect_err("resume must fail closed without a journal-restored run");
+        assert!(
+            error
+                .to_string()
+                .contains("missing its restored blocked pipeline run"),
+            "{error}"
+        );
 
         let state = orchestrator.state.read().await;
-        assert!(state.is_running("1"));
-        assert!(!state.is_waiting_on_human("1"));
-        let run = state
-            .get_pipeline_run("1")
-            .expect("pipeline run should be reconstructed for resumed issue");
-        assert!(matches!(
-            run.step_states.get("build"),
-            Some(crate::pipeline::engine::StepState::Running { .. })
-        ));
+        assert!(!state.is_running("1"));
+        assert!(state.is_waiting_on_human("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        drop(state);
+        let interaction = store.get("interaction-1").await.unwrap().unwrap();
+        assert!(interaction.awaiting_resume);
     }
 
     #[tokio::test]
@@ -13520,6 +15871,18 @@ agent:
             dir.path(),
             shutdown_rx,
         );
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.step_states
+                .insert("build".to_string(), StepState::Passed);
+            run.step_blocked_on_human("review", "interaction-1".to_string());
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+            state.add_claimed("1");
+        }
 
         let store = InteractionStore::new(dir.path().to_path_buf());
         store
@@ -13937,7 +16300,7 @@ agent:
     }
 
     #[tokio::test]
-    async fn resume_fails_when_current_config_no_longer_contains_blocked_step() {
+    async fn restored_interaction_context_failure_retains_owner() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
@@ -14055,6 +16418,17 @@ agent:
         let state = orchestrator.state.read().await;
         assert!(!state.is_running("1"));
         assert!(state.is_waiting_on_human("1"));
+        assert!(state.is_claimed("1"));
+        assert!(state.get_pipeline_run("1").is_some());
+        drop(state);
+        assert!(
+            store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
     }
 
     #[tokio::test]

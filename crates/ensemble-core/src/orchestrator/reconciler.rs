@@ -162,7 +162,10 @@ pub async fn reconcile_tracker_states(
     }
 
     for issue_id in tracked_ids {
-        if refreshed_ids.contains(&issue_id) || !state.is_waiting_on_human(&issue_id) {
+        if refreshed_ids.contains(&issue_id)
+            || !state.is_waiting_on_human(&issue_id)
+            || state.is_resume_requested(&issue_id)
+        {
             continue;
         }
 

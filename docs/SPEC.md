@@ -304,7 +304,31 @@ Pipeline run recovery:
   instead of appending a new `run_started` record.
 - Dispatch-time restore never creates new candidates; it only applies to issues already returned by
   the tracker as dispatch-eligible candidates.
-- Restored retry and waiting records stay parked until their normal resume or retry path.
+- Restored retry and unresolved waiting records stay parked until their normal retry or response
+  path. A resolved durable interaction with `awaiting_resume` remains claimed and is refreshed by
+  stable issue ID independently of normal candidate selection, so configured step and approval
+  tracker states can resume after restart.
+- Explicit interaction resume accepts only configured non-terminal active, step, or approval
+  states. It validates the durable interaction, waiting owner, and restored blocked pipeline step,
+  persists the resumed step's `StepRunning` journal snapshot, clears `awaiting_resume`, and only
+  then starts its worker. A confirmed-absent running-state append
+  restores the blocked step without starting work; an exact record visible after a late append
+  error is accepted, while an unreadable outcome retains the speculative running owner without
+  starting a worker for restart reconciliation. Once approval fan-out starts one continuation, a
+  later sibling dispatch failure cannot resurrect the superseded wait. Repeated ticks cannot resume
+  the same interaction twice.
+- If restart observes the narrow `StepRunning`-with-`awaiting_resume` interval, it retires the stale
+  interaction before hydrating waits; the normalized pending step remains journal-owned and can
+  continue through normal pipeline recovery.
+- If restart instead finds a durable awaiting interaction whose journal snapshot predates binding
+  that interaction ID, it reconstructs and persists the bound blocked or approval checkpoint
+  before exposing the wait. A resolved-but-unbound interaction follows the same repair path rather
+  than being mistaken for a reserved continuation.
+- A missing or failed tracker refresh, changed step context, quiescing runtime, workspace failure,
+  or first confirmed-absent dispatch retains the claim, waiting entry, pipeline snapshot, queued
+  resume request, and durable `awaiting_resume` marker for a later recoverable attempt.
+- Outside interaction resume, a confirmed-absent `StepRunning` append starts no worker and
+  schedules a recoverable retry when no sibling is already running.
 - A retry entry's `attempt` is the next pipeline cycle to dispatch. Tracker polling failures,
   capacity pressure, and shutdown quiescence defer the exact same retry entry while preserving its
   claim, attempt, step/fixup scope, and failure context.
@@ -1207,12 +1231,15 @@ The effective poll interval should be updated when workflow config changes are r
 
 Tick sequence:
 
-1. Reconcile running issues.
-2. Run dispatch preflight validation.
-3. Fetch candidate issues from tracker using active states.
-4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
-6. Notify observability/status consumers of state changes.
+1. Restore live pipeline runs, hydrate durable waiting interactions, and process responses.
+2. Refresh explicitly queued interaction resumes by stable issue ID and attempt eligible
+   continuations.
+3. Reconcile running issues.
+4. Run dispatch preflight validation.
+5. Fetch candidate issues from tracker using active states.
+6. Sort issues by dispatch priority.
+7. Dispatch eligible issues while slots remain.
+8. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -1285,6 +1312,16 @@ Retry handling behavior:
    - Dispatch if slots are available.
    - Otherwise requeue with error `no available orchestrator slots`.
 5. If found but no longer active, release claim.
+
+Manual retry is an orchestrator-owned per-issue transition. It reserves the same journal ordering
+boundary as automated retry, durably cancels an open interaction or clears a resolved
+`awaiting_resume` marker before changing waiting, retry, claim, pipeline, or release ownership, and
+then speculatively transfers the in-memory owner while appending the retry or `released` record.
+That transfer becomes final only after persistence is confirmed. The global orchestrator state
+lock is not held during durable I/O. A failed interaction write leaves the original owner
+unchanged; a demonstrably absent journal write restores the durable interaction before restoring
+the exact prior in-memory owner, while an ambiguous append retains the new in-memory owner until
+journal recovery can reconcile whether the transition became visible.
 
 Note:
 

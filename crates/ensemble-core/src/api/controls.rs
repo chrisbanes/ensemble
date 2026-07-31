@@ -5,13 +5,15 @@ use crate::interaction::{InteractionStatus, InteractionStore};
 use crate::orchestrator::pipeline_journal::PipelineRunJournal;
 use crate::orchestrator::retry::ManualStepRetryError;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState};
-use crate::orchestrator::ManualStepRetryCommand;
+use crate::orchestrator::{ManualStepRetryCommand, ManualWholeIssueRetryCommand};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::response::Response;
 use axum::Json;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 #[derive(Debug, PartialEq, Eq)]
 enum IssuePresence {
@@ -428,6 +430,21 @@ pub async fn post_retry(
                     format!("issue '{}' is no longer retryable", identifier),
                 );
             }
+            Err(ManualStepRetryError::Interaction(error)) => {
+                tracing::warn!(
+                    issue_id = %issue_id,
+                    error = %error,
+                    "failed to retire interaction for manual step retry"
+                );
+                return issue_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "retry_persistence_failed",
+                    format!(
+                        "failed to durably queue step-level retry for issue '{}'",
+                        identifier
+                    ),
+                );
+            }
             Err(ManualStepRetryError::Persistence(error)) => {
                 tracing::warn!(
                     issue_id = %issue_id,
@@ -445,29 +462,60 @@ pub async fn post_retry(
             }
         }
     } else {
-        let mut lock = lock;
-        // Whole-issue retry: release the claim so the next poll can pick it up fresh.
-        let release_run_id = lock
-            .get_running(&issue_id)
-            .and_then(|entry| entry.run_id.clone())
-            .or_else(|| {
-                lock.waiting_on_human
-                    .get(&issue_id)
-                    .and_then(|entry| entry.run_id.clone())
-            });
-        lock.remove_retry(&issue_id);
-        lock.remove_waiting_on_human(&issue_id);
-        lock.remove_claimed(&issue_id);
-        lock.remove_pipeline_run(&issue_id);
         drop(lock);
-        append_release_record(
-            &state,
-            &issue_id,
-            &identifier,
-            release_run_id,
-            "whole_issue_retry",
-        )
-        .await;
+        match state
+            .orchestrator_runtime
+            .queue_manual_whole_issue_retry(ManualWholeIssueRetryCommand {
+                issue_id: issue_id.clone(),
+                identifier: identifier.clone(),
+            })
+            .await
+        {
+            Ok(()) => {}
+            Err(ManualStepRetryError::RuntimeUnavailable) => {
+                return issue_error_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "orchestrator_unavailable",
+                    "the orchestrator runtime is not available to queue this retry",
+                );
+            }
+            Err(ManualStepRetryError::OwnerChanged) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "not_retrying",
+                    format!("issue '{}' is no longer retryable", identifier),
+                );
+            }
+            Err(
+                error @ (ManualStepRetryError::Interaction(_)
+                | ManualStepRetryError::Persistence(_)),
+            ) => {
+                tracing::warn!(
+                    issue_id = %issue_id,
+                    error = ?error,
+                    "failed to persist manual whole-issue retry"
+                );
+                return issue_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "retry_persistence_failed",
+                    format!(
+                        "failed to durably queue whole-issue retry for issue '{}'",
+                        identifier
+                    ),
+                );
+            }
+            Err(
+                ManualStepRetryError::NoPipelineRun
+                | ManualStepRetryError::StepNotFound
+                | ManualStepRetryError::MaxCyclesExhausted,
+            ) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "not_retrying",
+                    format!("issue '{}' is no longer retryable", identifier),
+                );
+            }
+        }
     }
 
     // Signal the orchestrator to poll immediately so it picks up the now-unclaimed issue
@@ -800,9 +848,27 @@ pub async fn post_resume(
             .into_response();
     }
 
+    if !queue_resume_if_waiting_owner_current(
+        &state.orchestrator_state,
+        &waiting_entry.issue_id,
+        &waiting_entry.interaction_request_id,
+    )
+    .await
     {
-        let mut lock = state.orchestrator_state.write().await;
-        lock.queue_resume(&waiting_entry.issue_id);
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::to_value(ApiError::new(
+                    "invalid_resume_state",
+                    &format!(
+                        "issue '{identifier}' is no longer waiting on interaction '{}'",
+                        waiting_entry.interaction_request_id
+                    ),
+                ))
+                .unwrap(),
+            ),
+        )
+            .into_response();
     }
 
     state.refresh_requested.notify_one();
@@ -821,6 +887,23 @@ pub async fn post_resume(
         .into_response()
 }
 
+async fn queue_resume_if_waiting_owner_current(
+    state: &Arc<RwLock<OrchestratorState>>,
+    issue_id: &str,
+    interaction_request_id: &str,
+) -> bool {
+    let mut state = state.write().await;
+    if !state
+        .waiting_on_human
+        .get(issue_id)
+        .is_some_and(|waiting| waiting.interaction_request_id == interaction_request_id)
+    {
+        return false;
+    }
+    state.queue_resume(issue_id);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -828,9 +911,14 @@ mod tests {
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::{ConcurrencyConfig, OnFailure, StepConfig, StepKind};
-    use crate::interaction::model::InteractionKind;
+    use crate::interaction::model::{
+        InteractionKind, InteractionRequest, InteractionResumeStrategy, InteractionStatus,
+    };
     use crate::orchestrator::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind};
-    use crate::orchestrator::retry::{queue_manual_step_retry, ManualStepRetryRequest};
+    use crate::orchestrator::retry::{
+        queue_manual_step_retry, queue_manual_whole_issue_retry, ManualStepRetryRequest,
+        ManualWholeIssueRetryRequest,
+    };
     use crate::orchestrator::state::{
         FinalizeStatus, IssueFinalizeState, OrchestratorState, RepoFinalizeState,
         WaitingOnHumanEntry,
@@ -840,8 +928,6 @@ mod tests {
     use crate::pipeline::engine::PipelineRun;
     use crate::tracker::model::{Issue, RetryEntry};
     use axum::body::to_bytes;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
     use tokio_util::sync::CancellationToken;
 
     #[test]
@@ -1029,10 +1115,62 @@ mod tests {
 
         let mut app_state = app_state_with_document_state(document_state);
         app_state.orchestrator_state = Arc::new(RwLock::new(state));
+        app_state.config_runtime.config_path = tempfile::tempdir()
+            .expect("waiting-pipeline test config directory")
+            .keep()
+            .join("config.yaml");
         app_state
     }
 
+    async fn persist_waiting_interaction(state: &AppState, status: InteractionStatus) {
+        let resolved = status == InteractionStatus::Resolved;
+        interaction_store(state)
+            .create(InteractionRequest {
+                id: "halted:NODE_123:build".to_string(),
+                schema_version: 1,
+                issue_id: "NODE_123".to_string(),
+                issue_identifier: "my-repo#42".to_string(),
+                pipeline_cycle: 1,
+                completed_steps: Vec::new(),
+                step_name: "build".to_string(),
+                agent_name: "build".to_string(),
+                step_depends: Vec::new(),
+                step_tracker_state: None,
+                kind: InteractionKind::Handoff,
+                status,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "manual repair needed".to_string(),
+                body: "manual repair needed".to_string(),
+                options: Vec::new(),
+                artifacts: Vec::new(),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: Vec::new(),
+                response: resolved.then_some(crate::interaction::InteractionResponse::Handoff {
+                    response_schema_version: 1,
+                    completed: true,
+                    notes: Some("repair complete".to_string()),
+                }),
+                waiting_started_at: Some(chrono::Utc::now()),
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: chrono::Utc::now(),
+                resolved_at: resolved.then_some(chrono::Utc::now()),
+            })
+            .await
+            .unwrap();
+    }
+
     fn install_test_retry_runtime(state: &AppState) {
+        install_test_retry_runtime_with_store(state, interaction_store(state));
+    }
+
+    fn install_test_retry_runtime_with_store(state: &AppState, interactions: InteractionStore) {
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(16);
         state
             .orchestrator_runtime
@@ -1046,12 +1184,26 @@ mod tests {
                         let result = queue_manual_step_retry(
                             &orchestrator_state,
                             &journal,
+                            &interactions,
                             ManualStepRetryRequest {
                                 issue_id: &command.issue_id,
                                 identifier: &command.identifier,
                                 step_name: &command.step_name,
                                 max_backoff_ms: 300_000,
                                 max_cycles: 3,
+                            },
+                        )
+                        .await;
+                        let _ = response.send(result);
+                    }
+                    OrchestratorCommand::QueueManualWholeIssueRetry { command, response } => {
+                        let result = queue_manual_whole_issue_retry(
+                            &orchestrator_state,
+                            &journal,
+                            &interactions,
+                            ManualWholeIssueRetryRequest {
+                                issue_id: &command.issue_id,
+                                identifier: &command.identifier,
                             },
                         )
                         .await;
@@ -1279,6 +1431,7 @@ mod tests {
     #[tokio::test]
     async fn test_retry_retrying_issue() {
         let state = build_app_state_with_retry();
+        install_test_retry_runtime(&state);
         let response = post_retry(
             State(state.clone()),
             Path("my-repo#99".to_string()),
@@ -1299,6 +1452,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut state = build_app_state_with_retry();
         state.config_runtime.config_path = temp.path().join("config.yaml");
+        install_test_retry_runtime(&state);
 
         let response = post_retry(
             State(state.clone()),
@@ -1321,6 +1475,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut state = build_app_state_with_waiting_pipeline();
         state.config_runtime.config_path = temp.path().join("config.yaml");
+        persist_waiting_interaction(&state, InteractionStatus::Open).await;
         install_test_retry_runtime(&state);
         let response = post_retry(
             State(state.clone()),
@@ -1356,11 +1511,141 @@ mod tests {
             .expect("manual step retry should be durable");
         assert_eq!(record.kind, PipelineTransitionKind::StepRetryScheduled);
         assert_eq!(record.retry.map(|retry| retry.attempt), Some(2));
+        let interaction = interaction_store(&state)
+            .get("halted:NODE_123:build")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Cancelled);
+        assert!(!interaction.awaiting_resume);
+    }
+
+    #[tokio::test]
+    async fn test_retry_waiting_issue_whole_issue_clears_resolved_interaction() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_waiting_pipeline();
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+        persist_waiting_interaction(&state, InteractionStatus::Resolved).await;
+        install_test_retry_runtime(&state);
+
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery { step: None }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let interaction = interaction_store(&state)
+            .get("halted:NODE_123:build")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Resolved);
+        assert!(!interaction.awaiting_resume);
+        let lock = state.orchestrator_state.read().await;
+        assert!(!lock.is_claimed("NODE_123"));
+        assert!(!lock.is_waiting_on_human("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_none());
+        drop(lock);
+        let latest = PipelineRunJournal::new(temp.path())
+            .latest_live_record_for_issue("NODE_123")
+            .await
+            .unwrap();
+        assert!(latest.is_none(), "the released run must not restore");
+    }
+
+    #[tokio::test]
+    async fn stale_resume_cannot_requeue_after_manual_retry_owner_transfer() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_waiting_pipeline();
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+        persist_waiting_interaction(&state, InteractionStatus::Resolved).await;
+        let ready = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let stale_resume = tokio::spawn({
+            let orchestrator_state = Arc::clone(&state.orchestrator_state);
+            let ready = Arc::clone(&ready);
+            let release = Arc::clone(&release);
+            async move {
+                ready.wait().await;
+                release.wait().await;
+                queue_resume_if_waiting_owner_current(
+                    &orchestrator_state,
+                    "NODE_123",
+                    "halted:NODE_123:build",
+                )
+                .await
+            }
+        });
+        ready.wait().await;
+
+        queue_manual_step_retry(
+            &state.orchestrator_state,
+            &pipeline_journal(&state),
+            &interaction_store(&state),
+            ManualStepRetryRequest {
+                issue_id: "NODE_123",
+                identifier: "my-repo#42",
+                step_name: "build",
+                max_backoff_ms: 300_000,
+                max_cycles: 3,
+            },
+        )
+        .await
+        .unwrap();
+        release.wait().await;
+
+        assert!(
+            !stale_resume.await.unwrap(),
+            "the stale resume snapshot must not recreate a superseded owner"
+        );
+        let lock = state.orchestrator_state.read().await;
+        assert!(!lock.is_resume_requested("NODE_123"));
+        assert!(!lock.is_waiting_on_human("NODE_123"));
+        assert!(lock.retry_attempts.contains_key("NODE_123"));
+    }
+
+    #[tokio::test]
+    async fn retry_interaction_write_failure_preserves_waiting_owner() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = build_app_state_with_waiting_pipeline();
+        state.config_runtime.config_path = temp.path().join("config.yaml");
+        persist_waiting_interaction(&state, InteractionStatus::Open).await;
+        let interactions = interaction_store(&state);
+        interactions.fail_next_writes(1);
+        install_test_retry_runtime_with_store(&state, interactions.clone());
+
+        let response = post_retry(
+            State(state.clone()),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("build".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let interaction = interactions
+            .get("halted:NODE_123:build")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Open);
+        assert!(interaction.awaiting_resume);
+        let lock = state.orchestrator_state.read().await;
+        assert!(lock.is_waiting_on_human("NODE_123"));
+        assert!(lock.get_pipeline_run("NODE_123").is_some());
+        assert!(lock.is_claimed("NODE_123"));
+        assert!(!lock.retry_attempts.contains_key("NODE_123"));
     }
 
     #[tokio::test]
     async fn manual_step_retry_exhaustion_preserves_the_existing_owner() {
         let state = build_app_state_with_waiting_pipeline();
+        persist_waiting_interaction(&state, InteractionStatus::Open).await;
         install_test_retry_runtime(&state);
         {
             let mut lock = state.orchestrator_state.write().await;
@@ -1399,6 +1684,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut state = build_app_state_with_waiting_pipeline();
         state.config_runtime.config_path = temp.path().join("config.yaml");
+        persist_waiting_interaction(&state, InteractionStatus::Open).await;
         let journal = PipelineRunJournal::new(temp.path());
         let previous_snapshot = state
             .orchestrator_state
@@ -1459,6 +1745,13 @@ mod tests {
         assert_eq!(latest.kind, PipelineTransitionKind::PipelineHalted);
         assert!(latest.retry.is_none());
         assert_eq!(latest.snapshot, Some(previous_snapshot));
+        let interaction = interaction_store(&state)
+            .get("halted:NODE_123:build")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.status, InteractionStatus::Open);
+        assert!(interaction.awaiting_resume);
     }
 
     #[tokio::test]

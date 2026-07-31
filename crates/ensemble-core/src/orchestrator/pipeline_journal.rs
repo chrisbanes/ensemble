@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use chrono::{DateTime, Utc};
@@ -23,6 +25,14 @@ pub(crate) struct PipelineIssueJournalTransaction<'a> {
 }
 
 impl PipelineIssueJournalTransaction<'_> {
+    pub(crate) async fn latest_record(
+        &self,
+    ) -> Result<Option<PipelineTransitionRecord>, std::io::Error> {
+        self.journal
+            .read_last_valid_record(&self.journal.path_for_issue(&self.issue_id))
+            .await
+    }
+
     pub(crate) async fn append(
         &self,
         input: PipelineTransitionInput,
@@ -38,6 +48,15 @@ impl PipelineIssueJournalTransaction<'_> {
             ready.wait().await;
             release.wait().await;
         }
+        #[cfg(test)]
+        if let Some((calls, fail_on_call)) = &self.journal.transaction_append_error_on_call {
+            let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == *fail_on_call {
+                return Err(std::io::Error::other(format!(
+                    "injected error before journal append call {call}"
+                )));
+            }
+        }
         let record = self.journal.append_unlocked(input).await?;
         #[cfg(test)]
         if self.journal.transaction_append_late_error {
@@ -52,6 +71,12 @@ impl PipelineIssueJournalTransaction<'_> {
         &self,
         input: &PipelineTransitionInput,
     ) -> Result<bool, std::io::Error> {
+        #[cfg(test)]
+        if self.journal.transaction_latest_record_match_error {
+            return Err(std::io::Error::other(
+                "injected latest-record reconciliation read error",
+            ));
+        }
         let latest = self
             .journal
             .read_last_valid_record(&self.journal.path_for_issue(&self.issue_id))
@@ -160,6 +185,10 @@ pub struct PipelineRunJournal {
         Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
     #[cfg(test)]
     pub(super) transaction_append_late_error: bool,
+    #[cfg(test)]
+    pub(super) transaction_latest_record_match_error: bool,
+    #[cfg(test)]
+    pub(super) transaction_append_error_on_call: Option<(Arc<AtomicUsize>, usize)>,
 }
 
 impl PipelineRunJournal {
@@ -172,6 +201,10 @@ impl PipelineRunJournal {
             transaction_append_test_barriers: None,
             #[cfg(test)]
             transaction_append_late_error: false,
+            #[cfg(test)]
+            transaction_latest_record_match_error: false,
+            #[cfg(test)]
+            transaction_append_error_on_call: None,
         }
     }
 
