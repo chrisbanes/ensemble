@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use tracing::{error, info, warn};
 
 use ensemble_core::api::bootstrap::{
-    build_app_state, start_or_replace_registered_orchestrator, take_registered_orchestrator,
+    build_app_state, clear_registered_orchestrator, start_or_replace_registered_orchestrator,
 };
 use ensemble_core::config::draft::load_config_document_or_missing;
 use ensemble_core::config::location::resolve_config_dir_for_cli;
@@ -134,10 +134,8 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         }
     }
 
-    if let Some(runtime) = take_registered_orchestrator(&prepared.app_state) {
-        runtime.shutdown().await;
-    }
     watcher.abort();
+    clear_registered_orchestrator(&prepared.app_state).await;
     info!("ensemble shut down cleanly");
     ExitCode::SUCCESS
 }

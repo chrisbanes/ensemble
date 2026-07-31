@@ -1,4 +1,4 @@
-use crate::agent::cancellation::{cancel_issue, clear_issue_cancellation};
+use crate::agent::cancellation::cancel_issue;
 use crate::api::handlers::{api_error, ApiError};
 use crate::api::router::AppState;
 use crate::interaction::{InteractionStatus, InteractionStore};
@@ -278,7 +278,6 @@ pub async fn post_stop(
         }
     }
 
-    clear_issue_cancellation(&state.cancellation_registry, &issue_id);
     let release_run_id = lock
         .get_running(&issue_id)
         .and_then(|entry| entry.run_id.clone());
@@ -820,7 +819,7 @@ pub async fn post_resume(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::cancellation::register_issue_cancellation;
+    use crate::agent::cancellation::{register_issue_cancellation, registry_is_empty};
     use crate::api::router::AppState;
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::{ConcurrencyConfig, OnFailure, StepConfig, StepKind};
@@ -1139,7 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_stop_running_issue_without_pid_uses_cancellation_registry() {
+    async fn post_stop_running_issue_without_pid_retains_cancellation_owner() {
         let state = build_app_state_with_running_pid(None);
         let cancellation = CancellationToken::new();
         register_issue_cancellation(
@@ -1152,6 +1151,10 @@ mod tests {
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(cancellation.is_cancelled());
+        assert!(
+            !registry_is_empty(&state.cancellation_registry),
+            "stop must retain the worker handle until bridge quiescence"
+        );
 
         let lock = state.orchestrator_state.read().await;
         assert!(lock.running.is_empty());

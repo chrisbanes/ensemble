@@ -72,23 +72,6 @@ pub fn cancel_issue(registry: &CancellationRegistry, issue_id: &str) -> bool {
     !tokens.is_empty()
 }
 
-pub fn clear_issue_cancellation(
-    registry: &CancellationRegistry,
-    issue_id: &str,
-) -> Option<CancellationToken> {
-    let mut registry = registry_guard(registry);
-    let identities = registry
-        .keys()
-        .filter(|identity| identity.issue_id == issue_id)
-        .cloned()
-        .collect::<Vec<_>>();
-    identities
-        .into_iter()
-        .filter_map(|identity| registry.remove(&identity))
-        .map(|worker| worker.cancellation)
-        .next()
-}
-
 pub fn cancel_all(registry: &CancellationRegistry) -> usize {
     let tokens: Vec<CancellationToken> = {
         // Clone the current handles inside a narrow scope so the mutex guard is
@@ -144,24 +127,37 @@ fn mark_workers_for_drain(
 }
 
 pub async fn await_worker_drain(handles: &mut [WorkerDrainHandle], wait: Duration) -> bool {
-    tokio::time::timeout(wait, async {
-        for handle in handles {
-            while !*handle.completion.borrow() {
-                if handle.completion.changed().await.is_err() {
-                    return false;
-                }
+    tokio::time::timeout(wait, await_worker_quiescence(handles))
+        .await
+        .unwrap_or_default()
+}
+
+pub async fn await_worker_quiescence(handles: &mut [WorkerDrainHandle]) -> bool {
+    for handle in handles {
+        while !*handle.completion.borrow() {
+            if handle.completion.changed().await.is_err() {
+                return false;
             }
         }
-        true
-    })
-    .await
-    .unwrap_or_default()
+    }
+    true
 }
 
 pub fn is_reconciliation_owned(registry: &CancellationRegistry, identity: &WorkerIdentity) -> bool {
     registry_guard(registry)
         .get(identity)
         .is_some_and(|worker| worker.reconciliation_owned)
+}
+
+pub fn pending_reconciliation_issue_ids(registry: &CancellationRegistry) -> Vec<String> {
+    let mut issue_ids = registry_guard(registry)
+        .iter()
+        .filter(|(_, worker)| worker.reconciliation_owned)
+        .map(|(identity, _)| identity.issue_id.clone())
+        .collect::<Vec<_>>();
+    issue_ids.sort();
+    issue_ids.dedup();
+    issue_ids
 }
 
 pub fn remove_completed_worker(registry: &CancellationRegistry, identity: &WorkerIdentity) -> bool {
@@ -343,6 +339,10 @@ mod tests {
         assert!(!await_worker_drain(&mut drain, Duration::from_millis(1)).await);
         assert!(contains_worker(&registry, &worker));
         assert!(is_reconciliation_owned(&registry, &worker));
+        assert_eq!(
+            pending_reconciliation_issue_ids(&registry),
+            vec!["issue-1".to_string()]
+        );
     }
 
     #[tokio::test]

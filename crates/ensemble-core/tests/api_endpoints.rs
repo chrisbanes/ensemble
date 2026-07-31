@@ -43,7 +43,7 @@ fn build_app_state(
     let history_db_path = temp_dir.path().join(".ensemble").join("history.db");
     AppState {
         orchestrator_state: Arc::new(RwLock::new(orchestrator_state)),
-        orchestrator_runtime: Arc::new(std::sync::Mutex::new(None)),
+        orchestrator_runtime: ensemble_core::api::bootstrap::RegisteredOrchestrator::default(),
         refresh_requested: Arc::new(tokio::sync::Notify::new()),
         workspace_root: temp_dir
             .path()

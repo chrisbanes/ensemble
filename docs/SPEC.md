@@ -1078,7 +1078,11 @@ Every live worker is also registered by an exact in-memory identity:
 `RunningEntry.started_at`. The registry retains that identity's cancellation and completion handles
 until the worker's local event channel has closed and every event has been forwarded. More than one
 identity-distinct handle may temporarily exist for an issue, and issue-wide cancellation signals all
-of them.
+of them. Worker event channels remain bounded; while reconciliation or shutdown awaits bridge
+completion, the lifecycle authority continues consuming the orchestrator-facing queue so forwarding
+can quiesce without bypassing that memory bound. Reconciliation discards events for the issue whose
+disposition it owns and applies normal identity checks to unrelated events; shutdown discards all
+worker events after marking every live handle as drain-owned.
 
 Important nuance:
 
@@ -1154,9 +1158,14 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - Worker updates and exits are accepted only when their full worker identity still owns the running
   entry, pipeline cycle, and running step. Events from superseded identities are ignored, and a
   reconciliation-owned exit never enters normal success, failure, or retry handling.
-- Graceful shutdown marks and cancels every registered worker, waits for their event bridges to
-  complete before flushing persistence, and removes only successfully drained handles. A timed-out
-  handle remains registered as incomplete.
+- Graceful shutdown enters a quiescing runtime state: it stops polling and dispatch, marks and
+  cancels every registered worker, retains the sole orchestrator event receiver, and pumps while
+  discarding events until every bridge completes. Persistence flush and runtime completion happen
+  only after this proof, and only successfully drained handles are removed.
+- Runtime replacement publishes the old runtime as quiescing before it waits. A bounded replacement
+  wait that times out or is cancelled leaves that exact runtime, receiver, and task registered and
+  returns a typed busy error; no replacement launches until a later caller observes both semantic
+  quiescence and completion of the exact registered runtime task.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (no durable orchestrator DB required).
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
@@ -1271,6 +1280,10 @@ Part A: Stall detection
   reconciliation-owned, signal cancellation, and await all captured completion handles.
 - Completion means each local worker event channel has closed and every event, including the final
   exit, has been forwarded to the orchestrator.
+- Recheck each candidate against its current activity timestamp immediately before cancellation,
+  because draining an earlier issue may apply a newer event for a later candidate.
+- Refresh each terminal or non-active tracker candidate immediately before cancellation, because
+  draining an earlier issue may apply an event that changes a later candidate's tracker state.
 - After draining, revalidate the same running attempt and pipeline cycle before removing the running
   entry and queueing the existing failure retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
@@ -1289,7 +1302,13 @@ Part B: Tracker state refresh
 The drain wait never holds the worker-registry mutex or an orchestrator-state guard. If draining
 times out or ownership changes before commit, reconciliation leaves the running entry, claim,
 pipeline snapshot, workspace, and marked worker handles intact; a later tick may retry. This
-live-worker boundary is separate from persisted pending-terminal reconciliation: configured
+pending drain is revisited before fresh stall and tracker scans even if its original trigger has
+cleared. After quiescence, reconciliation refreshes tracker state and stall activity again. It
+commits the current terminal, inactive, or stalled disposition; if the issue is active after its
+worker was already cancelled, it uses the existing failure-retry path rather than leaving a
+workerless running claim. Each successful disposition removes its exact handles and appends history,
+schedules retry, or starts cleanup once. This live-worker boundary is separate from persisted
+pending-terminal reconciliation: configured
 completion has already ended agent work and follows the journaled terminal-transition path through
 confirmed `Released` without waiting for an in-memory worker.
 
@@ -2374,6 +2393,12 @@ API design notes:
   - Do not append stopped history, schedule a replacement, release state, or remove files.
   - Retry reconciliation on a later tick.
 
+- Runtime replacement timeout or cancelled wait:
+  - Keep the exact old runtime registered as quiescing with its event receiver and task.
+  - Return a typed runtime-busy error.
+  - Do not abort the old runtime, clear active-worker handles, or launch a replacement.
+  - A later replacement attempt may proceed only after old-runtime completion is observed.
+
 - Dashboard/log failures:
   - Do not crash the orchestrator.
 
@@ -2402,6 +2427,9 @@ Operators can control behavior by:
 
 - Editing `config.yaml` (pipeline config and most runtime settings).
 - `config.yaml` changes should be detected and re-applied automatically without restart.
+- If applying a configuration change requires replacing a runtime that is still quiescing, surface
+  the typed busy error and keep the old runtime registered. Transactional configuration-document
+  rollback is a separate concern.
 - Changing issue states in the tracker:
   - terminal state -> running session is cancelled and drained before release and workspace cleanup
   - non-active state -> running session is cancelled and drained before release without cleanup
@@ -2570,14 +2598,28 @@ on_tick(state):
 
 ```text
 function reconcile_running_issues(state):
-  for issue_id in find_stalled_runs(state):
+  for issue_id in registry.pending_reconciliation_issue_ids():
     owner = capture_running_attempt_and_pipeline_cycle(state, issue_id)
     handles = registry.mark_and_cancel_all(issue_id)
     if not await_all_completion(handles, timeout=worker_drain_timeout):
       continue
+    disposition = refresh_tracker_and_stall_disposition(issue_id)
     if not owner_still_matches(state, issue_id, owner):
       continue
-    state = remove_running_and_schedule_existing_failure_retry(state, issue_id)
+    state = commit_current_disposition_once(state, issue_id, disposition)
+    registry.remove_exact(handles)
+
+  for issue_id in find_stalled_runs(state):
+    if not issue_is_still_stalled(state, issue_id):
+      continue
+    owner = capture_running_attempt_and_pipeline_cycle(state, issue_id)
+    handles = registry.mark_and_cancel_all(issue_id)
+    if not await_all_completion(handles, timeout=worker_drain_timeout):
+      continue
+    disposition = refresh_tracker_and_stall_disposition(issue_id)
+    if not owner_still_matches(state, issue_id, owner):
+      continue
+    state = commit_current_disposition_once(state, issue_id, disposition)
     registry.remove_exact(handles)
 
   running_ids = keys(state.running)
@@ -2601,9 +2643,10 @@ function reconcile_running_issues(state):
 ```
 
 `drain_revalidate_and_terminate` captures the running attempt and pipeline cycle, marks and cancels
-every issue worker, waits outside all locks, and mutates state only if the captured owner still
-matches. Timeout or mismatch retains all state and handles. Workspace removal, if requested, begins
-only after the successful drain and ownership commit.
+every issue worker, waits outside all locks while pumping the bounded event receiver, refreshes the
+current tracker/stall disposition, and mutates state only if the captured owner still matches.
+Timeout or mismatch retains all state and handles. Workspace removal, if requested, begins only
+after the successful drain and ownership commit.
 
 ### 16.4 Dispatch One Issue
 
@@ -2640,9 +2683,10 @@ function dispatch_issue(issue, state, attempt):
   local_events = create_worker_event_channel()
   completion = create_completion_signal()
   registry.register(identity, cancellation_token, completion)
-  bridge(local_events, fn event:
-    send(orchestrator_channel, {identity, event})
-  finally:
+  bridge(local_events, fn:
+    for event in local_events:
+      if not send(orchestrator_channel, {identity, event}):
+        return_without_signalling_completion
     signal(completion)
   )
 
@@ -2777,6 +2821,44 @@ on_retry_timer(issue_id, state):
   return dispatch_issue(issue, state, attempt=retry_entry.attempt)
 ```
 
+### 16.7 Runtime Quiescence and Replacement
+
+```text
+function replace_registered_runtime(prepared_runtime, timeout):
+  lock registered_runtime:
+    if current is quiescing_for_shutdown:
+      return runtime_busy
+    if current is quiescing_for_replacement and not complete:
+      return runtime_busy
+    if current is running:
+      current.phase = quiescing_for_replacement
+      current.request_shutdown()
+    old_identity = current.identity
+    old_completion = current.completion_observer
+  unlock registered_runtime
+
+  if not await_completion(old_completion, timeout):
+    return runtime_busy
+
+  lock registered_runtime:
+    if current is not the same completed quiescing_for_replacement runtime:
+      return runtime_busy
+    retire current
+    register prepared_runtime as running
+  unlock registered_runtime
+```
+
+The shutdown request synchronously closes a shared dispatch gate before it is queued, so an
+in-progress tick cannot begin another candidate or retry dispatch after quiescence is published.
+The quiescing runtime performs no further polling, retry dispatch, or candidate dispatch. It retains
+the sole worker-event receiver, cancels every exact worker handle, and pumps/discards bounded events
+until every bridge proves completion. Semantic completion is necessary but insufficient for
+retirement: the exact registered runtime task must also be observed finished. Timeout or
+cancellation of the replacement wait never removes the registered runtime. Graceful host shutdown
+uses a distinct quiescing-for-shutdown phase, retains the slot until exact completion, and rejects
+concurrent replacement. A closed-but-false completion signal cannot prove quiescence, so the runtime
+remains fail-closed and busy until host-level hard process termination.
+
 ## 17. Test and Validation Matrix
 
 A conforming implementation should include tests that cover the behaviors defined in this
@@ -2859,9 +2941,15 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   workspace cleanup
 - Stalled state cancels and drains every issue worker before scheduling a replacement
 - Drain timeout retains the current running/claimed/pipeline/workspace owner and schedules no retry
+- Pending drain ownership is retried even when the original trigger clears; an active issue whose
+  worker was already cancelled follows the existing failure-retry path
 - Exact attempt and pipeline-cycle revalidation rejects a superseded reconciliation owner
 - Late updates and exits from drained or superseded identities cannot mutate a replacement attempt
 - Reconciliation-owned exits do not enter normal worker-exit or retry handling
+- Shutdown stops polling and dispatch, retains and pumps the bounded receiver, and completes only
+  after every exact worker bridge quiesces
+- Runtime replacement timeout or wait cancellation retains the same quiescing runtime and returns
+  typed busy; one later retry launches a replacement only after observed completion
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
 - Abnormal worker exit increments retries with 10s-based exponential backoff
