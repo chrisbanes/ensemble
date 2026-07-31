@@ -4515,6 +4515,32 @@ impl Orchestrator {
                 return false;
             }
         };
+        if latest_record.cycle > interaction.pipeline_cycle {
+            match self
+                .interaction_store
+                .retire_waiting_state(&interaction.id)
+                .await
+            {
+                Ok(_) => {
+                    warn!(
+                        issue_id = %interaction.issue_id,
+                        interaction_id = %interaction.id,
+                        interaction_cycle = interaction.pipeline_cycle,
+                        durable_cycle = latest_record.cycle,
+                        "retired stale interaction superseded by a newer pipeline cycle"
+                    );
+                }
+                Err(error) => warn!(
+                    issue_id = %interaction.issue_id,
+                    interaction_id = %interaction.id,
+                    interaction_cycle = interaction.pipeline_cycle,
+                    durable_cycle = latest_record.cycle,
+                    error = %error,
+                    "failed to retire stale interaction superseded by a newer pipeline cycle"
+                ),
+            }
+            return false;
+        }
         let repair_matches_durable_predecessor = match interaction.resume_strategy {
             InteractionResumeStrategy::RerunStep => {
                 latest_record.kind == PipelineTransitionKind::StepRunning
@@ -8540,6 +8566,46 @@ agent:
         parse_config(yaml).unwrap()
     }
 
+    fn test_question_interaction(
+        issue: &Issue,
+        pipeline_cycle: u32,
+        interaction_id: &str,
+    ) -> InteractionRequest {
+        InteractionRequest {
+            id: interaction_id.to_string(),
+            schema_version: 1,
+            issue_id: issue.id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            pipeline_cycle,
+            completed_steps: Vec::new(),
+            step_name: "build".to_string(),
+            agent_name: "builder".to_string(),
+            step_depends: Vec::new(),
+            step_tracker_state: None,
+            kind: InteractionKind::Question,
+            status: InteractionStatus::Open,
+            blocking: true,
+            awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
+            title: "Need input".to_string(),
+            body: "Choose environment".to_string(),
+            options: Vec::new(),
+            artifacts: Vec::new(),
+            response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            resolved_at: None,
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: Vec::new(),
+        }
+    }
+
     fn make_retry_step_config() -> EnsembleConfig {
         let yaml = r#"
 tracker:
@@ -9328,15 +9394,15 @@ agent:
     }
 
     #[tokio::test]
-    async fn restart_does_not_bind_stale_interaction_to_newer_pipeline_cycle() {
+    async fn restart_retires_stale_interaction_from_older_pipeline_cycle() {
         let temp = tempfile::tempdir().unwrap();
-        let cfg = make_config();
+        let cfg = make_parallel_resume_config();
         let issue = test_issue("1", "Todo");
         let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
         let dag = build_dag(&cfg.steps).unwrap();
         let mut run = PipelineRun::new(issue.id.clone(), 2, dag);
         run.start();
-        run.mark_running("build", "newer-session".to_string());
+        run.mark_running("docs", "newer-session".to_string());
         orchestrator
             .pipeline_journal
             .append(PipelineTransitionInput {
@@ -9345,7 +9411,7 @@ agent:
                 identifier: issue.identifier.clone(),
                 run_id: Some("run-2".to_string()),
                 cycle: 2,
-                step: Some("build".to_string()),
+                step: Some("docs".to_string()),
                 reason: None,
                 retry: None,
                 snapshot: Some(run.to_snapshot()),
@@ -9353,48 +9419,17 @@ agent:
             })
             .await
             .unwrap();
-        let stale_interaction = InteractionRequest {
-            id: "interaction-1".to_string(),
-            schema_version: 1,
-            issue_id: issue.id.clone(),
-            issue_identifier: issue.identifier.clone(),
-            pipeline_cycle: 1,
-            completed_steps: Vec::new(),
-            step_name: "build".to_string(),
-            agent_name: "builder".to_string(),
-            step_depends: Vec::new(),
-            step_tracker_state: None,
-            kind: InteractionKind::Question,
-            status: InteractionStatus::Open,
-            blocking: true,
-            awaiting_resume: true,
-            resume_strategy: InteractionResumeStrategy::RerunStep,
-            title: "Stale input".to_string(),
-            body: "Old request".to_string(),
-            options: Vec::new(),
-            artifacts: Vec::new(),
-            response: None,
-            waiting_started_at: None,
-            agent_input_tokens: 0,
-            agent_output_tokens: 0,
-            agent_total_tokens: 0,
-            requested_at: Utc::now(),
-            resolved_at: None,
-            thread_root_comment_id: None,
-            thread_root_comment_url: None,
-            last_processed_comment_id: None,
-            accepted_command: None,
-            ignored_commands: Vec::new(),
-        };
+        orchestrator
+            .interaction_store
+            .create(test_question_interaction(&issue, 1, "interaction-1"))
+            .await
+            .unwrap();
 
         orchestrator.restore_pipeline_runs_from_journal().await;
-        assert!(
-            orchestrator
-                .repair_interaction_checkpoint(&stale_interaction)
-                .await
-        );
+        orchestrator.hydrate_waiting_on_human_from_store().await;
 
         let state = state.read().await;
+        assert!(!state.is_waiting_on_human(&issue.id));
         assert_eq!(
             state
                 .get_pipeline_run(&issue.id)
@@ -9411,6 +9446,149 @@ agent:
             .unwrap()
             .unwrap();
         assert_eq!(latest.kind, PipelineTransitionKind::StepRunning);
+        assert_eq!(latest.seq, 1);
+        assert_eq!(latest.run_id.as_deref(), Some("run-2"));
+        assert_eq!(latest.cycle, 2);
+        assert_eq!(latest.step.as_deref(), Some("docs"));
+        assert_eq!(latest.reason, None);
+        let retired = orchestrator
+            .interaction_store
+            .get("interaction-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retired.status, InteractionStatus::Cancelled);
+        assert!(!retired.awaiting_resume);
+    }
+
+    #[tokio::test]
+    async fn restart_hydrates_same_cycle_interaction_from_parallel_step_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_parallel_resume_config();
+        let issue = test_issue("1", "Todo");
+        let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.start();
+        run.step_blocked_on_human("build", "interaction-1".to_string());
+        run.mark_running("docs", "docs-session".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("docs".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        orchestrator
+            .interaction_store
+            .create(test_question_interaction(&issue, 1, "interaction-1"))
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let state = state.read().await;
+        assert!(state.is_waiting_on_human(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("build"),
+            Some(&StepState::BlockedOnHuman {
+                interaction_request_id: "interaction-1".to_string(),
+            })
+        );
+        drop(state);
+        let retained = orchestrator
+            .interaction_store
+            .get("interaction-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.status, InteractionStatus::Open);
+        assert!(retained.awaiting_resume);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.seq, 1);
+        assert_eq!(latest.cycle, 1);
+        assert_eq!(latest.step.as_deref(), Some("docs"));
+    }
+
+    #[tokio::test]
+    async fn stale_sidecar_retirement_preserves_newer_halted_owner_with_same_id() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("1", "Todo");
+        let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 2, dag);
+        run.step_failed("build", "newer halt".to_string());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-2".to_string()),
+                cycle: 2,
+                step: Some("build".to_string()),
+                reason: Some("newer halt".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+            })
+            .await
+            .unwrap();
+        let interaction_id = format!("halted:{}:build", issue.id);
+        let mut stale_interaction = test_question_interaction(&issue, 1, &interaction_id);
+        stale_interaction.kind = InteractionKind::Handoff;
+        orchestrator
+            .interaction_store
+            .create(stale_interaction)
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let state = state.read().await;
+        let waiting = state.waiting_on_human.get(&issue.id).unwrap();
+        assert_eq!(waiting.interaction_request_id, interaction_id);
+        assert_eq!(waiting.retry_attempt, Some(2));
+        assert_eq!(waiting.run_id.as_deref(), Some("run-2"));
+        assert_eq!(waiting.prompt, "newer halt");
+        drop(state);
+        let retired = orchestrator
+            .interaction_store
+            .get(&interaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retired.status, InteractionStatus::Cancelled);
+        assert!(!retired.awaiting_resume);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.seq, 1);
+        assert_eq!(latest.kind, PipelineTransitionKind::PipelineHalted);
         assert_eq!(latest.cycle, 2);
     }
 

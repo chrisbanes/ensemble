@@ -324,6 +324,9 @@ Pipeline run recovery:
   that interaction ID, it reconstructs and persists the bound blocked or approval checkpoint
   before exposing the wait. A resolved-but-unbound interaction follows the same repair path rather
   than being mistaken for a reserved continuation.
+- A newer live pipeline cycle supersedes and retires every awaiting interaction from an older
+  cycle without modifying the newer journal owner. A same-cycle record for a parallel sibling step
+  does not supersede an interaction that remains bound in that record's pipeline snapshot.
 - A missing or failed tracker refresh, changed step context, quiescing runtime, workspace failure,
   or first confirmed-absent dispatch retains the claim, waiting entry, pipeline snapshot, queued
   resume request, and durable `awaiting_resume` marker for a later recoverable attempt.

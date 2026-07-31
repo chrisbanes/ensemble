@@ -33,3 +33,6 @@ Interaction continuation retires its sidecar after `StepRunning` is durable and 
 launch; startup retires a stale awaiting sidecar if it observes a crash in that narrow interval.
 If the sidecar is durable but its bound waiting snapshot is not, startup instead reconstructs and
 persists the blocked or approval checkpoint before exposing the wait.
+An awaiting sidecar from an older pipeline cycle is retired in favor of the newer live journal
+owner, while a same-cycle parallel-step record remains compatible when its snapshot still binds
+the interaction.
