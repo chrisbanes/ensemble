@@ -52,7 +52,7 @@ cat > Formula/ensemble.rb << FORMULA
 class Ensemble < Formula
   desc "Multi-agent pipeline orchestrator"
   homepage "https://github.com/${REPO}"
-  license "MIT"
+  license "Apache-2.0"
   version "${VERSION}"
 
   on_macos do
