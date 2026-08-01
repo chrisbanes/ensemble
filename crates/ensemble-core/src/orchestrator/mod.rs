@@ -8553,7 +8553,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
   permission_request_policy:
@@ -8633,7 +8632,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
   permission_request_policy:
@@ -10227,7 +10225,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#;
@@ -10765,7 +10762,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
   permission_request_policy:
@@ -10803,7 +10799,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
   permission_request_policy:
@@ -10887,7 +10882,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#;
@@ -10923,7 +10917,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#;
@@ -10961,7 +10954,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#
@@ -10997,7 +10989,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#
@@ -11055,7 +11046,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#;
@@ -13249,7 +13239,6 @@ polling:
 workspace:
   root: /tmp/ensemble-test
 agent:
-  max_turns: 3
   command: "echo test"
   session_mode: code
 "#,

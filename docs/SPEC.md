@@ -1093,7 +1093,6 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `hooks.after_run`: shell script or null
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
-- `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.command`: command string (tokenized into program + args, no shell interpolation), default implementation-defined
 - `agent.session_mode`: string (`code`, `architect`, `ask`), default `code`
@@ -1154,7 +1153,7 @@ Important nuance:
 - The worker may continue through multiple back-to-back coding-agent turns before it exits.
 - After each normal turn completion, the worker re-checks the tracker issue state.
 - If the issue is still in an active state, the worker should start another turn on the same live
-  coding-agent thread in the same workspace, up to `agent.max_turns`.
+  coding-agent thread in the same workspace.
 - The first turn should use the full rendered task prompt.
 - Continuation turns should send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
@@ -2860,11 +2859,10 @@ function run_agent_attempt(issue, attempt, local_events):
     run_hook_best_effort("after_run", workspace.path)
     fail_worker("agent session startup error")
 
-  max_turns = config.agent.max_turns
   turn_number = 1
 
   while true:
-    prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
+    prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number)
     if prompt failed:
       acp_client.cancel_session(session)
       run_hook_best_effort("after_run", workspace.path)
@@ -2891,9 +2889,6 @@ function run_agent_attempt(issue, attempt, local_events):
     issue = refreshed_issue[0] or issue
 
     if issue.state is not active:
-      break
-
-    if turn_number >= max_turns:
       break
 
     turn_number = turn_number + 1

@@ -41,7 +41,6 @@ const initialForm: GuidedForm = {
     workspace: {},
     hooks: { timeout_ms: 1000 },
     agent: {
-      max_turns: 1,
       max_retry_backoff_ms: 1,
       command: "agent",
       session_mode: "code",

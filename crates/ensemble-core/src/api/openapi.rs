@@ -171,6 +171,21 @@ mod tests {
     }
 
     #[test]
+    fn test_openapi_omits_unsupported_agent_max_turns() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        for schema in ["AgentRuntimeConfig", "GuidedAgentRuntimeForm"] {
+            assert!(
+                spec["components"]["schemas"][schema]["properties"]
+                    .get("max_turns")
+                    .is_none(),
+                "{schema} must not expose max_turns"
+            );
+        }
+    }
+
+    #[test]
     fn test_openapi_documents_runtime_restart_failures_for_save_endpoints() {
         let spec: serde_json::Value =
             serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
