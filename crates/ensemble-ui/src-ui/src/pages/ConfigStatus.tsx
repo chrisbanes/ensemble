@@ -162,10 +162,6 @@ export default function ConfigStatus() {
                   <dt className="text-sm font-medium text-muted-foreground">Tracker</dt>
                   <dd className="text-sm">{config.tracker.kind}</dd>
                 </div>
-                <div>
-                  <dt className="text-sm font-medium text-muted-foreground">Max Turns</dt>
-                  <dd className="text-sm">{config.runtime.agent.max_turns}</dd>
-                </div>
               </dl>
             </CardContent>
           </Card>

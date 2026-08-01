@@ -107,7 +107,16 @@ pub(crate) fn parse_raw_yaml_with_dotenv(
 
     match parsed {
         Ok(document) => {
-            let typed: Result<EnsembleConfig, _> = serde_yaml::from_value(document.clone());
+            let typed: Result<EnsembleConfig, ConfigError> =
+                crate::config::ensemble::reject_unsupported_agent_max_turns(&document).and_then(
+                    |_| {
+                        serde_yaml::from_value(document.clone()).map_err(|e| {
+                            ConfigError::ConfigParseError {
+                                reason: e.to_string(),
+                            }
+                        })
+                    },
+                );
             match typed {
                 Ok(mut config) => {
                     let mut report = validate_document(&document);
@@ -784,6 +793,35 @@ on_failure: Failed
     }
 
     #[test]
+    fn parse_raw_yaml_rejects_unsupported_agent_max_turns() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  max_turns: 20
+"#;
+
+        let state = parse_raw_yaml(PathBuf::from("/tmp/test.yaml"), raw.to_string());
+
+        assert_eq!(state.kind, ConfigStateKind::Parsed);
+        assert!(state.active_config.is_none());
+        assert!(state.validation.issues.iter().any(|issue| {
+            issue.kind == ValidationIssueKind::Config
+                && issue.message.contains("agent.max_turns")
+                && issue.message.contains("no longer supported")
+        }));
+    }
+
+    #[test]
     fn parse_raw_yaml_returns_parsed_state_with_config_issues_for_typed_invalid_config() {
         let raw = r#"
 tracker:
@@ -934,6 +972,35 @@ on_failure: Failed
         let result = save_raw_yaml_atomically(&path, invalid_config);
 
         assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::ConfigWriteRejected { .. }
+        ));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn save_raw_yaml_atomically_rejects_unsupported_agent_max_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let invalid_config = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+agent:
+  max_turns: 20
+"#;
+
+        let result = save_raw_yaml_atomically(&path, invalid_config);
+
         assert!(matches!(
             result.unwrap_err(),
             ConfigError::ConfigWriteRejected { .. }

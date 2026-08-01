@@ -224,7 +224,6 @@ polling:
   interval_ms: 30000
 
 agent:
-  max_turns: 20
   turn_timeout_ms: 3600000
   inject_interaction_policy_instructions: true
   interaction_policy_overrides:
@@ -515,9 +514,11 @@ This section configures Ensemble's runtime behavior after the agent is launched.
 Agent step results are extracted by Ensemble through a hidden second turn in the same runtime
 session. There is no config switch for this behavior.
 
+`agent.max_turns` is unsupported and rejected during configuration parsing. Remove it from
+existing configurations: Ensemble cannot enforce provider-internal model turns.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_turns` | integer | `20` | Maximum agent conversation turns per session |
 | `max_retry_backoff_ms` | integer | `300000` | Cap on exponential backoff delay between retries |
 | `command` | string | `"claude-code"` | Agent binary command |
 | `session_mode` | string | `"code"` | Agent session mode |

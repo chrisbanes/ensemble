@@ -502,8 +502,6 @@ impl Default for HooksConfig {
 /// Runtime configuration for the agent executor.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentRuntimeConfig {
-    #[serde(default = "default_agent_max_turns")]
-    pub max_turns: u32,
     #[serde(default = "default_max_retry_backoff_ms")]
     pub max_retry_backoff_ms: u64,
     #[serde(default = "default_agent_command")]
@@ -601,10 +599,6 @@ pub enum InteractionPolicyOverrideMode {
     Off,
 }
 
-fn default_agent_max_turns() -> u32 {
-    20
-}
-
 fn default_max_retry_backoff_ms() -> u64 {
     300_000
 }
@@ -640,7 +634,6 @@ fn default_inject_interaction_policy_instructions() -> bool {
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
-            max_turns: default_agent_max_turns(),
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
             command: default_agent_command(),
             session_mode: default_session_mode(),
@@ -814,11 +807,32 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
         serde_yaml::from_str(yaml).map_err(|e| crate::error::ConfigError::ConfigParseError {
             reason: e.to_string(),
         })?;
+    reject_unsupported_agent_max_turns(&value)?;
     reject_legacy_agent_permission_policy(&value)?;
     reject_legacy_notion_tracker_keys(&value)?;
     serde_yaml::from_value(value).map_err(|e| crate::error::ConfigError::ConfigParseError {
         reason: e.to_string(),
     })
+}
+
+pub(crate) fn reject_unsupported_agent_max_turns(
+    value: &serde_yaml::Value,
+) -> Result<(), crate::error::ConfigError> {
+    let Some(agent) = value
+        .as_mapping()
+        .and_then(|root| root.get(serde_yaml::Value::String("agent".to_string())))
+        .and_then(serde_yaml::Value::as_mapping)
+    else {
+        return Ok(());
+    };
+
+    if agent.contains_key(serde_yaml::Value::String("max_turns".to_string())) {
+        return Err(crate::error::ConfigError::ConfigParseError {
+            reason: "agent.max_turns is no longer supported because Ensemble cannot enforce provider-internal model turns".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn reject_legacy_notion_tracker_keys(
@@ -1630,7 +1644,6 @@ on_failure: Failed
         assert_eq!(config.hooks.timeout_ms, 60_000);
 
         // AgentRuntimeConfig defaults
-        assert_eq!(config.agent.max_turns, 20);
         assert_eq!(config.agent.max_retry_backoff_ms, 300_000);
         assert_eq!(config.agent.command, "claude-code");
         assert_eq!(config.agent.session_mode, "code");
@@ -1657,6 +1670,19 @@ on_failure: Failed
             config.human_interaction.default_resume_mode,
             HumanResumeMode::Manual
         );
+    }
+
+    #[test]
+    fn rejects_unsupported_agent_max_turns() {
+        let yaml = format!("{}\nagent:\n  max_turns: 20\n", minimal_yaml());
+
+        let error = parse_config(&yaml).unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::error::ConfigError::ConfigParseError { reason }
+                if reason.contains("agent.max_turns") && reason.contains("no longer supported")
+        ));
     }
 
     #[test]

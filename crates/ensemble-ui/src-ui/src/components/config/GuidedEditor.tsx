@@ -122,7 +122,6 @@ export interface GuidedForm {
       timeout_ms: number;
     };
     agent: {
-      max_turns: number;
       max_retry_backoff_ms: number;
       command: string;
       session_mode: string;

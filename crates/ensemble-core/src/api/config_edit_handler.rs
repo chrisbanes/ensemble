@@ -1888,7 +1888,6 @@ on_failure: Failed
                     timeout_ms: 60000,
                 },
                 agent: crate::config::form::GuidedAgentRuntimeForm {
-                    max_turns: 20,
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
@@ -2039,7 +2038,6 @@ on_failure: Failed
                     timeout_ms: 60000,
                 },
                 agent: crate::config::form::GuidedAgentRuntimeForm {
-                    max_turns: 20,
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
@@ -2206,7 +2204,6 @@ on_failure: Failed
                     timeout_ms: 60000,
                 },
                 agent: crate::config::form::GuidedAgentRuntimeForm {
-                    max_turns: 20,
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),

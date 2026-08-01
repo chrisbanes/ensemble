@@ -121,7 +121,6 @@ pub struct GuidedHooksForm {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GuidedAgentRuntimeForm {
-    pub max_turns: u32,
     pub max_retry_backoff_ms: u64,
     pub command: String,
     pub session_mode: String,
@@ -262,7 +261,6 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 timeout_ms: config.hooks.timeout_ms,
             },
             agent: GuidedAgentRuntimeForm {
-                max_turns: config.agent.max_turns,
                 max_retry_backoff_ms: config.agent.max_retry_backoff_ms,
                 command: config.agent.command.clone(),
                 session_mode: config.agent.session_mode.clone(),
@@ -576,7 +574,7 @@ pub fn apply_guided_form(
         .entry("agent".into())
         .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     if let serde_yaml::Value::Mapping(ref mut am) = *agent_val {
-        am.insert("max_turns".into(), form.runtime.agent.max_turns.into());
+        am.remove("max_turns");
         am.insert(
             "max_retry_backoff_ms".into(),
             form.runtime.agent.max_retry_backoff_ms.into(),
@@ -743,6 +741,57 @@ on_failure: Failed
     }
 
     #[test]
+    fn guided_form_omits_max_turns_and_preserves_supported_agent_runtime_fields() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  build:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: build
+on_success: Done
+on_failure: Failed
+agent:
+  max_retry_backoff_ms: 456
+  command: custom-agent
+  session_mode: architect
+  permission_request_policy:
+    mode: reject_all
+  turn_timeout_ms: 123
+  read_timeout_ms: 234
+  stall_timeout_ms: 345
+"#;
+        let form = extract_guided_form(raw).unwrap();
+        let json = serde_json::to_string(&form).unwrap();
+
+        assert!(!json.contains("max_turns"));
+        assert_eq!(form.runtime.agent.max_retry_backoff_ms, 456);
+        assert_eq!(form.runtime.agent.command, "custom-agent");
+        assert_eq!(form.runtime.agent.session_mode, "architect");
+        assert_eq!(
+            form.runtime.agent.permission_request_policy.mode,
+            "reject_all"
+        );
+        assert_eq!(form.runtime.agent.turn_timeout_ms, 123);
+        assert_eq!(form.runtime.agent.read_timeout_ms, 234);
+        assert_eq!(form.runtime.agent.stall_timeout_ms, 345);
+
+        let legacy_base = format!("{raw}  max_turns: 20\n");
+        let merged: serde_yaml::Value =
+            serde_yaml::from_str(&apply_guided_form(&legacy_base, &form).unwrap()).unwrap();
+        assert!(merged["agent"].get("max_turns").is_none());
+        assert_eq!(merged["agent"]["max_retry_backoff_ms"], 456);
+        assert_eq!(merged["agent"]["command"], "custom-agent");
+        assert_eq!(merged["agent"]["session_mode"], "architect");
+        assert_eq!(merged["agent"]["turn_timeout_ms"], 123);
+        assert_eq!(merged["agent"]["read_timeout_ms"], 234);
+        assert_eq!(merged["agent"]["stall_timeout_ms"], 345);
+    }
+
+    #[test]
     fn guided_secret_edits_replace_reference_or_remove_explicitly() {
         let base = r#"
 tracker:
@@ -879,7 +928,6 @@ on_failure: Failed
                     timeout_ms: 60000,
                 },
                 agent: GuidedAgentRuntimeForm {
-                    max_turns: 20,
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),
