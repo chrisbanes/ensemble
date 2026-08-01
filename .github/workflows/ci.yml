@@ -23,6 +23,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # Cheapest checks first — fail fast
+      - name: Verify Cargo package licenses
+        run: |
+          for package in ensemble-core ensemble-cli ensemble-desktop; do
+            cmp LICENSE "crates/$package/LICENSE"
+            cargo package -p "$package" --list | grep -Fxq LICENSE
+          done
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -281,7 +288,12 @@ jobs:
       - name: Package binary
         run: |
           ARCHIVE="ensemble-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
-          tar -czf "$ARCHIVE" -C target/${{ matrix.target }}/release ensemble
+          PACKAGE_DIR="target/${{ matrix.target }}/package"
+          mkdir -p "$PACKAGE_DIR"
+          cp "target/${{ matrix.target }}/release/ensemble" "$PACKAGE_DIR/ensemble"
+          cp LICENSE "$PACKAGE_DIR/LICENSE"
+          tar -czf "$ARCHIVE" -C "$PACKAGE_DIR" ensemble LICENSE
+          tar -tzf "$ARCHIVE" | grep -Fxq LICENSE
           echo "archive=$ARCHIVE" >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v7
@@ -313,7 +325,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v3
         with:
-          files: artifacts/**
+          files: |
+            artifacts/**
+            LICENSE
           generate_release_notes: true
 
       - name: Update Homebrew tap

@@ -148,3 +148,9 @@ This opens the resolved configuration directory in your system's file manager. I
 - [Architecture Decisions](docs/adr/) — durable architectural choices and their rationale
 - [Contributing](docs/contributing.md) — building, testing, project structure
 - [Roadmap](docs/roadmap.md) — what's built, what's coming
+
+## License
+
+Copyright 2026 Chris Banes
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).
