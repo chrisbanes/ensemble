@@ -1,9 +1,10 @@
-use crate::config::ensemble::RepoConfig;
+use crate::config::ensemble::{HooksConfig, RepoConfig};
 use crate::error::WorkspaceError;
 use crate::observability::events_contract::{
     elapsed_ms, WORKSPACE_PREPARE_FAILED, WORKSPACE_PREPARE_FINISHED, WORKSPACE_PREPARE_STARTED,
 };
 use crate::workspace::coordinator::{WorktreeCoordinator, WorktreeInfo};
+use crate::workspace::hooks::run_hook_best_effort;
 use crate::workspace::key::issue_workspace_key;
 use std::collections::HashMap;
 use std::io::Write;
@@ -27,6 +28,7 @@ struct WorkspaceMetadata {
 pub struct WorkspaceManager {
     root: PathBuf,
     repos: HashMap<String, RepoConfig>,
+    hooks: HooksConfig,
     #[cfg(test)]
     preparation_test_barriers: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
     #[cfg(test)]
@@ -64,6 +66,15 @@ impl WorkspaceManager {
     /// Pass `repos` to enable worktree-based workspace isolation.
     /// Repo names are derived from path basenames.
     pub fn new(root: &Path, repos: Option<Vec<RepoConfig>>) -> Result<Self, WorkspaceError> {
+        Self::new_with_hooks(root, repos, HooksConfig::default())
+    }
+
+    /// Create a workspace manager with lifecycle hook configuration.
+    pub fn new_with_hooks(
+        root: &Path,
+        repos: Option<Vec<RepoConfig>>,
+        hooks: HooksConfig,
+    ) -> Result<Self, WorkspaceError> {
         let root = resolve_workspace_root(root)?;
 
         let repos_map = repos
@@ -85,6 +96,7 @@ impl WorkspaceManager {
         Ok(Self {
             root,
             repos: repos_map,
+            hooks,
             #[cfg(test)]
             preparation_test_barriers: None,
             #[cfg(test)]
@@ -425,6 +437,10 @@ impl WorkspaceManager {
         if let Some((after_verification, resume_removal)) = &self.removal_test_barriers {
             after_verification.wait().await;
             resume_removal.wait().await;
+        }
+
+        if let Some(script) = &self.hooks.before_remove {
+            run_hook_best_effort("before_remove", script, &base_path, self.hooks.timeout_ms).await;
         }
 
         // Clean up worktrees first - use persisted branch date to avoid date drift
@@ -1031,6 +1047,97 @@ mod tests {
 
         mgr.remove_workspace("NODE_42").await.unwrap();
         assert!(!ws_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn before_remove_hook_runs_in_base_workspace_before_worktree_cleanup() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let repo_name = Path::new(&repo.path).file_name().unwrap().to_str().unwrap();
+        let hooks = crate::config::ensemble::HooksConfig {
+            before_remove: Some(format!("test -d {repo_name} && pwd > ../before-remove-cwd")),
+            ..Default::default()
+        };
+        let mgr = WorkspaceManager::new_with_hooks(root.path(), Some(vec![repo]), hooks).unwrap();
+        let workspace = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let marker = root.path().join("before-remove-cwd");
+
+        mgr.remove_workspace("NODE_42").await.unwrap();
+
+        let expected_cwd = mgr
+            .root()
+            .canonicalize()
+            .unwrap()
+            .join(&workspace.workspace_key);
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap().trim(),
+            expected_cwd.display().to_string()
+        );
+        assert!(!workspace.base_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn before_remove_hook_failure_does_not_block_cleanup() {
+        let root = TempDir::new().unwrap();
+        let hooks = HooksConfig {
+            before_remove: Some("false".to_string()),
+            ..Default::default()
+        };
+        let mgr = WorkspaceManager::new_with_hooks(root.path(), None, hooks).unwrap();
+        let workspace = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let metadata_path = mgr.metadata_path("NODE_42");
+
+        mgr.remove_workspace("NODE_42").await.unwrap();
+
+        assert!(!workspace.base_path.exists());
+        assert!(!metadata_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn before_remove_hook_timeout_does_not_block_cleanup() {
+        let root = TempDir::new().unwrap();
+        let hooks = HooksConfig {
+            before_remove: Some("while :; do :; done".to_string()),
+            timeout_ms: 25,
+            ..Default::default()
+        };
+        let mgr = WorkspaceManager::new_with_hooks(root.path(), None, hooks).unwrap();
+        let workspace = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let metadata_path = mgr.metadata_path("NODE_42");
+
+        mgr.remove_workspace("NODE_42").await.unwrap();
+
+        assert!(!workspace.base_path.exists());
+        assert!(!metadata_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn before_remove_hook_is_not_run_for_an_absent_workspace() {
+        let root = TempDir::new().unwrap();
+        let marker = root.path().join("before-remove-ran");
+        let hooks = HooksConfig {
+            before_remove: Some("touch ../before-remove-ran".to_string()),
+            ..Default::default()
+        };
+        let mgr = WorkspaceManager::new_with_hooks(root.path(), None, hooks).unwrap();
+
+        mgr.remove_workspace("NODE_MISSING").await.unwrap();
+        mgr.remove_workspace("NODE_MISSING").await.unwrap();
+
+        assert!(!marker.exists());
     }
 
     #[tokio::test]
