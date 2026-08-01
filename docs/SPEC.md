@@ -833,8 +833,9 @@ Fields:
     exists.
   - Failure is logged but ignored.
 - `before_remove` (multiline shell script string, optional)
-  - Runs before workspace deletion if the directory exists.
-  - Failure is logged but ignored; cleanup still proceeds.
+  - Runs once in an existing, ownership-verified issue workspace before coordinated worktree or
+    base-directory removal.
+  - Uses `timeout_ms`; failure or timeout is logged but ignored, and cleanup still proceeds.
 - `timeout_ms` (integer, optional)
   - Default: `60000`
   - Applies to all workspace hooks.
@@ -1463,7 +1464,8 @@ Algorithm summary:
 Missing, malformed, ownerless legacy, or mismatched sidecar metadata is not repaired or adopted.
 Reuse and removal fail before any workspace side effect. Removing an absent canonical workspace
 with no sidecar remains idempotent; removing one with a valid matching leftover sidecar completes
-the interrupted cleanup. Cleanup removes repository worktrees exhaustively, then the agent
+the interrupted cleanup. For an existing ownership-verified workspace, `before_remove` runs once
+in the base workspace before cleanup removes repository worktrees exhaustively, then the agent
 workspace, then the sidecar. A sidecar-removal failure is retryable because the valid sidecar
 remains authoritative. Implementations do not scan, migrate, rename, or remove legacy
 identifier-only directories, and do not migrate or adopt in-workspace metadata.
@@ -3065,7 +3067,8 @@ resources; API saves return `409 Conflict` and watcher diagnostics expose no can
 - `after_create` hook runs only on new workspace creation
 - `before_run` hook runs before each attempt and failure/timeouts abort the current attempt
 - `after_run` hook runs after each attempt and failure/timeouts are logged and ignored
-- `before_remove` hook runs on cleanup and failures/timeouts are ignored
+- `before_remove` hook runs once in an existing ownership-verified base workspace before
+  worktree or directory removal, and failures/timeouts are ignored
 - Workspace path sanitization and root containment invariants are enforced before agent launch
 - Agent launch uses the per-issue workspace path as cwd and rejects out-of-root paths
 
