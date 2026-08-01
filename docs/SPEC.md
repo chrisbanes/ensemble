@@ -1151,16 +1151,12 @@ worker events after marking every live handle as drain-owned.
 Important nuance:
 
 - A successful worker exit does not mean the issue is done forever.
-- The worker may continue through multiple back-to-back coding-agent turns before it exits.
-- After each normal turn completion, the worker re-checks the tracker issue state.
-- If the issue is still in an active state, the worker should start another turn on the same live
-  coding-agent thread in the same workspace.
-- The first turn should use the full rendered task prompt.
-- Continuation turns should send only continuation guidance to the existing thread, not resend the
-  original task prompt that is already present in thread history.
-- Once the worker exits normally, the orchestrator still schedules a short continuation retry
-  (about 1 second) so it can re-check whether the issue remains active and needs another worker
-  session.
+- Each worker invokes one configured agent run with the full rendered task prompt. A provider may
+  perform its own internal turns within that run, but Ensemble does not drive an in-process
+  continuation loop or reuse a worker session for another run.
+- Once a worker exits normally, the orchestrator schedules a short continuation retry (about
+  1 second). It re-checks whether the issue remains active and, if eligible, dispatches a new
+  worker session in the existing workspace.
 
 ### 7.2 Run Attempt Lifecycle
 
@@ -1191,8 +1187,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `Worker Exit (normal)`
   - Remove running entry.
   - Update aggregate runtime totals.
-  - Schedule continuation retry (attempt `1`) after the worker exhausts or finishes its in-process
-    turn loop.
+  - Schedule continuation retry (attempt `1`) for a fresh worker session.
 
 - `Worker Exit (abnormal)`
   - Remove running entry.
@@ -2856,51 +2851,25 @@ function run_agent_attempt(issue, attempt, local_events):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = acp_client.start_session(workspace=workspace.path)
-  if session failed:
-    run_hook_best_effort("after_run", workspace.path)
-    fail_worker("agent session startup error")
-
-  turn_number = 1
-
-  while true:
-    prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number)
-    if prompt failed:
-      acp_client.cancel_session(session)
-      run_hook_best_effort("after_run", workspace.path)
-      fail_worker("prompt error")
-
-    turn_result = acp_client.send_prompt(
-      session=session,
-      prompt=prompt,
-      issue=issue,
-      on_message=(msg) -> send(local_events, {agent_update, issue.id, msg})
-    )
-
-    if turn_result failed:
-      acp_client.cancel_session(session)
-      run_hook_best_effort("after_run", workspace.path)
-      fail_worker("agent turn error")
-
-    refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
-    if refreshed_issue failed:
-      acp_client.cancel_session(session)
-      run_hook_best_effort("after_run", workspace.path)
-      fail_worker("issue state refresh error")
-
-    issue = refreshed_issue[0] or issue
-
-    if issue.state is not active:
-      break
-
-    turn_number = turn_number + 1
-
-  acp_client.cancel_session(session)
+  result = agent_runner.run(
+    issue=issue,
+    attempt=attempt,
+    workspace=workspace.path,
+    turn_number=1,
+    on_message=(msg) -> send(local_events, {agent_update, issue.id, msg})
+  )
   run_hook_best_effort("after_run", workspace.path)
+
+  if result failed:
+    fail_worker("agent run error")
 
   send(local_events, {worker_exit, issue.id, normal})
   close(local_events)
 ```
+
+An agent run may use provider-internal turns. Direct ACP runs may also issue a hidden verdict
+extraction turn in the same session. Neither is an Ensemble-managed continuation or a tracker
+refresh between prompts; a later continuation retry creates a fresh worker session.
 
 The worker sends its final exit through the same local channel. The bridge signals completion only
 after that channel closes and all prior events have been forwarded. The orchestrator validates the
