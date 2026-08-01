@@ -133,7 +133,7 @@ This opens the resolved configuration directory in your system's file manager. I
 
 **Pipelines** are a DAG of steps, each referencing an agent. Steps run sequentially by default. Use `depends` to create parallel branches. This is the CI-like contract: the pipeline, not the agent, defines the delivery gates. See [Pipeline Guide](docs/pipelines.md).
 
-**Workspaces** are isolated directories created per-issue. They persist across retries and get cleaned up when the issue reaches a terminal state. Shell hooks run at lifecycle points (create, before/after run, remove).
+**Workspaces** are isolated directories created per-issue. They persist across retries and get cleaned up when the issue reaches a terminal state. Shell hooks run at lifecycle points (create, before/after run, remove); `before_remove` runs in an existing workspace before its worktrees and directory are removed, and failures or timeouts are logged without blocking cleanup.
 
 **Step outputs** are how Ensemble turns agent work into pipeline decisions. After the visible working turn, Ensemble asks the same runtime session for structured JSON with `result`, optional `summary`, and optional downstream `output`. Verdict files and default-success fallbacks are not part of the current runtime contract.
 
@@ -148,3 +148,9 @@ This opens the resolved configuration directory in your system's file manager. I
 - [Architecture Decisions](docs/adr/) — durable architectural choices and their rationale
 - [Contributing](docs/contributing.md) — building, testing, project structure
 - [Roadmap](docs/roadmap.md) — what's built, what's coming
+
+## License
+
+Copyright 2026 Chris Banes
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

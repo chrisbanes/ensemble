@@ -496,7 +496,7 @@ Shell scripts that run at workspace lifecycle points. Each runs via `sh -lc` wit
 | `after_create` | string | — | Runs after a workspace directory is created for the first time |
 | `before_run` | string | — | Runs before each agent session starts |
 | `after_run` | string | — | Runs after each agent session completes |
-| `before_remove` | string | — | Runs before a workspace is cleaned up |
+| `before_remove` | string | — | Runs once in an existing issue workspace before worktree and directory removal; failures and timeouts are logged without blocking cleanup |
 | `timeout_ms` | integer | `60000` | Maximum time for any hook to run (milliseconds) |
 
 ### polling

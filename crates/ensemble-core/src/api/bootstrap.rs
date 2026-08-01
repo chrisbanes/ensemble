@@ -283,10 +283,14 @@ pub(crate) async fn prepare_orchestrator_runtime(
         Arc::clone(&config),
         Arc::clone(&app_state.config_runtime.document_state),
     ));
-    let workspace_mgr = WorkspaceManager::new(
-        Path::new(&app_state.workspace_root),
-        Some(config.read().await.repos.clone()),
-    )?;
+    let workspace_mgr = {
+        let config = config.read().await;
+        WorkspaceManager::new_with_hooks(
+            Path::new(&app_state.workspace_root),
+            Some(config.repos.clone()),
+            config.hooks.clone(),
+        )?
+    };
     let config_dir = config_dir_for_path(&app_state.config_runtime.config_path)?;
     let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
     let orchestrator = Orchestrator::new_with_state_and_history(
