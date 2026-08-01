@@ -815,7 +815,7 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
     })
 }
 
-fn reject_unsupported_agent_max_turns(
+pub(crate) fn reject_unsupported_agent_max_turns(
     value: &serde_yaml::Value,
 ) -> Result<(), crate::error::ConfigError> {
     let Some(agent) = value
