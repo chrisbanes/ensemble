@@ -31,6 +31,17 @@
 - Done name: `Done`
 - Done option ID: `98236657`
 
+## Triage
+
+- Needs-triage label: `needs-triage`
+
+## Work Roles
+
+- Epic label: `epic`
+- Epic label ID: `LA_kwDORzdwYM8AAAACuWX7NA`
+- Human-work label: `ready-for-human`
+- Human-work label ID: `LA_kwDORzdwYM8AAAACuAxOsQ`
+
 ## Priority
 
 - Field name: `Priority`
