@@ -2,6 +2,10 @@
 
 A pipeline is a directed acyclic graph (DAG) of steps that Ensemble runs for each issue. It is the CI contract for autonomous coding agents: each step invokes a named agent in an isolated workspace, collects a structured result, and lets pipeline policy decide what happens next.
 
+For the first release, sequential list-order pipelines are the supported path. Dependency syntax
+can describe a DAG, but Ensemble does not promise guaranteed parallel execution. Finalization after
+a successful pipeline is recoverable and may create a pull request; a human owns review and merge.
+
 ## Steps and agents
 
 Each step references an agent defined in `config.yaml`:
@@ -52,7 +56,8 @@ steps:
     agent: reviewer
 ```
 
-**Parallel:** Use `depends` to create branches. Steps with the same dependencies run in parallel.
+**Parallel syntax (not a supported first-release guarantee):** Use `depends` to describe branches.
+Do not rely on it for guaranteed parallel execution in the sequential MVP.
 
 ```yaml
 steps:
@@ -61,11 +66,11 @@ steps:
     depends: []           # root step — no dependencies
   - name: lint
     agent: linter
-    depends: []           # also a root step — runs parallel to build
+    depends: []           # another root; parallel dispatch is deferred beyond the MVP
   - name: review
     agent: reviewer
     depends:
-      - build             # waits for both build and lint
+      - build             # syntax for a future multi-branch pipeline
       - lint
 ```
 

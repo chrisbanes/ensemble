@@ -520,7 +520,7 @@ pub async fn get_setup_agents(
     path = "/api/v1/config/setup/agents/stream",
     operation_id = "getSetupAgentsStream",
     responses(
-        (status = 200, description = "Stream of discovered agents", body = String)
+        (status = 200, description = "Server-Sent Events stream of discovered agents", body = DiscoveredAgentInfo, content_type = "text/event-stream")
     ),
     tag = "config"
 )]

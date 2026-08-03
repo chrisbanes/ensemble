@@ -4,6 +4,16 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, render, renderHook, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { InteractionDetail, IssueDetailSnapshot } from "./generated/models";
+import { getStepConversation } from "./generated/api/conversation/conversation";
+import {
+  postFinalizeApprove,
+  postFinalizeRetry,
+  postResumeIssue,
+  postRetry,
+  postStop,
+} from "./generated/api/controls/controls";
+import { getTimeline } from "./generated/api/history/history";
+import { getIssueDetail, getStepDetail } from "./generated/api/issues/issues";
 import {
   useCancelInteractionMutation,
   useFinalizeApproveMutation,
@@ -18,6 +28,37 @@ import {
   useStopMutation,
   useTimelineQuery,
 } from "./hooks";
+
+vi.mock("./generated/api/conversation/conversation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./generated/api/conversation/conversation")>();
+  return { ...actual, getStepConversation: vi.fn(actual.getStepConversation) };
+});
+
+vi.mock("./generated/api/controls/controls", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./generated/api/controls/controls")>();
+  return {
+    ...actual,
+    postFinalizeApprove: vi.fn(actual.postFinalizeApprove),
+    postFinalizeRetry: vi.fn(actual.postFinalizeRetry),
+    postResumeIssue: vi.fn(actual.postResumeIssue),
+    postRetry: vi.fn(actual.postRetry),
+    postStop: vi.fn(actual.postStop),
+  };
+});
+
+vi.mock("./generated/api/history/history", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./generated/api/history/history")>();
+  return { ...actual, getTimeline: vi.fn(actual.getTimeline) };
+});
+
+vi.mock("./generated/api/issues/issues", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./generated/api/issues/issues")>();
+  return {
+    ...actual,
+    getIssueDetail: vi.fn(actual.getIssueDetail),
+    getStepDetail: vi.fn(actual.getStepDetail),
+  };
+});
 
 function jsonResponse(data: unknown) {
   return Promise.resolve(
@@ -180,7 +221,11 @@ describe("issue-scoped API hooks", () => {
     expect(fetchMock).toHaveBeenCalledWith(expectedUrl, expect.objectContaining({ method: "GET" }));
   });
 
-  it.each([
+  const mutationHooks: Array<[
+    string,
+    () => { mutate: (variables: { identifier: string }) => unknown },
+    string,
+  ]> = [
     ["stop", () => useStopMutation(), "/api/v1/org%2Frepo%2342/stop"],
     ["retry", () => useRetryMutation(), "/api/v1/org%2Frepo%2342/retry"],
     ["resume", () => useResumeIssueMutation("org/repo#42"), "/api/v1/issues/org%2Frepo%2342/resume"],
@@ -194,7 +239,9 @@ describe("issue-scoped API hooks", () => {
       () => useFinalizeRetryMutation("org/repo#42"),
       "/api/v1/org%2Frepo%2342/finalize/retry",
     ],
-  ])("URL-encodes issue identifier for %s", async (_name, useHook, expectedUrl) => {
+  ];
+
+  it.each(mutationHooks)("URL-encodes issue identifier for %s", async (_name, useHook, expectedUrl) => {
     const fetchMock = vi.fn(() => jsonResponse({ ok: true }));
     vi.stubGlobal("fetch", fetchMock);
     const { result } = renderHook(useHook, { wrapper: wrapper() });
@@ -203,6 +250,30 @@ describe("issue-scoped API hooks", () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     expect(fetchMock).toHaveBeenCalledWith(expectedUrl, expect.objectContaining({ method: "POST" }));
+  });
+
+  it("uses generated control operations while preserving encoded issue identifiers", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn(() => jsonResponse({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const stop = renderHook(() => useStopMutation(), { wrapper: wrapper() });
+    const retry = renderHook(() => useRetryMutation(), { wrapper: wrapper() });
+    const resume = renderHook(() => useResumeIssueMutation(), { wrapper: wrapper() });
+    const approve = renderHook(() => useFinalizeApproveMutation(), { wrapper: wrapper() });
+    const finalizeRetry = renderHook(() => useFinalizeRetryMutation(), { wrapper: wrapper() });
+
+    for (const mutation of [stop, retry, resume, approve, finalizeRetry]) {
+      mutation.result.current.mutate({ identifier: "org/repo#42" });
+    }
+
+    await waitFor(() => {
+      expect(postStop).toHaveBeenCalledWith("org%2Frepo%2342");
+      expect(postRetry).toHaveBeenCalledWith("org%2Frepo%2342");
+      expect(postResumeIssue).toHaveBeenCalledWith("org%2Frepo%2342");
+      expect(postFinalizeApprove).toHaveBeenCalledWith("org%2Frepo%2342");
+      expect(postFinalizeRetry).toHaveBeenCalledWith("org%2Frepo%2342");
+    });
   });
 
   it("URL-encodes issue identifier for timeline", async () => {
@@ -244,6 +315,35 @@ describe("issue-scoped API hooks", () => {
       "/api/v1/org%2Frepo%2342/runs/run-1/steps/qa%2Freview/conversation?limit=50",
       expect.objectContaining({ method: "GET" }),
     );
+  });
+
+  it("uses generated operations while preserving encoded path segments", async () => {
+    vi.clearAllMocks();
+    const fetchMock = vi.fn(() => jsonResponse({ events: [], records: [], total: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    renderHook(() => useIssueDetailQuery("org/repo#42"), { wrapper: wrapper() });
+    renderHook(() => useTimelineQuery("org/repo#42", "run 1"), { wrapper: wrapper() });
+    renderHook(() => useStepDetailQuery("org/repo#42", "review pass"), { wrapper: wrapper() });
+    renderHook(
+      () => useStepConversationQuery("org/repo#42", "run 1", "qa/review", { limit: 50 }),
+      { wrapper: wrapper() },
+    );
+
+    await waitFor(() => {
+      expect(getIssueDetail).toHaveBeenCalledWith("org%2Frepo%2342");
+      expect(getTimeline).toHaveBeenCalledWith("org%2Frepo%2342", {
+        run_id: "run 1",
+        limit: 200,
+      });
+      expect(getStepDetail).toHaveBeenCalledWith("org%2Frepo%2342", "review%20pass");
+      expect(getStepConversation).toHaveBeenCalledWith(
+        "org%2Frepo%2342",
+        "run%201",
+        "qa%2Freview",
+        { limit: 50 },
+      );
+    });
   });
 
   it.each([
