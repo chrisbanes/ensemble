@@ -54,13 +54,10 @@ pub fn is_dispatch_eligible(
         return Some("already completed".to_string());
     }
 
-    // Global concurrency check
-    if available_global_slots(state) == 0 {
-        return Some("no global slots available".to_string());
-    }
-
     // Per-state concurrency check
-    if available_state_slots(state, max_concurrent_by_state, &issue.state) == 0 {
+    if !max_concurrent_by_state.is_empty()
+        && available_state_slots(state, max_concurrent_by_state, &issue.state) == 0
+    {
         return Some(format!("no slots available for state '{}'", issue.state));
     }
 
@@ -123,10 +120,9 @@ pub fn is_resume_dispatch_eligible(
     if state.completed.contains_key(&issue.id) {
         return Some("already completed".to_string());
     }
-    if available_global_slots(state) == 0 {
-        return Some("no global slots available".to_string());
-    }
-    if available_state_slots(state, max_concurrent_by_state, &issue.state) == 0 {
+    if !max_concurrent_by_state.is_empty()
+        && available_state_slots(state, max_concurrent_by_state, &issue.state) == 0
+    {
         return Some(format!("no slots available for state '{}'", issue.state));
     }
 
@@ -185,9 +181,10 @@ pub fn available_state_slots(
     }
 }
 
-/// Check if there are any available global slots.
-pub fn has_available_slots(state: &OrchestratorState) -> bool {
-    available_global_slots(state) > 0
+/// Advisory check for admitting work that will reserve a live worker slot.
+/// The cancellation registry's atomic reservation remains authoritative.
+pub fn has_available_worker_slots(live_workers: u32, max_workers: u32) -> bool {
+    live_workers < max_workers
 }
 
 #[cfg(test)]
@@ -378,25 +375,10 @@ mod tests {
     }
 
     #[test]
-    fn test_ineligible_no_global_slots() {
-        let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
-        // Fill up all 4 default slots
-        state.add_running(&test_issue("1", "Todo"), None);
-        state.add_running(&test_issue("2", "Todo"), None);
-        state.add_running(&test_issue("3", "Todo"), None);
-        state.add_running(&test_issue("4", "Todo"), None);
-
-        let issue = test_issue("new", "Todo");
-
-        let result = is_dispatch_eligible(
-            &issue,
-            &state,
-            &default_active(),
-            &default_terminal(),
-            &HashMap::new(),
-        );
-        assert!(result.is_some());
-        assert!(result.unwrap().contains("no global slots"));
+    fn test_live_worker_admission_uses_worker_count() {
+        assert!(has_available_worker_slots(3, 4));
+        assert!(!has_available_worker_slots(4, 4));
+        assert!(!has_available_worker_slots(5, 4));
     }
 
     #[test]
