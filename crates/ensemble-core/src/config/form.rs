@@ -79,7 +79,8 @@ pub struct GuidedStepForm {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     pub agent: String,
-    pub depends: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
 }
 
@@ -237,7 +238,7 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 name: s.name.clone(),
                 kind: (s.kind != StepKind::Agent).then(|| s.kind.to_string()),
                 agent: s.agent.clone(),
-                depends: s.depends.clone().unwrap_or_default(),
+                depends: s.depends.clone(),
                 tracker_state: s.tracker_state.clone(),
             })
             .collect(),
@@ -491,8 +492,8 @@ pub fn apply_guided_form(
                 }
             }
             step_mapping.remove("depends");
-            if !s.depends.is_empty() {
-                step_mapping.insert("depends".into(), s.depends.clone().into());
+            if let Some(depends) = &s.depends {
+                step_mapping.insert("depends".into(), depends.clone().into());
             }
             step_mapping.remove("tracker_state");
             if let Some(ref tracker_state) = s.tracker_state {
@@ -741,6 +742,45 @@ on_failure: Failed
     }
 
     #[test]
+    fn guided_form_round_trips_implicit_and_explicit_dependencies() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+  - name: lint
+    agent: builder
+    depends: []
+  - name: test
+    agent: builder
+    depends: [build]
+  - name: publish
+    agent: builder
+    depends: []
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = extract_guided_form(raw).unwrap();
+        let merged = apply_guided_form(raw, &form).unwrap();
+        let steps = serde_yaml::from_str::<serde_yaml::Value>(&merged).unwrap();
+        let steps = steps["steps"].as_sequence().unwrap();
+
+        assert!(steps[0].get("depends").is_none());
+        assert_eq!(steps[1]["depends"], serde_yaml::Value::Sequence(vec![]));
+        assert_eq!(
+            steps[2]["depends"],
+            serde_yaml::to_value(["build"]).unwrap()
+        );
+        assert_eq!(steps[3]["depends"], serde_yaml::Value::Sequence(vec![]));
+    }
+
+    #[test]
     fn guided_form_omits_max_turns_and_preserves_supported_agent_runtime_fields() {
         let raw = r#"
 tracker:
@@ -907,7 +947,7 @@ on_failure: Failed
                 name: "implement".to_string(),
                 kind: None,
                 agent: "builder".to_string(),
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             runtime: GuidedRuntimeForm {
@@ -1353,7 +1393,7 @@ on_failure: Failed
 "#;
         let mut form = extract_guided_form(base).unwrap();
         form.steps[0].kind = Some("synthesis".to_string());
-        form.steps[0].depends = vec!["review-a".to_string()];
+        form.steps[0].depends = Some(vec!["review-a".to_string()]);
 
         let merged = apply_guided_form(base, &form).unwrap();
 

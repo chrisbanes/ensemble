@@ -99,7 +99,7 @@ export interface GuidedForm {
     name: string;
     kind?: "agent" | "synthesis";
     agent: string;
-    depends: string[];
+    depends?: string[];
     tracker_state?: string | null;
   }>;
   runtime: {

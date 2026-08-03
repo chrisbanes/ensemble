@@ -13,7 +13,7 @@ export interface WorkflowStep {
   name: string;
   kind?: "agent" | "synthesis";
   agent: string;
-  depends: string[];
+  depends?: string[];
   tracker_state?: string | null;
 }
 
@@ -59,10 +59,11 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
     const stepName = step.name;
     const newSteps = steps.filter((_, i) => i !== index);
     // Remove this step from dependencies of other steps
-    const updatedSteps = newSteps.map((step) => ({
-      ...step,
-      depends: step.depends.filter((d) => d !== stepName),
-    }));
+    const updatedSteps = newSteps.map((step) =>
+      step.depends
+        ? { ...step, depends: step.depends.filter((dependency) => dependency !== stepName) }
+        : step
+    );
     onChange({ ...value, steps: updatedSteps });
   };
 
@@ -89,11 +90,17 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
   const toggleDependency = (stepIndex: number, depName: string) => {
     const step = steps[stepIndex];
     if (!step) return;
-    const hasDep = step.depends.includes(depName);
+    const depends = step.depends ?? [];
+    const hasDep = depends.includes(depName);
     const newDepends = hasDep
-      ? step.depends.filter((d) => d !== depName)
-      : [...step.depends, depName];
+      ? depends.filter((dependency) => dependency !== depName)
+      : [...depends, depName];
     updateStep(stepIndex, { depends: newDepends });
+  };
+
+  const dependencyMode = (step: WorkflowStep) => {
+    if (step.depends === undefined) return "Default sequencing";
+    return step.depends.length === 0 ? "Independent root" : "Selected prerequisites";
   };
 
   return (
@@ -220,12 +227,47 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
                   </Select>
                 </div>
 
-                {availableDeps.length > 0 && (
+                <div className="space-y-1.5">
+                  <label className="text-sm font-medium" htmlFor={`dependency-mode-${index}`}>
+                    Dependency Mode
+                  </label>
+                  <Select
+                    value={dependencyMode(step)}
+                    onValueChange={(mode) => {
+                      if (mode === "Default sequencing") updateStep(index, { depends: undefined });
+                      if (mode === "Independent root") updateStep(index, { depends: [] });
+                      if (mode === "Selected prerequisites") updateStep(index, { depends: availableDeps });
+                    }}
+                  >
+                    <SelectTrigger id={`dependency-mode-${index}`} aria-label={`Dependency mode ${step.name}`}>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Default sequencing">Default sequencing</SelectItem>
+                      <SelectItem value="Independent root">Independent root</SelectItem>
+                      {availableDeps.length > 0 && (
+                        <SelectItem value="Selected prerequisites">Selected prerequisites</SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  {dependencyMode(step) === "Default sequencing" && (
+                    <p className="text-xs text-muted-foreground">
+                      {index === 0
+                        ? "The first step has no prior step, so it is a root."
+                        : "This step runs after the prior step."}
+                    </p>
+                  )}
+                  {dependencyMode(step) === "Independent root" && (
+                    <p className="text-xs text-muted-foreground">This step is an independent root.</p>
+                  )}
+                </div>
+
+                {dependencyMode(step) === "Selected prerequisites" && availableDeps.length > 0 && (
                   <div className="space-y-1.5">
-                    <label className="text-sm font-medium">Dependencies</label>
+                    <label className="text-sm font-medium">Prerequisites</label>
                     <div className="flex flex-wrap gap-2">
                       {availableDeps.map((depName) => {
-                        const isSelected = step.depends.includes(depName);
+                        const isSelected = step.depends?.includes(depName);
                         return (
                           <button
                             key={depName}

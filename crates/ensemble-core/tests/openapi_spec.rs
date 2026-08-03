@@ -76,6 +76,23 @@ fn openapi_documents_every_supported_ui_http_operation() {
 }
 
 #[test]
+fn openapi_keeps_editor_step_dependencies_optional() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+    for schema in ["GuidedStepForm", "SetupStep"] {
+        assert!(
+            !spec["components"]["schemas"][schema]["required"]
+                .as_array()
+                .is_some_and(
+                    |required| required.contains(&serde_json::Value::String("depends".into()))
+                ),
+            "{schema}.depends must remain optional"
+        );
+    }
+}
+
+#[test]
 #[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();

@@ -4,6 +4,7 @@ import { useValidateSetupMutation, useSaveSetupMutation } from "@/hooks";
 import { useAgentDiscovery } from "@/hooks/useAgentDiscovery";
 import FileBrowser from "./FileBrowser";
 import RestartRequiredNotice, { restartRequiredMessage } from "./RestartRequiredNotice";
+import WorkflowEditor from "./WorkflowEditor";
 import { secretEditValidationError } from "./secretEditValidation";
 import type {
   SetupTracker,
@@ -80,7 +81,7 @@ const DEFAULT_DRAFT: SetupDraft = {
   tracker: { ...DEFAULT_TODO_TRACKER },
   repos: [],
   agents: [{ role: "implement", acpx_agent: "", model: null, reasoning_level: null, permission_mode: null, prompt: null, prompt_file: null }],
-  steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+  steps: [],
   onSuccess: "done",
   onFailure: "paused",
 };
@@ -190,6 +191,7 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         agents: defaults.agents || prev.agents,
         steps: defaults.steps || prev.steps,
       }));
+      hasVisitedWorkflow.current = Boolean(defaults.steps?.length);
     }
   }, [defaultsData]);
 
@@ -310,10 +312,10 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
 
   const generateDefaultWorkflow = (agents: SetupAgentDraft[]): SetupStep[] => {
     if (agents.length === 1 && agents[0]) {
-      return [{ name: "implement", agent_role: agents[0].role, depends: [], tracker_state: null }];
+      return [{ name: "implement", agent_role: agents[0].role, tracker_state: null }];
     } else if (agents.length >= 2 && agents[0] && agents[1]) {
       return [
-        { name: "implement", agent_role: agents[0].role, depends: [], tracker_state: null },
+        { name: "implement", agent_role: agents[0].role, tracker_state: null },
         { name: "review", agent_role: agents[1].role, depends: ["implement"], tracker_state: null },
       ];
     }
@@ -322,7 +324,12 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
 
   // Update workflow when agents change (only on first visit to workflow step)
   useEffect(() => {
-    if (currentStep === "workflow" && draft.agents.length > 0 && !hasVisitedWorkflow.current) {
+    if (
+      currentStep === "workflow"
+      && draft.agents.length > 0
+      && draft.steps.length === 0
+      && !hasVisitedWorkflow.current
+    ) {
       const defaultSteps = generateDefaultWorkflow(draft.agents);
       setDraft(prev => ({ ...prev, steps: defaultSteps }));
       hasVisitedWorkflow.current = true;
@@ -982,20 +989,30 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
         For two or more agents, implement → review workflow is created.
       </p>
 
-      {draft.steps.map((step, index) => (
-        <div key={index} className="p-4 rounded-lg border">
-          <div className="flex items-center gap-2">
-            <span className="font-medium">{step.name}</span>
-            <span className="text-sm text-muted-foreground">→</span>
-            <span className="text-sm">{step.agent_role}</span>
-            {step.depends.length > 0 && (
-              <span className="text-xs text-muted-foreground">
-                (depends on: {step.depends.join(", ")})
-              </span>
-            )}
-          </div>
-        </div>
-      ))}
+      <WorkflowEditor
+        value={{
+          steps: draft.steps.map((step) => ({
+            name: step.name,
+            kind: step.kind === "agent" || step.kind === "synthesis" ? step.kind : undefined,
+            agent: step.agent_role,
+            depends: step.depends ?? undefined,
+            tracker_state: step.tracker_state,
+          })),
+          agents: draft.agents.map((agent) => ({ name: agent.role, label: agent.role })),
+        }}
+        onChange={(workflow) => {
+          setDraft((previous) => ({
+            ...previous,
+            steps: workflow.steps.map((step) => ({
+              name: step.name,
+              kind: step.kind,
+              agent_role: step.agent,
+              depends: step.depends,
+              tracker_state: step.tracker_state,
+            })),
+          }));
+        }}
+      />
 
       <div className="grid grid-cols-2 gap-4 pt-4">
         <div className="space-y-2">

@@ -769,20 +769,23 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
         .steps
         .iter()
         .map(|step| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "name": step.name,
                 "agent_role": step.agent,
                 "kind": match step.kind {
                     crate::config::ensemble::StepKind::Agent => "agent",
                     crate::config::ensemble::StepKind::Synthesis => "synthesis",
                 },
-                "depends": step.depends.clone().unwrap_or_default(),
                 "tracker_state": step.tracker_state,
                 "approval": step.approval.as_ref().map(|approval| serde_json::json!({
                     "mode": approval.mode,
                     "state": approval.state,
                 })),
-            })
+            });
+            if let Some(depends) = &step.depends {
+                value["depends"] = serde_json::json!(depends);
+            }
+            value
         })
         .collect();
 
@@ -1071,7 +1074,7 @@ mod tests {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1434,7 +1437,7 @@ on_failure: Failed
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
                     kind: None,
-                    depends: vec![],
+                    depends: Some(vec![]),
                     tracker_state: None,
                 }],
                 on_success: "Done".to_string(),
@@ -1761,7 +1764,7 @@ custom_root:
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
                     kind: None,
-                    depends: vec![],
+                    depends: Some(vec![]),
                     tracker_state: Some("In Progress".to_string()),
                 }],
                 on_success: "Done".to_string(),
@@ -1869,7 +1872,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 kind: None,
                 agent: "builder".to_string(),
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
@@ -2019,7 +2022,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 kind: None,
                 agent: "missing".to_string(),
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
@@ -2185,7 +2188,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 kind: None,
                 agent: "missing".to_string(),
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
@@ -2301,7 +2304,7 @@ on_failure: Failed
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
                     kind: None,
-                    depends: vec![],
+                    depends: Some(vec![]),
                     tracker_state: Some("In Progress".to_string()),
                 }],
                 on_success: "Done".to_string(),
@@ -2777,7 +2780,7 @@ on_failure: Failed
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
                     kind: None,
-                    depends: vec![],
+                    depends: Some(vec![]),
                     tracker_state: None,
                 }],
                 on_success: "Done".to_string(),
@@ -2874,7 +2877,7 @@ on_failure: Failed
                     name: "build".to_string(),
                     agent_role: "builder".to_string(),
                     kind: None,
-                    depends: vec![],
+                    depends: Some(vec![]),
                     tracker_state: None,
                 }],
                 on_success: "Done".to_string(),
@@ -3145,5 +3148,42 @@ on_failure: Failed
             .await
             .expect("orchestrator should adopt the saved poll interval");
         }
+    }
+
+    #[test]
+    fn active_setup_defaults_preserve_implicit_and_explicit_dependencies() {
+        let config = crate::config::ensemble::parse_config(
+            r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+  - name: lint
+    agent: builder
+    depends: []
+  - name: test
+    agent: builder
+    depends: [build]
+  - name: publish
+    agent: builder
+    depends: []
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let defaults = setup_defaults_from_active_config(&config);
+        let steps = defaults["steps"].as_array().unwrap();
+
+        assert!(steps[0].get("depends").is_none());
+        assert_eq!(steps[1]["depends"], serde_json::json!([]));
+        assert_eq!(steps[2]["depends"], serde_json::json!(["build"]));
+        assert_eq!(steps[3]["depends"], serde_json::json!([]));
     }
 }

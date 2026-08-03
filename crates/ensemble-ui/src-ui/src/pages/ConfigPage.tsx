@@ -53,6 +53,7 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
     })),
     steps: form.steps.map((step) => ({
       ...step,
+      depends: step.depends ?? undefined,
       kind: (step.kind ?? "agent") as "agent" | "synthesis",
       tracker_state: step.tracker_state ?? undefined,
     })),

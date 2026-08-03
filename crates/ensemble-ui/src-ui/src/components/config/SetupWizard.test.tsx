@@ -99,7 +99,12 @@ describe("SetupWizard", () => {
             },
             repos: [{ path: "/repo", branch: "main" }],
             agents: [{ role: "implement", acpx_agent: "builder", model: null }],
-            steps: [{ name: "implement", agent_role: "implement", depends: [], tracker_state: null }],
+            steps: [
+              { name: "build", agent_role: "implement", tracker_state: null },
+              { name: "lint", agent_role: "implement", depends: [], tracker_state: null },
+              { name: "test", agent_role: "implement", depends: ["build"], tracker_state: null },
+              { name: "publish", agent_role: "implement", depends: [], tracker_state: null },
+            ],
             onSuccess: "Done",
             onFailure: "Failed",
           },
@@ -128,6 +133,12 @@ describe("SetupWizard", () => {
     expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.api_key_edit).toEqual({
       action: "preserve",
     });
+    expect(validateMock.mock.calls[0]?.[0]?.setup.steps).toEqual([
+      { name: "build", agent_role: "implement", tracker_state: null },
+      { name: "lint", agent_role: "implement", depends: [], tracker_state: null },
+      { name: "test", agent_role: "implement", depends: ["build"], tracker_state: null },
+      { name: "publish", agent_role: "implement", depends: [], tracker_state: null },
+    ]);
   });
 
   it("does not advance with a blank secret replacement", async () => {
