@@ -13,6 +13,7 @@ struct ActiveWorker {
     cancellation: CancellationToken,
     completion: watch::Receiver<bool>,
     reconciliation_owned: bool,
+    launched: bool,
 }
 
 pub struct WorkerDrainHandle {
@@ -23,10 +24,18 @@ pub struct WorkerDrainHandle {
 #[derive(Clone, Default)]
 pub struct CancellationRegistry(Arc<Mutex<HashMap<WorkerIdentity, ActiveWorker>>>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerReservationError {
+    DuplicateIdentity,
+    GlobalCapacityExhausted,
+    IssueCapacityExhausted,
+}
+
 pub fn new_cancellation_registry() -> CancellationRegistry {
     CancellationRegistry::default()
 }
 
+#[cfg(test)]
 pub fn register_worker(
     registry: &CancellationRegistry,
     identity: WorkerIdentity,
@@ -39,8 +48,80 @@ pub fn register_worker(
             cancellation,
             completion,
             reconciliation_owned: false,
+            launched: true,
         },
     );
+}
+
+pub(crate) fn try_reserve_worker(
+    registry: &CancellationRegistry,
+    identity: WorkerIdentity,
+    cancellation: CancellationToken,
+    completion: watch::Receiver<bool>,
+    max_global_workers: u32,
+    max_issue_workers: u32,
+) -> Result<(), WorkerReservationError> {
+    let mut workers = registry_guard(registry);
+    if workers.contains_key(&identity) {
+        return Err(WorkerReservationError::DuplicateIdentity);
+    }
+    if workers.len() >= max_global_workers as usize {
+        return Err(WorkerReservationError::GlobalCapacityExhausted);
+    }
+    if workers
+        .keys()
+        .filter(|worker| worker.issue_id == identity.issue_id)
+        .count()
+        >= max_issue_workers as usize
+    {
+        return Err(WorkerReservationError::IssueCapacityExhausted);
+    }
+    workers.insert(
+        identity,
+        ActiveWorker {
+            cancellation,
+            completion,
+            reconciliation_owned: false,
+            launched: false,
+        },
+    );
+    Ok(())
+}
+
+pub(crate) fn mark_worker_launched(
+    registry: &CancellationRegistry,
+    identity: &WorkerIdentity,
+) -> bool {
+    let mut workers = registry_guard(registry);
+    let Some(worker) = workers.get_mut(identity) else {
+        return false;
+    };
+    worker.launched = true;
+    true
+}
+
+pub(crate) fn rollback_worker_reservation(
+    registry: &CancellationRegistry,
+    identity: &WorkerIdentity,
+) -> bool {
+    let mut workers = registry_guard(registry);
+    let removable = workers.get(identity).is_some_and(|worker| !worker.launched);
+    if removable {
+        workers.remove(identity);
+    }
+    removable
+}
+
+pub(crate) fn live_worker_count(registry: &CancellationRegistry) -> u32 {
+    registry_guard(registry).len() as u32
+}
+
+#[cfg(test)]
+pub fn live_worker_count_for_issue(registry: &CancellationRegistry, issue_id: &str) -> u32 {
+    registry_guard(registry)
+        .keys()
+        .filter(|identity| identity.issue_id == issue_id)
+        .count() as u32
 }
 
 #[cfg(test)]
@@ -361,5 +442,184 @@ mod tests {
         let mut drain = mark_issue_for_drain(&registry, "issue-1");
         assert!(!await_worker_drain(&mut drain, Duration::from_millis(10)).await);
         assert!(contains_worker(&registry, &worker));
+    }
+
+    #[test]
+    fn worker_capacity_reservation_enforces_global_and_issue_limits_atomically() {
+        let registry = new_cancellation_registry();
+        let first = identity("build", 1);
+        let second = identity("review", 1);
+        let other_issue = WorkerIdentity {
+            issue_id: "issue-2".to_string(),
+            ..identity("build", 2)
+        };
+        let (_, first_completion) = watch::channel(false);
+        let (_, second_completion) = watch::channel(false);
+        let (_, other_completion) = watch::channel(false);
+
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                first.clone(),
+                CancellationToken::new(),
+                first_completion,
+                2,
+                1,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                second,
+                CancellationToken::new(),
+                second_completion,
+                2,
+                1,
+            ),
+            Err(WorkerReservationError::IssueCapacityExhausted)
+        );
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                other_issue,
+                CancellationToken::new(),
+                other_completion,
+                2,
+                1,
+            ),
+            Ok(())
+        );
+        assert_eq!(live_worker_count(&registry), 2);
+        assert_eq!(live_worker_count_for_issue(&registry, "issue-1"), 1);
+
+        let (_, global_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                WorkerIdentity {
+                    issue_id: "issue-3".to_string(),
+                    ..identity("build", 3)
+                },
+                CancellationToken::new(),
+                global_completion,
+                2,
+                1,
+            ),
+            Err(WorkerReservationError::GlobalCapacityExhausted)
+        );
+
+        let (_, duplicate_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                first,
+                CancellationToken::new(),
+                duplicate_completion,
+                3,
+                2,
+            ),
+            Err(WorkerReservationError::DuplicateIdentity)
+        );
+
+        let racing_registry = new_cancellation_registry();
+        let start = Arc::new(std::sync::Barrier::new(9));
+        let contenders = (0..8)
+            .map(|index| {
+                let registry = racing_registry.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (_, completion) = watch::channel(false);
+                    start.wait();
+                    try_reserve_worker(
+                        &registry,
+                        WorkerIdentity {
+                            issue_id: format!("issue-{index}"),
+                            ..identity("build", index + 10)
+                        },
+                        CancellationToken::new(),
+                        completion,
+                        1,
+                        1,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let outcomes = contenders
+            .into_iter()
+            .map(|contender| contender.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert!(outcomes
+            .iter()
+            .filter(|outcome| outcome.is_err())
+            .all(|outcome| *outcome == Err(WorkerReservationError::GlobalCapacityExhausted)));
+        assert_eq!(live_worker_count(&racing_registry), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_capacity_release_is_exact_and_waits_for_quiescence() {
+        let registry = new_cancellation_registry();
+        let running = identity("build", 1);
+        let peer = identity("review", 1);
+        let (running_complete_tx, running_complete_rx) = watch::channel(false);
+        let (_, peer_complete_rx) = watch::channel(false);
+        try_reserve_worker(
+            &registry,
+            running.clone(),
+            CancellationToken::new(),
+            running_complete_rx,
+            2,
+            2,
+        )
+        .unwrap();
+        try_reserve_worker(
+            &registry,
+            peer.clone(),
+            CancellationToken::new(),
+            peer_complete_rx,
+            2,
+            2,
+        )
+        .unwrap();
+        assert!(mark_worker_launched(&registry, &running));
+        assert!(mark_worker_launched(&registry, &peer));
+
+        assert!(!rollback_worker_reservation(&registry, &running));
+        assert!(!remove_completed_worker(&registry, &running));
+        assert_eq!(live_worker_count(&registry), 2);
+
+        running_complete_tx.send(true).unwrap();
+        assert!(remove_completed_worker(&registry, &running));
+        assert_eq!(live_worker_count(&registry), 1);
+        assert!(contains_worker(&registry, &peer));
+        assert!(!remove_completed_worker(&registry, &running));
+    }
+
+    #[tokio::test]
+    async fn rejected_unlaunched_reservation_releases_a_reconciliation_owner() {
+        let registry = new_cancellation_registry();
+        let rejected = identity("build", 1);
+        let (completion_tx, completion_rx) = watch::channel(false);
+        try_reserve_worker(
+            &registry,
+            rejected.clone(),
+            CancellationToken::new(),
+            completion_rx,
+            1,
+            1,
+        )
+        .unwrap();
+
+        let mut drain = mark_issue_for_drain(&registry, "issue-1");
+        assert_eq!(drain.len(), 1);
+        assert!(is_reconciliation_owned(&registry, &rejected));
+
+        assert!(rollback_worker_reservation(&registry, &rejected));
+        completion_tx.send(true).unwrap();
+        assert!(await_worker_drain(&mut drain, Duration::from_millis(10)).await);
+        assert!(!contains_worker(&registry, &rejected));
+        assert_eq!(live_worker_count(&registry), 0);
     }
 }

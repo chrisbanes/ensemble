@@ -506,6 +506,18 @@ steps:
 | `max_concurrent_agents` | integer | `4` | Maximum parallel agent runs across all issues |
 | `max_step_parallelism` | integer | `2` | Maximum parallel steps within a single issue's pipeline |
 
+Both limits count live agent workers, not claimed or running issues. Ensemble reserves the global
+and per-issue slot atomically for each exact step worker before publishing the step as running or
+launching its agent. If either limit is full, the ready step remains pending without consuming a
+retry cycle. Pending ready steps in claimed pipelines are reconsidered when worker capacity is
+released and before new candidate issues are admitted on the next tick.
+
+A worker keeps its reservation until its event bridge has closed and quiescence is proven.
+Pre-launch errors roll back only the rejected worker's reservation; success, failure,
+cancellation, and reconciliation likewise release only their exact worker identities. If one
+parallel step fails, Ensemble cancels and drains its live sibling steps before applying the
+configured retry or failure behavior.
+
 ### max_cycles
 
 | Field | Type | Default | Description |

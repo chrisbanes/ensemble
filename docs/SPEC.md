@@ -479,6 +479,8 @@ Fields:
 - `poll_interval_ms` (current effective poll interval)
 - `max_concurrent_agents` (current effective global concurrency limit)
 - `running` (map `issue_id -> running entry`)
+- active-worker registry (map of exact worker identity to cancellation and completion ownership;
+  authoritative for live-agent capacity)
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
@@ -1143,7 +1145,8 @@ claim state.
    - In practice, claimed issues are either `Running` or `RetryQueued`.
 
 3. `Running`
-   - Worker task exists and the issue is tracked in `running` map.
+   - The issue has an active pipeline owner in the `running` map. Zero or more step workers may be
+     live while ready work is capacity-deferred or workers are transitioning to quiescence.
 
 4. `RetryQueued`
    - Worker is not running, but a retry timer exists in `retry_attempts`.
@@ -1163,7 +1166,11 @@ Every live worker is also registered by an exact in-memory identity:
 `RunningEntry.started_at`. The registry retains that identity's cancellation and completion handles
 until the worker's local event channel has closed and every event has been forwarded. More than one
 identity-distinct handle may temporarily exist for an issue, and issue-wide cancellation signals all
-of them. Worker event channels remain bounded; while reconciliation or shutdown awaits bridge
+of them. Registration is also the worker's capacity reservation: one mutex-protected operation
+checks the global and per-issue limits and inserts the exact identity before tracker step-entry,
+`StepRunning` publication, or process launch. A pre-launch failure rolls back only that exact
+reservation; a launched worker retains it until the bridge proves quiescence. Worker event channels
+remain bounded; while reconciliation or shutdown awaits bridge
 completion, the lifecycle authority continues consuming the orchestrator-facing queue so forwarding
 can quiesce without bypassing that memory bound. Reconciliation discards events for the issue whose
 disposition it owns and applies normal identity checks to unrelated events; shutdown discards all
@@ -1201,6 +1208,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
 
 - `Poll Tick`
   - Reconcile active runs.
+  - Re-scan claimed pipelines for ready pending steps before admitting candidates.
   - Validate config.
   - Fetch candidate issues.
   - Dispatch until slots are exhausted.
@@ -1211,6 +1219,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Schedule continuation retry (attempt `1`) for a fresh worker session.
 
 - `Worker Exit (abnormal)`
+  - Cancel and drain every live sibling step in the same current run.
+  - Revalidate the failed worker's exact run and cycle owner.
   - Remove running entry.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
@@ -1267,9 +1277,10 @@ Tick sequence:
 3. Reconcile running issues.
 4. Run dispatch preflight validation.
 5. Fetch candidate issues from tracker using active states.
-6. Sort issues by dispatch priority.
-7. Dispatch eligible issues while slots remain.
-8. Notify observability/status consumers of state changes.
+6. Re-scan claimed pipelines for ready pending steps while live-worker slots remain.
+7. Sort issues by dispatch priority.
+8. Dispatch eligible issues while slots remain.
+9. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -1288,7 +1299,8 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - It is not already in `running`.
 - It is not already in `claimed`.
-- Global concurrency slots are available.
+- A live-worker slot is advisably available; the atomic reservation at step dispatch is
+  authoritative.
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
@@ -1303,14 +1315,27 @@ Sorting order (stable intent):
 
 Global limit:
 
-- `available_slots = max(max_concurrent_agents - running_count, 0)`
+- `available_slots = max(max_concurrent_agents - live_worker_count, 0)`
+
+Per-issue step limit:
+
+- `issue_available_slots = max(max_step_parallelism - issue_live_worker_count, 0)`
+- Both limits are checked and the exact worker identity is inserted in one registry operation, so
+  competing dispatches cannot consume the same final slot.
+- A capacity miss leaves the ready step `Pending`; it is not a worker failure and consumes no retry
+  cycle. Claimed pipelines are re-scanned before new candidates on a tick and after worker capacity
+  is released.
+- Success, failure, cancellation, reconciliation, stale events, and pre-launch rollback retire only
+  their exact worker identity. Cancellation does not free capacity until every captured worker has
+  quiesced.
 
 Per-state limit:
 
 - `max_concurrent_agents_by_state[state]` if present (state key normalized)
 - otherwise fallback to global limit
 
-The runtime counts issues by their current tracked state in the `running` map.
+Per-state limits remain issue-state admission limits and are separate from live-worker accounting.
+They do not replace either worker-capacity reservation.
 
 Optional SSH host limit:
 
