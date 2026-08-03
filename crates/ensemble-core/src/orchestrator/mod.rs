@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, timeout};
 use tracing::{debug, error, info, warn};
 
+use crate::acceptance::{AcceptanceCommandRunner, AcceptanceStatus, ShellAcceptanceCommandRunner};
 use crate::agent::cancellation::{
     await_worker_drain, await_worker_quiescence, is_reconciliation_owned, mark_all_for_drain,
     mark_issue_for_drain, new_cancellation_registry, pending_reconciliation_issue_ids,
@@ -61,7 +62,7 @@ use crate::pipeline::engine::{
 };
 use crate::pipeline::verdict::StepResult;
 use crate::timeline::persistence::TimelinePersistence;
-use crate::tracker::model::{Issue, RetryEntry};
+use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
 use crate::tracker::IssueTracker;
 use crate::transcript::events::TranscriptEventBus;
 use crate::transcript::model::TranscriptRecordKind;
@@ -118,6 +119,23 @@ struct ExhaustedRetryTerminal {
 enum WholeIssueFailureRetry {
     Scheduled(Option<Box<PipelineTransitionInput>>),
     Exhausted(Box<ExhaustedRetryTerminal>),
+}
+
+enum AcceptancePhaseOutcome {
+    Passed,
+    Failed {
+        reason: String,
+        owner: AcceptanceOwnerIdentity,
+    },
+    RetainedForRecovery,
+}
+
+#[derive(Clone)]
+struct PendingAcceptanceTransition {
+    expected: PipelineTransitionInput,
+    candidate: PipelineRunSnapshot,
+    owner: AcceptanceOwnerIdentity,
+    baseline: PipelineRunSnapshot,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +205,48 @@ impl RunningAttemptIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum AcceptanceOwnerIdentity {
+    Running(RunningAttemptIdentity),
+    Waiting {
+        interaction_request_id: String,
+        run_id: Option<String>,
+        requested_at: chrono::DateTime<Utc>,
+    },
+}
+
+impl AcceptanceOwnerIdentity {
+    fn capture(state: &OrchestratorState, issue_id: &str) -> Option<Self> {
+        RunningAttemptIdentity::capture(state, issue_id)
+            .map(Self::Running)
+            .or_else(|| {
+                state
+                    .waiting_on_human
+                    .get(issue_id)
+                    .map(|entry| Self::Waiting {
+                        interaction_request_id: entry.interaction_request_id.clone(),
+                        run_id: entry.run_id.clone(),
+                        requested_at: entry.requested_at,
+                    })
+            })
+    }
+
+    fn is_current(&self, state: &OrchestratorState, issue_id: &str) -> bool {
+        match self {
+            Self::Running(identity) => identity.is_current(state, issue_id),
+            Self::Waiting {
+                interaction_request_id,
+                run_id,
+                requested_at,
+            } => state.waiting_on_human.get(issue_id).is_some_and(|entry| {
+                entry.interaction_request_id == *interaction_request_id
+                    && entry.run_id == *run_id
+                    && entry.requested_at == *requested_at
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReconciliationOwner {
     attempt: Option<RunningAttemptIdentity>,
     pipeline_cycle: Option<u32>,
@@ -252,6 +312,7 @@ pub struct Orchestrator {
     config: Arc<RwLock<EnsembleConfig>>,
     tracker: Arc<dyn IssueTracker>,
     agent_runner: Arc<dyn AgentRunner>,
+    acceptance_runner: Arc<dyn AcceptanceCommandRunner>,
     workspace_mgr: Arc<WorkspaceManager>,
     interaction_store: InteractionStore,
     refresh_requested: Arc<tokio::sync::Notify>,
@@ -260,6 +321,7 @@ pub struct Orchestrator {
     history_store: Option<HistoryStore>,
     pipeline_journal: PipelineRunJournal,
     pipeline_journal_restored: AtomicBool,
+    pending_acceptance_transitions: std::sync::Mutex<HashMap<String, PendingAcceptanceTransition>>,
     event_bus: EventBus,
     timeline_persistence: Option<TimelinePersistence>,
     transcript_persistence: Option<TranscriptPersistence>,
@@ -314,6 +376,7 @@ pub struct OrchestratorRuntimeParts {
     pub config: Arc<RwLock<EnsembleConfig>>,
     pub tracker: Arc<dyn IssueTracker>,
     pub agent_runner: Arc<dyn AgentRunner>,
+    pub acceptance_runner: Arc<dyn AcceptanceCommandRunner>,
     pub workspace_mgr: WorkspaceManager,
     pub refresh_requested: Arc<tokio::sync::Notify>,
     pub cancellation_registry: CancellationRegistry,
@@ -379,6 +442,7 @@ impl Orchestrator {
                 config,
                 tracker,
                 agent_runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr,
                 refresh_requested,
                 cancellation_registry: new_cancellation_registry(),
@@ -426,6 +490,7 @@ impl Orchestrator {
             config: parts.config,
             tracker: parts.tracker,
             agent_runner: parts.agent_runner,
+            acceptance_runner: parts.acceptance_runner,
             interaction_store: InteractionStore::new(config_dir.to_path_buf()),
             workspace_mgr: Arc::new(parts.workspace_mgr),
             refresh_requested: parts.refresh_requested,
@@ -434,6 +499,7 @@ impl Orchestrator {
             history_store,
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             pipeline_journal_restored: AtomicBool::new(false),
+            pending_acceptance_transitions: std::sync::Mutex::new(HashMap::new()),
             event_bus: parts.event_bus,
             timeline_persistence,
             transcript_persistence: Some(TranscriptPersistence::new_with_event_bus(
@@ -726,6 +792,7 @@ impl Orchestrator {
             state.last_tick_at = Some(Utc::now());
         }
 
+        self.reconcile_pending_acceptance_transitions().await;
         self.restore_pipeline_runs_from_journal().await;
         self.reconcile_pending_terminal_transitions().await;
         self.hydrate_waiting_on_human_from_store().await;
@@ -1128,6 +1195,20 @@ impl Orchestrator {
                             issue_id = %issue.id,
                             "restored pipeline already succeeded"
                         );
+                        match self.run_acceptance_phase(issue, &config_snapshot).await {
+                            AcceptancePhaseOutcome::Passed => {}
+                            AcceptancePhaseOutcome::Failed { reason, owner } => {
+                                self.schedule_acceptance_failure(
+                                    issue,
+                                    &config_snapshot,
+                                    &reason,
+                                    &owner,
+                                )
+                                .await;
+                                return;
+                            }
+                            AcceptancePhaseOutcome::RetainedForRecovery => return,
+                        }
                         let finalize_state = self
                             .finalize_and_stage_terminal_transition(
                                 &issue.id,
@@ -1611,6 +1692,370 @@ impl Orchestrator {
         }
 
         Ok(workspace.base_path)
+    }
+
+    async fn run_acceptance_phase(
+        &self,
+        issue: &Issue,
+        config: &EnsembleConfig,
+    ) -> AcceptancePhaseOutcome {
+        loop {
+            let (baseline, mut candidate, run_id, owner) = {
+                let state = self.state.read().await;
+                let Some(run) = state.get_pipeline_run(&issue.id).cloned() else {
+                    warn!(issue_id = %issue.id, "acceptance phase has no pipeline run");
+                    return AcceptancePhaseOutcome::RetainedForRecovery;
+                };
+                let run_id = state
+                    .running
+                    .get(&issue.id)
+                    .and_then(|entry| entry.run_id.clone())
+                    .or_else(|| {
+                        state
+                            .waiting_on_human
+                            .get(&issue.id)
+                            .and_then(|entry| entry.run_id.clone())
+                    })
+                    .or_else(|| state.issue_run_ids.get(&issue.id).cloned());
+                let Some(owner) = AcceptanceOwnerIdentity::capture(&state, &issue.id) else {
+                    warn!(issue_id = %issue.id, "acceptance phase has no current owner");
+                    return AcceptancePhaseOutcome::RetainedForRecovery;
+                };
+                (run.to_snapshot(), run, run_id, owner)
+            };
+
+            if let Err(error) = validate_acceptance_attempts(&candidate.to_snapshot(), config) {
+                warn!(issue_id = %issue.id, error = %error, "acceptance evidence does not match config");
+                return AcceptancePhaseOutcome::RetainedForRecovery;
+            }
+            if config.acceptance.commands.is_empty() {
+                return AcceptancePhaseOutcome::Passed;
+            }
+
+            let current_attempt = candidate
+                .acceptance_attempts
+                .iter()
+                .position(|attempt| attempt.cycle == candidate.cycle);
+            let command_to_run = if let Some(attempt_index) = current_attempt {
+                let results = &candidate.acceptance_attempts[attempt_index].results;
+                if results.len() == config.acceptance.commands.len() {
+                    if results
+                        .iter()
+                        .all(|result| result.status == AcceptanceStatus::Passed)
+                    {
+                        return AcceptancePhaseOutcome::Passed;
+                    }
+                    let summary = results
+                        .iter()
+                        .find(|result| result.status != AcceptanceStatus::Passed)
+                        .map(|result| result.summary.clone())
+                        .unwrap_or_else(|| "acceptance failed".to_string());
+                    return AcceptancePhaseOutcome::Failed {
+                        reason: summary,
+                        owner,
+                    };
+                }
+                config.acceptance.commands.get(results.len()).cloned()
+            } else {
+                candidate
+                    .acceptance_attempts
+                    .push(crate::acceptance::AcceptanceAttempt {
+                        cycle: candidate.cycle,
+                        results: Vec::new(),
+                    });
+                None
+            };
+            let transition_kind = if command_to_run.is_some() {
+                PipelineTransitionKind::AcceptanceCommandCompleted
+            } else {
+                PipelineTransitionKind::AcceptanceStarted
+            };
+
+            let result = if let Some(command) = command_to_run.as_ref() {
+                let workspace_path = self.workspace_mgr.workspace_path(&issue.id);
+                Some(self.acceptance_runner.run(command, &workspace_path).await)
+            } else {
+                None
+            };
+            {
+                let state = self.state.read().await;
+                if !Self::acceptance_owner_matches_run(&state, &issue.id, &owner, &baseline) {
+                    warn!(issue_id = %issue.id, "acceptance execution belongs to a stale running attempt");
+                    return AcceptancePhaseOutcome::RetainedForRecovery;
+                }
+            }
+            let reason = if let Some(result) = result {
+                let Some(attempt) = candidate
+                    .acceptance_attempts
+                    .iter_mut()
+                    .find(|attempt| attempt.cycle == candidate.cycle)
+                else {
+                    return AcceptancePhaseOutcome::RetainedForRecovery;
+                };
+                let summary = result.summary.clone();
+                attempt.results.push(result);
+                Some(summary)
+            } else {
+                None
+            };
+            let candidate_snapshot = candidate.to_snapshot();
+            let transition = PipelineTransitionInput {
+                kind: transition_kind,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id,
+                cycle: candidate.cycle,
+                step: None,
+                reason,
+                retry: None,
+                snapshot: Some(candidate_snapshot.clone()),
+                terminal_transition: None,
+            };
+            let journal_transaction = self
+                .pipeline_journal
+                .begin_issue_transition(&issue.id)
+                .await;
+            if let Err(error) = journal_transaction.append(transition.clone()).await {
+                match journal_transaction.latest_record_matches(&transition).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        drop(journal_transaction);
+                        warn!(issue_id = %issue.id, error = %error, "acceptance transition was not journaled; scheduling in-process recovery");
+                        self.release_acceptance_owner_for_recovery(
+                            &issue.id, &owner, &baseline, None,
+                        )
+                        .await;
+                        return AcceptancePhaseOutcome::RetainedForRecovery;
+                    }
+                    Err(reconciliation_error) => {
+                        warn!(issue_id = %issue.id, append_error = %error, reconciliation_error = %reconciliation_error, "acceptance transition outcome is ambiguous; retaining the active owner for recovery");
+                        self.pending_acceptance_transitions
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(
+                                issue.id.clone(),
+                                PendingAcceptanceTransition {
+                                    expected: transition,
+                                    candidate: candidate_snapshot,
+                                    owner,
+                                    baseline,
+                                },
+                            );
+                        self.refresh_requested.notify_one();
+                        return AcceptancePhaseOutcome::RetainedForRecovery;
+                    }
+                }
+            }
+            drop(journal_transaction);
+
+            let mut state = self.state.write().await;
+            let owner_is_current =
+                Self::acceptance_owner_matches_run(&state, &issue.id, &owner, &baseline);
+            let Some(current) = state.get_pipeline_run_mut(&issue.id) else {
+                return AcceptancePhaseOutcome::RetainedForRecovery;
+            };
+            if !owner_is_current {
+                warn!(issue_id = %issue.id, "acceptance result belongs to a stale running attempt");
+                return AcceptancePhaseOutcome::RetainedForRecovery;
+            }
+            current.acceptance_attempts = candidate.acceptance_attempts;
+        }
+    }
+
+    async fn reconcile_pending_acceptance_transitions(&self) {
+        let pending = self
+            .pending_acceptance_transitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for pending in pending {
+            let issue_id = pending.expected.issue_id.clone();
+            let journal_transaction = self
+                .pipeline_journal
+                .begin_issue_transition(&issue_id)
+                .await;
+            let visibility = journal_transaction
+                .latest_record_matches(&pending.expected)
+                .await;
+            drop(journal_transaction);
+            match visibility {
+                Ok(is_exact) => {
+                    let released = self
+                        .release_acceptance_owner_for_recovery(
+                            &issue_id,
+                            &pending.owner,
+                            &pending.baseline,
+                            is_exact.then_some(&pending.candidate),
+                        )
+                        .await;
+                    let owner_is_still_current = if released {
+                        false
+                    } else {
+                        let state = self.state.read().await;
+                        Self::acceptance_owner_matches_run(
+                            &state,
+                            &issue_id,
+                            &pending.owner,
+                            &pending.baseline,
+                        )
+                    };
+                    if released || !owner_is_still_current {
+                        self.pending_acceptance_transitions
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .remove(&issue_id);
+                    }
+                }
+                Err(error) => warn!(
+                    issue_id,
+                    error = %error,
+                    "acceptance transition remains ambiguous; retaining the active owner"
+                ),
+            }
+        }
+    }
+
+    fn acceptance_owner_matches_run(
+        state: &OrchestratorState,
+        issue_id: &str,
+        owner: &AcceptanceOwnerIdentity,
+        baseline: &PipelineRunSnapshot,
+    ) -> bool {
+        owner.is_current(state, issue_id)
+            && state
+                .get_pipeline_run(issue_id)
+                .is_some_and(|run| run.to_snapshot() == *baseline)
+    }
+
+    async fn release_acceptance_owner_for_recovery(
+        &self,
+        issue_id: &str,
+        owner: &AcceptanceOwnerIdentity,
+        baseline: &PipelineRunSnapshot,
+        replacement: Option<&PipelineRunSnapshot>,
+    ) -> bool {
+        if let AcceptanceOwnerIdentity::Waiting {
+            interaction_request_id,
+            ..
+        } = owner
+        {
+            let is_current = {
+                let state = self.state.read().await;
+                Self::acceptance_owner_matches_run(&state, issue_id, owner, baseline)
+            };
+            if !is_current {
+                return false;
+            }
+            let (previous, cleared) = match self
+                .interaction_store
+                .retire_waiting_state(interaction_request_id)
+                .await
+            {
+                Ok(retired) => retired,
+                Err(error) => {
+                    warn!(issue_id, interaction_id = interaction_request_id, error = %error, "failed to retire acceptance recovery interaction owner");
+                    return false;
+                }
+            };
+            let released = {
+                let mut state = self.state.write().await;
+                let is_current =
+                    Self::acceptance_owner_matches_run(&state, issue_id, owner, baseline);
+                if is_current {
+                    if let (Some(current), Some(replacement)) =
+                        (state.get_pipeline_run_mut(issue_id), replacement)
+                    {
+                        current.acceptance_attempts = replacement.acceptance_attempts.clone();
+                    }
+                    state.remove_waiting_on_human(issue_id);
+                }
+                is_current
+            };
+            if released {
+                self.refresh_requested.notify_one();
+            } else if let Err(error) = self
+                .interaction_store
+                .restore_waiting_state_after_failed_transition(&cleared, &previous)
+                .await
+            {
+                warn!(issue_id, interaction_id = interaction_request_id, error = %error, "failed to restore stale acceptance interaction owner");
+            }
+            return released;
+        }
+
+        let released = {
+            let mut state = self.state.write().await;
+            let is_current = Self::acceptance_owner_matches_run(&state, issue_id, owner, baseline);
+            if !is_current {
+                false
+            } else {
+                if let (Some(current), Some(replacement)) =
+                    (state.get_pipeline_run_mut(issue_id), replacement)
+                {
+                    current.acceptance_attempts = replacement.acceptance_attempts.clone();
+                }
+                state.remove_running(issue_id);
+                true
+            }
+        };
+        if released {
+            self.refresh_requested.notify_one();
+        }
+        released
+    }
+
+    async fn schedule_acceptance_failure(
+        &self,
+        issue: &Issue,
+        config: &EnsembleConfig,
+        reason: &str,
+        owner: &AcceptanceOwnerIdentity,
+    ) {
+        let outcome = {
+            let mut state = self.state.write().await;
+            if !owner.is_current(&state, &issue.id) {
+                warn!(issue_id = %issue.id, "acceptance failure belongs to a stale owner");
+                return;
+            }
+            let entry = state.remove_running(&issue.id).or_else(|| {
+                state
+                    .remove_waiting_on_human(&issue.id)
+                    .map(|waiting| RunningEntry {
+                        issue_id: issue.id.clone(),
+                        identifier: issue.identifier.clone(),
+                        run_id: waiting
+                            .run_id
+                            .or_else(|| state.issue_run_ids.get(&issue.id).cloned()),
+                        issue: issue.clone(),
+                        session_id: None,
+                        agent_pid: None,
+                        last_agent_event: None,
+                        last_agent_timestamp: None,
+                        last_agent_message: None,
+                        agent_input_tokens: waiting.agent_input_tokens,
+                        agent_output_tokens: waiting.agent_output_tokens,
+                        agent_total_tokens: waiting.agent_total_tokens,
+                        last_reported_input_tokens: waiting.agent_input_tokens,
+                        last_reported_output_tokens: waiting.agent_output_tokens,
+                        last_reported_total_tokens: waiting.agent_total_tokens,
+                        turn_count: 0,
+                        retry_attempt: waiting.retry_attempt,
+                        started_at: waiting.started_at.unwrap_or(waiting.requested_at),
+                    })
+            });
+            entry.map(|entry| {
+                self.schedule_whole_issue_failure_retry(
+                    &mut state,
+                    config,
+                    entry,
+                    reason,
+                    ScheduledRetryPipeline::Release,
+                )
+            })
+        };
+        self.commit_whole_issue_failure_retry(outcome).await;
     }
 
     /// Dispatch a single pipeline step after its workspace is ready.
@@ -2759,11 +3204,35 @@ impl Orchestrator {
                                 .unwrap_or_else(|| issue_id.to_string());
                             let finalize_attempt =
                                 RunningAttemptIdentity::capture(&state, issue_id);
+                            let acceptance_issue = issue_snapshot.clone().or_else(|| {
+                                state.running.get(issue_id).map(|entry| entry.issue.clone())
+                            });
                             let config_snapshot = config.clone();
                             drop(config);
                             drop(state);
                             if let Some(input) = step_transition {
                                 self.append_pipeline_transition(input).await;
+                            }
+                            let Some(acceptance_issue) = acceptance_issue else {
+                                warn!(issue_id = %issue_id, "pipeline success has no issue identity for acceptance");
+                                return;
+                            };
+                            match self
+                                .run_acceptance_phase(&acceptance_issue, &config_snapshot)
+                                .await
+                            {
+                                AcceptancePhaseOutcome::Passed => {}
+                                AcceptancePhaseOutcome::Failed { reason, owner } => {
+                                    self.schedule_acceptance_failure(
+                                        &acceptance_issue,
+                                        &config_snapshot,
+                                        &reason,
+                                        &owner,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                AcceptancePhaseOutcome::RetainedForRecovery => return,
                             }
                             let finalize_state = self
                                 .finalize_and_stage_terminal_transition(
@@ -3427,11 +3896,13 @@ impl Orchestrator {
         retry_entry: RetryEntry,
     ) -> Option<PipelineTransitionInput> {
         let dag = build_dag(&config.steps).ok()?;
-        state.insert_pipeline_run(
-            issue_id,
-            PipelineRun::new(issue_id.to_string(), retry_entry.attempt, dag),
-            Arc::new(config.clone()),
-        );
+        let acceptance_attempts = state
+            .get_pipeline_run(issue_id)
+            .map(|run| run.acceptance_attempts.clone())
+            .unwrap_or_default();
+        let mut next_run = PipelineRun::new(issue_id.to_string(), retry_entry.attempt, dag);
+        next_run.acceptance_attempts = acceptance_attempts;
+        state.insert_pipeline_run(issue_id, next_run, Arc::new(config.clone()));
         Self::transition_input_for_run(
             state,
             issue_id,
@@ -6290,6 +6761,7 @@ impl Orchestrator {
             last_error: input.last_error,
             verdict: Self::history_verdict(input.run),
             workspace_path,
+            acceptance_attempts: input.run.acceptance_attempts.clone(),
             artifacts: input.artifacts,
         }
     }
@@ -6331,6 +6803,7 @@ impl Orchestrator {
             last_error: input.last_error,
             verdict: Self::history_verdict(input.run),
             workspace_path,
+            acceptance_attempts: input.run.acceptance_attempts.clone(),
             artifacts: input.artifacts,
         }
     }
@@ -6861,6 +7334,23 @@ impl Orchestrator {
                         }
                     }
                     PipelineAction::Succeeded => {
+                        match self.run_acceptance_phase(issue, &current_config).await {
+                            AcceptancePhaseOutcome::Passed => {}
+                            AcceptancePhaseOutcome::Failed { reason, owner } => {
+                                if !interaction_was_retired {
+                                    self.interaction_store.mark_resumed(&interaction.id).await?;
+                                }
+                                self.schedule_acceptance_failure(
+                                    issue,
+                                    &current_config,
+                                    &reason,
+                                    &owner,
+                                )
+                                .await;
+                                return Ok(());
+                            }
+                            AcceptancePhaseOutcome::RetainedForRecovery => return Ok(()),
+                        }
                         let finalize_state = self
                             .finalize_and_stage_terminal_transition(
                                 &issue.id,
@@ -7573,6 +8063,7 @@ fn validate_restored_snapshot_against_config(
     snapshot: &PipelineRunSnapshot,
     config: &EnsembleConfig,
 ) -> Result<(), EnsembleError> {
+    validate_acceptance_attempts(snapshot, config)?;
     for persisted_step in &snapshot.dag_steps {
         if snapshot
             .synthetic_fixup_steps
@@ -7606,6 +8097,46 @@ fn validate_restored_snapshot_against_config(
         }
     }
 
+    Ok(())
+}
+
+fn validate_acceptance_attempts(
+    snapshot: &PipelineRunSnapshot,
+    config: &EnsembleConfig,
+) -> Result<(), EnsembleError> {
+    let mut previous_cycle = 0;
+    for attempt in &snapshot.acceptance_attempts {
+        if attempt.cycle == 0 || attempt.cycle > snapshot.cycle || attempt.cycle <= previous_cycle {
+            return Err(AgentError::PromptError {
+                reason: "persisted acceptance attempts have invalid cycle ordering".to_string(),
+            }
+            .into());
+        }
+        previous_cycle = attempt.cycle;
+        if attempt.cycle != snapshot.cycle {
+            continue;
+        }
+        if attempt.results.len() > config.acceptance.commands.len() {
+            return Err(AgentError::PromptError {
+                reason: format!(
+                    "persisted acceptance attempt {} has more results than configured commands",
+                    attempt.cycle
+                ),
+            }
+            .into());
+        }
+        for (result, command) in attempt.results.iter().zip(&config.acceptance.commands) {
+            if result.name != command.name {
+                return Err(AgentError::PromptError {
+                    reason: format!(
+                        "persisted acceptance result '{}' no longer matches configured command '{}'",
+                        result.name, command.name
+                    ),
+                }
+                .into());
+            }
+        }
+    }
     Ok(())
 }
 
@@ -8177,6 +8708,80 @@ mod tests {
         responses: Arc<RwLock<Vec<Option<InteractionResponseEnvelope>>>>,
     }
 
+    struct RecordingAcceptanceRunner {
+        statuses: std::sync::Mutex<std::collections::VecDeque<AcceptanceStatus>>,
+        calls: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    struct BlockingAcceptanceRunner {
+        started: Arc<tokio::sync::Barrier>,
+        release: Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl AcceptanceCommandRunner for BlockingAcceptanceRunner {
+        async fn run(
+            &self,
+            command: &crate::config::ensemble::AcceptanceCommandConfig,
+            _issue_workspace: &Path,
+        ) -> crate::acceptance::AcceptanceResult {
+            self.started.wait().await;
+            self.release.wait().await;
+            crate::acceptance::AcceptanceResult {
+                name: command.name.clone(),
+                status: AcceptanceStatus::Passed,
+                exit_code: Some(0),
+                stdout: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                stderr: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                summary: "passed".into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AcceptanceCommandRunner for RecordingAcceptanceRunner {
+        async fn run(
+            &self,
+            command: &crate::config::ensemble::AcceptanceCommandConfig,
+            _issue_workspace: &Path,
+        ) -> crate::acceptance::AcceptanceResult {
+            self.calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(command.name.clone());
+            let status = self
+                .statuses
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .pop_front()
+                .unwrap_or(AcceptanceStatus::Passed);
+            crate::acceptance::AcceptanceResult {
+                name: command.name.clone(),
+                exit_code: (status == AcceptanceStatus::Passed).then_some(0),
+                summary: format!("{}: {status:?}", command.name),
+                status,
+                stdout: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                stderr: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+            }
+        }
+    }
+
     #[async_trait]
     impl AgentRunner for InteractionCaptureRunner {
         async fn run(&self, request: AgentRunRequest<'_>) -> Result<WorkerResult, AgentError> {
@@ -8679,6 +9284,7 @@ agent:
                 config: Arc::new(RwLock::new(cfg.clone())),
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
@@ -8690,6 +9296,749 @@ agent:
             shutdown_rx,
         );
         (orchestrator, state)
+    }
+
+    fn make_acceptance_test_orchestrator(
+        temp: &tempfile::TempDir,
+        cfg: &EnsembleConfig,
+        issue: &Issue,
+        acceptance_runner: Arc<dyn AcceptanceCommandRunner>,
+    ) -> (Orchestrator, Arc<RwLock<OrchestratorState>>) {
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let workspace_root = temp.path().join("workspaces");
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config: Arc::new(RwLock::new(cfg.clone())),
+                tracker,
+                agent_runner: Arc::new(MockRunner {
+                    delay_ms: 0,
+                    observed_commands: None,
+                    observed_timeouts: None,
+                    cancellation_probe: None,
+                }),
+                acceptance_runner,
+                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root,
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+        (orchestrator, state)
+    }
+
+    fn acceptance_config(names: &[&str]) -> EnsembleConfig {
+        let mut config = make_config();
+        config.acceptance.commands = names
+            .iter()
+            .map(|name| crate::config::ensemble::AcceptanceCommandConfig {
+                name: (*name).to_string(),
+                run: format!("run-{name}"),
+                timeout_ms: 1_000,
+            })
+            .collect();
+        config
+    }
+
+    async fn install_succeeded_run(
+        state: &Arc<RwLock<OrchestratorState>>,
+        issue: &Issue,
+        config: &EnsembleConfig,
+    ) {
+        let dag = build_dag(&config.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        for step in run.step_states.values_mut() {
+            *step = StepState::Passed;
+        }
+        let mut state = state.write().await;
+        state.insert_pipeline_run(&issue.id, run, Arc::new(config.clone()));
+        state.add_running(issue, None);
+    }
+
+    async fn install_acceptance_started(
+        orchestrator: &Orchestrator,
+        state: &Arc<RwLock<OrchestratorState>>,
+        issue: &Issue,
+    ) {
+        let transition = {
+            let mut state = state.write().await;
+            let run = state.get_pipeline_run_mut(&issue.id).unwrap();
+            run.acceptance_attempts
+                .push(crate::acceptance::AcceptanceAttempt {
+                    cycle: run.cycle,
+                    results: Vec::new(),
+                });
+            Orchestrator::transition_input_for_run(
+                &state,
+                &issue.id,
+                &issue.identifier,
+                PipelineTransitionKind::AcceptanceStarted,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        orchestrator
+            .pipeline_journal
+            .append(transition)
+            .await
+            .unwrap();
+    }
+
+    async fn install_acceptance_waiting_owner(
+        orchestrator: &Orchestrator,
+        state: &Arc<RwLock<OrchestratorState>>,
+        issue: &Issue,
+        interaction_id: &str,
+    ) {
+        let mut interaction = test_question_interaction(issue, 1, interaction_id);
+        interaction.status = InteractionStatus::Resolved;
+        interaction.awaiting_resume = true;
+        interaction.response = Some(InteractionResponse::Question {
+            response_schema_version: 1,
+            text: "continue".to_string(),
+            selected_option: None,
+        });
+        interaction.resolved_at = Some(Utc::now());
+        orchestrator
+            .interaction_store
+            .create(interaction.clone())
+            .await
+            .unwrap();
+        let mut state = state.write().await;
+        let running = state.remove_running(&issue.id).unwrap();
+        state.add_waiting_on_human(WaitingOnHumanEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            interaction_request_id: interaction_id.to_string(),
+            step_name: "build".to_string(),
+            kind: InteractionKind::Question,
+            prompt: "continue".to_string(),
+            agent_name: "builder".to_string(),
+            retry_attempt: Some(1),
+            started_at: Some(running.started_at),
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: interaction.requested_at,
+            run_id: running.run_id,
+            issue: Some(issue.clone()),
+        });
+    }
+
+    #[tokio::test]
+    async fn acceptance_runs_all_commands_in_order_and_journals_before_advancing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-order", "In Progress");
+        let config = acceptance_config(&["first", "second", "third"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(
+                [
+                    AcceptanceStatus::Failed,
+                    AcceptanceStatus::Passed,
+                    AcceptanceStatus::TimedOut,
+                ]
+                .into(),
+            ),
+            calls: Arc::clone(&calls),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Failed { .. }));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["first", "second", "third"]
+        );
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert_eq!(records[0].kind, PipelineTransitionKind::AcceptanceStarted);
+        assert!(records[1..]
+            .iter()
+            .all(|record| record.kind == PipelineTransitionKind::AcceptanceCommandCompleted));
+        for pair in records.windows(2) {
+            assert!(pair[0].seq < pair[1].seq);
+            assert!(
+                pair[0].snapshot.as_ref().unwrap().acceptance_attempts[0]
+                    .results
+                    .len()
+                    < pair[1].snapshot.as_ref().unwrap().acceptance_attempts[0]
+                        .results
+                        .len()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn acceptance_recovery_resumes_after_durable_prefix() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-resume", "In Progress");
+        let config = acceptance_config(&["first", "second"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Passed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        {
+            let mut state = state.write().await;
+            state
+                .get_pipeline_run_mut(&issue.id)
+                .unwrap()
+                .acceptance_attempts
+                .push(crate::acceptance::AcceptanceAttempt {
+                    cycle: 1,
+                    results: vec![crate::acceptance::AcceptanceResult {
+                        name: "first".into(),
+                        status: AcceptanceStatus::Passed,
+                        exit_code: Some(0),
+                        stdout: crate::acceptance::AcceptanceOutput {
+                            tail: String::new(),
+                            total_bytes: 0,
+                            truncated: false,
+                        },
+                        stderr: crate::acceptance::AcceptanceOutput {
+                            tail: String::new(),
+                            total_bytes: 0,
+                            truncated: false,
+                        },
+                        summary: "first passed".into(),
+                    }],
+                });
+        }
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Passed));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["second"]
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_journal_failures_do_not_advance_execution_or_evidence() {
+        for fail_on_call in [1, 2] {
+            let temp = tempfile::TempDir::new().unwrap();
+            let issue = test_issue(&format!("acceptance-journal-{fail_on_call}"), "In Progress");
+            let config = acceptance_config(&["first", "second"]);
+            let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let runner = Arc::new(RecordingAcceptanceRunner {
+                statuses: std::sync::Mutex::new([AcceptanceStatus::Passed].into()),
+                calls: Arc::clone(&calls),
+            });
+            let (mut orchestrator, state) =
+                make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+            orchestrator
+                .pipeline_journal
+                .transaction_append_error_on_call =
+                Some((Arc::new(AtomicUsize::new(0)), fail_on_call));
+            install_succeeded_run(&state, &issue, &config).await;
+
+            let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+            assert!(matches!(
+                outcome,
+                AcceptancePhaseOutcome::RetainedForRecovery
+            ));
+            let calls = calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if fail_on_call == 1 {
+                assert!(calls.is_empty());
+                assert!(state
+                    .read()
+                    .await
+                    .get_pipeline_run(&issue.id)
+                    .unwrap()
+                    .acceptance_attempts
+                    .is_empty());
+            } else {
+                assert_eq!(calls, vec!["first"]);
+                let state = state.read().await;
+                let attempt = &state
+                    .get_pipeline_run(&issue.id)
+                    .unwrap()
+                    .acceptance_attempts[0];
+                assert!(attempt.results.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn acceptance_journal_failure_is_redispatched_on_the_next_tick() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-journal-recovery", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(
+                [AcceptanceStatus::Passed, AcceptanceStatus::Passed].into(),
+            ),
+            calls: Arc::clone(&calls),
+        });
+        let (mut orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+        install_succeeded_run(&state, &issue, &config).await;
+
+        assert!(matches!(
+            orchestrator.run_acceptance_phase(&issue, &config).await,
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        orchestrator.handle_tick().await;
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test", "test"]
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_journal_failure_retires_a_waiting_owner_before_redispatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-waiting-recovery", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(
+                [AcceptanceStatus::Passed, AcceptanceStatus::Passed].into(),
+            ),
+            calls: Arc::clone(&calls),
+        });
+        let (mut orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+        install_succeeded_run(&state, &issue, &config).await;
+        let interaction_id = "acceptance-waiting-interaction";
+        install_acceptance_waiting_owner(&orchestrator, &state, &issue, interaction_id).await;
+
+        assert!(matches!(
+            orchestrator.run_acceptance_phase(&issue, &config).await,
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        orchestrator.handle_tick().await;
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test", "test"]
+        );
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get(interaction_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_late_append_error_uses_the_exact_durable_transition() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-late-append", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Passed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let (mut orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        install_succeeded_run(&state, &issue, &config).await;
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Passed));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"]
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_ambiguous_append_reconciles_exact_visibility_on_a_later_tick() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-ambiguous-exact", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Passed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let (mut orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        install_acceptance_started(&orchestrator, &state, &issue).await;
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
+
+        assert!(matches!(
+            orchestrator.run_acceptance_phase(&issue, &config).await,
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"]
+        );
+        assert!(state
+            .read()
+            .await
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .acceptance_attempts[0]
+            .results
+            .is_empty());
+
+        orchestrator.handle_tick().await;
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"],
+            "an unreadable acceptance transition must remain fail-closed"
+        );
+        assert!(state.read().await.is_running(&issue.id));
+
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator.handle_tick().await;
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"],
+            "an exactly visible acceptance result must not execute again"
+        );
+        assert!(
+            !state.read().await.is_running(&issue.id),
+            "the retained owner must advance after journal visibility recovers"
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_ambiguous_append_redispatches_after_confirmed_absence() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-ambiguous-absent", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(
+                [AcceptanceStatus::Passed, AcceptanceStatus::Passed].into(),
+            ),
+            calls: Arc::clone(&calls),
+        });
+        let (mut orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        install_acceptance_started(&orchestrator, &state, &issue).await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
+
+        assert!(matches!(
+            orchestrator.run_acceptance_phase(&issue, &config).await,
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"]
+        );
+        assert!(state.read().await.is_running(&issue.id));
+
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator.handle_tick().await;
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test", "test"],
+            "only the command whose result was confirmed absent may execute again"
+        );
+        assert!(
+            !state.read().await.is_running(&issue.id),
+            "confirmed absence must release the retained owner for redispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_ambiguous_reconciliation_retries_waiting_owner_retirement() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-ambiguous-waiting", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Passed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let (mut orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        install_acceptance_started(&orchestrator, &state, &issue).await;
+        let interaction_id = "acceptance-ambiguous-waiting-interaction";
+        install_acceptance_waiting_owner(&orchestrator, &state, &issue, interaction_id).await;
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
+
+        assert!(matches!(
+            orchestrator.run_acceptance_phase(&issue, &config).await,
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator.interaction_store.fail_next_writes(1);
+
+        orchestrator
+            .reconcile_pending_acceptance_transitions()
+            .await;
+        assert!(state.read().await.is_waiting_on_human(&issue.id));
+        assert!(
+            orchestrator
+                .interaction_store
+                .get(interaction_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+
+        orchestrator
+            .reconcile_pending_acceptance_transitions()
+            .await;
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"]
+        );
+        let state = state.read().await;
+        assert!(!state.is_waiting_on_human(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .acceptance_attempts[0]
+                .results
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn acceptance_does_not_commit_a_result_for_a_replaced_running_attempt() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-stale", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let started = Arc::new(tokio::sync::Barrier::new(2));
+        let release = Arc::new(tokio::sync::Barrier::new(2));
+        let runner = Arc::new(BlockingAcceptanceRunner {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        let orchestrator = Arc::new(orchestrator);
+        let execution = {
+            let orchestrator = Arc::clone(&orchestrator);
+            let issue = issue.clone();
+            let config = config.clone();
+            tokio::spawn(async move { orchestrator.run_acceptance_phase(&issue, &config).await })
+        };
+        started.wait().await;
+        {
+            let mut state = state.write().await;
+            state.running.get_mut(&issue.id).unwrap().started_at += chrono::Duration::seconds(1);
+        }
+        release.wait().await;
+
+        assert!(matches!(
+            execution.await.unwrap(),
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        let state = state.read().await;
+        assert!(state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .acceptance_attempts[0]
+            .results
+            .is_empty());
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, PipelineTransitionKind::AcceptanceStarted);
+    }
+
+    #[test]
+    fn acceptance_recovery_rejects_a_name_mismatch() {
+        let config = acceptance_config(&["configured"]);
+        let dag = build_dag(&config.steps).unwrap();
+        let mut run = PipelineRun::new("issue".into(), 1, dag);
+        run.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
+            cycle: 1,
+            results: vec![crate::acceptance::AcceptanceResult {
+                name: "old-name".into(),
+                status: AcceptanceStatus::Passed,
+                exit_code: Some(0),
+                stdout: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                stderr: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                summary: "passed".into(),
+            }],
+        }];
+
+        let error =
+            validate_restored_snapshot_against_config(&run.to_snapshot(), &config).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("no longer matches configured command"));
+    }
+
+    #[test]
+    fn acceptance_recovery_allows_historical_attempts_from_an_older_config() {
+        let config = acceptance_config(&["configured"]);
+        let dag = build_dag(&config.steps).unwrap();
+        let mut run = PipelineRun::new("issue".into(), 2, dag);
+        run.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
+            cycle: 1,
+            results: vec![crate::acceptance::AcceptanceResult {
+                name: "old-name".into(),
+                status: AcceptanceStatus::Passed,
+                exit_code: Some(0),
+                stdout: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                stderr: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                summary: "passed".into(),
+            }],
+        }];
+
+        validate_restored_snapshot_against_config(&run.to_snapshot(), &config).unwrap();
+    }
+
+    #[tokio::test]
+    async fn acceptance_retry_preserves_completed_attempts_in_the_next_cycle() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-retry", "In Progress");
+        let config = acceptance_config(&["test"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Failed].into()),
+            calls,
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        assert!(matches!(
+            orchestrator.run_acceptance_phase(&issue, &config).await,
+            AcceptancePhaseOutcome::Failed { .. }
+        ));
+
+        let transition = {
+            let mut state = state.write().await;
+            Orchestrator::prepare_whole_issue_retry(
+                &mut state,
+                &config,
+                &issue.id,
+                &issue.identifier,
+                "acceptance failed",
+                RetryEntry {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                    attempt: 2,
+                    due_at_ms: 0,
+                    error: Some("acceptance failed".into()),
+                    retry_from_step: None,
+                    with_fixup: false,
+                },
+            )
+            .unwrap()
+        };
+
+        let snapshot = transition.snapshot.unwrap();
+        assert_eq!(snapshot.cycle, 2);
+        assert_eq!(snapshot.acceptance_attempts.len(), 1);
+        assert_eq!(snapshot.acceptance_attempts[0].cycle, 1);
+        assert_eq!(
+            snapshot.acceptance_attempts[0].results[0].status,
+            AcceptanceStatus::Failed
+        );
     }
 
     #[tokio::test]
@@ -8842,6 +10191,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr,
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
@@ -8908,6 +10258,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -8998,6 +10349,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -9083,6 +10435,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -9750,6 +11103,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
@@ -9877,6 +11231,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
@@ -10012,6 +11367,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
@@ -10151,6 +11507,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -10252,6 +11609,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -10353,6 +11711,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -10452,6 +11811,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -10549,6 +11909,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -10672,6 +12033,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
@@ -12491,6 +13853,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr,
                 refresh_requested: Arc::clone(&refresh_requested),
                 cancellation_registry: new_cancellation_registry(),
@@ -12565,6 +13928,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr,
                 refresh_requested,
                 cancellation_registry: new_cancellation_registry(),
@@ -13201,6 +14565,108 @@ agent:
             run.step_states.get("review"),
             Some(crate::pipeline::engine::StepState::Running { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn exhausted_acceptance_failure_retires_the_resolved_approval_interaction() {
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("1", "Todo");
+        let mut config = make_single_step_always_approval_config(1);
+        config.acceptance.commands = vec![crate::config::ensemble::AcceptanceCommandConfig {
+            name: "test".to_string(),
+            run: "run-test".to_string(),
+            timeout_ms: 1_000,
+        }];
+        let config = Arc::new(RwLock::new(config));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(FailingWriteTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let acceptance_runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Failed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            config.read().await.polling.interval_ms,
+            &config.read().await.concurrency,
+        )));
+        let workspace_root = config_dir.path().join("workspaces");
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state,
+                config: Arc::clone(&config),
+                tracker,
+                agent_runner: Arc::new(MockRunner {
+                    delay_ms: 0,
+                    observed_commands: None,
+                    observed_timeouts: None,
+                    cancellation_probe: None,
+                }),
+                acceptance_runner,
+                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root,
+            },
+            config_dir.path(),
+            shutdown_rx,
+        );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
+        write_raw_interaction(
+            config_dir.path(),
+            "approval-1",
+            serde_json::json!({
+                "id": "approval-1",
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": [],
+                "step_name": "build",
+                "agent_name": "builder",
+                "step_depends": [],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve build",
+                "body": "Please review the build output.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true,
+                    "reason": "looks good"
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+
+        orchestrator.resume_blocked_issue(&issue).await.unwrap();
+
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["test"]
+        );
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
     }
 
     #[tokio::test]
@@ -13900,6 +15366,7 @@ agent:
             last_error: None,
             verdict: Some(HISTORY_VERDICT_APPROVED.to_string()),
             workspace_path: config_dir.path().display().to_string(),
+            acceptance_attempts: vec![],
             artifacts: None,
         };
         let history_store = orchestrator.history_store.as_ref().unwrap();
@@ -13984,6 +15451,7 @@ agent:
             last_error: None,
             verdict: Some(HISTORY_VERDICT_APPROVED.to_string()),
             workspace_path: config_dir.path().display().to_string(),
+            acceptance_attempts: vec![],
             artifacts: None,
         };
         HistoryWriter::new(config_dir.path().join("ensemble_history.jsonl"))
@@ -17734,6 +19202,7 @@ agent:
                 config,
                 tracker,
                 agent_runner: runner,
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
                 workspace_mgr,
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),

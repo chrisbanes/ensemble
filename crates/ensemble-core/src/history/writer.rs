@@ -80,6 +80,7 @@ mod tests {
             last_error: None,
             verdict: Some("approved".into()),
             workspace_path: "/tmp/ensemble_workspaces/MT-648".into(),
+            acceptance_attempts: vec![],
             artifacts: None,
         }
     }

@@ -27,6 +27,15 @@ pub(crate) fn row_to_history_record(row: &Row<'_>) -> rusqlite::Result<HistoryRe
         .map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })?;
+    let acceptance_attempts_json: Option<String> = row.get("acceptance_attempts")?;
+    let acceptance_attempts = acceptance_attempts_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?
+        .unwrap_or_default();
 
     Ok(HistoryRecord {
         issue_identifier: row.get("issue_identifier")?,
@@ -45,6 +54,7 @@ pub(crate) fn row_to_history_record(row: &Row<'_>) -> rusqlite::Result<HistoryRe
         last_error: row.get("last_error")?,
         verdict: row.get("verdict")?,
         workspace_path: row.get("workspace_path")?,
+        acceptance_attempts,
         artifacts,
     })
 }

@@ -97,6 +97,8 @@ pub enum PipelineTransitionKind {
     StepBlockedOnHuman,
     StepAwaitingApproval,
     ApprovalResolved,
+    AcceptanceStarted,
+    AcceptanceCommandCompleted,
     StepRetryScheduled,
     FixupRetryScheduled,
     PipelineHalted,
@@ -1050,6 +1052,20 @@ mod tests {
 
         let record: PipelineTransitionRecord = serde_json::from_value(legacy).unwrap();
         assert!(record.terminal_transition.is_none());
+    }
+
+    #[test]
+    fn acceptance_transition_kinds_round_trip() {
+        for kind in [
+            PipelineTransitionKind::AcceptanceStarted,
+            PipelineTransitionKind::AcceptanceCommandCompleted,
+        ] {
+            let json = serde_json::to_string(&kind).unwrap();
+            assert_eq!(
+                serde_json::from_str::<PipelineTransitionKind>(&json).unwrap(),
+                kind
+            );
+        }
     }
 
     #[tokio::test]

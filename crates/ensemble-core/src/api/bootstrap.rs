@@ -299,6 +299,7 @@ pub(crate) async fn prepare_orchestrator_runtime(
             config,
             tracker,
             agent_runner,
+            acceptance_runner: Arc::new(crate::acceptance::ShellAcceptanceCommandRunner),
             workspace_mgr,
             refresh_requested: Arc::clone(&app_state.refresh_requested),
             cancellation_registry: app_state.cancellation_registry.clone(),

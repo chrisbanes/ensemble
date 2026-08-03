@@ -1007,6 +1007,7 @@ mod tests {
             hooks: Default::default(),
             agent: Default::default(),
             human_interaction: Default::default(),
+            acceptance: Default::default(),
         })
     }
 
