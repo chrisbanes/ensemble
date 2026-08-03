@@ -311,6 +311,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
     use crate::error::PipelineError;
 
     match e {
+        PipelineError::InvalidAcceptanceCommand { name, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid acceptance command '{}': {}", name, reason),
+            section: "acceptance".to_string(),
+            field: Some(name.clone()),
+            path: Some(format!("acceptance.commands.{}", name)),
+        },
         PipelineError::UnknownAgent { name } => ValidationIssue {
             kind: ValidationIssueKind::Config,
             message: format!("unknown agent reference: {}", name),

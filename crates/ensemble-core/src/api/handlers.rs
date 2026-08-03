@@ -774,6 +774,7 @@ mod tests {
                 last_error: Some("agent crashed".to_string()),
                 verdict: Some("failed".to_string()),
                 workspace_path: "/tmp/workspaces/todo-0".to_string(),
+                acceptance_attempts: vec![],
                 artifacts: None,
             })
             .await
@@ -826,6 +827,7 @@ mod tests {
                 last_error: Some("agent crashed".to_string()),
                 verdict: Some("failed".to_string()),
                 workspace_path: String::new(),
+                acceptance_attempts: vec![],
                 artifacts: None,
             })
             .await
@@ -917,6 +919,7 @@ on_failure: Failed
                 last_error: None,
                 verdict: Some("approved".to_string()),
                 workspace_path: "/tmp/workspaces/synth-1".to_string(),
+                acceptance_attempts: vec![],
                 artifacts: None,
             })
             .await
@@ -972,6 +975,7 @@ on_failure: Failed
                 last_error: None,
                 verdict: Some("approved".into()),
                 workspace_path: tmp.path().join("repo-77").display().to_string(),
+                acceptance_attempts: vec![],
                 artifacts: Some(crate::history::artifacts::RunArtifacts {
                     run_id: "run-77".into(),
                     workspace_path: tmp.path().join("repo-77").display().to_string(),
@@ -1023,6 +1027,7 @@ on_failure: Failed
                 last_error: None,
                 verdict: Some("approved".into()),
                 workspace_path: tmp.path().join("repo-77").display().to_string(),
+                acceptance_attempts: vec![],
                 artifacts: Some(crate::history::artifacts::RunArtifacts {
                     run_id: "run-77".into(),
                     workspace_path: tmp.path().join("repo-77").display().to_string(),

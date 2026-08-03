@@ -132,6 +132,8 @@ pub enum AgentError {
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
+    #[error("invalid acceptance command {name}: {reason}")]
+    InvalidAcceptanceCommand { name: String, reason: String },
     #[error("unknown agent reference: {name}")]
     UnknownAgent { name: String },
     #[error("unknown step dependency: {step} depends on {dependency}")]

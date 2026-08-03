@@ -55,13 +55,16 @@ impl HistoryStore {
                 .map(serde_json::to_string)
                 .transpose()
                 .map_err(io::Error::other)?;
+            let acceptance_attempts_json =
+                serde_json::to_string(&record.acceptance_attempts).map_err(io::Error::other)?;
             tx.execute(
                 r#"
                 INSERT INTO runs (
                     run_id, issue_id, issue_identifier, outcome, steps_traversed, attempts,
                     duration_seconds, started_at, completed_at, last_error, verdict,
-                    workspace_path, input_tokens, output_tokens, total_tokens, artifacts
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                    workspace_path, input_tokens, output_tokens, total_tokens, artifacts,
+                    acceptance_attempts
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                 ON CONFLICT(run_id) DO UPDATE SET
                     issue_id = excluded.issue_id,
                     issue_identifier = excluded.issue_identifier,
@@ -77,7 +80,8 @@ impl HistoryStore {
                     input_tokens = excluded.input_tokens,
                     output_tokens = excluded.output_tokens,
                     total_tokens = excluded.total_tokens,
-                    artifacts = excluded.artifacts
+                    artifacts = excluded.artifacts,
+                    acceptance_attempts = excluded.acceptance_attempts
                 "#,
                 params![
                     run_id,
@@ -96,6 +100,7 @@ impl HistoryStore {
                     record.tokens.output_tokens,
                     record.tokens.total_tokens,
                     artifacts_json,
+                    acceptance_attempts_json,
                 ],
             )
             .map_err(io::Error::other)?;
@@ -215,7 +220,7 @@ impl HistoryStore {
             })?;
 
             let page_sql = format!(
-                "SELECT issue_id, issue_identifier, outcome, steps_traversed, attempts, duration_seconds, started_at, completed_at, last_error, verdict, workspace_path, input_tokens, output_tokens, total_tokens, artifacts FROM runs{where_sql} ORDER BY completed_at DESC LIMIT ? OFFSET ?"
+                "SELECT issue_id, issue_identifier, outcome, steps_traversed, attempts, duration_seconds, started_at, completed_at, last_error, verdict, workspace_path, input_tokens, output_tokens, total_tokens, artifacts, acceptance_attempts FROM runs{where_sql} ORDER BY completed_at DESC LIMIT ? OFFSET ?"
             );
             let mut page_params = base_params;
             page_params.push(Value::from(limit_i64));
@@ -395,6 +400,7 @@ mod tests {
             last_error: None,
             verdict: Some("approved".into()),
             workspace_path: format!("/tmp/{identifier}"),
+            acceptance_attempts: vec![],
             artifacts: None,
         }
     }
@@ -470,6 +476,42 @@ mod tests {
             Some("https://github.com/acme/repo/pull/12")
         );
         assert_eq!(artifacts.transcripts[0].step_name, "build");
+    }
+
+    #[tokio::test]
+    async fn append_history_record_round_trips_acceptance_attempts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = HistoryStore::new(dir.path().join("history.db"))
+            .await
+            .unwrap();
+        let mut record = sample_history("repo#1");
+        record.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
+            cycle: 1,
+            results: vec![crate::acceptance::AcceptanceResult {
+                name: "test".into(),
+                status: crate::acceptance::AcceptanceStatus::Passed,
+                exit_code: Some(0),
+                stdout: crate::acceptance::AcceptanceOutput {
+                    tail: "ok".into(),
+                    total_bytes: 2,
+                    truncated: false,
+                },
+                stderr: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                summary: "passed".into(),
+            }],
+        }];
+
+        store.append_history_record("run-1", &record).await.unwrap();
+
+        let response = store.read_history(&HistoryQuery::default()).await.unwrap();
+        assert_eq!(
+            response.records[0].acceptance_attempts,
+            record.acceptance_attempts
+        );
     }
 
     #[tokio::test]

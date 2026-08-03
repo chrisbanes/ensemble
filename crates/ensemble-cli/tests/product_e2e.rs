@@ -79,6 +79,15 @@ async fn web_cli_runs_todo_issue_to_completion_with_mock_acpx() {
         .expect("history should contain completed run");
     assert_eq!(history["issue_identifier"], ISSUE_ID);
     assert_eq!(history["outcome"], "succeeded");
+    let acceptance = &history["acceptance_attempts"][0]["results"][0];
+    assert_eq!(acceptance["name"], "verify");
+    assert_eq!(acceptance["status"], "passed");
+    assert_eq!(acceptance["stdout"]["total_bytes"], 40_000);
+    assert_eq!(acceptance["stdout"]["truncated"], true);
+    assert_eq!(
+        acceptance["stdout"]["tail"].as_str().unwrap().len(),
+        32 * 1024
+    );
     assert!(
         history["steps_traversed"]
             .as_array()
@@ -109,6 +118,57 @@ async fn web_cli_runs_todo_issue_to_completion_with_mock_acpx() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() {
+    let fixture = TestFixture::new_with_acceptance("printf acceptance-failed >&2; exit 7")
+        .expect("fixture setup");
+    let port = reserve_local_port().expect("reserve local port");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command.spawn().expect("spawn ensemble web");
+    let _guard = ChildGuard::new(child);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+
+    let history = wait_for_failed_history_record(&client, &base_url, &fixture.workspace_root)
+        .await
+        .expect("acceptance failure should be durable");
+
+    assert_eq!(history["outcome"], "failed");
+    assert_eq!(history["steps_traversed"][0], "implement");
+    assert_eq!(history["attempts"], 1);
+    let acceptance = &history["acceptance_attempts"][0]["results"][0];
+    assert_eq!(acceptance["name"], "verify");
+    assert_eq!(acceptance["status"], "failed");
+    assert_eq!(acceptance["exit_code"], 7);
+    assert!(acceptance["stderr"]["tail"]
+        .as_str()
+        .unwrap()
+        .ends_with("acceptance-failed"));
+
+    let todo = fs::read_to_string(&fixture.todo_path).expect("read TODO.md");
+    assert!(section_contains_issue(&todo, "Failed", ISSUE_ID));
+    assert!(!section_contains_issue(&todo, "Done", ISSUE_ID));
+    let acpx_log = fs::read_to_string(&fixture.acpx_log_path).expect("read mock acpx log");
+    assert_eq!(
+        acpx_log.lines().filter(|line| line.contains(" prompt ")).count(),
+        2,
+        "one agent cycle emits its visible prompt and hidden extraction prompt; exhaustion must not launch another cycle"
+    );
+}
+
 struct TestFixture {
     config_dir: TempDir,
     todo_path: PathBuf,
@@ -119,6 +179,10 @@ struct TestFixture {
 
 impl TestFixture {
     fn new() -> io::Result<Self> {
+        Self::new_with_acceptance("yes x | head -c 40000")
+    }
+
+    fn new_with_acceptance(acceptance_run: &str) -> io::Result<Self> {
         let config_dir = TempDir::new()?;
         let root = config_dir.path();
         let todo_path = root.join("TODO.md");
@@ -131,7 +195,7 @@ impl TestFixture {
         fs::write(&todo_path, todo_fixture())?;
         fs::write(
             root.join("config.yaml"),
-            config_yaml(&todo_path, &workspace_root),
+            config_yaml(&todo_path, &workspace_root, acceptance_run),
         )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
 
@@ -170,7 +234,7 @@ fn todo_fixture() -> String {
     )
 }
 
-fn config_yaml(todo_path: &Path, workspace_root: &Path) -> String {
+fn config_yaml(todo_path: &Path, workspace_root: &Path, acceptance_run: &str) -> String {
     format!(
         r#"
 tracker:
@@ -191,6 +255,11 @@ steps:
   - name: implement
     agent: builder
     tracker_state: In Progress
+acceptance:
+  commands:
+    - name: verify
+      run: {}
+      timeout_ms: 5000
 on_success: Done
 on_failure: Failed
 max_cycles: 1
@@ -205,8 +274,36 @@ agent:
   max_retry_backoff_ms: 100
 "#,
         yaml_quote(&todo_path.display().to_string()),
-        yaml_quote(&workspace_root.display().to_string())
+        yaml_quote(&workspace_root.display().to_string()),
+        yaml_quote(acceptance_run)
     )
+}
+
+async fn wait_for_failed_history_record(
+    client: &reqwest::Client,
+    base_url: &str,
+    workspace_root: &Path,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let url = format!("{base_url}/api/v1/history?outcome=failed&step=implement");
+    loop {
+        let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        let json = response.json::<Value>().await.map_err(|e| e.to_string())?;
+        if let Some(record) = json["records"]
+            .as_array()
+            .and_then(|records| records.iter().find(|r| r["issue_identifier"] == ISSUE_ID))
+        {
+            return Ok(record.clone());
+        }
+        if Instant::now() >= deadline {
+            let history_path = workspace_root.join("ensemble_history.jsonl");
+            let persisted = fs::read_to_string(&history_path).unwrap_or_default();
+            return Err(format!(
+                "failed history record not found: {json:#?}\npersisted history:\n{persisted}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn yaml_quote(value: &str) -> String {

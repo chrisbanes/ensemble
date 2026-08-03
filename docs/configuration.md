@@ -203,6 +203,12 @@ steps:
       - build
     tracker_state: In Review
 
+acceptance:
+  commands:
+    - name: test
+      run: cargo test --workspace
+      timeout_ms: 900000
+
 on_success: Done
 on_failure: Failed
 
@@ -234,6 +240,31 @@ agent:
 ```
 
 ## Reference
+
+### acceptance
+
+`acceptance` is optional. Its `commands` list defaults to empty, which preserves the direct
+pipeline-success-to-finalization behavior.
+
+```yaml
+acceptance:
+  commands:
+    - name: unit-tests
+      run: cargo test --workspace
+      timeout_ms: 900000
+```
+
+Each command requires a unique, non-blank `name`, a non-blank `run` string, and a positive
+`timeout_ms`. Ensemble preserves `run` exactly and executes it as `/bin/sh -lc <run>`; there is no
+interpolation, command-specific environment, working-directory override, output-limit setting,
+parallelism, or acceptance-specific retry option. Commands inherit the orchestrator environment,
+run sequentially in declaration order in the issue workspace, and all commands run even after an
+earlier command does not pass.
+
+Acceptance starts only after every pipeline step and approval gate has passed, and before repository
+finalization. A non-passing command uses the existing whole-issue `max_cycles` retry path and, on
+exhaustion, writes `on_failure`; per-step `on_failure` settings do not apply. See
+[Pipeline Guide](pipelines.md#acceptance-commands) for evidence, recovery, and retry semantics.
 
 ### tracker
 

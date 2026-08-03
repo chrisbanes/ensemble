@@ -153,6 +153,53 @@ Verdict files and default-success fallback are not part of the runtime result co
 
 **Failed** means the step failed. The `summary` field explains why. Ensemble applies the step's `on_failure` behavior.
 
+## Acceptance commands
+
+Acceptance commands provide deterministic checks after all steps and approval gates pass but before
+repository finalization or the `on_success` tracker transition:
+
+```yaml
+acceptance:
+  commands:
+    - name: tests
+      run: cargo test --workspace
+      timeout_ms: 900000
+    - name: formatting
+      run: cargo fmt --all -- --check
+      timeout_ms: 120000
+```
+
+Ensemble runs these sequentially in declaration order as `/bin/sh -lc` in the issue workspace,
+inheriting the orchestrator environment unchanged. It runs the complete list even if an earlier
+command fails, times out, or cannot launch. Commands are not DAG steps, do not run through an agent,
+and cannot be parallelized or given acceptance-specific retries. Missing or empty commands skip the
+phase entirely.
+
+Each durable result contains the configured `name` but never the command string. `status` is
+`passed`, `failed`, `timed_out`, or `unavailable`; `exit_code` is optional because signals, timeouts,
+launch/cwd failures, or collection failures may not provide one. `stdout` and `stderr` independently
+store a lossy-UTF-8 rendering of only the final 32,768 raw bytes, the total observed byte count, and
+a `truncated` flag. The runner drains both streams concurrently and terminates and reaps the command
+process group on timeout.
+
+Phase start and every completed result are journaled before Ensemble advances. After restart, the
+current cycle's durable results must be a declaration-order prefix of configured command names;
+Ensemble resumes with the first missing command. Thus an interrupted command without a durable result
+may repeat, while a durable prefix does not. Legacy snapshots and history records default to no
+attempts. Ordered attempts are also preserved in JSONL history, SQLite history, and pending terminal
+reconciliation records.
+
+If an append outcome is ambiguous, Ensemble keeps the active owner and retries only the journal
+visibility check on later poll ticks. An exactly visible result advances without executing the
+command again; confirmed absence releases the owner so only that undurable command can be
+redispatched.
+
+Any non-passing result dominates a succeeded or concern step output and prevents finalization. It
+uses whole-issue retry regardless of per-step `on_failure`: a new cycle reruns the full pipeline and
+the full acceptance list while retaining prior attempts. Exhausting `max_cycles` records every
+attempt and moves the issue to `on_failure`. Artifact/handoff validation and Mission Control or
+generated-client presentation are separate contracts and are not performed by acceptance commands.
+
 ## Retries and cycles
 
 When a step fails or an agent errors out, Ensemble can retry. The `max_cycles` setting controls how many times:

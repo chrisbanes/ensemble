@@ -35,6 +35,23 @@ pub struct EnsembleConfig {
     pub agent: AgentRuntimeConfig,
     #[serde(default)]
     pub human_interaction: HumanInteractionConfig,
+    #[serde(default)]
+    pub acceptance: AcceptanceConfig,
+}
+
+/// Commands that must pass after the pipeline and its approval gates succeed.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct AcceptanceConfig {
+    #[serde(default)]
+    pub commands: Vec<AcceptanceCommandConfig>,
+}
+
+/// One named acceptance command executed by `/bin/sh -lc`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct AcceptanceCommandConfig {
+    pub name: String,
+    pub run: String,
+    pub timeout_ms: u64,
 }
 
 /// Runtime configuration for blocked-on-human interaction handling.
@@ -915,6 +932,32 @@ fn reject_legacy_agent_permission_policy(
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
+    let mut acceptance_names = std::collections::HashSet::new();
+    for command in &config.acceptance.commands {
+        let display_name = if command.name.trim().is_empty() {
+            "<unnamed>"
+        } else {
+            command.name.as_str()
+        };
+        let reason = if command.name.trim().is_empty() {
+            Some("name must not be empty")
+        } else if !acceptance_names.insert(command.name.as_str()) {
+            Some("name must be unique")
+        } else if command.run.trim().is_empty() {
+            Some("run must not be empty")
+        } else if command.timeout_ms == 0 {
+            Some("timeout_ms must be greater than 0")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(PipelineError::InvalidAcceptanceCommand {
+                name: display_name.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+    }
+
     for (name, agent) in &config.agents {
         match (&agent.prompt, &agent.prompt_template) {
             (Some(_), Some(_)) | (None, None) => {
@@ -1139,6 +1182,88 @@ on_failure: Failed
         assert_eq!(config.steps[0].agent, "build");
         assert_eq!(config.on_success, "Done");
         assert_eq!(config.on_failure, "Failed");
+        assert!(config.acceptance.commands.is_empty());
+    }
+
+    #[test]
+    fn parses_acceptance_commands() {
+        let yaml = format!(
+            "{}\nacceptance:\n  commands:\n    - name: test\n      run: \"  cargo test --workspace  \"\n      timeout_ms: 120000\n",
+            minimal_yaml()
+        );
+
+        let config = parse_config(&yaml).unwrap();
+
+        assert_eq!(
+            config.acceptance.commands,
+            vec![AcceptanceCommandConfig {
+                name: "test".to_string(),
+                run: "  cargo test --workspace  ".to_string(),
+                timeout_ms: 120_000,
+            }]
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn empty_acceptance_defaults_to_no_commands() {
+        let yaml = format!("{}\nacceptance: {{}}\n", minimal_yaml());
+
+        let config = parse_config(&yaml).unwrap();
+
+        assert!(config.acceptance.commands.is_empty());
+    }
+
+    #[test]
+    fn validates_acceptance_commands() {
+        let invalid_cases = [
+            ("", "echo ok", 1, "name must not be empty"),
+            ("check", "", 1, "run must not be empty"),
+            ("check", "echo ok", 0, "timeout_ms must be greater than 0"),
+        ];
+
+        for (name, run, timeout_ms, expected_reason) in invalid_cases {
+            let expected_name = if name.trim().is_empty() {
+                "<unnamed>"
+            } else {
+                name
+            };
+            let yaml = format!(
+                "{}\nacceptance:\n  commands:\n    - name: {:?}\n      run: {:?}\n      timeout_ms: {}\n",
+                minimal_yaml(),
+                name,
+                run,
+                timeout_ms
+            );
+            let config = parse_config(&yaml).unwrap();
+            let error = validate_config(&config).unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    PipelineError::InvalidAcceptanceCommand { ref name, ref reason }
+                        if name == expected_name && reason == expected_reason
+                ),
+                "unexpected error: {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_acceptance_command_names_are_invalid() {
+        let yaml = format!(
+            "{}\nacceptance:\n  commands:\n    - name: test\n      run: cargo test\n      timeout_ms: 1000\n    - name: test\n      run: cargo test --doc\n      timeout_ms: 1000\n",
+            minimal_yaml()
+        );
+        let config = parse_config(&yaml).unwrap();
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(matches!(
+            error,
+            PipelineError::InvalidAcceptanceCommand { ref name, ref reason }
+                if name == "test" && reason == "name must be unique"
+        ));
     }
 
     #[test]

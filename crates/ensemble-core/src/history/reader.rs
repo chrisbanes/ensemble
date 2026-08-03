@@ -120,6 +120,7 @@ mod tests {
             last_error: None,
             verdict: None,
             workspace_path: format!("/tmp/{}", identifier),
+            acceptance_attempts: vec![],
             artifacts: None,
         }
     }

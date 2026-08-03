@@ -26,7 +26,8 @@ pub fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
             input_tokens INTEGER NOT NULL,
             output_tokens INTEGER NOT NULL,
             total_tokens INTEGER NOT NULL,
-            artifacts TEXT
+            artifacts TEXT,
+            acceptance_attempts TEXT
         );
 
         CREATE TABLE IF NOT EXISTS run_events (
@@ -49,6 +50,7 @@ pub fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
         "#,
     )?;
     add_column_if_missing(conn, "runs", "artifacts", "TEXT")?;
+    add_column_if_missing(conn, "runs", "acceptance_attempts", "TEXT")?;
     Ok(())
 }
 
@@ -149,5 +151,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(artifacts_column_count, 1);
+        let acceptance_column_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name = 'acceptance_attempts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(acceptance_column_count, 1);
     }
 }

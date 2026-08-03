@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::acceptance::AcceptanceAttempt;
 use crate::config::ensemble::{OnFailure, StepKind};
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
@@ -119,6 +120,8 @@ pub struct PipelineRun {
     pub step_states: HashMap<String, StepState>,
     /// Stored outputs from completed steps.
     pub step_outputs: HashMap<String, StepOutput>,
+    /// Durable acceptance evidence retained across whole-issue cycles.
+    pub acceptance_attempts: Vec<AcceptanceAttempt>,
     /// The resolved, validated step DAG.
     dag: StepDag,
     /// Synthetic fixup steps generated for step-level retries.
@@ -131,6 +134,8 @@ pub struct PipelineRunSnapshot {
     pub cycle: u32,
     pub step_states: HashMap<String, StepState>,
     pub step_outputs: HashMap<String, StepOutput>,
+    #[serde(default)]
+    pub acceptance_attempts: Vec<AcceptanceAttempt>,
     pub dag_steps: Vec<DagStep>,
     pub synthetic_fixup_steps: HashSet<String>,
 }
@@ -149,6 +154,7 @@ impl PipelineRun {
             cycle,
             step_states,
             step_outputs: HashMap::new(),
+            acceptance_attempts: Vec::new(),
             dag,
             synthetic_fixup_steps: HashSet::new(),
         }
@@ -160,6 +166,7 @@ impl PipelineRun {
             cycle: self.cycle,
             step_states: self.step_states.clone(),
             step_outputs: self.step_outputs.clone(),
+            acceptance_attempts: self.acceptance_attempts.clone(),
             dag_steps: self.dag.steps.clone(),
             synthetic_fixup_steps: self.synthetic_fixup_steps.clone(),
         }
@@ -174,6 +181,7 @@ impl PipelineRun {
             cycle: snapshot.cycle,
             step_states: snapshot.step_states,
             step_outputs: snapshot.step_outputs,
+            acceptance_attempts: snapshot.acceptance_attempts,
             dag: StepDag {
                 steps: snapshot.dag_steps,
             },
@@ -2026,5 +2034,40 @@ mod tests {
         assert_eq!(run.dag.steps, original_steps);
         assert_eq!(run.step_states, original_states);
         assert!(!run.step_states.contains_key("fixup-unknown"));
+    }
+
+    #[test]
+    fn snapshot_round_trip_preserves_acceptance_attempts_and_legacy_defaults_empty() {
+        let mut run = make_run(&[make_step("build", "builder", &[])]);
+        run.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
+            cycle: 1,
+            results: vec![crate::acceptance::AcceptanceResult {
+                name: "test".to_string(),
+                status: crate::acceptance::AcceptanceStatus::Passed,
+                exit_code: Some(0),
+                stdout: crate::acceptance::AcceptanceOutput {
+                    tail: "ok".to_string(),
+                    total_bytes: 2,
+                    truncated: false,
+                },
+                stderr: crate::acceptance::AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+                summary: "passed".to_string(),
+            }],
+        }];
+
+        let restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+        assert_eq!(restored.acceptance_attempts, run.acceptance_attempts);
+
+        let mut legacy = serde_json::to_value(run.to_snapshot()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("acceptance_attempts");
+        let legacy: PipelineRunSnapshot = serde_json::from_value(legacy).unwrap();
+        assert!(legacy.acceptance_attempts.is_empty());
     }
 }

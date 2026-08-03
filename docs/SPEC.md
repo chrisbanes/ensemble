@@ -223,6 +223,10 @@ Parsed `config.yaml` payload:
   - `max_concurrent_agents` (global cap) and `max_step_parallelism` (per-issue cap).
 - `max_cycles` (integer, default 3)
   - Maximum pipeline cycle number an issue can enter. Scheduler deferrals do not consume cycles.
+- `acceptance` (AcceptanceConfig, optional)
+  - `commands` is an ordered list of `{ name, run, timeout_ms }` command definitions. Names must be
+    unique and non-blank, `run` must be non-blank, and the required timeout must be positive.
+  - Missing `acceptance`, missing `commands`, and an empty list all mean no acceptance phase.
 
 #### 4.1.3 Agent Config
 
@@ -283,6 +287,14 @@ Per-issue pipeline execution state:
 - `issue_id` (string)
 - `cycle` (integer, 1-based) — which pipeline cycle this is (bounded by `max_cycles`)
 - `step_states` (map of step name to StepState)
+- `acceptance_attempts` (ordered list, default empty)
+  - Each attempt contains its 1-based pipeline `cycle` and declaration-order `results` prefix.
+  - Each result contains `name`, `status` (`passed`, `failed`, `timed_out`, or `unavailable`),
+    optional `exit_code`, bounded `stdout` and `stderr`, and a human-readable `summary`. The
+    configured command string is never part of durable evidence.
+  - Each stream contains a lossy-UTF-8 `tail`, `total_bytes`, and `truncated`; the retained tail is
+    independently limited to the final 32,768 raw bytes while the runner continues counting and
+    draining all bytes.
 
 Step states:
 
@@ -308,6 +320,15 @@ Pipeline run recovery:
 - Ensemble appends pipeline transition records to
   `<config_dir>/state/pipeline-runs/<encoded_issue_id>.jsonl`.
 - Each recoverable transition includes a full `PipelineRun` snapshot.
+- Acceptance appends `acceptance_started` before its first command and
+  `acceptance_command_completed` after every completed result. A failed append stops the phase
+  before the next command, finalization, or retry decision. On restore, the current cycle's durable
+  results must match the configured command-name prefix; Ensemble resumes at the first missing
+  command, so only a
+  command interrupted before its result became durable may run again.
+- If an append outcome is ambiguous, Ensemble retains the active owner and retries only journal
+  visibility on later poll ticks. Exact visibility advances without rerunning the command;
+  confirmed absence releases the owner so only the undurable command can be dispatched again.
 - On orchestrator startup, Ensemble restores the latest non-released snapshot for each issue before
   the first poll tick.
 - During normal tick dispatch, before starting a candidate as a fresh pipeline, Ensemble checks that
