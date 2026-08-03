@@ -36,9 +36,22 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
   const { steps, agents } = value;
 
   const updateStep = (index: number, updates: Partial<WorkflowStep>) => {
-    const newSteps = steps.map((step, i) =>
-      i === index ? { ...step, ...updates } : step
-    );
+    const step = steps[index];
+    if (!step) return;
+
+    const renamedFrom = updates.name === undefined || updates.name === step.name
+      ? undefined
+      : step.name;
+    const newSteps = steps.map((current, i) => {
+      if (i === index) return { ...current, ...updates };
+      if (renamedFrom === undefined || current.depends === undefined) return current;
+      return {
+        ...current,
+        depends: current.depends.map((dependency) =>
+          dependency === renamedFrom ? updates.name! : dependency
+        ),
+      };
+    });
     onChange({ ...value, steps: newSteps });
   };
 
@@ -47,7 +60,7 @@ export default function WorkflowEditor({ value, onChange }: WorkflowEditorProps)
       name: `step-${steps.length + 1}`,
       kind: "agent",
       agent: agents[0]?.name || "",
-      depends: [],
+      depends: undefined,
       tracker_state: null,
     };
     onChange({ ...value, steps: [...steps, newStep] });

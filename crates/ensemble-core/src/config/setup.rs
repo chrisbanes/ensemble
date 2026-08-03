@@ -1079,13 +1079,13 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                 .filter_map(|item| {
                     let name = item.get("name")?.as_str()?;
                     let agent_role = item.get("agent")?.as_str()?;
-                    let depends = item.get("depends").map(|value| {
-                        value
-                            .as_sequence()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|dependency| dependency.as_str().map(String::from))
-                            .collect()
+                    let depends = item.get("depends").and_then(|value| {
+                        value.as_sequence().map(|dependencies| {
+                            dependencies
+                                .iter()
+                                .filter_map(|dependency| dependency.as_str().map(String::from))
+                                .collect()
+                        })
                     });
                     let tracker_state = item
                         .get("tracker_state")
@@ -2917,6 +2917,28 @@ on_failure: Failed
             serde_yaml::to_value(["build"]).unwrap()
         );
         assert_eq!(steps[3]["depends"], serde_yaml::Value::Sequence(vec![]));
+    }
+
+    #[test]
+    fn setup_defaults_treat_null_dependencies_as_implicit() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+    depends: null
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = extract_setup_defaults(raw).unwrap();
+
+        assert_eq!(request.steps[0].depends, None);
     }
 
     #[test]

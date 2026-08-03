@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { renderWithProviders } from "@/test/render";
-import { cleanup, screen } from "@testing-library/react";
+import { cleanup, fireEvent, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import WorkflowEditor, { type WorkflowDraft } from "./WorkflowEditor";
 
@@ -45,6 +46,7 @@ describe("WorkflowEditor", () => {
     const lastCall = mockOnChange.mock.calls[mockOnChange.mock.calls.length - 1];
     if (lastCall) {
       expect(lastCall[0].steps).toHaveLength(3);
+      expect(lastCall[0].steps[2].depends).toBeUndefined();
     }
   });
 
@@ -91,6 +93,22 @@ describe("WorkflowEditor", () => {
     expect(mockOnChange).toHaveBeenCalled();
     const lastCall = mockOnChange.mock.calls[mockOnChange.mock.calls.length - 1]!;
     expect(lastCall[0].steps[1].kind).toBe("synthesis");
+  });
+
+  it("renames selected prerequisites when a step name changes", async () => {
+    const onChange = vi.fn();
+
+    function StatefulEditor() {
+      const [draft, setDraft] = useState(mockDraft);
+      return <WorkflowEditor value={draft} onChange={(next) => { setDraft(next); onChange(next); }} />;
+    }
+
+    renderWithProviders(<StatefulEditor />);
+
+    fireEvent.change(screen.getByDisplayValue("build"), { target: { value: "compile" } });
+
+    const lastCall = onChange.mock.calls[onChange.mock.calls.length - 1]!;
+    expect(lastCall[0].steps[1].depends).toEqual(["compile"]);
   });
 
   it("writes default sequencing, explicit roots, and selected prerequisites distinctly", async () => {
