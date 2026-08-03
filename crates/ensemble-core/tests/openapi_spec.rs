@@ -93,6 +93,31 @@ fn openapi_keeps_editor_step_dependencies_optional() {
 }
 
 #[test]
+fn openapi_documents_agent_state_worker_caps_as_integer_maps() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+    for schema in ["AgentRuntimeConfig", "GuidedAgentRuntimeForm"] {
+        let state_caps =
+            &spec["components"]["schemas"][schema]["properties"]["max_concurrent_agents_by_state"];
+        assert_eq!(state_caps["type"], "object", "{schema} must expose a map");
+        assert_eq!(
+            state_caps["additionalProperties"]["type"], "integer",
+            "{schema} state limits must be integers"
+        );
+        assert_eq!(
+            state_caps["additionalProperties"]["minimum"], 1,
+            "{schema} state limits must be positive"
+        );
+        assert_eq!(
+            state_caps["additionalProperties"]["maximum"],
+            u32::MAX,
+            "{schema} state limits must fit in u32"
+        );
+    }
+}
+
+#[test]
 #[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();

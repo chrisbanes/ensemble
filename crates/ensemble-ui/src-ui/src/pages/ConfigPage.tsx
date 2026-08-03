@@ -72,6 +72,8 @@ function toGuidedForm(form: GuidedConfigForm): GuidedForm {
       },
       agent: {
         ...form.runtime.agent,
+        max_concurrent_agents_by_state:
+          form.runtime.agent.max_concurrent_agents_by_state ?? {},
         permission_request_policy: toPermissionRequestPolicy(form.runtime.agent.permission_request_policy),
       },
     },

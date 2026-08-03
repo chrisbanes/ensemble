@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -45,13 +45,53 @@ function supportedPermissionMode(value: string | undefined) {
   return value && SUPPORTED_PERMISSION_MODES.has(value) ? value : undefined;
 }
 
-function normalizeGuidedForm(form: GuidedForm): GuidedForm {
+type StateCapRow = {
+  id: number;
+  state: string;
+  limit: string;
+};
+
+function stateCapRowsFromMap(stateCaps: Record<string, number>): StateCapRow[] {
+  return Object.entries(stateCaps).map(([state, limit], id) => ({
+    id,
+    state,
+    limit: String(limit),
+  }));
+}
+
+function stateCapRowsError(rows: StateCapRow[]) {
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const normalized = row.state.trim().toLowerCase();
+    if (!normalized) return "State names must not be blank.";
+    if (seen.has(normalized)) return "State names must be unique after trimming and case-folding.";
+    seen.add(normalized);
+    const limit = Number(row.limit);
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 4_294_967_295) {
+      return "State limits must be positive integers no greater than 4294967295.";
+    }
+  }
+  return undefined;
+}
+
+function stateCapMapFromRows(rows: StateCapRow[]) {
+  return Object.fromEntries(rows.map((row) => [row.state, Number(row.limit)]));
+}
+
+function normalizeGuidedForm(form: GuidedForm, stateCapRows: StateCapRow[]): GuidedForm {
   return {
     ...form,
     agents: form.agents.map(({ available_models: _availableModels, available_modes: _availableModes, ...agent }) => ({
       ...agent,
       permission_mode: supportedPermissionMode(agent.permission_mode),
     })),
+    runtime: {
+      ...form.runtime,
+      agent: {
+        ...form.runtime.agent,
+        max_concurrent_agents_by_state: stateCapMapFromRows(stateCapRows),
+      },
+    },
   };
 }
 
@@ -122,6 +162,7 @@ export interface GuidedForm {
       timeout_ms: number;
     };
     agent: {
+      max_concurrent_agents_by_state: Record<string, number>;
       max_retry_backoff_ms: number;
       command: string;
       session_mode: string;
@@ -155,6 +196,10 @@ export default function GuidedEditor({
   onReset,
 }: GuidedEditorProps) {
   const [form, setForm] = useState<GuidedForm>(initialForm);
+  const [stateCapRows, setStateCapRows] = useState<StateCapRow[]>(() =>
+    stateCapRowsFromMap(initialForm.runtime.agent.max_concurrent_agents_by_state)
+  );
+  const nextStateCapRowId = useRef(stateCapRows.length);
   const [isDirty, setIsDirty] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -167,6 +212,11 @@ export default function GuidedEditor({
 
   useEffect(() => {
     setForm(initialForm);
+    const rows = stateCapRowsFromMap(
+      initialForm.runtime.agent.max_concurrent_agents_by_state
+    );
+    setStateCapRows(rows);
+    nextStateCapRowId.current = rows.length;
     setIsDirty(false);
   }, [initialForm]);
 
@@ -189,9 +239,12 @@ export default function GuidedEditor({
   };
 
   const handleValidate = async () => {
-      setIsValidating(true);
+    setIsValidating(true);
     try {
-      const validatedIssues = await onValidate(normalizeGuidedForm(form), baseRawYaml);
+      const validatedIssues = await onValidate(
+        normalizeGuidedForm(form, stateCapRows),
+        baseRawYaml
+      );
       setDisplayedIssues(validatedIssues);
       setLastValidation({
         timestamp: new Date(),
@@ -205,7 +258,7 @@ export default function GuidedEditor({
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      await onSave(normalizeGuidedForm(form), baseRawYaml);
+      await onSave(normalizeGuidedForm(form, stateCapRows), baseRawYaml);
       setIsDirty(false);
     } finally {
       setIsSaving(false);
@@ -214,8 +267,18 @@ export default function GuidedEditor({
 
   const handleReset = () => {
     setForm(initialForm);
+    const rows = stateCapRowsFromMap(
+      initialForm.runtime.agent.max_concurrent_agents_by_state
+    );
+    setStateCapRows(rows);
+    nextStateCapRowId.current = rows.length;
     setIsDirty(false);
     onReset();
+  };
+
+  const updateStateCapRows = (update: (rows: StateCapRow[]) => StateCapRow[]) => {
+    setStateCapRows(update);
+    setIsDirty(true);
   };
 
   const hasErrors = displayedIssues.length > 0;
@@ -225,6 +288,7 @@ export default function GuidedEditor({
   }));
   const secretEdit = form.tracker.api_key_edit ?? { action: "preserve" as const };
   const secretEditError = secretEditValidationError(secretEdit);
+  const stateCapsError = stateCapRowsError(stateCapRows);
   const secretStatus =
     form.tracker.api_key.state === "redacted"
       ? "Existing secret is configured."
@@ -262,13 +326,19 @@ export default function GuidedEditor({
           <Button
             variant="outline"
             onClick={handleValidate}
-            disabled={isValidating || Boolean(secretEditError)}
+            disabled={isValidating || Boolean(secretEditError) || Boolean(stateCapsError)}
           >
             Validate
           </Button>
           <Button
             onClick={handleSave}
-            disabled={!isDirty || isSaving || hasErrors || Boolean(secretEditError)}
+            disabled={
+              !isDirty ||
+              isSaving ||
+              hasErrors ||
+              Boolean(secretEditError) ||
+              Boolean(stateCapsError)
+            }
           >
             <Save className="h-4 w-4 mr-2" />
             {isSaving ? "Saving..." : "Save"}
@@ -665,6 +735,76 @@ export default function GuidedEditor({
                 }
               />
             </div>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <h4 className="font-medium">Live workers by tracker state</h4>
+                <p className="text-sm text-muted-foreground">
+                  Optional limits for simultaneously running agent processes.
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                onClick={() =>
+                  updateStateCapRows((rows) => [
+                    ...rows,
+                    { id: nextStateCapRowId.current++, state: "", limit: "1" },
+                  ])
+                }
+              >
+                Add state limit
+              </Button>
+            </div>
+            {stateCapRows.map((row) => (
+              <div key={row.id} className="grid grid-cols-[1fr_8rem_auto] gap-2">
+                <Input
+                  aria-label="State"
+                  value={row.state}
+                  placeholder="In Progress"
+                  onChange={(event) =>
+                    updateStateCapRows((rows) =>
+                      rows.map((candidate) =>
+                        candidate.id === row.id
+                          ? { ...candidate, state: event.target.value }
+                          : candidate
+                      )
+                    )
+                  }
+                />
+                <Input
+                  aria-label="Limit"
+                  type="number"
+                  min={1}
+                  max={4_294_967_295}
+                  step={1}
+                  value={row.limit}
+                  onChange={(event) =>
+                    updateStateCapRows((rows) =>
+                      rows.map((candidate) =>
+                        candidate.id === row.id
+                          ? { ...candidate, limit: event.target.value }
+                          : candidate
+                      )
+                    )
+                  }
+                />
+                <Button
+                  variant="outline"
+                  aria-label={`Remove ${row.state || "blank state"}`}
+                  onClick={() =>
+                    updateStateCapRows((rows) =>
+                      rows.filter((candidate) => candidate.id !== row.id)
+                    )
+                  }
+                >
+                  Remove
+                </Button>
+              </div>
+            ))}
+            {stateCapsError && (
+              <p className="text-sm text-red-600">{stateCapsError}</p>
+            )}
           </div>
         </CardContent>
       </Card>

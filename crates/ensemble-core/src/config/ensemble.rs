@@ -2,8 +2,8 @@ use crate::agent::runtime::RuntimeKind;
 use crate::config::location::default_todo_state_path;
 use crate::error::PipelineError;
 use crate::workspace::finalize::RepoFinalizeConfig;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 /// Top-level configuration parsed from `ensemble.yaml`.
@@ -519,6 +519,9 @@ impl Default for HooksConfig {
 /// Runtime configuration for the agent executor.
 #[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct AgentRuntimeConfig {
+    #[serde(default, deserialize_with = "deserialize_state_worker_caps")]
+    #[schema(schema_with = state_worker_caps_schema)]
+    pub max_concurrent_agents_by_state: BTreeMap<String, u32>,
     #[serde(default = "default_max_retry_backoff_ms")]
     pub max_retry_backoff_ms: u64,
     #[serde(default = "default_agent_command")]
@@ -539,6 +542,77 @@ pub struct AgentRuntimeConfig {
     pub interaction_policy_text: Option<String>,
     #[serde(default)]
     pub interaction_policy_overrides: InteractionPolicyOverridesConfig,
+}
+
+fn deserialize_state_worker_caps<'de, D>(deserializer: D) -> Result<BTreeMap<String, u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let entries = serde_yaml::Mapping::deserialize(deserializer)?;
+    let mut parsed = Vec::with_capacity(entries.len());
+    for (raw_key, raw_limit) in entries {
+        let Some(state) = raw_key.as_str() else {
+            return Err(serde::de::Error::custom(format!(
+                "agent.max_concurrent_agents_by_state entry {raw_key:?} must use a state name"
+            )));
+        };
+        let Some(limit) = raw_limit
+            .as_u64()
+            .and_then(|limit| u32::try_from(limit).ok())
+        else {
+            return Err(serde::de::Error::custom(format!(
+                "agent.max_concurrent_agents_by_state entry {state:?} must be a positive integer"
+            )));
+        };
+        parsed.push((state.to_string(), limit));
+    }
+    normalize_state_worker_caps(parsed).map_err(serde::de::Error::custom)
+}
+
+pub(crate) fn normalize_state_worker_caps(
+    entries: impl IntoIterator<Item = (String, u32)>,
+) -> Result<BTreeMap<String, u32>, String> {
+    let mut normalized = BTreeMap::new();
+    let mut original_keys = BTreeMap::new();
+    for (state, limit) in entries {
+        let normalized_state = normalize_state_worker_cap_key(&state);
+        if normalized_state.is_empty() {
+            return Err(
+                "agent.max_concurrent_agents_by_state contains a blank state key".to_string(),
+            );
+        }
+        if limit == 0 {
+            return Err(format!(
+                "agent.max_concurrent_agents_by_state entry {state:?} must be a positive integer"
+            ));
+        }
+        if let Some(previous) = original_keys.insert(normalized_state.clone(), state.clone()) {
+            return Err(format!(
+                "agent.max_concurrent_agents_by_state entry {state:?} collides with {previous:?} after normalization"
+            ));
+        }
+        normalized.insert(normalized_state, limit);
+    }
+    Ok(normalized)
+}
+
+pub(crate) fn normalize_state_worker_cap_key(state: &str) -> String {
+    state.trim().to_lowercase()
+}
+
+pub(crate) fn state_worker_caps_schema() -> utoipa::openapi::schema::Object {
+    use utoipa::openapi::schema::{ObjectBuilder, Type};
+
+    ObjectBuilder::new()
+        .schema_type(Type::Object)
+        .property_names(Some(ObjectBuilder::new().schema_type(Type::String)))
+        .additional_properties(Some(
+            ObjectBuilder::new()
+                .schema_type(Type::Integer)
+                .minimum(Some(1))
+                .maximum(Some(u32::MAX)),
+        ))
+        .build()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
@@ -651,6 +725,7 @@ fn default_inject_interaction_policy_instructions() -> bool {
 impl Default for AgentRuntimeConfig {
     fn default() -> Self {
         Self {
+            max_concurrent_agents_by_state: BTreeMap::new(),
             max_retry_backoff_ms: default_max_retry_backoff_ms(),
             command: default_agent_command(),
             session_mode: default_session_mode(),
@@ -1783,6 +1858,7 @@ on_failure: Failed
         assert!(config.agent.interaction_policy_text.is_none());
         assert!(config.agent.interaction_policy_overrides.agents.is_empty());
         assert!(config.agent.interaction_policy_overrides.steps.is_empty());
+        assert!(config.agent.max_concurrent_agents_by_state.is_empty());
 
         // TrackerConfig defaults
         assert_eq!(config.tracker.active_states, vec!["Todo", "In Progress"]);
@@ -1795,6 +1871,50 @@ on_failure: Failed
             config.human_interaction.default_resume_mode,
             HumanResumeMode::Manual
         );
+    }
+
+    #[test]
+    fn max_concurrent_agents_by_state_normalizes_configured_states() {
+        let yaml = format!(
+            "{}\nagent:\n  max_concurrent_agents_by_state:\n    ' Todo ': 2\n    IN PROGRESS: 3\n",
+            minimal_yaml()
+        );
+
+        let config = parse_config(&yaml).unwrap();
+
+        assert_eq!(config.agent.max_concurrent_agents_by_state["todo"], 2);
+        assert_eq!(
+            config.agent.max_concurrent_agents_by_state["in progress"],
+            3
+        );
+    }
+
+    #[test]
+    fn max_concurrent_agents_by_state_rejects_invalid_entries_precisely() {
+        for (entries, offending) in [
+            ("    '   ': 1\n", "blank"),
+            ("    Todo: 0\n", "Todo"),
+            ("    Todo: -1\n", "Todo"),
+            ("    Todo: many\n", "Todo"),
+            ("    Todo: 1\n    ' todo ': 2\n", "todo"),
+        ] {
+            let yaml = format!(
+                "{}\nagent:\n  max_concurrent_agents_by_state:\n{entries}",
+                minimal_yaml()
+            );
+
+            let error = parse_config(&yaml).expect_err("invalid state cap must be rejected");
+            let message = error.to_string();
+
+            assert!(
+                message.contains("agent.max_concurrent_agents_by_state"),
+                "missing field path in {message:?}"
+            );
+            assert!(
+                message.to_lowercase().contains(&offending.to_lowercase()),
+                "missing offending entry {offending:?} in {message:?}"
+            );
+        }
     }
 
     #[test]

@@ -243,6 +243,9 @@ polling:
   interval_ms: 30000
 
 agent:
+  max_concurrent_agents_by_state:
+    todo: 2
+    in review: 1
   turn_timeout_ms: 3600000
   inject_interaction_policy_instructions: true
   interaction_policy_overrides:
@@ -519,12 +522,13 @@ steps:
 | `max_concurrent_agents` | integer | `4` | Worker-capacity cap; concurrent dispatch is not a first-release guarantee |
 | `max_step_parallelism` | integer | `2` | Per-issue worker cap reserved for deferred multi-branch execution |
 
-These limits count live agent workers, not claimed or running issues. Ensemble reserves the global
-and per-issue slot atomically for each exact step worker before publishing the step as running or
-launching its agent. This describes the implemented capacity accounting, not a supported guarantee
-of parallel execution in the sequential MVP. If either limit is full, the ready step remains pending
-without consuming a retry cycle. Pending ready steps in claimed pipelines are reconsidered when
-worker capacity is released and before new candidate issues are admitted on the next tick.
+These limits count live agent workers, not claimed or running issues. Ensemble reserves global,
+per-issue, and any configured `agent.max_concurrent_agents_by_state` slot atomically for each exact
+step worker before publishing the step as running or launching its agent. This describes the
+implemented capacity accounting, not a supported guarantee of parallel execution in the sequential
+MVP. If any limit is full, the ready step remains pending without consuming a retry cycle. Pending
+ready steps in claimed pipelines are reconsidered when worker capacity is released and before new
+candidate issues are admitted on the next tick.
 
 A worker keeps its reservation until its event bridge has closed and quiescence is proven.
 Pre-launch errors roll back only the rejected worker's reservation; success, failure,
@@ -576,6 +580,7 @@ existing configurations: Ensemble cannot enforce provider-internal model turns.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `max_concurrent_agents_by_state` | map of positive integers | `{}` | Optional live-worker caps keyed by normalized tracker state |
 | `max_retry_backoff_ms` | integer | `300000` | Cap on exponential backoff delay between retries |
 | `command` | string | `"claude-code"` | Agent binary command |
 | `session_mode` | string | `"code"` | Agent session mode |
@@ -590,6 +595,24 @@ existing configurations: Ensemble cannot enforce provider-internal model turns.
 | `interaction_policy_overrides.agents.<agent>.text` | string | — | Required for useful `custom` overrides; policy text appended for that agent |
 | `interaction_policy_overrides.steps.<step>.mode` | string | `inherit` | Per-step override mode. Step override wins over agent override |
 | `interaction_policy_overrides.steps.<step>.text` | string | — | Required for useful `custom` per-step overrides |
+
+State-cap keys are trimmed and lowercased when configuration is parsed and when a worker reserves
+capacity. Blank keys, zero or negative limits, non-numeric limits, and distinct keys that collide
+after normalization reject the complete configuration with an error naming
+`agent.max_concurrent_agents_by_state` and the offending entry. Omitting the field is identical to
+an empty map. States not present in the map have no additional state limit; the global and per-issue
+limits still apply.
+
+The exact live-worker registry is the sole state-cap authority. A worker retains the normalized
+state bucket captured from its owning issue when it reserves; later tracker reconciliation does not
+migrate or evict it. The next initial, downstream, restored, resumed, or capacity-deferred dispatch
+uses the owning issue snapshot's latest reconciled state. A full bucket harmlessly leaves the step
+pending and consumes no retry. Config generations remain immutable for active pipelines, replacement
+uses the serialized prepare-quiesce-commit boundary, and restart restores no agent process or
+persisted capacity ledger, so restored pending work makes a fresh reservation.
+
+These limits describe implemented capacity, not guaranteed parallel execution in the trusted-local
+sequential first release.
 
 Interaction policy override precedence is: `step override` → `agent override` → global `agent.*` defaults.
 

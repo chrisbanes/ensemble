@@ -150,6 +150,7 @@ describe("ConfigPage", () => {
           workspace: {},
           hooks: { timeout_ms: 1000 },
           agent: {
+            max_concurrent_agents_by_state: {},
             max_retry_backoff_ms: 1,
             command: "agent",
             session_mode: "code",
@@ -190,6 +191,7 @@ describe("ConfigPage", () => {
           workspace: {},
           hooks: { timeout_ms: 1000 },
           agent: {
+            max_concurrent_agents_by_state: {},
             max_retry_backoff_ms: 1,
             command: "agent",
             session_mode: "code",
@@ -256,6 +258,7 @@ describe("ConfigPage", () => {
           workspace: {},
           hooks: { timeout_ms: 1000 },
           agent: {
+            max_concurrent_agents_by_state: {},
             max_retry_backoff_ms: 1,
             command: "agent",
             session_mode: "code",

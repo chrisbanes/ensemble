@@ -21,10 +21,11 @@ use tracing::{debug, error, info, warn};
 
 use crate::acceptance::{AcceptanceCommandRunner, AcceptanceStatus, ShellAcceptanceCommandRunner};
 use crate::agent::cancellation::{
-    await_worker_drain, await_worker_quiescence, is_reconciliation_owned, live_worker_count,
-    mark_all_for_drain, mark_issue_for_drain, mark_worker_launched, new_cancellation_registry,
-    pending_reconciliation_issue_ids, remove_completed_worker, remove_drained_workers,
-    rollback_worker_reservation, try_reserve_worker, CancellationRegistry, WorkerDrainHandle,
+    await_worker_drain, await_worker_quiescence, has_available_state_worker_capacity,
+    is_reconciliation_owned, live_worker_count, mark_all_for_drain, mark_issue_for_drain,
+    mark_worker_launched, new_cancellation_registry, pending_reconciliation_issue_ids,
+    remove_completed_worker, remove_drained_workers, rollback_worker_reservation,
+    try_reserve_worker, CancellationRegistry, StateWorkerCapacity, WorkerDrainHandle,
     WorkerReservationError,
 };
 use crate::agent::events::{
@@ -1015,13 +1016,7 @@ impl Orchestrator {
 
             let eligible = {
                 let state = self.state.read().await;
-                is_dispatch_eligible(
-                    issue,
-                    &state,
-                    &active_lower,
-                    &terminal_lower,
-                    &HashMap::new(),
-                )
+                is_dispatch_eligible(issue, &state, &active_lower, &terminal_lower)
             };
 
             let restored_pipeline_ready = {
@@ -1032,6 +1027,13 @@ impl Orchestrator {
             if restored_pipeline_ready {
                 self.dispatch_issue(issue, None).await;
                 continue;
+            }
+
+            {
+                let config = self.config.read().await;
+                if !self.state_worker_capacity_available(issue, &config).await {
+                    continue;
+                }
             }
 
             if eligible.is_some() {
@@ -1370,6 +1372,12 @@ impl Orchestrator {
                             }
                         };
                         for req in requests {
+                            if !self
+                                .state_worker_capacity_available(issue, &config_snapshot)
+                                .await
+                            {
+                                return;
+                            }
                             let workspace_path =
                                 match self.prepare_step_workspace(issue, &config_snapshot).await {
                                     Ok(path) => path,
@@ -1528,6 +1536,12 @@ impl Orchestrator {
         // Process initial dispatch requests
         if let PipelineAction::Dispatch(requests) = action {
             for req in requests {
+                if !self
+                    .state_worker_capacity_available(issue, &config_snapshot)
+                    .await
+                {
+                    return;
+                }
                 let workspace_path =
                     match self.prepare_step_workspace(issue, &config_snapshot).await {
                         Ok(path) => path,
@@ -1626,6 +1640,25 @@ impl Orchestrator {
         }
     }
 
+    async fn state_worker_capacity_available(
+        &self,
+        issue: &Issue,
+        config: &EnsembleConfig,
+    ) -> bool {
+        let issue_state = {
+            let state = self.state.read().await;
+            state
+                .get_running(&issue.id)
+                .map(|entry| entry.issue.state.clone())
+                .unwrap_or_else(|| issue.state.clone())
+        };
+        has_available_state_worker_capacity(
+            &self.cancellation_registry,
+            &issue_state,
+            &config.agent.max_concurrent_agents_by_state,
+        )
+    }
+
     async fn dispatch_ready_steps_for_issue(&self, issue_id: &str, permit: &DispatchPermit) {
         let Some((issue, config_snapshot, attempt, requests)) = ({
             let state = self.state.read().await;
@@ -1650,6 +1683,12 @@ impl Orchestrator {
         };
 
         for request in requests {
+            if !self
+                .state_worker_capacity_available(&issue, &config_snapshot)
+                .await
+            {
+                return;
+            }
             let workspace_path = match self.prepare_step_workspace(&issue, &config_snapshot).await {
                 Ok(path) => path,
                 Err(error) => {
@@ -2238,7 +2277,7 @@ impl Orchestrator {
         dispatch: StepDispatchContext<'_>,
         _permit: &DispatchPermit,
     ) -> Result<StepDispatchOutcome, EnsembleError> {
-        let worker_identity = {
+        let (worker_identity, issue_snapshot) = {
             let state = self.state.read().await;
             let running_entry =
                 state
@@ -2267,14 +2306,18 @@ impl Orchestrator {
                         dispatch.step_name
                     ),
                 })?;
-            WorkerIdentity {
-                issue_id: issue.id.clone(),
-                run_id,
-                cycle,
-                step_name: dispatch.step_name.to_string(),
-                started_at: running_entry.started_at,
-            }
+            (
+                WorkerIdentity {
+                    issue_id: issue.id.clone(),
+                    run_id,
+                    cycle,
+                    step_name: dispatch.step_name.to_string(),
+                    started_at: running_entry.started_at,
+                },
+                running_entry.issue.clone(),
+            )
         };
+        let issue = &issue_snapshot;
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let (completion_tx, completion_rx) = watch::channel(false);
         match try_reserve_worker(
@@ -2284,11 +2327,16 @@ impl Orchestrator {
             completion_rx,
             config_snapshot.concurrency.max_concurrent_agents,
             config_snapshot.concurrency.max_step_parallelism,
+            StateWorkerCapacity::new(
+                &issue.state,
+                &config_snapshot.agent.max_concurrent_agents_by_state,
+            ),
         ) {
             Ok(()) => {}
             Err(
                 WorkerReservationError::GlobalCapacityExhausted
-                | WorkerReservationError::IssueCapacityExhausted,
+                | WorkerReservationError::IssueCapacityExhausted
+                | WorkerReservationError::StateCapacityExhausted,
             ) => {
                 debug!(
                     issue_id = %issue.id,
@@ -2333,6 +2381,12 @@ impl Orchestrator {
                 );
                 match self.tracker.set_issue_state(&issue.id, state_name).await {
                     Ok(()) => {
+                        let mut transitioned_issue = issue.clone();
+                        transitioned_issue.state = state_name.to_string();
+                        self.state
+                            .write()
+                            .await
+                            .update_issue_snapshot(&issue.id, transitioned_issue);
                         info!(
                             event = TRACKER_TRANSITION_SUCCEEDED,
                             issue_id = %issue.id,
@@ -3381,6 +3435,12 @@ impl Orchestrator {
                                     return;
                                 };
                                 for (req, step_outputs) in dispatch_contexts {
+                                    if !self
+                                        .state_worker_capacity_available(issue, &config_snapshot)
+                                        .await
+                                    {
+                                        return;
+                                    }
                                     let workspace_path = match self
                                         .prepare_step_workspace(issue, &config_snapshot)
                                         .await
@@ -7172,7 +7232,6 @@ impl Orchestrator {
                     reason: format!("issue '{}' is not waiting on human", issue.identifier),
                 })?
         };
-
         if waiting.step_name != interaction.step_name {
             return Err(AgentError::PromptError {
                 reason: format!(
@@ -7295,11 +7354,35 @@ impl Orchestrator {
             }
         }
 
-        if !current_config.agents.contains_key(&current_step.agent) {
+        let (pipeline_config, pipeline_step) = {
+            let state = self.state.read().await;
+            let config = state
+                .get_pipeline_config(&issue.id)
+                .cloned()
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!(
+                        "issue '{}' is missing its pipeline config snapshot",
+                        issue.identifier
+                    ),
+                })?;
+            let step = state
+                .get_pipeline_run(&issue.id)
+                .and_then(|run| run.step(&waiting.step_name))
+                .cloned()
+                .ok_or_else(|| AgentError::PromptError {
+                    reason: format!(
+                        "issue '{}' is missing blocked step '{}'",
+                        issue.identifier, waiting.step_name
+                    ),
+                })?;
+            (config, step)
+        };
+
+        if !pipeline_config.agents.contains_key(&pipeline_step.agent) {
             return Err(AgentError::PromptError {
                 reason: format!(
                     "blocked step agent '{}' no longer exists",
-                    current_step.agent
+                    pipeline_step.agent
                 ),
             }
             .into());
@@ -7313,7 +7396,6 @@ impl Orchestrator {
                 &state,
                 &workflow_states,
                 &current_config.tracker.terminal_states,
-                &HashMap::new(),
             ) {
                 return Err(AgentError::PromptError {
                     reason: format!("issue '{}' cannot be resumed: {reason}", issue.identifier),
@@ -7356,6 +7438,13 @@ impl Orchestrator {
                     resolved_at,
                 );
 
+                if !self
+                    .state_worker_capacity_available(issue, &pipeline_config)
+                    .await
+                {
+                    return Err(EnsembleError::RuntimeBusy);
+                }
+
                 let (attempt, step_outputs, previous_running) = {
                     let mut state = self.state.write().await;
                     let previous_running = state.get_running(&issue.id).cloned();
@@ -7365,42 +7454,42 @@ impl Orchestrator {
                         .unwrap_or(interaction.pipeline_cycle.max(1));
                     let step_outputs = state
                         .get_pipeline_run(&issue.id)
-                        .and_then(|run| run.output_context_for(&current_step.name))
+                        .and_then(|run| run.output_context_for(&pipeline_step.name))
                         .unwrap_or_default();
                     state.add_running(issue, Some(attempt));
                     (attempt, step_outputs, previous_running)
                 };
 
-                let workspace_path = match self.prepare_step_workspace(issue, &current_config).await
-                {
-                    Ok(path) => path,
-                    Err(error) => {
-                        let mut state = self.state.write().await;
-                        Self::restore_previous_running(
-                            &mut state,
-                            &issue.id,
-                            previous_running.as_ref(),
-                        );
-                        return Err(AgentError::PromptError {
-                            reason: format!("workspace error: {error}"),
+                let workspace_path =
+                    match self.prepare_step_workspace(issue, &pipeline_config).await {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let mut state = self.state.write().await;
+                            Self::restore_previous_running(
+                                &mut state,
+                                &issue.id,
+                                previous_running.as_ref(),
+                            );
+                            return Err(AgentError::PromptError {
+                                reason: format!("workspace error: {error}"),
+                            }
+                            .into());
                         }
-                        .into());
-                    }
-                };
+                    };
 
                 let dispatch_outcome = match self
                     .dispatch_step(
                         issue,
-                        Arc::clone(&current_config),
+                        Arc::clone(&pipeline_config),
                         StepDispatchContext {
-                            step_name: &current_step.name,
-                            agent_name: &current_step.agent,
-                            step_kind: current_step.kind,
-                            tracker_state: current_step.tracker_state.as_deref(),
+                            step_name: &pipeline_step.name,
+                            agent_name: &pipeline_step.agent,
+                            step_kind: pipeline_step.kind,
+                            tracker_state: pipeline_step.tracker_state.as_deref(),
                             attempt: Some(attempt),
                             timeout_ms: Self::effective_step_timeout_ms(
-                                current_step.timeout_ms,
-                                &current_config,
+                                pipeline_step.timeout_ms,
+                                &pipeline_config,
                             ),
                             interaction_response: Some(interaction_response),
                             interaction_resume_id: Some(&interaction.id),
@@ -7420,7 +7509,7 @@ impl Orchestrator {
                             matches!(
                                 state
                                     .get_pipeline_run(&issue.id)
-                                    .and_then(|run| run.step_states.get(&current_step.name)),
+                                    .and_then(|run| run.step_states.get(&pipeline_step.name)),
                                 Some(StepState::Running { .. })
                             )
                         };
@@ -7476,14 +7565,14 @@ impl Orchestrator {
                             approved, reason, ..
                         } => {
                             if approved {
-                                run.approve_gate(&current_step.name)
+                                run.approve_gate(&pipeline_step.name)
                             } else {
                                 run.reject_gate(
-                                    &current_step.name,
+                                    &pipeline_step.name,
                                     reason.unwrap_or_else(|| {
                                         format!(
                                             "approval rejected for step '{}'",
-                                            current_step.name
+                                            pipeline_step.name
                                         )
                                     }),
                                 )
@@ -7521,6 +7610,16 @@ impl Orchestrator {
 
                 match action {
                     PipelineAction::Dispatch(_requests) => {
+                        if !self
+                            .state_worker_capacity_available(issue, &pipeline_config)
+                            .await
+                        {
+                            let mut state = self.state.write().await;
+                            state
+                                .pipeline_runs
+                                .insert(issue.id.clone(), previous_run.clone());
+                            return Err(EnsembleError::RuntimeBusy);
+                        }
                         let attempt = {
                             let mut state = self.state.write().await;
                             let attempt = state
@@ -7532,7 +7631,7 @@ impl Orchestrator {
                         };
 
                         let workspace_path =
-                            match self.prepare_step_workspace(issue, &current_config).await {
+                            match self.prepare_step_workspace(issue, &pipeline_config).await {
                                 Ok(path) => path,
                                 Err(error) => {
                                     let mut state = self.state.write().await;
@@ -7556,7 +7655,7 @@ impl Orchestrator {
                             let dispatch_outcome = match self
                                 .dispatch_step(
                                     issue,
-                                    Arc::clone(&current_config),
+                                    Arc::clone(&pipeline_config),
                                     StepDispatchContext {
                                         step_name: &req.step_name,
                                         agent_name: &req.agent_name,
@@ -7565,7 +7664,7 @@ impl Orchestrator {
                                         attempt: Some(attempt),
                                         timeout_ms: Self::effective_step_timeout_ms(
                                             req.timeout_ms,
-                                            &current_config,
+                                            &pipeline_config,
                                         ),
                                         interaction_response: None,
                                         interaction_resume_id: Some(&interaction.id),
@@ -7578,7 +7677,7 @@ impl Orchestrator {
                                                 identifier: issue.identifier.clone(),
                                                 run_id: waiting.run_id.clone(),
                                                 cycle: previous_run.cycle,
-                                                step: Some(current_step.name.clone()),
+                                                step: Some(pipeline_step.name.clone()),
                                                 reason: Some(format!(
                                                     "interaction '{}' retirement failed",
                                                     interaction.id
@@ -7645,7 +7744,7 @@ impl Orchestrator {
                         }
                     }
                     PipelineAction::Succeeded => {
-                        match self.run_acceptance_phase(issue, &current_config).await {
+                        match self.run_acceptance_phase(issue, &pipeline_config).await {
                             AcceptancePhaseOutcome::Passed => {}
                             AcceptancePhaseOutcome::Failed { reason, owner } => {
                                 if !interaction_was_retired {
@@ -7653,7 +7752,7 @@ impl Orchestrator {
                                 }
                                 self.schedule_acceptance_failure(
                                     issue,
-                                    &current_config,
+                                    &pipeline_config,
                                     &reason,
                                     &owner,
                                 )
@@ -7666,7 +7765,7 @@ impl Orchestrator {
                             .finalize_and_stage_terminal_transition(
                                 &issue.id,
                                 &issue.identifier,
-                                &current_config,
+                                &pipeline_config,
                             )
                             .await;
                         let completed_at = Utc::now();
@@ -7694,7 +7793,7 @@ impl Orchestrator {
                             ) {
                                 (
                                     Some(TerminalOutcome::Succeeded),
-                                    Some(current_config.on_success.clone()),
+                                    Some(pipeline_config.on_success.clone()),
                                     history_record,
                                 )
                             } else {
@@ -7709,7 +7808,7 @@ impl Orchestrator {
                                 }
                                 (
                                     is_terminal_failure.then_some(TerminalOutcome::Failed),
-                                    is_terminal_failure.then(|| current_config.on_failure.clone()),
+                                    is_terminal_failure.then(|| pipeline_config.on_failure.clone()),
                                     None,
                                 )
                             }
@@ -7750,7 +7849,7 @@ impl Orchestrator {
                         self.begin_terminal_transition(
                             issue,
                             TerminalOutcome::Failed,
-                            current_config.on_failure.clone(),
+                            pipeline_config.on_failure.clone(),
                             history_record,
                         )
                         .await;
@@ -7781,7 +7880,7 @@ impl Orchestrator {
             PipelineEvent::InputResumed {
                 issue_identifier: issue.identifier.clone(),
                 timestamp: Utc::now(),
-                step_name: current_step.name.clone(),
+                step_name: pipeline_step.name.clone(),
                 detail: format!("resumed from interaction {}", interaction.id),
             },
         )
@@ -7794,7 +7893,7 @@ impl Orchestrator {
             PipelineEvent::StepResumedFromHumanReply {
                 issue_identifier: issue.identifier.clone(),
                 timestamp: Utc::now(),
-                step_name: current_step.name.clone(),
+                step_name: pipeline_step.name.clone(),
                 ask_id: interaction.id.clone(),
                 detail: "step resumed after human reply".to_string(),
             },
@@ -11810,9 +11909,13 @@ agent:
     }
 
     #[tokio::test]
-    async fn restored_live_pipeline_run_dispatches_on_next_tick() {
+    async fn state_worker_dispatch_restored_run_waits_for_state_capacity() {
         let temp = tempfile::tempdir().unwrap();
-        let cfg = make_config();
+        let mut cfg = make_config();
+        cfg.concurrency.max_concurrent_agents = 2;
+        cfg.agent
+            .max_concurrent_agents_by_state
+            .insert("todo".to_string(), 1);
         let issue = test_issue("1", "Todo");
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![issue.clone()])),
@@ -11830,6 +11933,26 @@ agent:
             cfg.polling.interval_ms,
             &cfg.concurrency,
         )));
+        let cancellation_registry = new_cancellation_registry();
+        let peer = WorkerIdentity {
+            issue_id: "peer".to_string(),
+            run_id: "peer-run".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (peer_complete_tx, peer_complete_rx) = watch::channel(false);
+        try_reserve_worker(
+            &cancellation_registry,
+            peer.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            peer_complete_rx,
+            cfg.concurrency.max_concurrent_agents,
+            cfg.concurrency.max_step_parallelism,
+            StateWorkerCapacity::new("Todo", &cfg.agent.max_concurrent_agents_by_state),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(&cancellation_registry, &peer));
         let orchestrator = Orchestrator::new_with_state(
             OrchestratorRuntimeParts {
                 state: Arc::clone(&state),
@@ -11840,7 +11963,7 @@ agent:
                 workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
                     .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
-                cancellation_registry: new_cancellation_registry(),
+                cancellation_registry: cancellation_registry.clone(),
                 event_bus: EventBus::new(),
                 transcript_event_bus: TranscriptEventBus::new(),
                 workspace_root: temp.path().join("workspaces"),
@@ -11873,6 +11996,33 @@ agent:
 
         orchestrator.handle_tick().await;
 
+        {
+            let lock = state.read().await;
+            assert!(lock.is_running(&issue.id));
+            assert!(matches!(
+                lock.get_pipeline_run(&issue.id)
+                    .and_then(|run| run.step_states.get("build")),
+                Some(StepState::Pending)
+            ));
+            assert!(!lock.retry_attempts.contains_key(&issue.id));
+        }
+        let prepared_workspaces = std::fs::read_dir(temp.path().join("workspaces"))
+            .map(|entries| {
+                entries
+                    .map(|entry| entry.unwrap().file_name())
+                    .filter(|name| name != ".ensemble")
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        assert!(
+            prepared_workspaces.is_empty(),
+            "state-cap deferral must not prepare a workspace: {prepared_workspaces:?}"
+        );
+
+        peer_complete_tx.send(true).unwrap();
+        assert!(remove_completed_worker(&cancellation_registry, &peer));
+        orchestrator.handle_tick().await;
+
         let lock = state.read().await;
         assert!(lock.is_running(&issue.id));
         assert!(matches!(
@@ -11880,6 +12030,90 @@ agent:
                 .and_then(|run| run.step_states.get("build")),
             Some(StepState::Running { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn state_worker_dispatch_full_bucket_does_not_claim_fresh_candidate() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = make_config();
+        cfg.concurrency.max_concurrent_agents = 2;
+        cfg.agent
+            .max_concurrent_agents_by_state
+            .insert("todo".to_string(), 1);
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let config = Arc::new(RwLock::new(cfg.clone()));
+        let (shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        drop(shutdown_tx);
+        let state = Arc::new(RwLock::new(OrchestratorState::new(
+            cfg.polling.interval_ms,
+            &cfg.concurrency,
+        )));
+        let cancellation_registry = new_cancellation_registry();
+        let peer = WorkerIdentity {
+            issue_id: "peer".to_string(),
+            run_id: "peer-run".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (_peer_complete_tx, peer_complete_rx) = watch::channel(false);
+        try_reserve_worker(
+            &cancellation_registry,
+            peer.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            peer_complete_rx,
+            cfg.concurrency.max_concurrent_agents,
+            cfg.concurrency.max_step_parallelism,
+            StateWorkerCapacity::new("Todo", &cfg.agent.max_concurrent_agents_by_state),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(&cancellation_registry, &peer));
+        let orchestrator = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&state),
+                config,
+                tracker,
+                agent_runner: Arc::new(MockRunner {
+                    delay_ms: 0,
+                    observed_commands: None,
+                    observed_timeouts: None,
+                    cancellation_probe: None,
+                }),
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
+                workspace_mgr: WorkspaceManager::new(&temp.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry,
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root: temp.path().join("workspaces"),
+            },
+            temp.path(),
+            shutdown_rx,
+        );
+
+        orchestrator.handle_tick().await;
+
+        let lock = state.read().await;
+        assert!(
+            !lock.is_claimed(&issue.id),
+            "a full state bucket must not claim a fresh candidate"
+        );
+        assert!(!lock.is_running(&issue.id));
+        assert!(lock.get_pipeline_run(&issue.id).is_none());
+        drop(lock);
+        assert!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue(&issue.id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a full state bucket must not journal a fresh run"
+        );
     }
 
     #[tokio::test]
@@ -15001,9 +15235,18 @@ agent:
     }
 
     #[tokio::test]
-    async fn question_resume_capacity_deferral_preserves_the_waiting_owner() {
+    async fn state_worker_dispatch_resume_uses_latest_reconciled_state() {
         let mut raw_config = make_config();
-        raw_config.concurrency.max_concurrent_agents = 1;
+        raw_config.concurrency.max_concurrent_agents = 3;
+        raw_config.tracker.active_states.push("Review".to_string());
+        raw_config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("todo".to_string(), 1);
+        raw_config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("review".to_string(), 1);
         let config = Arc::new(RwLock::new(raw_config));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![])),
@@ -15076,19 +15319,31 @@ agent:
             .await
             .unwrap();
 
+        let peer = WorkerIdentity {
+            issue_id: "2".to_string(),
+            run_id: "peer-run".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
         let (_, peer_completion) = watch::channel(false);
-        crate::agent::cancellation::register_worker(
+        try_reserve_worker(
             &orchestrator.cancellation_registry,
-            WorkerIdentity {
-                issue_id: "2".to_string(),
-                run_id: "peer-run".to_string(),
-                cycle: 1,
-                step_name: "build".to_string(),
-                started_at: Utc::now(),
-            },
+            peer.clone(),
             tokio_util::sync::CancellationToken::new(),
             peer_completion,
-        );
+            3,
+            1,
+            StateWorkerCapacity::new(
+                "Todo",
+                &config.read().await.agent.max_concurrent_agents_by_state,
+            ),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(
+            &orchestrator.cancellation_registry,
+            &peer
+        ));
 
         orchestrator
             .resume_blocked_issue(&issue)
@@ -15116,6 +15371,76 @@ agent:
                 .unwrap()
                 .awaiting_resume
         );
+
+        let review_issue = Issue {
+            state: "Review".to_string(),
+            ..issue
+        };
+        config
+            .write()
+            .await
+            .agent
+            .max_concurrent_agents_by_state
+            .remove("review");
+        let review_peer = WorkerIdentity {
+            issue_id: "3".to_string(),
+            run_id: "review-peer-run".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (review_peer_complete_tx, review_peer_completion) = watch::channel(false);
+        let pipeline_config = orchestrator
+            .state
+            .read()
+            .await
+            .get_pipeline_config(&review_issue.id)
+            .unwrap()
+            .clone();
+        try_reserve_worker(
+            &orchestrator.cancellation_registry,
+            review_peer.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            review_peer_completion,
+            3,
+            1,
+            StateWorkerCapacity::new(
+                "Review",
+                &pipeline_config.agent.max_concurrent_agents_by_state,
+            ),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(
+            &orchestrator.cancellation_registry,
+            &review_peer
+        ));
+
+        orchestrator
+            .resume_blocked_issue(&review_issue)
+            .await
+            .expect_err("resume must retain the owning pipeline's state caps");
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .is_waiting_on_human(&review_issue.id));
+
+        review_peer_complete_tx.send(true).unwrap();
+        assert!(remove_completed_worker(
+            &orchestrator.cancellation_registry,
+            &review_peer
+        ));
+        orchestrator
+            .resume_blocked_issue(&review_issue)
+            .await
+            .expect("latest reconciled state must select the next reservation bucket");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running(&review_issue.id));
+        assert!(!state.is_waiting_on_human(&review_issue.id));
+        assert!(!state.retry_attempts.contains_key(&review_issue.id));
+        drop(state);
+        assert_eq!(live_worker_count(&orchestrator.cancellation_registry), 2);
     }
 
     #[tokio::test]
@@ -21996,11 +22321,23 @@ agent:
         tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
         Arc<tokio::sync::Semaphore>,
     ) {
-        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
-        let release = Arc::new(tokio::sync::Semaphore::new(0));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(issues)),
         });
+        capacity_test_orchestrator_with_tracker(config, tracker)
+    }
+
+    fn capacity_test_orchestrator_with_tracker(
+        config: EnsembleConfig,
+        tracker: Arc<dyn IssueTracker>,
+    ) -> (
+        Orchestrator,
+        tempfile::TempDir,
+        tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+        Arc<tokio::sync::Semaphore>,
+    ) {
+        let (started_tx, started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
         let runner: Arc<dyn AgentRunner> = Arc::new(CapacityBlockingRunner {
             started: started_tx,
             release: Arc::clone(&release),
@@ -22100,6 +22437,155 @@ agent:
         orchestrator.handle_worker_event(event).await;
 
         receive_started_worker(&mut started).await;
+    }
+
+    #[tokio::test]
+    async fn state_worker_dispatch_initial_and_deferred_use_independent_buckets() {
+        let mut config = parallel_capacity_config(4, 2);
+        config.agent.max_concurrent_agents_by_state = std::collections::BTreeMap::from([
+            ("todo".to_string(), 1),
+            ("in progress".to_string(), 1),
+        ]);
+        let issues = vec![
+            test_issue("1", "Todo"),
+            test_issue("2", "Todo"),
+            test_issue("3", "In Progress"),
+        ];
+        let (orchestrator, _dir, mut started, release) = capacity_test_orchestrator(config, issues);
+
+        orchestrator.handle_tick().await;
+
+        let mut initial = vec![
+            receive_started_worker(&mut started).await,
+            receive_started_worker(&mut started).await,
+        ];
+        initial.sort();
+        assert_eq!(initial[0].0, "1");
+        assert_eq!(initial[1].0, "3");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), started.recv())
+                .await
+                .is_err()
+        );
+        assert!(orchestrator.state.read().await.retry_attempts.is_empty());
+
+        release.add_permits(1);
+        let completed = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        orchestrator.handle_worker_event(completed).await;
+
+        receive_started_worker(&mut started).await;
+        assert!(orchestrator.state.read().await.retry_attempts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn state_worker_dispatch_batched_roots_use_tracker_transition_bucket() {
+        let mut config = parallel_capacity_config(2, 2);
+        config.agent.max_concurrent_agents_by_state = std::collections::BTreeMap::from([
+            ("todo".to_string(), 1),
+            ("in progress".to_string(), 1),
+        ]);
+        config.steps[0].tracker_state = Some("In Progress".to_string());
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![issue])),
+            state_writes: Arc::new(RwLock::new(Vec::new())),
+        });
+        let (orchestrator, _dir, mut started, _release) =
+            capacity_test_orchestrator_with_tracker(config, tracker);
+
+        orchestrator.handle_tick().await;
+
+        let mut steps = vec![
+            receive_started_worker(&mut started).await.1,
+            receive_started_worker(&mut started).await.1,
+        ];
+        steps.sort();
+        assert_eq!(steps, ["first", "second"]);
+        assert_eq!(
+            orchestrator
+                .state
+                .read()
+                .await
+                .get_running("1")
+                .unwrap()
+                .issue
+                .state,
+            "In Progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_worker_dispatch_downstream_reuses_released_bucket() {
+        let mut config = parallel_capacity_config(2, 2);
+        config.agent.max_concurrent_agents_by_state =
+            std::collections::BTreeMap::from([("todo".to_string(), 1)]);
+        config.steps[1].depends = Some(vec!["first".to_string()]);
+        let (orchestrator, _dir, mut started, release) =
+            capacity_test_orchestrator(config, vec![test_issue("1", "Todo")]);
+
+        orchestrator.handle_tick().await;
+        assert_eq!(receive_started_worker(&mut started).await.1, "first");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), started.recv())
+                .await
+                .is_err()
+        );
+
+        release.add_permits(1);
+        let completed = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        orchestrator.handle_worker_event(completed).await;
+
+        assert_eq!(receive_started_worker(&mut started).await.1, "second");
+        assert!(orchestrator.state.read().await.retry_attempts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn state_worker_dispatch_downstream_uses_successful_tracker_transition_bucket() {
+        let mut config = parallel_capacity_config(2, 2);
+        config.agent.max_concurrent_agents_by_state = std::collections::BTreeMap::from([
+            ("todo".to_string(), 1),
+            ("in progress".to_string(), 1),
+        ]);
+        config.steps[0].tracker_state = Some("In Progress".to_string());
+        config.steps[1].depends = Some(vec!["first".to_string()]);
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+            state_writes: Arc::new(RwLock::new(Vec::new())),
+        });
+        let (orchestrator, _dir, mut started, release) =
+            capacity_test_orchestrator_with_tracker(config, tracker);
+
+        orchestrator.handle_tick().await;
+        assert_eq!(receive_started_worker(&mut started).await.1, "first");
+
+        release.add_permits(1);
+        let completed = tokio::time::timeout(
+            Duration::from_secs(1),
+            recv_worker_event(&orchestrator.worker_rx),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        orchestrator.handle_worker_event(completed).await;
+        assert_eq!(receive_started_worker(&mut started).await.1, "second");
+
+        orchestrator
+            .dispatch_issue(&test_issue("2", "Todo"), None)
+            .await;
+        assert_eq!(receive_started_worker(&mut started).await.0, "2");
     }
 
     #[tokio::test]
