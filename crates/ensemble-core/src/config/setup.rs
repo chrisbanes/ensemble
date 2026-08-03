@@ -77,7 +77,8 @@ pub struct SetupStep {
     pub agent_role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    pub depends: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
 }
 
@@ -715,11 +716,11 @@ fn generate_yaml(request: &SetupRequest) -> String {
                     step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
                 }
             }
-            if !step.depends.is_empty() {
+            if let Some(depends) = &step.depends {
                 step_map.insert(
                     "depends".into(),
                     serde_yaml::Value::Sequence(
-                        step.depends
+                        depends
                             .iter()
                             .map(|d| serde_yaml::Value::String(d.clone()))
                             .collect(),
@@ -822,8 +823,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 name: step.name.clone(),
                 kind,
                 agent: step.agent_role.clone(),
-                // Setup steps treat an empty list as an explicit root, not an implicit sequential dep.
-                depends: Some(step.depends.clone()),
+                depends: step.depends.clone(),
                 tracker_state: step.tracker_state.clone(),
                 timeout_ms: None,
                 approval: None,
@@ -1079,15 +1079,14 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                 .filter_map(|item| {
                     let name = item.get("name")?.as_str()?;
                     let agent_role = item.get("agent")?.as_str()?;
-                    let depends = item
-                        .get("depends")
-                        .and_then(|d| d.as_sequence())
-                        .map(|seq| {
-                            seq.iter()
-                                .filter_map(|v| v.as_str().map(String::from))
+                    let depends = item.get("depends").and_then(|value| {
+                        value.as_sequence().map(|dependencies| {
+                            dependencies
+                                .iter()
+                                .filter_map(|dependency| dependency.as_str().map(String::from))
                                 .collect()
                         })
-                        .unwrap_or_default();
+                    });
                     let tracker_state = item
                         .get("tracker_state")
                         .and_then(|s| s.as_str())
@@ -1284,9 +1283,8 @@ fn update_yaml_from_request(
                     step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
                 }
             }
-            if !s.depends.is_empty() {
-                let deps: Vec<serde_yaml::Value> = s
-                    .depends
+            if let Some(depends) = &s.depends {
+                let deps: Vec<serde_yaml::Value> = depends
                     .iter()
                     .map(|d| serde_yaml::Value::String(d.clone()))
                     .collect();
@@ -1457,7 +1455,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "build".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1626,7 +1624,7 @@ on_failure: Failed
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: Some("In Progress".to_string()),
             }],
             on_success: "Done".to_string(),
@@ -1669,7 +1667,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1726,7 +1724,7 @@ on_failure: Failed
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1764,7 +1762,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1808,7 +1806,7 @@ on_failure: Failed
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1877,7 +1875,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1917,7 +1915,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1956,7 +1954,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -1993,7 +1991,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2095,7 +2093,7 @@ on_failure: Failed
             _ => panic!("expected GitHub tracker"),
         }
         assert_eq!(request.agents[0].model, Some("sonnet".to_string()));
-        assert_eq!(request.steps[0].depends, vec!["test"]);
+        assert_eq!(request.steps[0].depends, Some(vec!["test".to_string()]));
     }
 
     #[test]
@@ -2141,7 +2139,7 @@ custom_section:
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: Some("In Progress".to_string()),
             }],
             on_success: "Done".to_string(),
@@ -2207,7 +2205,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: Some("In Progress".to_string()),
             }],
             on_success: "Merged".to_string(),
@@ -2274,14 +2272,14 @@ on_failure: Failed
                 name: "a".to_string(),
                 agent_role: "agent".to_string(),
                 kind: None,
-                depends: vec!["b".to_string()],
+                depends: Some(vec!["b".to_string()]),
                 tracker_state: None,
             },
             SetupStep {
                 name: "b".to_string(),
                 agent_role: "agent".to_string(),
                 kind: None,
-                depends: vec!["a".to_string()],
+                depends: Some(vec!["a".to_string()]),
                 tracker_state: None,
             },
         ];
@@ -2297,21 +2295,21 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             },
             SetupStep {
                 name: "test".to_string(),
                 agent_role: "tester".to_string(),
                 kind: None,
-                depends: vec!["build".to_string()],
+                depends: Some(vec!["build".to_string()]),
                 tracker_state: None,
             },
             SetupStep {
                 name: "deploy".to_string(),
                 agent_role: "deployer".to_string(),
                 kind: None,
-                depends: vec!["test".to_string()],
+                depends: Some(vec!["test".to_string()]),
                 tracker_state: None,
             },
         ];
@@ -2330,7 +2328,7 @@ on_failure: Failed
             name: "build".into(),
             agent_role: "builder".into(),
             kind: None,
-            depends: vec!["missing".into()],
+            depends: Some(vec!["missing".into()]),
             tracker_state: None,
         }];
 
@@ -2345,21 +2343,21 @@ on_failure: Failed
                 name: "lint".into(),
                 agent_role: "linter".into(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             },
             SetupStep {
                 name: "build".into(),
                 agent_role: "builder".into(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             },
             SetupStep {
                 name: "test".into(),
                 agent_role: "tester".into(),
                 kind: None,
-                depends: vec!["lint".into(), "build".into()],
+                depends: Some(vec!["lint".into(), "build".into()]),
                 tracker_state: None,
             },
         ];
@@ -2382,7 +2380,7 @@ on_failure: Failed
             name: "build".into(),
             agent_role: "builder".into(),
             kind: Some("synthsis".into()),
-            depends: vec![],
+            depends: Some(vec![]),
             tracker_state: None,
         }];
 
@@ -2407,7 +2405,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2470,7 +2468,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2502,7 +2500,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2536,7 +2534,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2625,7 +2623,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2859,7 +2857,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -2880,6 +2878,67 @@ on_failure: Failed
             "reviewer should be removed since it's not in the request"
         );
         assert_eq!(agents.len(), 1, "only builder should remain in agents");
+    }
+
+    #[test]
+    fn setup_round_trips_implicit_and_explicit_dependencies() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+  - name: lint
+    agent: builder
+    depends: []
+  - name: test
+    agent: builder
+    depends: [build]
+  - name: publish
+    agent: builder
+    depends: []
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = extract_setup_defaults(raw).unwrap();
+        let merged = merge_setup_request(Some(raw), &request).unwrap();
+        let steps = serde_yaml::from_str::<serde_yaml::Value>(&merged.raw_yaml).unwrap();
+        let steps = steps["steps"].as_sequence().unwrap();
+
+        assert!(steps[0].get("depends").is_none());
+        assert_eq!(steps[1]["depends"], serde_yaml::Value::Sequence(vec![]));
+        assert_eq!(
+            steps[2]["depends"],
+            serde_yaml::to_value(["build"]).unwrap()
+        );
+        assert_eq!(steps[3]["depends"], serde_yaml::Value::Sequence(vec![]));
+    }
+
+    #[test]
+    fn setup_defaults_treat_null_dependencies_as_implicit() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+    depends: null
+on_success: Done
+on_failure: Failed
+"#;
+
+        let request = extract_setup_defaults(raw).unwrap();
+
+        assert_eq!(request.steps[0].depends, None);
     }
 
     #[test]
@@ -2919,7 +2978,7 @@ on_failure: Failed
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: Some("In Progress".to_string()),
             }],
             on_success: "Done".to_string(),
@@ -2988,7 +3047,7 @@ on_failure: Done
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),

@@ -6,7 +6,7 @@ pub struct PipelineStep {
     pub name: String,
     pub agent_role: String,
     pub kind: Option<String>,
-    pub depends: Vec<String>,
+    pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
 }
 
@@ -37,7 +37,7 @@ pub fn ask_pipeline(
             name: step_name.to_string(),
             agent_role: role_names[0].to_string(),
             kind: None,
-            depends: vec![],
+            depends: None,
             tracker_state: Some(tracker_state.to_string()),
         }]);
     }
@@ -69,7 +69,7 @@ pub fn ask_pipeline(
                     name: s.name.clone(),
                     agent_role: s.agent.clone(),
                     kind: None,
-                    depends: s.depends.clone().unwrap_or_default(),
+                    depends: s.depends.clone(),
                     tracker_state: s.tracker_state.clone(),
                 })
                 .collect());
@@ -98,7 +98,7 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
         name: "implement".to_string(),
         agent_role: role_names[0].to_string(),
         kind: None,
-        depends: vec![],
+        depends: None,
         tracker_state: Some("In Progress".to_string()),
     }];
 
@@ -107,7 +107,7 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
             name: "review".to_string(),
             agent_role: role_names[1].to_string(),
             kind: None,
-            depends: vec!["implement".to_string()],
+            depends: Some(vec!["implement".to_string()]),
             tracker_state: Some("Review".to_string()),
         });
     }
@@ -131,13 +131,13 @@ fn custom_pipeline(role_names: &[&str]) -> Result<Vec<PipelineStep>, inquire::In
             .to_string();
 
         let depends = if steps.is_empty() {
-            vec![]
+            None
         } else {
             let step_names: Vec<String> = steps
                 .iter()
                 .map(|s: &PipelineStep| s.name.clone())
                 .collect();
-            inquire::MultiSelect::new("  Depends on:", step_names).prompt()?
+            Some(inquire::MultiSelect::new("  Depends on:", step_names).prompt()?)
         };
 
         steps.push(PipelineStep {
@@ -160,4 +160,17 @@ fn custom_pipeline(role_names: &[&str]) -> Result<Vec<PipelineStep>, inquire::In
     }
 
     Ok(steps)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_pipeline;
+
+    #[test]
+    fn default_pipeline_keeps_implicit_sequencing() {
+        let steps = default_pipeline(&["builder", "reviewer"]);
+
+        assert_eq!(steps[0].depends, None);
+        assert_eq!(steps[1].depends, Some(vec!["implement".to_string()]));
+    }
 }

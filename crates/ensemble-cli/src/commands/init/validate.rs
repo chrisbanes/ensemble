@@ -92,7 +92,7 @@ mod tests {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
             kind: None,
-            depends: vec![],
+            depends: None,
             tracker_state: Some("In Progress".to_string()),
         }];
 

@@ -268,7 +268,7 @@ mod tests {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
             kind: None,
-            depends: vec![],
+            depends: None,
             tracker_state: Some("In Progress".to_string()),
         }];
 
@@ -317,14 +317,14 @@ mod tests {
                 name: "implement".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: None,
                 tracker_state: Some("In Progress".to_string()),
             },
             PipelineStep {
                 name: "review".to_string(),
                 agent_role: "reviewer".to_string(),
                 kind: None,
-                depends: vec!["implement".to_string()],
+                depends: Some(vec!["implement".to_string()]),
                 tracker_state: Some("Review".to_string()),
             },
         ];
@@ -382,7 +382,7 @@ mod tests {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
             kind: None,
-            depends: vec![],
+            depends: None,
             tracker_state: Some("In Progress".to_string()),
         }];
 
@@ -405,7 +405,7 @@ mod tests {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
             kind: None,
-            depends: vec![],
+            depends: None,
             tracker_state: None,
         }];
         let tracker = TrackerChoice::TodoFile {
@@ -432,7 +432,7 @@ mod tests {
             name: "implement".to_string(),
             agent_role: "builder".to_string(),
             kind: None,
-            depends: vec![],
+            depends: None,
             tracker_state: Some("In Progress".to_string()),
         }];
 
@@ -477,7 +477,7 @@ mod tests {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -518,7 +518,7 @@ mod tests {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),
@@ -552,7 +552,7 @@ mod tests {
                 name: "build".to_string(),
                 agent_role: "builder".to_string(),
                 kind: None,
-                depends: vec![],
+                depends: Some(vec![]),
                 tracker_state: None,
             }],
             on_success: "Done".to_string(),

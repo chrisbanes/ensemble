@@ -180,6 +180,38 @@ describe("GuidedEditor", () => {
     expect(await screen.findByText(/step agent is invalid/i)).toBeInTheDocument();
   });
 
+  it("preserves implicit and multiple explicit-root dependencies when saving", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_form: GuidedForm, _baseRawYaml: string) => undefined);
+    const parallelRootForm: GuidedForm = {
+      ...initialForm,
+      steps: [
+        { name: "build", agent: "builder" },
+        { name: "lint", agent: "builder", depends: [] },
+        { name: "test", agent: "builder", depends: ["build"] },
+        { name: "publish", agent: "builder", depends: [] },
+      ],
+    };
+
+    renderWithProviders(
+      <GuidedEditor
+        initialForm={parallelRootForm}
+        baseRawYaml={"tracker:\n  kind: todo_file\n"}
+        issues={[]}
+        onValidate={vi.fn(async () => [])}
+        onSave={onSave}
+        onReset={vi.fn()}
+      />,
+      { route: "/config" }
+    );
+
+    await user.click(screen.getByLabelText("Model"));
+    await user.click(await screen.findByRole("option", { name: "Opus" }));
+    await user.click(screen.getByRole("button", { name: /save/i }));
+
+    expect(onSave.mock.calls[0]?.[0].steps).toEqual(parallelRootForm.steps);
+  });
+
   it("saves inline agent model reasoning and mode edits", async () => {
     const user = userEvent.setup();
     const onSave = vi.fn(async (_form: GuidedForm, _baseRawYaml: string) => undefined);
