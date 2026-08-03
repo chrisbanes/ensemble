@@ -7,249 +7,7 @@ use tracing::{debug, info, warn};
 use super::model::{InteractionThreadRoot, Issue, TrackerComment};
 use super::{IssueTracker, TrackerError};
 
-// --- GraphQL query constants ---
-
-/// Discovery query: resolve Project v2 node ID and Status field ID.
-const PROJECT_DISCOVERY_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $projectNumber: Int!) {
-  repository(owner: $owner, name: $repo) {
-    projectV2(number: $projectNumber) {
-      id
-      fields(first: 20) {
-        nodes {
-          ... on ProjectV2SingleSelectField {
-            id
-            name
-            options {
-              id
-              name
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-/// Fetch project items with pagination.
-const PROJECT_ITEMS_QUERY: &str = r#"
-query($projectId: ID!, $cursor: String) {
-  node(id: $projectId) {
-    ... on ProjectV2 {
-      items(first: 50, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        nodes {
-          fieldValues(first: 20) {
-            nodes {
-              ... on ProjectV2ItemFieldSingleSelectValue {
-                name
-                field {
-                  ... on ProjectV2SingleSelectField {
-                    name
-                  }
-                }
-              }
-            }
-          }
-          content {
-            ... on Issue {
-              id
-              number
-              title
-              body
-              createdAt
-              updatedAt
-              url
-              labels(first: 20) {
-                nodes {
-                  name
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-/// Fetch repository issues (no project board).
-const REPO_ISSUES_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $cursor: String, $labels: [String!]) {
-  repository(owner: $owner, name: $repo) {
-    issues(first: 50, after: $cursor, states: [OPEN, CLOSED], labels: $labels, orderBy: {field: CREATED_AT, direction: ASC}) {
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-      nodes {
-        id
-        number
-        title
-        body
-        createdAt
-        updatedAt
-        url
-        state
-        labels(first: 20) {
-          nodes {
-            name
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-/// Batch query for issue states by node IDs.
-const ISSUE_STATES_QUERY: &str = r#"
-query($ids: [ID!]!) {
-  nodes(ids: $ids) {
-    ... on Issue {
-      id
-      number
-      title
-      state
-      url
-      labels(first: 20) {
-        nodes {
-          name
-        }
-      }
-      projectItems(first: 100) {
-        nodes {
-          id
-          project {
-            id
-          }
-          fieldValues(first: 20) {
-            nodes {
-              ... on ProjectV2ItemFieldSingleSelectValue {
-                name
-                field {
-                  ... on ProjectV2SingleSelectField {
-                    name
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-const ADD_COMMENT_MUTATION: &str = r#"
-mutation($subjectId: ID!, $body: String!) {
-  addComment(input: {subjectId: $subjectId, body: $body}) {
-    commentEdge {
-      node {
-        id
-        url
-      }
-    }
-  }
-}
-"#;
-
-const ISSUE_COMMENTS_QUERY: &str = r#"
-query($issueId: ID!, $cursor: String) {
-  node(id: $issueId) {
-    ... on Issue {
-      comments(first: 100, after: $cursor) {
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-        nodes {
-          id
-          body
-          createdAt
-          updatedAt
-          author {
-            login
-          }
-        }
-      }
-    }
-  }
-}
-"#;
-
-const UPDATE_PROJECT_ITEM_FIELD_MUTATION: &str = r#"
-mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-  updateProjectV2ItemFieldValue(input: {
-    projectId: $projectId,
-    itemId: $itemId,
-    fieldId: $fieldId,
-    value: { singleSelectOptionId: $optionId }
-  }) {
-    projectV2Item {
-      id
-    }
-  }
-}
-"#;
-
-const REPOSITORY_LABEL_QUERY: &str = r#"
-query($owner: String!, $repo: String!, $name: String!) {
-  repository(owner: $owner, name: $repo) {
-    label(name: $name) {
-      id
-      name
-    }
-  }
-}
-"#;
-
-const ADD_LABELS_MUTATION: &str = r#"
-mutation($labelableId: ID!, $labelIds: [ID!]!) {
-  addLabelsToLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
-    labelable {
-      ... on Issue {
-        id
-      }
-    }
-  }
-}
-"#;
-
-const REMOVE_LABELS_MUTATION: &str = r#"
-mutation($labelableId: ID!, $labelIds: [ID!]!) {
-  removeLabelsFromLabelable(input: {labelableId: $labelableId, labelIds: $labelIds}) {
-    labelable {
-      ... on Issue {
-        id
-      }
-    }
-  }
-}
-"#;
-
-const FIND_PROJECT_ITEM_QUERY: &str = r#"
-query($nodeId: ID!) {
-  node(id: $nodeId) {
-    ... on Issue {
-      projectItems(first: 100) {
-        nodes {
-          id
-          project {
-            id
-          }
-        }
-      }
-    }
-  }
-}
-"#;
+mod graphql;
 
 /// GitHub Projects v2 issue tracker using GraphQL.
 pub struct GithubTracker {
@@ -309,9 +67,12 @@ impl GithubTracker {
     }
 
     /// Execute a GraphQL query against the configured endpoint.
-    async fn graphql(&self, query: &str, variables: Value) -> Result<Value, TrackerError> {
+    async fn graphql<O: graphql::Operation>(
+        &self,
+        variables: Value,
+    ) -> Result<O::Response, TrackerError> {
         let body = json!({
-            "query": query,
+            "query": O::QUERY,
             "variables": variables,
         });
 
@@ -348,40 +109,20 @@ impl GithubTracker {
             let body_text = response.text().await.unwrap_or_default();
             return Err(TrackerError::ApiStatus {
                 status: status.as_u16(),
-                body: body_text,
+                body: graphql::redact_token(
+                    &format!("{} response: {body_text}", O::NAME),
+                    &self.token,
+                ),
             });
         }
 
-        let json_body: Value =
-            response
-                .json()
-                .await
-                .map_err(|e| TrackerError::UnexpectedPayload {
-                    reason: format!("failed to parse response JSON: {e}"),
-                })?;
-
-        // Check for GraphQL errors
-        if let Some(errors) = json_body.get("errors") {
-            if let Some(arr) = errors.as_array() {
-                if !arr.is_empty() {
-                    let messages: Vec<String> = arr
-                        .iter()
-                        .filter_map(|e| e.get("message").and_then(|m| m.as_str()))
-                        .map(|s| s.to_string())
-                        .collect();
-                    return Err(TrackerError::GraphqlErrors {
-                        errors: messages.join("; "),
-                    });
-                }
-            }
-        }
-
-        json_body
-            .get("data")
-            .cloned()
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "response missing 'data' field".to_string(),
-            })
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| TrackerError::ApiRequestFailed {
+                reason: error.to_string(),
+            })?;
+        graphql::decode_response::<O>(&bytes, &self.token)
     }
 
     /// Discover the project node ID and status field ID via GraphQL.
@@ -409,65 +150,58 @@ impl GithubTracker {
             "discovering project metadata"
         );
 
-        let variables = json!({
-            "owner": self.owner,
-            "repo": self.repo,
-            "projectNumber": project_number,
-        });
+        let mut cursor: Option<String> = None;
+        let mut project_id = None;
+        let (status_field_id, option_ids) = loop {
+            let variables = json!({
+                "owner": self.owner,
+                "repo": self.repo,
+                "projectNumber": project_number,
+                "cursor": cursor,
+            });
+            let data = self.graphql::<graphql::ProjectDiscovery>(variables).await?;
+            let project = data
+                .repository
+                .and_then(|repository| repository.project)
+                .ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::ProjectDiscovery>("project not found")
+                })?;
+            project_id.get_or_insert_with(|| project.id.clone());
 
-        let data = self.graphql(PROJECT_DISCOVERY_QUERY, variables).await?;
-
-        let project = data.pointer("/repository/projectV2").ok_or_else(|| {
-            TrackerError::UnexpectedPayload {
-                reason: "project not found in discovery response".to_string(),
+            if let Some(status_field) = project
+                .fields
+                .nodes
+                .iter()
+                .flatten()
+                .find(|field| field.name.as_deref() == Some("Status"))
+            {
+                let status_field_id = status_field.id.clone().ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::ProjectDiscovery>(
+                        "Status field ID not found",
+                    )
+                })?;
+                let option_ids: HashMap<String, String> = status_field
+                    .options
+                    .as_deref()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|option| Some((option.name.clone()?, option.id.clone()?)))
+                    .collect();
+                break (status_field_id, option_ids);
             }
+
+            match project.fields.page_info.next_cursor()? {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => {
+                    return Err(graphql::unexpected_payload::<graphql::ProjectDiscovery>(
+                        "Status field not found in project",
+                    ));
+                }
+            }
+        };
+        let project_id = project_id.ok_or_else(|| {
+            graphql::unexpected_payload::<graphql::ProjectDiscovery>("project ID not found")
         })?;
-
-        let project_id = project
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "project ID not found".to_string(),
-            })?
-            .to_string();
-
-        // Find the Status field
-        let fields = project
-            .pointer("/fields/nodes")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "project fields not found".to_string(),
-            })?;
-
-        let status_field = fields
-            .iter()
-            .find(|f| f.get("name").and_then(|n| n.as_str()) == Some("Status"))
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "Status field not found in project".to_string(),
-            })?;
-
-        let status_field_id = status_field
-            .get("id")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "Status field ID not found".to_string(),
-            })?
-            .to_string();
-
-        // Extract status option name -> ID map
-        let option_ids: HashMap<String, String> = status_field
-            .pointer("/options")
-            .and_then(|v| v.as_array())
-            .map(|opts| {
-                opts.iter()
-                    .filter_map(|opt| {
-                        let name = opt.get("name")?.as_str()?.to_string();
-                        let id = opt.get("id")?.as_str()?.to_string();
-                        Some((name, id))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
 
         info!(
             project_id = %project_id,
@@ -509,49 +243,23 @@ impl GithubTracker {
                 "cursor": cursor,
             });
 
-            let data = self.graphql(PROJECT_ITEMS_QUERY, variables).await?;
+            let data = self.graphql::<graphql::ProjectItems>(variables).await?;
+            let items = data
+                .node
+                .ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::ProjectItems>("project items not found")
+                })?
+                .items;
 
-            let items_data =
-                data.pointer("/node/items")
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "items not found in project response".to_string(),
-                    })?;
-
-            let page_info =
-                items_data
-                    .get("pageInfo")
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "pageInfo not found".to_string(),
-                    })?;
-
-            let has_next = page_info
-                .get("hasNextPage")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let nodes = items_data
-                .pointer("/nodes")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| TrackerError::UnexpectedPayload {
-                    reason: "items nodes not found".to_string(),
-                })?;
-
-            for node in nodes {
+            for node in items.nodes.iter().flatten() {
                 if let Some(issue) = self.normalize_project_item(node, filter_states) {
                     all_issues.push(issue);
                 }
             }
 
-            if has_next {
-                cursor = page_info
-                    .get("endCursor")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if cursor.is_none() {
-                    return Err(TrackerError::MissingEndCursor);
-                }
-            } else {
-                break;
+            match items.page_info.next_cursor()? {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
             }
         }
 
@@ -561,15 +269,12 @@ impl GithubTracker {
     /// Normalize a single ProjectV2 item node into an Issue.
     /// Returns None if the item's status doesn't match the filter states
     /// or if the content is not an Issue.
-    fn normalize_project_item(&self, node: &Value, filter_states: &[String]) -> Option<Issue> {
-        let content = node.get("content")?;
-
-        // Must be an Issue (not Draft or PR)
-        let id = content.get("id")?.as_str()?;
-        let number = content.get("number")?.as_u64()?;
-        let title = content.get("title")?.as_str()?;
-
-        // Extract status from field values
+    fn normalize_project_item(
+        &self,
+        node: &graphql::ProjectItem,
+        filter_states: &[String],
+    ) -> Option<Issue> {
+        let content = node.content.as_ref()?;
         let status = self.extract_status_from_field_values(node);
 
         // Filter by status if filter_states is provided
@@ -583,17 +288,6 @@ impl GithubTracker {
             }
         }
 
-        let body = content
-            .get("body")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
-
-        let url = content
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
         let labels = extract_labels(content);
 
         // Client-side label filtering for project-board mode (repo-mode uses
@@ -606,34 +300,11 @@ impl GithubTracker {
             return None;
         }
 
-        let priority = extract_priority_from_field_values(node);
-
-        let created_at = content
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok());
-
-        let updated_at = content
-            .get("updatedAt")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok());
-
-        let identifier = format!("{}#{}", self.repo, number);
-
-        Some(Issue {
-            id: id.to_string(),
-            identifier,
-            title: title.to_string(),
-            description: body,
-            priority,
-            state: status.unwrap_or_else(|| "unknown".to_string()),
-            branch_name: None,
-            url,
-            labels,
-            blocked_by: vec![],
-            created_at,
-            updated_at,
-        })
+        self.normalize_issue_node(
+            content,
+            status.unwrap_or_else(|| "unknown".to_string()),
+            extract_priority_from_field_values(node),
+        )
     }
 
     /// Map a set of lowercased labels to the canonical configured state name.
@@ -662,21 +333,16 @@ impl GithubTracker {
     }
 
     /// Extract the Status field value from a project item's fieldValues.
-    fn extract_status_from_field_values(&self, node: &Value) -> Option<String> {
-        let field_values = node
-            .pointer("/fieldValues/nodes")
-            .and_then(|v| v.as_array())?;
-
-        for fv in field_values {
-            let field_name = fv.pointer("/field/name").and_then(|v| v.as_str());
-            if field_name == Some("Status") {
-                return fv
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-            }
-        }
-        None
+    fn extract_status_from_field_values(&self, node: &graphql::ProjectItem) -> Option<String> {
+        node.field_values
+            .as_ref()?
+            .nodes
+            .iter()
+            .flatten()
+            .find(|value| {
+                value.field.as_ref().and_then(|field| field.name.as_deref()) == Some("Status")
+            })
+            .and_then(|value| value.name.clone())
     }
 
     /// Fetch repository issues without a project board.
@@ -701,49 +367,23 @@ impl GithubTracker {
                 "labels": labels_param,
             });
 
-            let data = self.graphql(REPO_ISSUES_QUERY, variables).await?;
+            let data = self.graphql::<graphql::RepositoryIssues>(variables).await?;
+            let issues = data
+                .repository
+                .ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::RepositoryIssues>("repository not found")
+                })?
+                .issues;
 
-            let issues_data = data.pointer("/repository/issues").ok_or_else(|| {
-                TrackerError::UnexpectedPayload {
-                    reason: "issues not found in repo response".to_string(),
-                }
-            })?;
-
-            let page_info =
-                issues_data
-                    .get("pageInfo")
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "pageInfo not found".to_string(),
-                    })?;
-
-            let has_next = page_info
-                .get("hasNextPage")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            let nodes = issues_data
-                .get("nodes")
-                .and_then(|v| v.as_array())
-                .ok_or_else(|| TrackerError::UnexpectedPayload {
-                    reason: "issue nodes not found".to_string(),
-                })?;
-
-            for node in nodes {
+            for node in issues.nodes.iter().flatten() {
                 if let Some(issue) = self.normalize_repo_issue(node, filter_states) {
                     all_issues.push(issue);
                 }
             }
 
-            if has_next {
-                cursor = page_info
-                    .get("endCursor")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if cursor.is_none() {
-                    return Err(TrackerError::MissingEndCursor);
-                }
-            } else {
-                break;
+            match issues.page_info.next_cursor()? {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
             }
         }
 
@@ -751,20 +391,16 @@ impl GithubTracker {
     }
 
     /// Normalize a single repository issue node into an Issue.
-    fn normalize_repo_issue(&self, node: &Value, filter_states: &[String]) -> Option<Issue> {
-        let id = node.get("id")?.as_str()?;
-        let number = node.get("number")?.as_u64()?;
-        let title = node.get("title")?.as_str()?;
-
+    fn normalize_repo_issue(
+        &self,
+        node: &graphql::IssueNode,
+        filter_states: &[String],
+    ) -> Option<Issue> {
         let labels = extract_labels(node);
 
         // Determine state: match labels to canonical configured names,
         // falling back to raw GitHub open/closed.
-        let raw_state = node
-            .get("state")
-            .and_then(|v| v.as_str())
-            .unwrap_or("open")
-            .to_lowercase();
+        let raw_state = node.state.as_deref().unwrap_or("open").to_lowercase();
 
         let state = self.canonical_state_from_labels(&labels, raw_state);
 
@@ -775,42 +411,37 @@ impl GithubTracker {
             return None;
         }
 
-        let body = node
-            .get("body")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .filter(|s| !s.is_empty());
+        self.normalize_issue_node(node, state, None)
+    }
 
-        let url = node
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let created_at = node
-            .get("createdAt")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok());
-
-        let updated_at = node
-            .get("updatedAt")
-            .and_then(|v| v.as_str())
-            .and_then(|s| s.parse::<DateTime<Utc>>().ok());
-
-        let identifier = format!("{}#{}", self.repo, number);
-
+    fn normalize_issue_node(
+        &self,
+        node: &graphql::IssueNode,
+        state: String,
+        priority: Option<i32>,
+    ) -> Option<Issue> {
+        let id = node.id.clone()?;
+        let number = node.number?;
+        let title = node.title.clone()?;
         Some(Issue {
-            id: id.to_string(),
-            identifier,
-            title: title.to_string(),
-            description: body,
-            priority: None,
+            id,
+            identifier: format!("{}#{}", self.repo, number),
+            title,
+            description: node.body.clone().filter(|body| !body.is_empty()),
+            priority,
             state,
             branch_name: None,
-            url,
-            labels,
+            url: node.url.clone(),
+            labels: extract_labels(node),
             blocked_by: vec![],
-            created_at,
-            updated_at,
+            created_at: node
+                .created_at
+                .as_deref()
+                .and_then(|value| value.parse::<DateTime<Utc>>().ok()),
+            updated_at: node
+                .updated_at
+                .as_deref()
+                .and_then(|value| value.parse::<DateTime<Utc>>().ok()),
         })
     }
 
@@ -830,20 +461,10 @@ impl GithubTracker {
             "ids": ids,
         });
 
-        let data = self.graphql(ISSUE_STATES_QUERY, variables).await?;
-
-        let nodes = data
-            .get("nodes")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "nodes not found in state refresh response".to_string(),
-            })?;
+        let data = self.graphql::<graphql::IssueStates>(variables).await?;
 
         let mut issues = Vec::new();
-        for node in nodes {
-            if node.is_null() {
-                continue;
-            }
+        for node in data.nodes.iter().flatten() {
             if let Some(issue) =
                 self.normalize_state_node(node, configured_project_id.as_deref())?
             {
@@ -860,11 +481,11 @@ impl GithubTracker {
             "repo": self.repo,
             "name": name,
         });
-        let data = self.graphql(REPOSITORY_LABEL_QUERY, variables).await?;
+        let data = self.graphql::<graphql::RepositoryLabel>(variables).await?;
         Ok(data
-            .pointer("/repository/label/id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned))
+            .repository
+            .and_then(|repository| repository.label)
+            .map(|label| label.id))
     }
 
     async fn configured_state_label_ids(
@@ -918,13 +539,10 @@ impl GithubTracker {
             .collect();
 
         if !remove_label_ids.is_empty() {
-            self.graphql(
-                REMOVE_LABELS_MUTATION,
-                json!({
-                    "labelableId": id,
-                    "labelIds": remove_label_ids,
-                }),
-            )
+            self.graphql::<graphql::RemoveLabels>(json!({
+                "labelableId": id,
+                "labelIds": remove_label_ids,
+            }))
             .await?;
         }
 
@@ -933,13 +551,10 @@ impl GithubTracker {
             .iter()
             .any(|label| label.eq_ignore_ascii_case(state));
         if !already_has_target {
-            self.graphql(
-                ADD_LABELS_MUTATION,
-                json!({
-                    "labelableId": id,
-                    "labelIds": [target_label_id],
-                }),
-            )
+            self.graphql::<graphql::AddLabels>(json!({
+                "labelableId": id,
+                "labelIds": [target_label_id],
+            }))
             .await?;
         }
 
@@ -949,7 +564,7 @@ impl GithubTracker {
     /// Find the project item ID for an issue node within the configured project.
     async fn find_project_item_id(&self, issue_node_id: &str) -> Result<String, TrackerError> {
         let variables = json!({ "nodeId": issue_node_id });
-        let data = self.graphql(FIND_PROJECT_ITEM_QUERY, variables).await?;
+        let data = self.graphql::<graphql::FindProjectItem>(variables).await?;
 
         let project_id = {
             let lock = self.project_node_id.read().await;
@@ -960,42 +575,43 @@ impl GithubTracker {
         };
 
         let items = data
-            .pointer("/node/projectItems/nodes")
-            .and_then(Value::as_array)
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: format!("issue {issue_node_id} is missing projectItems nodes"),
-            })?;
+            .node
+            .and_then(|node| node.project_items)
+            .ok_or_else(|| {
+                graphql::unexpected_payload::<graphql::FindProjectItem>(format_args!(
+                    "issue {issue_node_id} is missing projectItems nodes"
+                ))
+            })?
+            .nodes;
 
-        let (item_id, _) = select_configured_project_item(issue_node_id, &project_id, items)?;
+        let (item_id, _) = select_configured_project_item(issue_node_id, &project_id, &items)?;
         Ok(item_id.to_string())
     }
 
     /// Normalize a node from the state refresh query.
     fn normalize_state_node(
         &self,
-        node: &Value,
+        node: &graphql::IssueNode,
         configured_project_id: Option<&str>,
     ) -> Result<Option<Issue>, TrackerError> {
-        let Some(id) = node.get("id").and_then(Value::as_str) else {
+        let Some(id) = node.id.as_deref() else {
             return Ok(None);
         };
-        let Some(number) = node.get("number").and_then(Value::as_u64) else {
+        if node.number.is_none() || node.title.is_none() {
             return Ok(None);
-        };
-        let Some(title) = node.get("title") else {
-            return Ok(None);
-        };
-        let title = title.as_str().unwrap_or("").to_string();
+        }
 
         let labels = extract_labels(node);
 
         let state = if let Some(configured_project_id) = configured_project_id {
             let items = node
-                .pointer("/projectItems/nodes")
-                .and_then(Value::as_array)
+                .project_items
+                .as_ref()
                 .ok_or_else(|| TrackerError::UnexpectedPayload {
                     reason: format!("issue {id} is missing projectItems nodes"),
-                })?;
+                })?
+                .nodes
+                .as_slice();
             let (item_id, item) = select_configured_project_item(id, configured_project_id, items)?;
             self.extract_status_from_field_values(item).ok_or_else(|| {
                 TrackerError::UnexpectedPayload {
@@ -1005,38 +621,14 @@ impl GithubTracker {
                 }
             })?
         } else {
-            let raw_state = node
-                .get("state")
-                .and_then(Value::as_str)
-                .unwrap_or("open")
-                .to_lowercase();
+            let raw_state = node.state.as_deref().unwrap_or("open").to_lowercase();
 
             // In repo-mode, derive canonical state from labels to stay consistent
             // with normalize_repo_issue.
             self.canonical_state_from_labels(&labels, raw_state)
         };
 
-        let url = node
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let identifier = format!("{}#{}", self.repo, number);
-
-        Ok(Some(Issue {
-            id: id.to_string(),
-            identifier,
-            title,
-            description: None,
-            priority: None,
-            state,
-            branch_name: None,
-            url,
-            labels,
-            blocked_by: vec![],
-            created_at: None,
-            updated_at: None,
-        }))
+        Ok(self.normalize_issue_node(node, state, None))
     }
 }
 
@@ -1063,13 +655,16 @@ fn parse_owner_repo(repository: &str) -> Result<(String, String), TrackerError> 
 }
 
 /// Extract lowercased labels from a GitHub issue node.
-fn extract_labels(node: &Value) -> Vec<String> {
-    node.pointer("/labels/nodes")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                .map(|s| s.to_lowercase())
+fn extract_labels(node: &graphql::IssueNode) -> Vec<String> {
+    node.labels
+        .as_ref()
+        .map(|labels| {
+            labels
+                .nodes
+                .iter()
+                .flatten()
+                .filter_map(|label| label.name.as_deref())
+                .map(str::to_lowercase)
                 .collect()
         })
         .unwrap_or_default()
@@ -1079,21 +674,26 @@ fn extract_labels(node: &Value) -> Vec<String> {
 fn select_configured_project_item<'a>(
     issue_node_id: &str,
     configured_project_id: &str,
-    items: &'a [Value],
-) -> Result<(&'a str, &'a Value), TrackerError> {
+    items: &'a [Option<graphql::ProjectItem>],
+) -> Result<(&'a str, &'a graphql::ProjectItem), TrackerError> {
     let mut configured_items = Vec::new();
 
     for (index, item) in items.iter().enumerate() {
-        let item_id = item.get("id").and_then(Value::as_str).ok_or_else(|| {
-            TrackerError::UnexpectedPayload {
+        let Some(item) = item.as_ref() else {
+            continue;
+        };
+        let item_id = item
+            .id
+            .as_deref()
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
                 reason: format!(
                     "issue {issue_node_id} project item at index {index} is missing item ID"
                 ),
-            }
-        })?;
+            })?;
         let project_id = item
-            .pointer("/project/id")
-            .and_then(Value::as_str)
+            .project
+            .as_ref()
+            .map(|project| project.id.as_str())
             .ok_or_else(|| TrackerError::UnexpectedPayload {
                 reason: format!(
                     "issue {issue_node_id} project item {item_id} is missing project ID"
@@ -1132,16 +732,12 @@ fn select_configured_project_item<'a>(
 ///
 /// Looks for a "Priority" single-select field and maps known values:
 /// Urgent=1, High=2, Medium=3, Low=4.
-fn extract_priority_from_field_values(node: &Value) -> Option<i32> {
-    let field_values = node
-        .pointer("/fieldValues/nodes")
-        .and_then(|v| v.as_array())?;
-
-    for fv in field_values {
-        let field_name = fv.pointer("/field/name").and_then(|v| v.as_str());
+fn extract_priority_from_field_values(node: &graphql::ProjectItem) -> Option<i32> {
+    for value in node.field_values.as_ref()?.nodes.iter().flatten() {
+        let field_name = value.field.as_ref().and_then(|field| field.name.as_deref());
         if field_name == Some("Priority") {
-            if let Some(value) = fv.get("name").and_then(|v| v.as_str()) {
-                return match value.to_lowercase().as_str() {
+            if let Some(name) = value.name.as_deref() {
+                return match name.to_lowercase().as_str() {
                     "urgent" => Some(1),
                     "high" => Some(2),
                     "medium" => Some(3),
@@ -1191,7 +787,7 @@ impl IssueTracker for GithubTracker {
             "subjectId": id,
             "body": body,
         });
-        self.graphql(ADD_COMMENT_MUTATION, variables).await?;
+        self.graphql::<graphql::AddComment>(variables).await?;
         Ok(())
     }
 
@@ -1204,24 +800,19 @@ impl IssueTracker for GithubTracker {
             "subjectId": id,
             "body": body,
         });
-        let data = self.graphql(ADD_COMMENT_MUTATION, variables).await?;
+        let data = self.graphql::<graphql::AddComment>(variables).await?;
         let node = data
-            .pointer("/addComment/commentEdge/node")
-            .ok_or_else(|| TrackerError::UnexpectedPayload {
-                reason: "missing addComment.commentEdge.node payload".to_string(),
+            .add_comment
+            .and_then(|payload| payload.comment_edge)
+            .and_then(|edge| edge.node)
+            .ok_or_else(|| {
+                graphql::unexpected_payload::<graphql::AddComment>(
+                    "missing addComment.commentEdge.node payload",
+                )
             })?;
-        let comment_id = node.get("id").and_then(Value::as_str).ok_or_else(|| {
-            TrackerError::UnexpectedPayload {
-                reason: "missing comment id in addComment payload".to_string(),
-            }
-        })?;
-        let comment_url = node
-            .get("url")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
         Ok(InteractionThreadRoot {
-            comment_id: comment_id.to_string(),
-            comment_url,
+            comment_id: node.id,
+            comment_url: node.url,
         })
     }
 
@@ -1237,70 +828,41 @@ impl IssueTracker for GithubTracker {
                 "issueId": id,
                 "cursor": cursor,
             });
-            let data = self.graphql(ISSUE_COMMENTS_QUERY, variables).await?;
-            let comments_node =
-                data.pointer("/node/comments")
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "missing issue comments payload".to_string(),
-                    })?;
-            let nodes = comments_node
-                .get("nodes")
-                .and_then(Value::as_array)
-                .ok_or_else(|| TrackerError::UnexpectedPayload {
-                    reason: "missing issue comments nodes".to_string(),
-                })?;
+            let data = self.graphql::<graphql::IssueComments>(variables).await?;
+            let connection = data
+                .node
+                .ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::IssueComments>(
+                        "missing issue comments payload",
+                    )
+                })?
+                .comments;
 
-            for node in nodes {
-                let comment_id = node.get("id").and_then(Value::as_str).ok_or_else(|| {
-                    TrackerError::UnexpectedPayload {
-                        reason: "missing issue comment id".to_string(),
-                    }
-                })?;
-                let body = node.get("body").and_then(Value::as_str).ok_or_else(|| {
-                    TrackerError::UnexpectedPayload {
-                        reason: "missing issue comment body".to_string(),
-                    }
-                })?;
+            for node in connection.nodes.iter().flatten() {
                 comments.push(TrackerComment {
-                    comment_id: comment_id.to_string(),
-                    body: body.to_string(),
+                    comment_id: node.id.clone(),
+                    body: node.body.clone(),
                     author: node
-                        .pointer("/author/login")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_string(),
+                        .author
+                        .as_ref()
+                        .and_then(|author| author.login.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
                     created_at: node
-                        .get("createdAt")
-                        .and_then(Value::as_str)
+                        .created_at
+                        .as_deref()
                         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
                         .map(|value| value.with_timezone(&Utc)),
                     updated_at: node
-                        .get("updatedAt")
-                        .and_then(Value::as_str)
+                        .updated_at
+                        .as_deref()
                         .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
                         .map(|value| value.with_timezone(&Utc)),
                 });
             }
 
-            let page_info =
-                comments_node
-                    .get("pageInfo")
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "missing issue comments pageInfo".to_string(),
-                    })?;
-            let has_next = page_info
-                .get("hasNextPage")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if !has_next {
-                break;
-            }
-            cursor = page_info
-                .get("endCursor")
-                .and_then(Value::as_str)
-                .map(ToString::to_string);
-            if cursor.is_none() {
-                return Err(TrackerError::MissingEndCursor);
+            match connection.page_info.next_cursor()? {
+                Some(next_cursor) => cursor = Some(next_cursor),
+                None => break,
             }
         }
 
@@ -1356,7 +918,7 @@ impl IssueTracker for GithubTracker {
                 "fieldId": field_id,
                 "optionId": option_id,
             });
-            self.graphql(UPDATE_PROJECT_ITEM_FIELD_MUTATION, variables)
+            self.graphql::<graphql::UpdateProjectItemField>(variables)
                 .await?;
             Ok(())
         } else {
@@ -1390,12 +952,25 @@ mod tests {
         json!({ "data": data })
     }
 
+    fn issue_node(value: Value) -> graphql::IssueNode {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn project_item(value: Value) -> graphql::ProjectItem {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn project_items(value: Value) -> Vec<Option<graphql::ProjectItem>> {
+        serde_json::from_value(value).unwrap()
+    }
+
     async fn mount_project_discovery(server: &MockServer, project_id: &str) {
         let response = graphql_response(json!({
             "repository": {
                 "projectV2": {
                     "id": project_id,
                     "fields": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
                         "nodes": [
                             {
                                 "id": "F_status",
@@ -1419,6 +994,73 @@ mod tests {
             .expect(1)
             .mount(server)
             .await;
+    }
+
+    #[tokio::test]
+    async fn project_discovery_finds_status_on_later_page() {
+        let server = MockServer::start().await;
+
+        let first_page = graphql_response(json!({
+            "repository": {
+                "projectV2": {
+                    "id": "PVT_test123",
+                    "fields": {
+                        "pageInfo": {
+                            "hasNextPage": true,
+                            "endCursor": "fields_page_2"
+                        },
+                        "nodes": [
+                            { "id": "F_priority", "name": "Priority", "options": [] }
+                        ]
+                    }
+                }
+            }
+        }));
+        let second_page = graphql_response(json!({
+            "repository": {
+                "projectV2": {
+                    "id": "PVT_test123",
+                    "fields": {
+                        "pageInfo": {
+                            "hasNextPage": false,
+                            "endCursor": null
+                        },
+                        "nodes": [{
+                            "id": "F_status",
+                            "name": "Status",
+                            "options": [{ "id": "O_todo", "name": "Todo" }]
+                        }]
+                    }
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"cursor\":null"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&first_page))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("fields_page_2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&second_page))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let metadata = tracker.ensure_project_metadata().await.unwrap();
+
+        assert_eq!(
+            metadata,
+            ("PVT_test123".to_string(), "F_status".to_string())
+        );
+        assert_eq!(
+            tracker.status_option_ids.read().await.get("Todo"),
+            Some(&"O_todo".to_string())
+        );
     }
 
     // --- parse_owner_repo tests ---
@@ -1457,7 +1099,7 @@ mod tests {
 
     #[test]
     fn test_extract_labels_lowercased() {
-        let node = json!({
+        let node = issue_node(json!({
             "labels": {
                 "nodes": [
                     { "name": "Bug" },
@@ -1465,14 +1107,14 @@ mod tests {
                     { "name": "p1" }
                 ]
             }
-        });
+        }));
         let labels = extract_labels(&node);
         assert_eq!(labels, vec!["bug", "enhancement", "p1"]);
     }
 
     #[test]
     fn test_extract_labels_empty() {
-        let node = json!({});
+        let node = issue_node(json!({}));
         let labels = extract_labels(&node);
         assert!(labels.is_empty());
     }
@@ -1481,7 +1123,7 @@ mod tests {
 
     #[test]
     fn test_extract_priority_urgent() {
-        let node = json!({
+        let node = project_item(json!({
             "fieldValues": {
                 "nodes": [
                     {
@@ -1490,13 +1132,13 @@ mod tests {
                     }
                 ]
             }
-        });
+        }));
         assert_eq!(extract_priority_from_field_values(&node), Some(1));
     }
 
     #[test]
     fn test_extract_priority_high() {
-        let node = json!({
+        let node = project_item(json!({
             "fieldValues": {
                 "nodes": [
                     {
@@ -1505,13 +1147,13 @@ mod tests {
                     }
                 ]
             }
-        });
+        }));
         assert_eq!(extract_priority_from_field_values(&node), Some(2));
     }
 
     #[test]
     fn test_extract_priority_medium() {
-        let node = json!({
+        let node = project_item(json!({
             "fieldValues": {
                 "nodes": [
                     {
@@ -1520,13 +1162,13 @@ mod tests {
                     }
                 ]
             }
-        });
+        }));
         assert_eq!(extract_priority_from_field_values(&node), Some(3));
     }
 
     #[test]
     fn test_extract_priority_low() {
-        let node = json!({
+        let node = project_item(json!({
             "fieldValues": {
                 "nodes": [
                     {
@@ -1535,23 +1177,23 @@ mod tests {
                     }
                 ]
             }
-        });
+        }));
         assert_eq!(extract_priority_from_field_values(&node), Some(4));
     }
 
     #[test]
     fn test_extract_priority_none() {
-        let node = json!({
+        let node = project_item(json!({
             "fieldValues": {
                 "nodes": []
             }
-        });
+        }));
         assert_eq!(extract_priority_from_field_values(&node), None);
     }
 
     #[test]
     fn test_extract_priority_skips_non_priority_fields() {
-        let node = json!({
+        let node = project_item(json!({
             "fieldValues": {
                 "nodes": [
                     {
@@ -1560,7 +1202,7 @@ mod tests {
                     }
                 ]
             }
-        });
+        }));
         assert_eq!(extract_priority_from_field_values(&node), None);
     }
 
@@ -1568,10 +1210,9 @@ mod tests {
 
     #[test]
     fn configured_project_item_rejects_missing_project_identity() {
-        let items = json!([{ "id": "PVTI_unknown" }]);
+        let items = project_items(json!([{ "id": "PVTI_unknown" }]));
 
-        let result =
-            select_configured_project_item("I_node1", "P_configured", items.as_array().unwrap());
+        let result = select_configured_project_item("I_node1", "P_configured", &items);
 
         match result {
             Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
@@ -1584,10 +1225,9 @@ mod tests {
 
     #[test]
     fn configured_project_item_rejects_missing_configured_project() {
-        let items = json!([{ "id": "PVTI_other", "project": { "id": "P_other" } }]);
+        let items = project_items(json!([{ "id": "PVTI_other", "project": { "id": "P_other" } }]));
 
-        let result =
-            select_configured_project_item("I_node1", "P_configured", items.as_array().unwrap());
+        let result = select_configured_project_item("I_node1", "P_configured", &items);
 
         match result {
             Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
@@ -1600,13 +1240,12 @@ mod tests {
 
     #[test]
     fn configured_project_item_rejects_multiple_configured_items() {
-        let items = json!([
+        let items = project_items(json!([
             { "id": "PVTI_b", "project": { "id": "P_configured" } },
             { "id": "PVTI_a", "project": { "id": "P_configured" } }
-        ]);
+        ]));
 
-        let result =
-            select_configured_project_item("I_node1", "P_configured", items.as_array().unwrap());
+        let result = select_configured_project_item("I_node1", "P_configured", &items);
 
         match result {
             Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
@@ -1620,7 +1259,7 @@ mod tests {
     #[test]
     fn project_mode_reconciliation_rejects_missing_status() {
         let tracker = create_test_tracker("https://example.invalid", Some(1));
-        let node = json!({
+        let node = issue_node(json!({
             "id": "I_node1",
             "number": 1,
             "title": "Issue 1",
@@ -1632,7 +1271,7 @@ mod tests {
                     "fieldValues": { "nodes": [] }
                 }]
             }
-        });
+        }));
 
         let result = tracker.normalize_state_node(&node, Some("P_configured"));
 
@@ -1657,6 +1296,7 @@ mod tests {
                 "projectV2": {
                     "id": "PVT_test123",
                     "fields": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
                         "nodes": [
                             {
                                 "id": "FIELD_status_1",
@@ -1900,6 +1540,160 @@ mod tests {
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].identifier, "my-repo#1");
         assert_eq!(issues[1].identifier, "my-repo#2");
+    }
+
+    #[tokio::test]
+    async fn project_items_paginates_across_empty_and_populated_pages() {
+        let server = MockServer::start().await;
+        mount_project_discovery(&server, "P_configured").await;
+
+        let first_page = graphql_response(json!({
+            "node": {
+                "items": {
+                    "pageInfo": { "hasNextPage": true, "endCursor": "items_page_2" },
+                    "nodes": []
+                }
+            }
+        }));
+        let second_page = graphql_response(json!({
+            "node": {
+                "items": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [{
+                        "fieldValues": {
+                            "nodes": [
+                                { "name": "Todo", "field": { "name": "Status" } },
+                                { "name": "Urgent", "field": { "name": "Priority" } }
+                            ]
+                        },
+                        "content": {
+                            "id": "I_page_2",
+                            "number": 2,
+                            "title": "Second page",
+                            "body": "body",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-02T00:00:00Z",
+                            "url": "https://github.com/acme/my-repo/issues/2",
+                            "labels": { "nodes": [{ "name": "Bug" }] }
+                        }
+                    }]
+                }
+            }
+        }));
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"projectId\":\"P_configured\""))
+            .and(body_string_contains("\"cursor\":null"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&first_page))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("items_page_2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&second_page))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let issues = create_test_tracker(&server.uri(), Some(1))
+            .fetch_candidate_issues()
+            .await
+            .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].identifier, "my-repo#2");
+        assert_eq!(issues[0].priority, Some(1));
+        assert_eq!(issues[0].labels, vec!["bug"]);
+        assert!(issues[0].created_at.is_some());
+        assert!(issues[0].updated_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn pagination_rejects_missing_end_cursor() {
+        let server = MockServer::start().await;
+        let response = graphql_response(json!({
+            "repository": {
+                "issues": {
+                    "pageInfo": { "hasNextPage": true, "endCursor": null },
+                    "nodes": []
+                }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let error = create_test_tracker(&server.uri(), None)
+            .fetch_candidate_issues()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TrackerError::MissingEndCursor));
+    }
+
+    #[tokio::test]
+    async fn nullable_graphql_nodes_are_skipped() {
+        let server = MockServer::start().await;
+        let response = graphql_response(json!({
+            "repository": {
+                "issues": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [
+                        null,
+                        {
+                            "id": "I_present",
+                            "number": 7,
+                            "title": "Present issue",
+                            "body": "",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-01T00:00:00Z",
+                            "url": "https://github.com/acme/my-repo/issues/7",
+                            "state": "OPEN",
+                            "labels": { "nodes": [null, { "name": "Todo" }] }
+                        }
+                    ]
+                }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let issues = create_test_tracker(&server.uri(), None)
+            .fetch_candidate_issues()
+            .await
+            .unwrap();
+
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].id, "I_present");
+        assert_eq!(issues[0].labels, vec!["todo"]);
+    }
+
+    #[tokio::test]
+    async fn missing_required_connection_is_contextual() {
+        let server = MockServer::start().await;
+        let response = graphql_response(json!({ "repository": {} }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let error = create_test_tracker(&server.uri(), None)
+            .fetch_candidate_issues()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TrackerError::UnexpectedPayload { .. }));
+        assert!(error.to_string().contains("RepositoryIssues"));
+        assert!(error.to_string().contains("missing field `issues`"));
     }
 
     #[tokio::test]
@@ -2349,6 +2143,7 @@ mod tests {
                 "projectV2": {
                     "id": "PVT_1",
                     "fields": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
                         "nodes": [
                             {
                                 "id": "F_status",
@@ -2428,6 +2223,7 @@ mod tests {
                 "projectV2": {
                     "id": "PVT_1",
                     "fields": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
                         "nodes": [{
                             "id": "F_status",
                             "name": "Status",
@@ -2698,6 +2494,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repository_label_lookup_preserves_absent_repository_as_missing_label() {
+        let server = MockServer::start().await;
+        let response = graphql_response(json!({ "repository": null }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("label(name:"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let label_id = create_test_tracker(&server.uri(), None)
+            .repository_label_id("Todo")
+            .await
+            .unwrap();
+
+        assert_eq!(label_id, None);
+    }
+
+    #[tokio::test]
+    async fn add_comment_accepts_missing_mutation_payload() {
+        let server = MockServer::start().await;
+        let response = graphql_response(json!({}));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addComment"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        create_test_tracker(&server.uri(), None)
+            .add_comment("ISSUE_NODE_1", "Hello")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
     async fn create_interaction_thread_root_returns_comment_metadata() {
         let server = MockServer::start().await;
 
@@ -2730,6 +2562,29 @@ mod tests {
             root.comment_url.as_deref(),
             Some("https://github.com/acme/my-repo/issues/1#issuecomment-123")
         );
+    }
+
+    #[tokio::test]
+    async fn interaction_root_rejects_missing_typed_comment_metadata() {
+        let server = MockServer::start().await;
+        let response = graphql_response(json!({ "addComment": { "commentEdge": null } }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addComment"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .mount(&server)
+            .await;
+
+        let error = create_test_tracker(&server.uri(), None)
+            .create_interaction_thread_root("ISSUE_NODE_1", "Need input")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, TrackerError::UnexpectedPayload { .. }));
+        assert!(error.to_string().contains("AddComment"));
+        assert!(error
+            .to_string()
+            .contains("missing addComment.commentEdge.node payload"));
     }
 
     #[tokio::test]
@@ -2777,9 +2632,64 @@ mod tests {
         assert_eq!(comments[0].author, "alice");
     }
 
+    #[tokio::test]
+    async fn list_comments_after_paginates_with_shared_cursor_rules() {
+        let server = MockServer::start().await;
+        let first_page = graphql_response(json!({
+            "node": {
+                "comments": {
+                    "pageInfo": { "hasNextPage": true, "endCursor": "comments_page_2" },
+                    "nodes": [{
+                        "id": "C_1",
+                        "body": "root",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                        "author": { "login": "bot" }
+                    }]
+                }
+            }
+        }));
+        let second_page = graphql_response(json!({
+            "node": {
+                "comments": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [{
+                        "id": "C_2",
+                        "body": "/approve",
+                        "createdAt": "2026-01-01T00:01:00Z",
+                        "updatedAt": "2026-01-01T00:01:00Z",
+                        "author": { "login": "alice" }
+                    }]
+                }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("\"cursor\":null"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&first_page))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("comments_page_2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&second_page))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let comments = create_test_tracker(&server.uri(), None)
+            .list_comments_after("ISSUE_NODE_1", "C_1")
+            .await
+            .unwrap();
+
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].comment_id, "C_2");
+    }
+
     #[test]
     fn issue_states_query_requests_project_item_identity() {
-        let compact_query = ISSUE_STATES_QUERY
+        let compact_query = graphql::ISSUE_STATES_QUERY
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
@@ -2828,6 +2738,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, TrackerError::UnexpectedPayload { .. }));
-        assert!(err.to_string().contains("missing issue comment body"));
+        assert!(err.to_string().contains("IssueComments"));
+        assert!(err.to_string().contains("missing field `body`"));
     }
 }
