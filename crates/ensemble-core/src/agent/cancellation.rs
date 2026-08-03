@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -8,10 +8,12 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::events::WorkerIdentity;
+use crate::config::ensemble::normalize_state_worker_cap_key;
 
 struct ActiveWorker {
     cancellation: CancellationToken,
     completion: watch::Receiver<bool>,
+    state_bucket: String,
     reconciliation_owned: bool,
     launched: bool,
 }
@@ -29,6 +31,24 @@ pub(crate) enum WorkerReservationError {
     DuplicateIdentity,
     GlobalCapacityExhausted,
     IssueCapacityExhausted,
+    StateCapacityExhausted,
+}
+
+pub(crate) struct StateWorkerCapacity<'a> {
+    issue_state: &'a str,
+    max_workers_by_state: &'a BTreeMap<String, u32>,
+}
+
+impl<'a> StateWorkerCapacity<'a> {
+    pub(crate) fn new(
+        issue_state: &'a str,
+        max_workers_by_state: &'a BTreeMap<String, u32>,
+    ) -> Self {
+        Self {
+            issue_state,
+            max_workers_by_state,
+        }
+    }
 }
 
 pub fn new_cancellation_registry() -> CancellationRegistry {
@@ -47,6 +67,7 @@ pub fn register_worker(
         ActiveWorker {
             cancellation,
             completion,
+            state_bucket: String::new(),
             reconciliation_owned: false,
             launched: true,
         },
@@ -60,6 +81,7 @@ pub(crate) fn try_reserve_worker(
     completion: watch::Receiver<bool>,
     max_global_workers: u32,
     max_issue_workers: u32,
+    state_capacity: StateWorkerCapacity<'_>,
 ) -> Result<(), WorkerReservationError> {
     let mut workers = registry_guard(registry);
     if workers.contains_key(&identity) {
@@ -76,16 +98,51 @@ pub(crate) fn try_reserve_worker(
     {
         return Err(WorkerReservationError::IssueCapacityExhausted);
     }
+    let state_bucket = normalize_state_worker_cap_key(state_capacity.issue_state);
+    if !state_worker_capacity_available(
+        &workers,
+        &state_bucket,
+        state_capacity.max_workers_by_state,
+    ) {
+        return Err(WorkerReservationError::StateCapacityExhausted);
+    }
     workers.insert(
         identity,
         ActiveWorker {
             cancellation,
             completion,
+            state_bucket,
             reconciliation_owned: false,
             launched: false,
         },
     );
     Ok(())
+}
+
+pub(crate) fn has_available_state_worker_capacity(
+    registry: &CancellationRegistry,
+    issue_state: &str,
+    max_state_workers: &BTreeMap<String, u32>,
+) -> bool {
+    if max_state_workers.is_empty() {
+        return true;
+    }
+    let state_bucket = normalize_state_worker_cap_key(issue_state);
+    state_worker_capacity_available(&registry_guard(registry), &state_bucket, max_state_workers)
+}
+
+fn state_worker_capacity_available(
+    workers: &HashMap<WorkerIdentity, ActiveWorker>,
+    state_bucket: &str,
+    max_state_workers: &BTreeMap<String, u32>,
+) -> bool {
+    max_state_workers.get(state_bucket).is_none_or(|limit| {
+        workers
+            .values()
+            .filter(|worker| worker.state_bucket == state_bucket)
+            .count()
+            < *limit as usize
+    })
 }
 
 pub(crate) fn mark_worker_launched(
@@ -465,6 +522,7 @@ mod tests {
                 first_completion,
                 2,
                 1,
+                StateWorkerCapacity::new("", &BTreeMap::new()),
             ),
             Ok(())
         );
@@ -476,6 +534,7 @@ mod tests {
                 second_completion,
                 2,
                 1,
+                StateWorkerCapacity::new("", &BTreeMap::new()),
             ),
             Err(WorkerReservationError::IssueCapacityExhausted)
         );
@@ -487,6 +546,7 @@ mod tests {
                 other_completion,
                 2,
                 1,
+                StateWorkerCapacity::new("", &BTreeMap::new()),
             ),
             Ok(())
         );
@@ -505,6 +565,7 @@ mod tests {
                 global_completion,
                 2,
                 1,
+                StateWorkerCapacity::new("", &BTreeMap::new()),
             ),
             Err(WorkerReservationError::GlobalCapacityExhausted)
         );
@@ -518,6 +579,7 @@ mod tests {
                 duplicate_completion,
                 3,
                 2,
+                StateWorkerCapacity::new("", &BTreeMap::new()),
             ),
             Err(WorkerReservationError::DuplicateIdentity)
         );
@@ -541,6 +603,7 @@ mod tests {
                         completion,
                         1,
                         1,
+                        StateWorkerCapacity::new("", &BTreeMap::new()),
                     )
                 })
             })
@@ -572,6 +635,7 @@ mod tests {
             running_complete_rx,
             2,
             2,
+            StateWorkerCapacity::new("", &BTreeMap::new()),
         )
         .unwrap();
         try_reserve_worker(
@@ -581,6 +645,7 @@ mod tests {
             peer_complete_rx,
             2,
             2,
+            StateWorkerCapacity::new("", &BTreeMap::new()),
         )
         .unwrap();
         assert!(mark_worker_launched(&registry, &running));
@@ -609,6 +674,7 @@ mod tests {
             completion_rx,
             1,
             1,
+            StateWorkerCapacity::new("", &BTreeMap::new()),
         )
         .unwrap();
 
@@ -621,5 +687,192 @@ mod tests {
         assert!(await_worker_drain(&mut drain, Duration::from_millis(10)).await);
         assert!(!contains_worker(&registry, &rejected));
         assert_eq!(live_worker_count(&registry), 0);
+    }
+
+    #[test]
+    fn state_worker_capacity_enforces_normalized_independent_atomic_buckets() {
+        let registry = new_cancellation_registry();
+        let caps = BTreeMap::from([("todo".to_string(), 1), ("review".to_string(), 1)]);
+        let reserve = |identity: WorkerIdentity, state: &str, global, per_issue| {
+            let (_, completion) = watch::channel(false);
+            try_reserve_worker(
+                &registry,
+                identity,
+                CancellationToken::new(),
+                completion,
+                global,
+                per_issue,
+                StateWorkerCapacity::new(state, &caps),
+            )
+        };
+
+        assert_eq!(reserve(identity("build", 1), " Todo ", 3, 2), Ok(()));
+        assert_eq!(
+            reserve(
+                WorkerIdentity {
+                    issue_id: "issue-2".to_string(),
+                    ..identity("build", 2)
+                },
+                "TODO",
+                3,
+                2
+            ),
+            Err(WorkerReservationError::StateCapacityExhausted)
+        );
+        assert_eq!(
+            reserve(
+                WorkerIdentity {
+                    issue_id: "issue-2".to_string(),
+                    ..identity("review", 2)
+                },
+                "Review",
+                3,
+                2
+            ),
+            Ok(())
+        );
+        assert_eq!(live_worker_count(&registry), 2);
+
+        assert_eq!(
+            reserve(identity("review", 1), "other", 3, 1),
+            Err(WorkerReservationError::IssueCapacityExhausted)
+        );
+        assert_eq!(
+            reserve(
+                WorkerIdentity {
+                    issue_id: "issue-3".to_string(),
+                    ..identity("build", 3)
+                },
+                "other",
+                2,
+                2
+            ),
+            Err(WorkerReservationError::GlobalCapacityExhausted)
+        );
+        assert_eq!(live_worker_count(&registry), 2);
+
+        let racing_registry = new_cancellation_registry();
+        let racing_caps = Arc::new(BTreeMap::from([("todo".to_string(), 1)]));
+        let start = Arc::new(std::sync::Barrier::new(9));
+        let contenders = (0..8)
+            .map(|index| {
+                let registry = racing_registry.clone();
+                let caps = Arc::clone(&racing_caps);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let (_, completion) = watch::channel(false);
+                    start.wait();
+                    try_reserve_worker(
+                        &registry,
+                        WorkerIdentity {
+                            issue_id: format!("issue-{index}"),
+                            ..identity("build", index + 10)
+                        },
+                        CancellationToken::new(),
+                        completion,
+                        8,
+                        1,
+                        StateWorkerCapacity::new(" todo ", &caps),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let outcomes = contenders
+            .into_iter()
+            .map(|contender| contender.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+        assert!(outcomes
+            .iter()
+            .filter(|outcome| outcome.is_err())
+            .all(|outcome| { *outcome == Err(WorkerReservationError::StateCapacityExhausted) }));
+        assert_eq!(live_worker_count(&racing_registry), 1);
+    }
+
+    #[tokio::test]
+    async fn state_worker_capacity_releases_only_the_captured_worker_bucket() {
+        let registry = new_cancellation_registry();
+        let caps = BTreeMap::from([("todo".to_string(), 1), ("review".to_string(), 1)]);
+        let first = identity("build", 1);
+        let second = identity("review", 1);
+        let (first_complete_tx, first_complete_rx) = watch::channel(false);
+        let (_, second_complete_rx) = watch::channel(false);
+
+        try_reserve_worker(
+            &registry,
+            first.clone(),
+            CancellationToken::new(),
+            first_complete_rx,
+            3,
+            2,
+            StateWorkerCapacity::new("Todo", &caps),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(&registry, &first));
+        try_reserve_worker(
+            &registry,
+            second.clone(),
+            CancellationToken::new(),
+            second_complete_rx,
+            3,
+            2,
+            StateWorkerCapacity::new("Review", &caps),
+        )
+        .unwrap();
+
+        assert!(rollback_worker_reservation(&registry, &second));
+        let (_, replacement_complete_rx) = watch::channel(false);
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                WorkerIdentity {
+                    issue_id: "issue-2".to_string(),
+                    ..identity("review", 2)
+                },
+                CancellationToken::new(),
+                replacement_complete_rx,
+                3,
+                2,
+                StateWorkerCapacity::new(" review ", &caps),
+            ),
+            Ok(())
+        );
+
+        let (_, todo_complete_rx) = watch::channel(false);
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                WorkerIdentity {
+                    issue_id: "issue-3".to_string(),
+                    ..identity("build", 3)
+                },
+                CancellationToken::new(),
+                todo_complete_rx,
+                3,
+                2,
+                StateWorkerCapacity::new("todo", &caps),
+            ),
+            Err(WorkerReservationError::StateCapacityExhausted)
+        );
+
+        first_complete_tx.send(true).unwrap();
+        assert!(remove_completed_worker(&registry, &first));
+        let (_, later_complete_rx) = watch::channel(false);
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                WorkerIdentity {
+                    issue_id: "issue-1".to_string(),
+                    ..identity("build", 4)
+                },
+                CancellationToken::new(),
+                later_complete_rx,
+                3,
+                2,
+                StateWorkerCapacity::new("Todo", &caps),
+            ),
+            Ok(())
+        );
     }
 }

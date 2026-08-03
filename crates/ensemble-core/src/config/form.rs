@@ -6,11 +6,13 @@
 //! round-trip to support custom user extensions.
 
 use crate::config::ensemble::{
-    ModeDefinition, ModelDefinition, PermissionRequestPolicy, PermissionRequestPolicyMode, StepKind,
+    state_worker_caps_schema, ModeDefinition, ModelDefinition, PermissionRequestPolicy,
+    PermissionRequestPolicyMode, StepKind,
 };
 use crate::config::secrets::{SecretDisplay, SecretEdit};
 use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Helper to convert Option<T> to serde_yaml::Value
 fn opt_to_value<T: Into<serde_yaml::Value>>(opt: Option<T>) -> Option<serde_yaml::Value> {
@@ -122,6 +124,9 @@ pub struct GuidedHooksForm {
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GuidedAgentRuntimeForm {
+    #[serde(default)]
+    #[schema(schema_with = state_worker_caps_schema)]
+    pub max_concurrent_agents_by_state: BTreeMap<String, u32>,
     pub max_retry_backoff_ms: u64,
     pub command: String,
     pub session_mode: String,
@@ -262,6 +267,7 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 timeout_ms: config.hooks.timeout_ms,
             },
             agent: GuidedAgentRuntimeForm {
+                max_concurrent_agents_by_state: config.agent.max_concurrent_agents_by_state.clone(),
                 max_retry_backoff_ms: config.agent.max_retry_backoff_ms,
                 command: config.agent.command.clone(),
                 session_mode: config.agent.session_mode.clone(),
@@ -576,6 +582,22 @@ pub fn apply_guided_form(
         .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
     if let serde_yaml::Value::Mapping(ref mut am) = *agent_val {
         am.remove("max_turns");
+        let state_caps = crate::config::ensemble::normalize_state_worker_caps(
+            form.runtime.agent.max_concurrent_agents_by_state.clone(),
+        )
+        .map_err(|reason| ConfigError::ConfigParseError { reason })?;
+        if state_caps.is_empty() {
+            am.remove("max_concurrent_agents_by_state");
+        } else {
+            am.insert(
+                "max_concurrent_agents_by_state".into(),
+                serde_yaml::to_value(state_caps).map_err(|error| {
+                    ConfigError::ConfigParseError {
+                        reason: error.to_string(),
+                    }
+                })?,
+            );
+        }
         am.insert(
             "max_retry_backoff_ms".into(),
             form.runtime.agent.max_retry_backoff_ms.into(),
@@ -781,6 +803,73 @@ on_failure: Failed
     }
 
     #[test]
+    fn guided_form_round_trips_agent_state_caps() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+  - name: lint
+    agent: builder
+    depends: []
+  - name: test
+    agent: builder
+    depends: [build]
+on_success: Done
+on_failure: Failed
+agent:
+  max_concurrent_agents_by_state:
+    ' Todo ': 1
+    IN PROGRESS: 2
+"#;
+
+        let mut form = extract_guided_form(raw).unwrap();
+        assert_eq!(form.runtime.agent.max_concurrent_agents_by_state["todo"], 1);
+        assert_eq!(
+            form.runtime.agent.max_concurrent_agents_by_state["in progress"],
+            2
+        );
+
+        form.runtime
+            .agent
+            .max_concurrent_agents_by_state
+            .remove("in progress");
+        form.runtime
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("review".to_string(), 3);
+        let merged = apply_guided_form(raw, &form).unwrap();
+        let config = crate::config::ensemble::parse_config(&merged).unwrap();
+        assert_eq!(config.agent.max_concurrent_agents_by_state["todo"], 1);
+        assert_eq!(config.agent.max_concurrent_agents_by_state["review"], 3);
+        assert!(!config
+            .agent
+            .max_concurrent_agents_by_state
+            .contains_key("in progress"));
+
+        let merged_value = serde_yaml::from_str::<serde_yaml::Value>(&merged).unwrap();
+        let steps = merged_value["steps"].as_sequence().unwrap();
+        assert!(steps[0].get("depends").is_none());
+        assert_eq!(steps[1]["depends"], serde_yaml::Value::Sequence(vec![]));
+        assert_eq!(
+            steps[2]["depends"],
+            serde_yaml::to_value(["build"]).unwrap()
+        );
+
+        form.runtime.agent.max_concurrent_agents_by_state.clear();
+        let without_caps = apply_guided_form(&merged, &form).unwrap();
+        let without_caps = serde_yaml::from_str::<serde_yaml::Value>(&without_caps).unwrap();
+        assert!(without_caps["agent"]
+            .get("max_concurrent_agents_by_state")
+            .is_none());
+    }
+
+    #[test]
     fn guided_form_omits_max_turns_and_preserves_supported_agent_runtime_fields() {
         let raw = r#"
 tracker:
@@ -968,6 +1057,7 @@ on_failure: Failed
                     timeout_ms: 60000,
                 },
                 agent: GuidedAgentRuntimeForm {
+                    max_concurrent_agents_by_state: BTreeMap::new(),
                     max_retry_backoff_ms: 300000,
                     command: "claude-code".to_string(),
                     session_mode: "code".to_string(),

@@ -41,6 +41,7 @@ const initialForm: GuidedForm = {
     workspace: {},
     hooks: { timeout_ms: 1000 },
     agent: {
+      max_concurrent_agents_by_state: {},
       max_retry_backoff_ms: 1,
       command: "agent",
       session_mode: "code",
@@ -210,6 +211,71 @@ describe("GuidedEditor", () => {
     await user.click(screen.getByRole("button", { name: /save/i }));
 
     expect(onSave.mock.calls[0]?.[0].steps).toEqual(parallelRootForm.steps);
+  });
+
+  it("edits state worker caps without changing dependency shapes", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn(async (_form: GuidedForm, _baseRawYaml: string) => undefined);
+    const formWithCaps: GuidedForm = {
+      ...initialForm,
+      steps: [
+        { name: "build", agent: "builder" },
+        { name: "lint", agent: "builder", depends: [] },
+        { name: "test", agent: "builder", depends: ["build"] },
+      ],
+      runtime: {
+        ...initialForm.runtime,
+        agent: {
+          ...initialForm.runtime.agent,
+          max_concurrent_agents_by_state: { Todo: 1, Review: 2 },
+        },
+      },
+    };
+
+    renderWithProviders(
+      <GuidedEditor
+        initialForm={formWithCaps}
+        baseRawYaml={"tracker:\n  kind: todo_file\n"}
+        issues={[]}
+        onValidate={vi.fn(async () => [])}
+        onSave={onSave}
+        onReset={vi.fn()}
+      />,
+      { route: "/config" }
+    );
+
+    await user.click(screen.getByLabelText("Model"));
+    await user.click(await screen.findByRole("option", { name: "Opus" }));
+    await user.click(screen.getByRole("button", { name: /save/i }));
+    expect(onSave.mock.calls[0]?.[0].runtime.agent.max_concurrent_agents_by_state).toEqual({
+      Todo: 1,
+      Review: 2,
+    });
+
+    const limits = screen.getAllByLabelText("Limit");
+    await user.clear(limits[0]!);
+    await user.type(limits[0]!, "4294967296");
+    expect(screen.getByText(/no greater than 4294967295/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /save/i })).toBeDisabled();
+    await user.clear(limits[0]!);
+    await user.type(limits[0]!, "3");
+    const states = screen.getAllByLabelText("State");
+    await user.clear(states[1]!);
+    await user.type(states[1]!, "In Progress");
+    await user.click(screen.getByRole("button", { name: /add state limit/i }));
+    const addedStates = screen.getAllByLabelText("State");
+    const addedLimits = screen.getAllByLabelText("Limit");
+    await user.type(addedStates[2]!, "QA");
+    await user.clear(addedLimits[2]!);
+    await user.type(addedLimits[2]!, "4");
+    await user.click(screen.getByRole("button", { name: /remove in progress/i }));
+    await user.click(screen.getByRole("button", { name: /save/i }));
+
+    const saved = onSave.mock.calls[1]?.[0];
+    expect(saved).toBeDefined();
+    if (!saved) throw new Error("onSave should receive edited state caps");
+    expect(saved.runtime.agent.max_concurrent_agents_by_state).toEqual({ Todo: 3, QA: 4 });
+    expect(saved.steps).toEqual(formWithCaps.steps);
   });
 
   it("saves inline agent model reasoning and mode edits", async () => {

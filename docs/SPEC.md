@@ -491,8 +491,9 @@ Fields:
 - `poll_interval_ms` (current effective poll interval)
 - `max_concurrent_agents` (current effective global concurrency limit)
 - `running` (map `issue_id -> running entry`)
-- active-worker registry (map of exact worker identity to cancellation and completion ownership;
-  authoritative for live-agent capacity)
+- active-worker registry (map of exact worker identity to cancellation, completion ownership, and
+  private normalized reservation-time state bucket; sole atomic authority for global, per-issue,
+  and per-state live-agent capacity)
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
@@ -510,6 +511,9 @@ Fields:
   - Use the sanitized value for the workspace directory name.
 - `Normalized Issue State`
   - Compare states after `lowercase`.
+- `Normalized State-Cap Bucket`
+  - Trim surrounding whitespace and apply `lowercase` to configured state-cap keys and tracker
+    states observed at worker reservation.
 - `Session ID`
   - Use the `sessionId` returned by the ACP `session/new` response.
 
@@ -891,8 +895,12 @@ Fields:
   - Changes should be re-applied at runtime and affect future retry scheduling.
 - `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
   - Default: empty map.
-  - State keys are normalized (`lowercase`) for lookup.
-  - Invalid entries (non-positive or non-numeric) are ignored.
+  - State keys are normalized with `trim().lowercase()` for lookup and canonical serialization.
+  - Blank keys, non-positive or non-numeric limits, and distinct keys that collide after
+    normalization reject the complete configuration. Errors identify
+    `agent.max_concurrent_agents_by_state` and the offending entry.
+  - Omission is equivalent to an empty map. A state without an entry has no additional state limit;
+    global and per-issue worker limits still apply.
 - `command` (string command)
   - Default: implementation-defined.
   - Used by the direct ACP runtime when a step agent does not provide `executor`.
@@ -1026,6 +1034,12 @@ Dynamic reload is required:
   prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
+- Each active pipeline keeps its immutable config-generation snapshot. State-cap changes therefore
+  affect reservations made by a later generation and never re-bucket, cancel, or evict a live
+  worker. The serialized prepare-quiesce-commit boundary drains the previous runtime before a new
+  generation begins dispatching.
+- Process restart recovers no agent process or persisted capacity ledger. A restored pending step
+  makes a fresh reservation using the restored generation and the issue's latest reconciled state.
 - Implementations are not required to restart in-flight agent sessions automatically when config
   changes.
 - Extensions that manage their own listeners/resources (for example an HTTP server port change) may
@@ -1315,7 +1329,6 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - A live-worker slot is advisably available; the atomic reservation at step dispatch is
   authoritative.
-- Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
 
@@ -1345,11 +1358,17 @@ Per-issue step limit:
 
 Per-state limit:
 
-- `max_concurrent_agents_by_state[state]` if present (state key normalized)
-- otherwise fallback to global limit
-
-Per-state limits remain issue-state admission limits and are separate from live-worker accounting.
-They do not replace either worker-capacity reservation.
+- `agent.max_concurrent_agents_by_state[normalized_reservation_state]` if present.
+- The orchestrator counts exact live workers in the matching private reservation-time bucket inside
+  the same registry lock as the global and per-issue checks, before one insertion linearization
+  point. A miss leaves the step pending without failure or retry consumption.
+- If the state is absent from the map, there is no additional state limit; there is no fallback to
+  running-issue admission or a separately named state limit.
+- A live worker keeps the bucket captured when it reserved. Tracker reconciliation never migrates,
+  cancels, evicts, or re-buckets it. A later initial, downstream, restored, resumed, or deferred
+  dispatch uses its owning issue snapshot's latest reconciled state for a new reservation.
+- These are implemented live-worker capacity limits. They do not guarantee parallel execution in
+  the trusted-local sequential first-release profile.
 
 Optional SSH host limit:
 
