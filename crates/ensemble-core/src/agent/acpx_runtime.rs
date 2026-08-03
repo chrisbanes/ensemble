@@ -576,6 +576,19 @@ on_failure: Failed
         )
     }
 
+    async fn wait_for_session_files(directory: &std::path::Path, sessions: &[&str]) {
+        tokio::time::timeout(Duration::from_millis(TEST_TIMEOUT_MS), async {
+            while !sessions
+                .iter()
+                .all(|session| directory.join(session).exists())
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed out waiting for mock acpx sessions");
+    }
+
     #[tokio::test]
     async fn acpx_runtime_passes_permission_mode_to_every_lifecycle_command() {
         let cases = [
@@ -759,6 +772,316 @@ exit 1
             }
         }
         assert!(saw_output);
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_concurrent_runs_keep_sessions_outputs_events_and_cleanup_isolated() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let log_path = workspace.path().join("commands.txt");
+        let ready_dir = workspace.path().join("ready");
+        let release_dir = workspace.path().join("release");
+        std::fs::create_dir_all(&ready_dir).unwrap();
+        std::fs::create_dir_all(&release_dir).unwrap();
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+session=""
+for ((index = 1; index <= $#; index++)); do
+  if [ "${{!index}}" = "--session" ] || [ "${{!index}}" = "--name" ]; then
+    next=$((index + 1))
+    session="${{!next}}"
+    break
+  fi
+done
+if [[ "$*" == *" sessions close "* ]]; then
+  session="${{!#}}"
+fi
+printf 'command|%s|%s\n' "$session" "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*) exit 0 ;;
+  *" prompt --session "*)
+    prompt=$(cat)
+    if [[ "$prompt" == Extract* ]]; then
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"$session\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"{{\\\"result\\\":\\\"succeeded\\\",\\\"output\\\":{{\\\"session\\\":\\\"$session\\\"}}}}\"}}}}}}}}" "{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+    else
+      : > "{}/$session"
+      while [ ! -f "{}/$session" ]; do /bin/sleep 0.01; done
+      printf 'visible|%s\n' "$session" >> "{}"
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"$session\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"visible-$session\"}}}}}}}}" "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+    fi
+    exit 0
+    ;;
+  *" sessions close "*) exit 0 ;;
+esac
+exit 1
+"#,
+                log_path.display(),
+                ready_dir.display(),
+                release_dir.display(),
+                log_path.display()
+            ),
+        );
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let config = test_config();
+        let issue_a = test_issue("issue-a", "Todo");
+        let issue_b = test_issue("issue-b", "Todo");
+        let issue_c = test_issue("issue-c", "Todo");
+        let (tx_a, mut rx_a) = tokio::sync::mpsc::channel(16);
+        let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(16);
+        let (tx_c, mut rx_c) = tokio::sync::mpsc::channel(16);
+        let request_a = AgentRunRequest {
+            config: Arc::clone(&config),
+            issue: &issue_a,
+            agent_name: "builder",
+            step_name: "build-a",
+            step_kind: StepKind::Agent,
+            attempt: Some(1),
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx_a,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+        let request_b = AgentRunRequest {
+            config: Arc::clone(&config),
+            issue: &issue_b,
+            agent_name: "builder",
+            step_name: "build-b",
+            step_kind: StepKind::Agent,
+            attempt: Some(2),
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx_b,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+        let request_c = AgentRunRequest {
+            config,
+            issue: &issue_c,
+            agent_name: "builder",
+            step_name: "build-c",
+            step_kind: StepKind::Agent,
+            attempt: Some(3),
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: tx_c,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+        let sessions = [
+            "issue-a-build-a-attempt-1",
+            "issue-b-build-b-attempt-2",
+            "issue-c-build-c-attempt-3",
+        ];
+        let release_sessions = sessions;
+        let ready_dir_for_release = ready_dir.clone();
+        let release_dir_for_release = release_dir.clone();
+        let release = async move {
+            wait_for_session_files(&ready_dir_for_release, &release_sessions).await;
+            for session in release_sessions {
+                std::fs::write(release_dir_for_release.join(session), "").unwrap();
+            }
+        };
+        let ((result_a, result_b, result_c), ()) = tokio::join!(
+            async {
+                tokio::join!(
+                    runner.run_step(&request_a, "run a"),
+                    runner.run_step(&request_b, "run b"),
+                    runner.run_step(&request_c, "run c")
+                )
+            },
+            release,
+        );
+
+        for (result, session) in [result_a.unwrap(), result_b.unwrap(), result_c.unwrap()]
+            .iter()
+            .zip(sessions)
+        {
+            assert!(
+                matches!(result, WorkerResult::Success { output, .. } if output.output == Some(serde_json::json!({"session": session})))
+            );
+        }
+        for (receiver, session) in [
+            (&mut rx_a, sessions[0]),
+            (&mut rx_b, sessions[1]),
+            (&mut rx_c, sessions[2]),
+        ] {
+            let events: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+            assert!(events.iter().any(|event| matches!(event, WorkerEvent::AgentUpdate { event: AgentEvent::OutputChunk { content, .. }, .. } if content == &format!("visible-{session}"))));
+            assert!(!events.iter().any(|event| matches!(event, WorkerEvent::AgentUpdate { event: AgentEvent::OutputChunk { content, .. }, .. } if content.starts_with("visible-") && content != &format!("visible-{session}"))));
+        }
+        let commands = std::fs::read_to_string(log_path).unwrap();
+        for session in sessions {
+            assert_eq!(
+                commands.matches(&format!("command|{session}|")).count(),
+                4,
+                "{commands}"
+            );
+            assert!(
+                commands.contains(&format!("visible|{session}")),
+                "{commands}"
+            );
+            assert!(
+                commands.contains(&format!("sessions close {session}")),
+                "{commands}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn acpx_runtime_concurrent_cancellation_and_failure_do_not_affect_peers() {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let log_path = workspace.path().join("commands.txt");
+        let ready_dir = workspace.path().join("ready");
+        let release_dir = workspace.path().join("release");
+        std::fs::create_dir_all(&ready_dir).unwrap();
+        std::fs::create_dir_all(&release_dir).unwrap();
+        let script_path = write_mock_acpx_script(
+            workspace.path(),
+            &format!(
+                r#"#!/usr/bin/env bash
+session=""
+for ((index = 1; index <= $#; index++)); do
+  if [ "${{!index}}" = "--session" ] || [ "${{!index}}" = "--name" ]; then
+    next=$((index + 1)); session="${{!next}}"; break
+  fi
+done
+if [[ "$*" == *" sessions close "* ]]; then session="${{!#}}"; fi
+printf 'command|%s|%s\n' "$session" "$*" >> "{}"
+case "$*" in
+  *" sessions ensure --name "*|*" sessions close "*) exit 0 ;;
+  *" cancel --session "*) : > "{}/$session"; exit 0 ;;
+  *" prompt --session "*)
+    prompt=$(cat)
+    if [[ "$prompt" == Extract* ]]; then
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"$session\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"{{\\\"result\\\":\\\"succeeded\\\",\\\"output\\\":{{\\\"session\\\":\\\"$session\\\"}}}}\"}}}}}}}}" "{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+    else
+      : > "{}/$session"
+      while [ ! -f "{}/$session" ]; do /bin/sleep 0.01; done
+      if [ "$session" = "issue-fail-build-attempt-2" ]; then exit 1; fi
+      printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{{\"sessionId\":\"$session\",\"update\":{{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{{\"type\":\"text\",\"text\":\"visible-$session\"}}}}}}}}" "{{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"stopReason\":\"end_turn\"}}}}"
+    fi
+    exit 0 ;;
+esac
+exit 1
+"#,
+                log_path.display(),
+                release_dir.display(),
+                ready_dir.display(),
+                release_dir.display()
+            ),
+        );
+        let runner = AcpxRuntime::with_cli(AcpxCli::new(script_path));
+        let config = test_config();
+        let cancelled_issue = test_issue("issue-cancel", "Todo");
+        let failed_issue = test_issue("issue-fail", "Todo");
+        let successful_issue = test_issue("issue-success", "Todo");
+        let (cancel_tx, _cancel_rx) = tokio::sync::mpsc::channel(16);
+        let (failure_tx, _failure_rx) = tokio::sync::mpsc::channel(16);
+        let (success_tx, mut success_rx) = tokio::sync::mpsc::channel(16);
+        let cancel_token = CancellationToken::new();
+        let cancelled = AgentRunRequest {
+            config: Arc::clone(&config),
+            issue: &cancelled_issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: Some(1),
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: cancel_tx,
+            cancel_token: cancel_token.clone(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+        let failed = AgentRunRequest {
+            config: Arc::clone(&config),
+            issue: &failed_issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: Some(2),
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: failure_tx,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+        let successful = AgentRunRequest {
+            config,
+            issue: &successful_issue,
+            agent_name: "builder",
+            step_name: "build",
+            step_kind: StepKind::Agent,
+            attempt: Some(3),
+            timeout_ms: TEST_TIMEOUT_MS,
+            interaction_response: None,
+            workspace_path: workspace.path(),
+            event_tx: success_tx,
+            cancel_token: CancellationToken::new(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+        let sessions = [
+            "issue-cancel-build-attempt-1",
+            "issue-fail-build-attempt-2",
+            "issue-success-build-attempt-3",
+        ];
+        let ready_for_control = ready_dir.clone();
+        let release_for_control = release_dir.clone();
+        let control = async move {
+            wait_for_session_files(&ready_for_control, &sessions).await;
+            cancel_token.cancel();
+            for session in &sessions[1..] {
+                std::fs::write(release_for_control.join(session), "").unwrap();
+            }
+        };
+        let ((cancelled_result, failed_result, successful_result), ()) = tokio::join!(
+            async {
+                tokio::join!(
+                    runner.run_step(&cancelled, "cancel me"),
+                    runner.run_step(&failed, "fail me"),
+                    runner.run_step(&successful, "complete me")
+                )
+            },
+            control,
+        );
+        assert!(matches!(cancelled_result, Err(AgentError::TurnCancelled)));
+        assert!(matches!(
+            failed_result,
+            Err(AgentError::AcpxCommandFailed { .. })
+        ));
+        assert!(
+            matches!(successful_result, Ok(WorkerResult::Success { output, .. }) if output.output == Some(serde_json::json!({"session": "issue-success-build-attempt-3"})))
+        );
+        let events: Vec<_> = std::iter::from_fn(|| success_rx.try_recv().ok()).collect();
+        assert!(events.iter().any(|event| matches!(event, WorkerEvent::AgentUpdate { event: AgentEvent::OutputChunk { content, .. }, .. } if content == "visible-issue-success-build-attempt-3")));
+        let commands = std::fs::read_to_string(log_path).unwrap();
+        assert_eq!(
+            commands
+                .matches("cancel --session issue-cancel-build-attempt-1")
+                .count(),
+            1,
+            "{commands}"
+        );
+        for session in sessions {
+            assert!(
+                commands.contains(&format!("sessions close {session}")),
+                "{commands}"
+            );
+        }
+        assert!(
+            !commands.contains("cancel --session issue-fail-build-attempt-2"),
+            "{commands}"
+        );
+        assert!(
+            !commands.contains("cancel --session issue-success-build-attempt-3"),
+            "{commands}"
+        );
     }
 
     #[tokio::test]
