@@ -2,6 +2,17 @@
 
 Ensemble is CI for autonomous coding agents. It turns issue-tracker work into repeatable, config-driven agent pipelines: poll for eligible tickets, create isolated workspaces, run named agents through explicit steps, collect structured results, and move tracker state at workflow boundaries.
 
+## First-release boundary
+
+The supported first release is a trusted-local, unauthenticated service for one operator. It is
+ACPX-first and supports sequential pipelines as the stable execution path. Mission Control Phase 1
+and recoverable repository finalization are included: supported delivery ends when finalization
+creates a pull request and moves the work to review. A human owns pull-request review and merge.
+
+Parallel DAG syntax, remote or multi-user control, and live replacement of process-scoped workspace
+or repository resources are not supported first-release contracts. Restart Ensemble after changing
+the workspace root or repository set.
+
 ## How it works
 
 Ensemble reads issues from a tracker (GitHub Projects/repository labels, Notion, or a local TODO file), creates a workspace directory for each one, and runs a pipeline of named agents against it. Each agent gets a prompt rendered from the issue context and previous step outputs. Ensemble runs a hidden extraction turn to collect a strict `StepOutput` (`succeeded`, `failed`, or `concern`) and uses the configured pipeline policy to continue, retry, or fail the issue. Failed issues retry with exponential backoff.
@@ -10,8 +21,9 @@ All behavior is configured in a `config.yaml` file that lives in a configuration
 
 ## Install
 
-Tagged releases publish CLI and desktop artifacts and update the Homebrew tap. Once a release is
-available:
+Pushing a version tag runs the release workflow: it builds CLI archives for macOS arm64 and Linux
+x86_64/arm64, builds signed and notarized macOS desktop artifacts, creates a GitHub Release, and
+updates the Homebrew tap. Once a release is available:
 
 ```sh
 brew install ensemble
@@ -131,7 +143,10 @@ This opens the resolved configuration directory in your system's file manager. I
 
 **Agents** are named definitions that pair an executor (like `claude-code`) with a prompt. Prompts can be inline strings or [Liquid](https://shopify.github.io/liquid/) template files with access to issue context.
 
-**Pipelines** are a DAG of steps, each referencing an agent. Steps run sequentially by default. Use `depends` to create parallel branches. This is the CI-like contract: the pipeline, not the agent, defines the delivery gates. See [Pipeline Guide](docs/pipelines.md).
+**Pipelines** are a DAG of steps, each referencing an agent. Sequential list-order steps are the
+supported first-release path. `depends` syntax can express branches, but it does not make guaranteed
+parallel execution a supported contract. The pipeline, not the agent, defines delivery gates. See
+the [Pipeline Guide](docs/pipelines.md).
 
 **Workspaces** are isolated directories created per-issue. They persist across retries and get cleaned up when the issue reaches a terminal state. Shell hooks run at lifecycle points (create, before/after run, remove); `before_remove` runs in an existing workspace before its worktrees and directory are removed, and failures or timeouts are logged without blocking cleanup.
 

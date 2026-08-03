@@ -1,5 +1,9 @@
 # SDD Parent Planning Prompt
 
+> **Superseded example.** This historical GSD prompt is retained for reference; use the current
+> runtime and Project lifecycle guidance in
+> [`docs/agents/run-github-project.md`](../../agents/run-github-project.md).
+
 Use this prompt when an agent is planning from a parent GitHub issue.
 
 ```text

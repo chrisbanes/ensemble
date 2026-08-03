@@ -5,6 +5,17 @@ Status: Draft v1 (language-agnostic)
 Purpose: Define CI for autonomous coding agents: a service that turns issue-tracker work into
 repeatable, observable, config-driven agent pipelines.
 
+## First-release profile
+
+The shipped first release is a trusted-local, unauthenticated, single-operator service. ACPX is
+the primary agent runtime and sequential pipelines are the supported execution path. Mission
+Control Phase 1 and recoverable finalization are included. Finalization may publish a branch and
+create a pull request, then leaves review and merge to a human.
+
+The runtime may parse DAG dependencies, but it does not promise guaranteed parallel execution in
+this release. Remote or multi-user control and live replacement of process-scoped workspace or
+repository resources are unsupported; restart is required after those resource changes.
+
 ## 1. Problem Statement
 
 Ensemble runs agent workflows for tickets and provides a control room for supervising interactive
@@ -357,8 +368,9 @@ Pipeline run recovery:
   before exposing the wait. A resolved-but-unbound interaction follows the same repair path rather
   than being mistaken for a reserved continuation.
 - A newer live pipeline cycle supersedes and retires every awaiting interaction from an older
-  cycle without modifying the newer journal owner. A same-cycle record for a parallel sibling step
-  does not supersede an interaction that remains bound in that record's pipeline snapshot.
+  cycle without modifying the newer journal owner. In deferred multi-branch execution, a same-cycle
+  record for a sibling step does not supersede an interaction that remains bound in that record's
+  pipeline snapshot.
 - A missing or failed tracker refresh, changed step context, quiescing runtime, workspace failure,
   or first confirmed-absent dispatch retains the claim, waiting entry, pipeline snapshot, queued
   resume request, and durable `awaiting_resume` marker for a later recoverable attempt.
@@ -787,13 +799,14 @@ Pipeline step definitions forming a DAG. Each step is an object:
   - Step kind: `"agent"` for normal steps or `"synthesis"` for steps that merge/adjudicate direct
     dependency outputs. Synthesis steps must declare `depends` explicitly.
 - `depends` (list of strings, optional)
-  - Step names this step depends on. Steps with the same dependencies run in parallel.
+  - Step names this step depends on. The syntax can describe branches, but it does not guarantee
+    parallel execution in the first release.
   - If omitted: the first step in the list has no implicit dependency (it is a root). Each
     subsequent step that omits `depends` implicitly depends on the step directly before it in the
     list. A step that explicitly sets `depends` overrides this.
 - `tracker_state` (string, optional)
-  - Tracker state to write when entering this step. If multiple parallel steps share the same
-    `tracker_state`, it is written once.
+  - Tracker state to write when entering this step. For deferred multi-branch execution, a shared
+    `tracker_state` is written once.
 
 #### 5.3.5 `on_success` (string)
 
@@ -812,7 +825,8 @@ Fields:
   - Global cap on total agent processes across all issues.
 - `max_step_parallelism` (integer)
   - Default: `2`
-  - Per-issue cap on concurrent agents within a single pipeline run.
+  - Per-issue worker cap retained for deferred multi-branch execution; not a first-release
+    guarantee of parallel dispatch.
 
 #### 5.3.8 `max_cycles` (integer)
 

@@ -1,5 +1,9 @@
 # Ensemble Wave Execution Example
 
+> **Superseded example.** This historical SDD template is retained for reference; use the current
+> runtime and Project lifecycle guidance in
+> [`docs/agents/run-github-project.md`](../../agents/run-github-project.md).
+
 ## Parent
 
 Parent issue reference.

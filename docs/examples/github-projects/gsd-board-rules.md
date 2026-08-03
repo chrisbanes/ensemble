@@ -1,5 +1,9 @@
 # GSD Board Rules
 
+> **Superseded example.** Preserve this historical GSD board model for reference only. Use the
+> current runtime and Project lifecycle guidance in
+> [`docs/agents/run-github-project.md`](../../agents/run-github-project.md).
+
 Use one shared GitHub status field for both parent planning issues and child wave execution issues.
 
 ## Parent Issue States

@@ -1,5 +1,9 @@
 # SDD With Ensemble
 
+> **Superseded workflow guidance.** This historical SDD method is not a runtime contract. For the
+> current trusted-local, single-operator runtime and GitHub Project lifecycle, see
+> [`docs/SPEC.md`](SPEC.md) and [`docs/agents/run-github-project.md`](agents/run-github-project.md).
+
 ## Who This Is For
 
 This workflow is for teams using GitHub issues as the human-facing planning surface and Ensemble as the issue executor. It provides a spec-driven development approach where planning work produces durable artifacts that execution work consumes.

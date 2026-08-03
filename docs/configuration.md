@@ -1,5 +1,14 @@
 # Configuration Reference
 
+## First-release configuration boundary
+
+Configuration serves one trusted local operator. ACPX-backed agents and sequential pipelines are
+the supported first-release path. `agent.max_turns` is not a supported field and is rejected.
+Changes to `workspace.root` or the ordered `repos` list persist but require an Ensemble restart
+before activation; they do not live-replace process-scoped resources. `hooks.before_remove` runs
+best-effort in the existing workspace before removal, and its failure or timeout does not block
+cleanup.
+
 Ensemble is configured through a `config.yaml` file located in a configuration directory. The default config directory is determined by your platform:
 
 - **Linux:** `~/.config/ensemble/`
@@ -80,6 +89,10 @@ timeline/transcript persistence to drain, and then commits the config document,
 observed file mtime, config-derived orchestrator values, and prepared runtime as
 one generation. The replacement runtime cannot start until that commit is
 complete.
+
+`workspace.root` and the ordered `repos` list are the exception: they are
+process-scoped resources, so saves persist their candidate configuration but do
+not prepare or commit a replacement runtime. Restart Ensemble to activate them.
 
 Invalid candidates, preparation failures, and a busy runtime leave the complete
 last-known-good generation active. Their file mtime is not consumed, so the same
@@ -503,20 +516,21 @@ steps:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `max_concurrent_agents` | integer | `4` | Maximum parallel agent runs across all issues |
-| `max_step_parallelism` | integer | `2` | Maximum parallel steps within a single issue's pipeline |
+| `max_concurrent_agents` | integer | `4` | Worker-capacity cap; concurrent dispatch is not a first-release guarantee |
+| `max_step_parallelism` | integer | `2` | Per-issue worker cap reserved for deferred multi-branch execution |
 
-Both limits count live agent workers, not claimed or running issues. Ensemble reserves the global
+These limits count live agent workers, not claimed or running issues. Ensemble reserves the global
 and per-issue slot atomically for each exact step worker before publishing the step as running or
-launching its agent. If either limit is full, the ready step remains pending without consuming a
-retry cycle. Pending ready steps in claimed pipelines are reconsidered when worker capacity is
-released and before new candidate issues are admitted on the next tick.
+launching its agent. This describes the implemented capacity accounting, not a supported guarantee
+of parallel execution in the sequential MVP. If either limit is full, the ready step remains pending
+without consuming a retry cycle. Pending ready steps in claimed pipelines are reconsidered when
+worker capacity is released and before new candidate issues are admitted on the next tick.
 
 A worker keeps its reservation until its event bridge has closed and quiescence is proven.
 Pre-launch errors roll back only the rejected worker's reservation; success, failure,
 cancellation, and reconciliation likewise release only their exact worker identities. If one
-parallel step fails, Ensemble cancels and drains its live sibling steps before applying the
-configured retry or failure behavior.
+step fails in deferred multi-branch execution, Ensemble cancels and drains its live sibling steps
+before applying the configured retry or failure behavior.
 
 ### max_cycles
 
