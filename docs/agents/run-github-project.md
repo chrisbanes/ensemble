@@ -57,7 +57,7 @@
 - Issue closure: `closing-keyword`
 - Required reviews: `none`
 - Required checks: `Check, Test, Clippy, Format`; `Frontend Test and Build`;
-  `Tauri PR (Linux)`; `Tauri PR (Mac)`; `Greptile Review`
+  `Tauri PR (Linux)`; `Tauri PR (Mac)`
 - Done automation: `set-status`
 - Automation description: Enabled Project workflows `Item closed` and
   `Pull request merged`; verified that merged-and-closed issue #182 moved from
