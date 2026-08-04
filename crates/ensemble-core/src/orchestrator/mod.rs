@@ -1969,14 +1969,15 @@ impl Orchestrator {
                 warn!(issue_id = %issue.id, error = %error, "acceptance evidence does not match config");
                 return AcceptancePhaseOutcome::RetainedForRecovery;
             }
-            if plan.pre_final_len() == 0 {
-                return AcceptancePhaseOutcome::Passed;
-            }
-
             let current_attempt = candidate
                 .acceptance_attempts
                 .iter()
                 .position(|attempt| attempt.cycle == candidate.cycle);
+            if plan.pre_final_len() == 0
+                && (plan.required_pull_requests.is_empty() || current_attempt.is_some())
+            {
+                return AcceptancePhaseOutcome::Passed;
+            }
             let check_to_run = if let Some(attempt_index) = current_attempt {
                 let results = &candidate.acceptance_attempts[attempt_index].results;
                 if results.len() >= plan.pre_final_len() {
@@ -10832,6 +10833,53 @@ agent:
                         .len()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn acceptance_creates_a_durable_attempt_for_a_pull_request_only_plan() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-pr-only", "In Progress");
+        let mut config = acceptance_config(&[]);
+        let mut repo = crate::config::ensemble::RepoConfig {
+            path: "/tmp/primary".into(),
+            branch: "main".into(),
+            git_remote: "origin".into(),
+            finalize: Default::default(),
+        };
+        repo.finalize.mode = crate::workspace::finalize::FinalizeMode::PushAndPr;
+        config.repos = vec![repo];
+        config.acceptance.required_pull_requests =
+            vec![crate::config::ensemble::AcceptancePullRequestConfig {
+                name: "primary-pr".into(),
+                repo: "primary".into(),
+            }];
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(Default::default()),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Passed));
+        let state = state.read().await;
+        let attempts = &state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .acceptance_attempts;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].cycle, 1);
+        assert!(attempts[0].results.is_empty());
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, PipelineTransitionKind::AcceptanceStarted);
     }
 
     fn mixed_acceptance_config() -> EnsembleConfig {
