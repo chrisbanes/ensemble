@@ -80,6 +80,26 @@ const issue = {
   last_error: null,
   pending_input: null,
   current_interaction: null,
+  acceptance_attempts: [
+    {
+      cycle: 1,
+      results: [
+        {
+          version: 2,
+          name: "unit tests",
+          status: "passed",
+          summary: "tests passed",
+          timing: { kind: "unknown" },
+          evidence: {
+            kind: "command",
+            exit_code: 0,
+            stdout: { tail: "ok", total_bytes: 2, truncated: false },
+            stderr: { tail: "", total_bytes: 0, truncated: false },
+          },
+        },
+      ],
+    },
+  ],
 } satisfies IssueDetailSnapshot;
 
 const openInteraction = {
@@ -189,7 +209,7 @@ describe("IssueCommandPanel", () => {
       "aria-selected",
       "true",
     );
-    expect(screen.getAllByRole("tab")).toHaveLength(6);
+    expect(screen.getAllByRole("tab")).toHaveLength(7);
   });
 
   it("renders tabs in contract order and activates them with roving keyboard focus", async () => {
@@ -214,7 +234,15 @@ describe("IssueCommandPanel", () => {
     );
 
     const labels = screen.getAllByRole("tab").map((tab) => tab.textContent);
-    expect(labels).toEqual(["Overview", "Respond", "Steps", "Transcript", "Logs", "Artifacts"]);
+    expect(labels).toEqual([
+      "Overview",
+      "Respond",
+      "Steps",
+      "Transcript",
+      "Logs",
+      "Acceptance",
+      "Artifacts",
+    ]);
     const controlledPanelIds = screen
       .getAllByRole("tab")
       .map((tab) => tab.getAttribute("aria-controls"));
@@ -241,6 +269,8 @@ describe("IssueCommandPanel", () => {
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveFocus();
     await user.keyboard("{ArrowLeft}");
     expect(screen.getByRole("tab", { name: "Artifacts" })).toHaveFocus();
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("tab", { name: "Acceptance" })).toHaveFocus();
   });
 
   it("notifies the parent when a tab is selected", async () => {
@@ -857,6 +887,17 @@ describe("IssueCommandPanel", () => {
     expect(screen.getByText("No run artifacts recorded.")).toBeInTheDocument();
     expect(screen.queryByText("Workspace")).not.toBeInTheDocument();
     expect(screen.getByText("Ship the command panel")).toBeInTheDocument();
+  });
+
+  it("renders generated acceptance attempts in the accessible Acceptance tab", () => {
+    renderPanel("acceptance");
+
+    expect(screen.getByRole("tab", { name: "Acceptance" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("unit tests")).toBeInTheDocument();
+    expect(screen.getByText("passed")).toBeInTheDocument();
   });
 
   it("reuses the artifact panel when run artifacts exist", () => {

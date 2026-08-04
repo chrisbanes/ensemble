@@ -102,6 +102,7 @@ function interaction(status: InteractionDetail["status"]): InteractionDetail {
 
 function issueDetail(finalizeStatus: string, approvalRequired = false): IssueDetailSnapshot {
   return {
+    acceptance_attempts: [],
     artifacts: null,
     attempts: { restart_count: 0, current_retry_attempt: null },
     current_interaction: null,

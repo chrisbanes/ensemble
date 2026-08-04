@@ -279,6 +279,7 @@ fn issue_snapshot_from_history_record(
             url: None,
         },
         artifacts,
+        acceptance_attempts: record.acceptance_attempts.clone(),
     })
 }
 
@@ -548,13 +549,18 @@ pub async fn method_not_allowed() -> (StatusCode, Json<ApiError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acceptance::{
+        AcceptanceAttempt, AcceptanceEvidence, AcceptanceOutput, AcceptanceResult,
+        AcceptanceStatus, AcceptanceTiming, FileObservation, HandoffOutputObservation,
+        HandoffSectionEvidence, HandoffSectionObservation, JsonValueKind, PullRequestDeliveryPhase,
+    };
     use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
     use crate::config::ensemble::ConcurrencyConfig;
     use crate::history::model::{HistoryRecord, TokenTotals};
     use crate::history::writer::HistoryWriter;
     use crate::orchestrator::state::OrchestratorState;
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use tempfile::NamedTempFile;
 
     fn test_issue() -> Issue {
@@ -607,6 +613,86 @@ mod tests {
             retry_from_step: None,
             with_fixup: false,
         }
+    }
+
+    fn persisted_acceptance_attempts() -> Vec<AcceptanceAttempt> {
+        let timing = AcceptanceTiming::Observed {
+            started_at: Utc.with_ymd_and_hms(2026, 8, 4, 9, 0, 0).single().unwrap(),
+            completed_at: Utc.with_ymd_and_hms(2026, 8, 4, 9, 0, 1).single().unwrap(),
+            duration_ms: 1_000,
+        };
+        let mut command = AcceptanceResult::new(
+            "unit tests".to_string(),
+            AcceptanceStatus::Passed,
+            "tests passed".to_string(),
+            AcceptanceEvidence::Command {
+                exit_code: Some(0),
+                stdout: AcceptanceOutput {
+                    tail: "tests passed".to_string(),
+                    total_bytes: 12,
+                    truncated: false,
+                },
+                stderr: AcceptanceOutput {
+                    tail: String::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                },
+            },
+        );
+        command.timing = timing.clone();
+        let mut release_notes = AcceptanceResult::new(
+            "release notes".to_string(),
+            AcceptanceStatus::Failed,
+            "release notes are missing".to_string(),
+            AcceptanceEvidence::File {
+                repo: "ensemble".to_string(),
+                path: "docs/release.md".to_string(),
+                observation: FileObservation::Missing,
+            },
+        );
+        release_notes.timing = timing.clone();
+        let mut handoff = AcceptanceResult::new(
+            "handoff".to_string(),
+            AcceptanceStatus::TimedOut,
+            "handoff inspection timed out".to_string(),
+            AcceptanceEvidence::Handoff {
+                step: "review".to_string(),
+                output: HandoffOutputObservation::NonObject {
+                    value_kind: JsonValueKind::String,
+                },
+                sections: vec![HandoffSectionEvidence {
+                    name: "summary".to_string(),
+                    observation: HandoffSectionObservation::Missing,
+                }],
+            },
+        );
+        handoff.timing = timing.clone();
+        let mut pull_request = AcceptanceResult::new(
+            "pull request".to_string(),
+            AcceptanceStatus::Unavailable,
+            "pull request delivery is unavailable".to_string(),
+            AcceptanceEvidence::PullRequest {
+                repo: "chrisbanes/ensemble".to_string(),
+                delivery_phase: PullRequestDeliveryPhase::Blocked,
+                base_branch: Some("main".to_string()),
+                head_branch: Some("feature/acceptance".to_string()),
+                head_sha: Some("abc123".to_string()),
+                pr_number: Some(419),
+                pr_url: Some("https://github.com/chrisbanes/ensemble/pull/419".to_string()),
+            },
+        );
+        pull_request.timing = timing;
+
+        vec![
+            AcceptanceAttempt {
+                cycle: 1,
+                results: vec![command, release_notes],
+            },
+            AcceptanceAttempt {
+                cycle: 2,
+                results: vec![handoff, pull_request],
+            },
+        ]
     }
 
     fn build_populated_state() -> AppState {
@@ -785,6 +871,96 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn history_backed_issue_detail_projects_persisted_acceptance_attempts_verbatim() {
+        let mut app_state = build_empty_state();
+        let tmp = NamedTempFile::new().unwrap();
+        let history_path = tmp.path().to_path_buf();
+        std::fs::remove_file(&history_path).ok();
+        app_state.history_path = history_path.clone();
+        let acceptance_attempts = persisted_acceptance_attempts();
+
+        HistoryWriter::new(history_path)
+            .append(&HistoryRecord {
+                issue_identifier: "history#419".to_string(),
+                issue_id: "NODE_419".to_string(),
+                outcome: "failed".to_string(),
+                steps_traversed: vec!["build".to_string()],
+                attempts: 2,
+                tokens: TokenTotals {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                },
+                duration_seconds: 42,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: None,
+                verdict: Some("failed".to_string()),
+                workspace_path: "/tmp/workspaces/history-419".to_string(),
+                acceptance_attempts: acceptance_attempts.clone(),
+                artifacts: None,
+            })
+            .await
+            .unwrap();
+
+        let response = get_issue_detail(State(app_state), Path("history#419".to_string()))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(
+            detail["acceptance_attempts"],
+            serde_json::to_value(acceptance_attempts).unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn history_backed_issue_detail_preserves_an_empty_acceptance_attempt_sequence() {
+        let mut app_state = build_empty_state();
+        let tmp = NamedTempFile::new().unwrap();
+        let history_path = tmp.path().to_path_buf();
+        std::fs::remove_file(&history_path).ok();
+        app_state.history_path = history_path.clone();
+
+        HistoryWriter::new(history_path)
+            .append(&HistoryRecord {
+                issue_identifier: "history#empty".to_string(),
+                issue_id: "NODE_EMPTY".to_string(),
+                outcome: "succeeded".to_string(),
+                steps_traversed: vec![],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                },
+                duration_seconds: 0,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: None,
+                verdict: None,
+                workspace_path: String::new(),
+                acceptance_attempts: vec![],
+                artifacts: None,
+            })
+            .await
+            .unwrap();
+
+        let response = get_issue_detail(State(app_state), Path("history#empty".to_string()))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(detail["acceptance_attempts"], serde_json::json!([]));
     }
 
     #[tokio::test]

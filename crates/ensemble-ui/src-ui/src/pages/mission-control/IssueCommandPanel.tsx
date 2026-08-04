@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { X } from "lucide-react";
 import ArtifactsPanel from "@/components/ArtifactsPanel";
+import { AcceptanceEvidencePanel } from "@/components/AcceptanceEvidencePanel";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import FinalizeApprovalDialog from "@/components/FinalizeApprovalDialog";
 import EventTimeline from "@/components/EventTimeline";
@@ -19,6 +20,7 @@ export type IssueCommandPanelTab =
   | "steps"
   | "transcript"
   | "logs"
+  | "acceptance"
   | "artifacts";
 
 interface IssueCommandPanelProps {
@@ -34,6 +36,7 @@ const TABS: Array<{ id: IssueCommandPanelTab; label: string }> = [
   { id: "steps", label: "Steps" },
   { id: "transcript", label: "Transcript" },
   { id: "logs", label: "Logs" },
+  { id: "acceptance", label: "Acceptance" },
   { id: "artifacts", label: "Artifacts" },
 ];
 
@@ -396,6 +399,8 @@ function IssueCommandPanelContent({
             />
           </div>
         );
+      case "acceptance":
+        return <AcceptanceEvidencePanel attempts={data.acceptance_attempts} />;
       case "artifacts":
         return (
           <div className="space-y-3">

@@ -25,6 +25,7 @@ const PANEL_TABS: IssueCommandPanelTab[] = [
   "steps",
   "transcript",
   "logs",
+  "acceptance",
   "artifacts",
 ];
 

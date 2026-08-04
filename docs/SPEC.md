@@ -2462,6 +2462,12 @@ Minimum endpoints:
     artifacts such as workspace path, repo branch/HEAD/change metadata, transcript metadata, and
     finalize output. These artifacts are independent of finalize mode; `finalize.mode: none` still
     records the workspace, repo, and transcript metadata.
+  - `acceptance_attempts` is an additive ordered array of the persisted version-2 acceptance
+    attempts. For an active or recovered run, the response copies the owning `PipelineRun` sequence;
+    a terminal history fallback copies the `HistoryRecord` sequence. Empty sequences and partial
+    result prefixes are returned unchanged. The API and Mission Control only present this stored
+    evidence: they do not re-evaluate acceptance, infer an outcome, inspect raw agent transcripts,
+    or consult current acceptance configuration or tracker state.
   - Suggested response shape:
 
     ```json
