@@ -301,8 +301,11 @@ Per-issue pipeline execution state:
 - `acceptance_attempts` (ordered list, default empty)
   - Each attempt contains its 1-based pipeline `cycle` and declaration-order `results` prefix.
   - Each result contains `name`, `status` (`passed`, `failed`, `timed_out`, or `unavailable`),
-    optional `exit_code`, bounded `stdout` and `stderr`, and a human-readable `summary`. The
-    configured command string is never part of durable evidence.
+    `timing`, optional `exit_code`, bounded `stdout` and `stderr`, and a human-readable `summary`.
+    The configured command string is never part of durable evidence.
+  - Newly executed results use tagged observed timing with UTC `started_at` and `completed_at`
+    boundaries plus monotonic `duration_ms`. Legacy results without timing deserialize as tagged
+    `unknown` timing and remain readable without invented timestamps.
   - Each stream contains a lossy-UTF-8 `tail`, `total_bytes`, and `truncated`; the retained tail is
     independently limited to the final 32,768 raw bytes while the runner continues counting and
     draining all bytes.

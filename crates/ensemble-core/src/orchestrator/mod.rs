@@ -9058,6 +9058,7 @@ mod tests {
             crate::acceptance::AcceptanceResult {
                 name: command.name.clone(),
                 status: AcceptanceStatus::Passed,
+                timing: crate::acceptance::AcceptanceTiming::Unknown,
                 exit_code: Some(0),
                 stdout: crate::acceptance::AcceptanceOutput {
                     tail: String::new(),
@@ -9093,6 +9094,7 @@ mod tests {
                 .unwrap_or(AcceptanceStatus::Passed);
             crate::acceptance::AcceptanceResult {
                 name: command.name.clone(),
+                timing: crate::acceptance::AcceptanceTiming::Unknown,
                 exit_code: (status == AcceptanceStatus::Passed).then_some(0),
                 summary: format!("{}: {status:?}", command.name),
                 status,
@@ -10506,6 +10508,7 @@ agent:
                     results: vec![crate::acceptance::AcceptanceResult {
                         name: "first".into(),
                         status: AcceptanceStatus::Passed,
+                        timing: crate::acceptance::AcceptanceTiming::Unknown,
                         exit_code: Some(0),
                         stdout: crate::acceptance::AcceptanceOutput {
                             tail: String::new(),
@@ -10933,6 +10936,7 @@ agent:
             results: vec![crate::acceptance::AcceptanceResult {
                 name: "old-name".into(),
                 status: AcceptanceStatus::Passed,
+                timing: crate::acceptance::AcceptanceTiming::Unknown,
                 exit_code: Some(0),
                 stdout: crate::acceptance::AcceptanceOutput {
                     tail: String::new(),
@@ -10966,6 +10970,7 @@ agent:
             results: vec![crate::acceptance::AcceptanceResult {
                 name: "old-name".into(),
                 status: AcceptanceStatus::Passed,
+                timing: crate::acceptance::AcceptanceTiming::Unknown,
                 exit_code: Some(0),
                 stdout: crate::acceptance::AcceptanceOutput {
                     tail: String::new(),
