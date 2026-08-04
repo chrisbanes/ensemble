@@ -1,3 +1,4 @@
+use crate::acceptance::AcceptanceAttempt;
 use crate::history::artifacts::{RunArtifacts, StepTranscriptArtifact};
 use crate::interaction::store::InteractionStore;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
@@ -132,6 +133,7 @@ pub struct IssueDetailSnapshot {
     pub workflow_steps: Vec<WorkflowStepInfo>,
     pub issue: IssueSummary,
     pub artifacts: Option<RunArtifacts>,
+    pub acceptance_attempts: Vec<AcceptanceAttempt>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -721,6 +723,9 @@ pub async fn build_issue_snapshot(
         workflow_steps,
         issue: issue_summary,
         artifacts,
+        acceptance_attempts: pipeline_run
+            .map(|run| run.acceptance_attempts.clone())
+            .unwrap_or_default(),
     })
 }
 
@@ -860,6 +865,10 @@ fn pending_input_from_current(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acceptance::{
+        AcceptanceAttempt, AcceptanceEvidence, AcceptanceOutput, AcceptanceResult,
+        AcceptanceStatus, AcceptanceTiming,
+    };
     use crate::config::ensemble::{
         ConcurrencyConfig, EnsembleConfig, OnFailure, StepConfig, StepKind, TrackerConfig,
     };
@@ -1374,6 +1383,81 @@ mod tests {
             .unwrap();
         assert_eq!(review_step.get("state").unwrap(), "running");
         assert_eq!(review_step.get("agent").unwrap(), "reviewer");
+    }
+
+    #[tokio::test]
+    async fn issue_snapshot_projects_ordered_partial_acceptance_attempts_from_live_run() {
+        let mut state = build_test_state();
+        attach_pipeline_state(&mut state, "NODE_123");
+        let mut release_notes = AcceptanceResult::new(
+            "release notes".to_string(),
+            AcceptanceStatus::Failed,
+            "release notes are missing".to_string(),
+            AcceptanceEvidence::File {
+                repo: "ensemble".to_string(),
+                path: "docs/release.md".to_string(),
+                observation: crate::acceptance::FileObservation::Missing,
+            },
+        );
+        release_notes.timing = AcceptanceTiming::Observed {
+            started_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 4, 9, 0, 0)
+                .single()
+                .unwrap(),
+            completed_at: chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 8, 4, 9, 0, 1)
+                .single()
+                .unwrap(),
+            duration_ms: 1_000,
+        };
+        let attempts = vec![
+            AcceptanceAttempt {
+                cycle: 1,
+                results: vec![AcceptanceResult::new(
+                    "unit tests".to_string(),
+                    AcceptanceStatus::Passed,
+                    "tests passed".to_string(),
+                    AcceptanceEvidence::Command {
+                        exit_code: Some(0),
+                        stdout: AcceptanceOutput {
+                            tail: "ok".to_string(),
+                            total_bytes: 2,
+                            truncated: false,
+                        },
+                        stderr: AcceptanceOutput {
+                            tail: String::new(),
+                            total_bytes: 0,
+                            truncated: false,
+                        },
+                    },
+                )],
+            },
+            AcceptanceAttempt {
+                cycle: 2,
+                results: vec![release_notes],
+            },
+        ];
+        state
+            .pipeline_runs
+            .get_mut("NODE_123")
+            .unwrap()
+            .acceptance_attempts = attempts.clone();
+
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None)
+            .await
+            .unwrap();
+
+        assert_eq!(detail.acceptance_attempts, attempts);
+    }
+
+    #[tokio::test]
+    async fn issue_snapshot_preserves_an_empty_acceptance_attempt_sequence() {
+        let mut state = build_test_state();
+        attach_pipeline_state(&mut state, "NODE_123");
+
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None)
+            .await
+            .unwrap();
+
+        assert!(detail.acceptance_attempts.is_empty());
     }
 
     #[tokio::test]

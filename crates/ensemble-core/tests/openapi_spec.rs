@@ -142,6 +142,28 @@ fn openapi_documents_versioned_acceptance_evidence() {
 }
 
 #[test]
+fn openapi_documents_issue_detail_acceptance_attempts() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+    let issue_detail = &spec["components"]["schemas"]["IssueDetailSnapshot"];
+
+    assert_eq!(
+        issue_detail["properties"]["acceptance_attempts"]["items"]["$ref"],
+        "#/components/schemas/AcceptanceAttempt"
+    );
+    assert_eq!(
+        spec["components"]["schemas"]["AcceptanceResult"]["properties"]["evidence"]["$ref"],
+        "#/components/schemas/AcceptanceEvidence"
+    );
+    assert_eq!(
+        spec["components"]["schemas"]["AcceptanceEvidence"]["oneOf"]
+            .as_array()
+            .map(Vec::len),
+        Some(4)
+    );
+}
+
+#[test]
 #[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();

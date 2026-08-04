@@ -1164,6 +1164,7 @@ describe("useIssueRuntime lifecycle", () => {
     "prefers the last persisted transcript artifact when mounting a %s issue directly",
     async (status, terminalStepState) => {
       const terminalDetail = {
+        acceptance_attempts: [],
         issue_identifier: "todo-1",
         issue_id: "NODE_1",
         status,

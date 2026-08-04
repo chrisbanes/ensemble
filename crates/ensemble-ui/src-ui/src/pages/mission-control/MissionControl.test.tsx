@@ -182,6 +182,7 @@ function mockMutation<T>(): T {
 
 function runtimeFixture(identifier: string): IssueRuntimeState {
   const data = {
+    acceptance_attempts: [],
     issue_identifier: identifier,
     issue_id: `id:${identifier}`,
     status: "running",
@@ -923,7 +924,7 @@ describe("Mission Control page", () => {
 
   it("restores valid preferences", async () => {
     window.localStorage.setItem(VIEW_MODE_KEY, "list");
-    window.localStorage.setItem(ACTIVE_TAB_KEY, "transcript");
+    window.localStorage.setItem(ACTIVE_TAB_KEY, "acceptance");
     window.localStorage.setItem(ATTENTION_ONLY_KEY, "true");
     const user = userEvent.setup();
     renderMissionControl(runtimeSnapshot());
@@ -935,7 +936,7 @@ describe("Mission Control page", () => {
         name: /Open\s*repo#2/i,
       }),
     );
-    expect(screen.getByRole("tab", { name: "Transcript" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Acceptance" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("renders when localStorage access is unavailable", () => {
