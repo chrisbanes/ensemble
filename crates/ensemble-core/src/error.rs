@@ -134,6 +134,12 @@ pub enum AgentError {
 pub enum PipelineError {
     #[error("invalid acceptance command {name}: {reason}")]
     InvalidAcceptanceCommand { name: String, reason: String },
+    #[error("invalid acceptance {kind} requirement {name}: {reason}")]
+    InvalidAcceptanceRequirement {
+        kind: String,
+        name: String,
+        reason: String,
+    },
     #[error("unknown agent reference: {name}")]
     UnknownAgent { name: String },
     #[error("unknown step dependency: {step} depends on {dependency}")]

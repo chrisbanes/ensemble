@@ -118,35 +118,34 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
                 ));
             }
         };
-        timer.finish(AcceptanceResult {
-            name: command_config.name.clone(),
-            status: AcceptanceStatus::TimedOut,
-            timing: AcceptanceTiming::Unknown,
-            exit_code: None,
-            stdout,
-            stderr,
-            summary: format!(
+        timer.finish(AcceptanceResult::command(
+            command_config.name.clone(),
+            AcceptanceStatus::TimedOut,
+            format!(
                 "acceptance command '{}' timed out after {}ms",
                 command_config.name, command_config.timeout_ms
             ),
-        })
+            None,
+            stdout,
+            stderr,
+        ))
     }
 }
 
-struct AcceptanceTimer {
+pub(crate) struct AcceptanceTimer {
     started_at: chrono::DateTime<Utc>,
     started: Instant,
 }
 
 impl AcceptanceTimer {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         Self {
             started_at: Utc::now(),
             started: Instant::now(),
         }
     }
 
-    fn finish(self, mut result: AcceptanceResult) -> AcceptanceResult {
+    pub(crate) fn finish(self, mut result: AcceptanceResult) -> AcceptanceResult {
         result.timing = AcceptanceTiming::Observed {
             started_at: self.started_at,
             completed_at: Utc::now(),
@@ -172,15 +171,14 @@ fn finish_result(
         Some(code) => format!("acceptance command '{name}' failed with exit code {code}"),
         None => format!("acceptance command '{name}' terminated by signal"),
     };
-    AcceptanceResult {
-        name: name.to_string(),
-        status: acceptance_status,
-        timing: AcceptanceTiming::Unknown,
-        exit_code: status.code(),
+    AcceptanceResult::command(
+        name.to_string(),
+        acceptance_status,
+        summary,
+        status.code(),
         stdout,
         stderr,
-        summary,
-    }
+    )
 }
 
 async fn collect_outputs(
@@ -237,15 +235,14 @@ fn append_tail(tail: &mut Vec<u8>, chunk: &[u8]) {
 }
 
 fn unavailable_result(name: &str, summary: String) -> AcceptanceResult {
-    AcceptanceResult {
-        name: name.to_string(),
-        status: AcceptanceStatus::Unavailable,
-        timing: AcceptanceTiming::Unknown,
-        exit_code: None,
-        stdout: empty_output(),
-        stderr: empty_output(),
+    AcceptanceResult::command(
+        name.to_string(),
+        AcceptanceStatus::Unavailable,
         summary,
-    }
+        None,
+        empty_output(),
+        empty_output(),
+    )
 }
 
 fn empty_output() -> AcceptanceOutput {
@@ -273,7 +270,7 @@ fn terminate_process_group(_child_id: Option<u32>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acceptance::{AcceptanceStatus, AcceptanceTiming};
+    use crate::acceptance::{AcceptanceEvidence, AcceptanceStatus, AcceptanceTiming};
     use crate::config::ensemble::AcceptanceCommandConfig;
     use crate::test_support::env::ENV_LOCK;
 
@@ -299,6 +296,19 @@ mod tests {
         }
     }
 
+    fn command_evidence(
+        result: &AcceptanceResult,
+    ) -> (Option<i32>, &AcceptanceOutput, &AcceptanceOutput) {
+        match &result.evidence {
+            AcceptanceEvidence::Command {
+                exit_code,
+                stdout,
+                stderr,
+            } => (*exit_code, stdout, stderr),
+            evidence => panic!("expected command evidence, got {evidence:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn shell_runner_inherits_environment_and_uses_issue_workspace() {
         let _guard = ENV_LOCK
@@ -319,14 +329,15 @@ mod tests {
 
         std::env::remove_var(variable);
         assert_eq!(result.status, AcceptanceStatus::Passed);
-        assert_eq!(result.exit_code, Some(0));
+        let (exit_code, stdout, _) = command_evidence(&result);
+        assert_eq!(exit_code, Some(0));
         let expected_workspace = std::fs::canonicalize(workspace.path()).unwrap();
         assert_eq!(
-            result.stdout.tail,
+            stdout.tail,
             format!("inherited-value\n{}", expected_workspace.display())
         );
-        assert_eq!(result.stdout.total_bytes, result.stdout.tail.len() as u64);
-        assert!(!result.stdout.truncated);
+        assert_eq!(stdout.total_bytes, stdout.tail.len() as u64);
+        assert!(!stdout.truncated);
         assert_eq!(result.name, "context");
         observed_duration_ms(&result);
     }
@@ -346,10 +357,11 @@ mod tests {
             .await;
 
         assert_eq!(nonzero.status, AcceptanceStatus::Failed);
-        assert_eq!(nonzero.exit_code, Some(23));
-        assert!(nonzero.stderr.tail.ends_with("failure"));
+        let (nonzero_exit_code, _, nonzero_stderr) = command_evidence(&nonzero);
+        assert_eq!(nonzero_exit_code, Some(23));
+        assert!(nonzero_stderr.tail.ends_with("failure"));
         assert_eq!(signal.status, AcceptanceStatus::Failed);
-        assert_eq!(signal.exit_code, None);
+        assert_eq!(command_evidence(&signal).0, None);
         assert!(signal.summary.contains("signal"));
         observed_duration_ms(&nonzero);
         observed_duration_ms(&signal);
@@ -376,14 +388,16 @@ mod tests {
             .await;
 
         assert_eq!(noisy.status, AcceptanceStatus::Passed);
-        assert_eq!(noisy.stdout.total_bytes, 40_000);
-        assert!(noisy.stderr.total_bytes >= 41_000);
-        assert!(noisy.stdout.truncated);
-        assert!(noisy.stderr.truncated);
-        assert_eq!(noisy.stdout.tail.len(), OUTPUT_TAIL_LIMIT);
-        assert_eq!(noisy.stderr.tail.len(), OUTPUT_TAIL_LIMIT);
-        assert_eq!(lossy.stdout.total_bytes, 2);
-        assert_eq!(lossy.stdout.tail, "�x");
+        let (_, noisy_stdout, noisy_stderr) = command_evidence(&noisy);
+        assert_eq!(noisy_stdout.total_bytes, 40_000);
+        assert!(noisy_stderr.total_bytes >= 41_000);
+        assert!(noisy_stdout.truncated);
+        assert!(noisy_stderr.truncated);
+        assert_eq!(noisy_stdout.tail.len(), OUTPUT_TAIL_LIMIT);
+        assert_eq!(noisy_stderr.tail.len(), OUTPUT_TAIL_LIMIT);
+        let (_, lossy_stdout, _) = command_evidence(&lossy);
+        assert_eq!(lossy_stdout.total_bytes, 2);
+        assert_eq!(lossy_stdout.tail, "�x");
     }
 
     #[tokio::test]
@@ -404,7 +418,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         assert_eq!(result.status, AcceptanceStatus::TimedOut);
-        assert_eq!(result.exit_code, None);
+        assert_eq!(command_evidence(&result).0, None);
         assert!(observed_duration_ms(&result) >= 40);
         assert!(
             !marker.exists(),
@@ -452,10 +466,11 @@ mod tests {
             .await;
 
         assert_eq!(result.status, AcceptanceStatus::Unavailable);
-        assert_eq!(result.exit_code, None);
+        let (exit_code, stdout, stderr) = command_evidence(&result);
+        assert_eq!(exit_code, None);
         assert!(!result.summary.contains("super-secret-command"));
-        assert!(result.stdout.tail.is_empty());
-        assert!(result.stderr.tail.is_empty());
+        assert!(stdout.tail.is_empty());
+        assert!(stderr.tail.is_empty());
         observed_duration_ms(&result);
     }
 }

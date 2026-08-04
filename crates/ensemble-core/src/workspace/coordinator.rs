@@ -184,6 +184,20 @@ impl WorktreeCoordinator {
         Ok(created)
     }
 
+    /// Resolve the deterministic paths for already-owned worktrees without touching git.
+    pub(crate) fn worktree_paths(&self, issue_id: &str) -> HashMap<String, PathBuf> {
+        let branch = self.format_branch_name(issue_id);
+        self.repos
+            .keys()
+            .map(|repo_name| {
+                (
+                    repo_name.clone(),
+                    self.worktree_root.join(repo_name).join(&branch),
+                )
+            })
+            .collect()
+    }
+
     /// Clean up worktrees and delete branches for the given issue.
     pub async fn cleanup_worktrees(&self, issue_id: &str) -> Result<(), WorktreeError> {
         let branch = self.format_branch_name(issue_id);

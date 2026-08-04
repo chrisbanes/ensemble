@@ -158,10 +158,9 @@ Verdict files and default-success fallback are not part of the runtime result co
 
 **Failed** means the step failed. The `summary` field explains why. Ensemble applies the step's `on_failure` behavior.
 
-## Acceptance commands
+## Acceptance requirements
 
-Acceptance commands provide deterministic checks after all steps and approval gates pass but before
-repository finalization or the `on_success` tracker transition:
+Acceptance requirements provide deterministic checks around repository finalization:
 
 ```yaml
 acceptance:
@@ -172,20 +171,42 @@ acceptance:
     - name: formatting
       run: cargo fmt --all -- --check
       timeout_ms: 120000
+  required_files:
+    - name: release-notes
+      repo: ensemble
+      path: docs/release-notes.md
+  required_handoff_sections:
+    - name: implementation-handoff
+      step: implement
+      sections: [summary, testing]
+  required_pull_requests:
+    - name: ensemble-pr
+      repo: ensemble
 ```
 
 Ensemble runs these sequentially in declaration order as `/bin/sh -lc` in the issue workspace,
 inheriting the orchestrator environment unchanged. It runs the complete list even if an earlier
 command fails, times out, or cannot launch. Commands are not DAG steps, do not run through an agent,
-and cannot be parallelized or given acceptance-specific retries. Missing or empty commands skip the
-phase entirely.
+and cannot be parallelized or given acceptance-specific retries. Ensemble next checks required files
+in owned worktrees, then required top-level sections in persisted step output objects. It runs the
+complete pre-final sequence even after a failure.
 
-Each durable result contains the configured `name` but never the command string. `status` is
-`passed`, `failed`, `timed_out`, or `unavailable`; `exit_code` is optional because signals, timeouts,
-launch/cwd failures, or collection failures may not provide one. `stdout` and `stderr` independently
-store a lossy-UTF-8 rendering of only the final 32,768 raw bytes, the total observed byte count, and
-a `truncated` flag. The runner drains both streams concurrently and terminates and reaps the command
-process group on timeout.
+Required files use exact repository-relative paths. The target must be a regular file whose resolved
+path stays inside the configured worktree. Required handoff sections treat missing, null, blank
+strings, empty objects, and empty arrays as absent; boolean `false` and numeric `0` are present.
+
+After finalization retains a pull-request identity, Ensemble evaluates required pull requests in
+declaration order. These checks project only the stored delivery phase, branch and SHA identity,
+pull-request number, and URL. They never push, create, or discover remote state.
+
+Each newly written durable result is a version-2 envelope with `name`, `status`, `summary`, `timing`,
+and tagged `evidence`. Evidence kind is `command`, `file`, `handoff`, or `pull_request`. Command
+evidence has optional `exit_code` plus `stdout` and `stderr`; each stream stores a lossy-UTF-8
+rendering of only the final 32,768 raw bytes, total observed bytes, and a `truncated` flag. The runner
+drains both streams concurrently and terminates and reaps the command process group on timeout.
+Other evidence variants contain typed observations and configured relative identifiers, never
+command strings or absolute repository paths. Unversioned legacy flat command results remain
+readable with unknown timing; unsupported explicit versions fail closed and new writes are v2.
 
 Every newly executed result also records tagged timing:
 
@@ -202,12 +223,13 @@ The boundaries use UTC wall-clock timestamps, while `duration_ms` uses a monoton
 results without a `timing` field deserialize as `{"kind":"unknown"}`; Ensemble preserves their
 evidence without inventing timestamps.
 
-Phase start and every completed result are journaled before Ensemble advances. After restart, the
-current cycle's durable results must be a declaration-order prefix of configured command names;
-Ensemble resumes with the first missing command. Thus an interrupted command without a durable result
-may repeat, while a durable prefix does not. Legacy snapshots and history records default to no
-attempts, and legacy results within an existing attempt default to unknown timing. Ordered attempts
-are also preserved in JSONL history, SQLite history, and pending terminal reconciliation records.
+Phase start and every completed result are journaled before Ensemble advances. A new run freezes a
+non-secret resolved plan and semantic config digest. Results must be a declaration-order prefix of
+commands, files, and handoffs; restart resumes the first missing check from frozen descriptors.
+Digest drift before an unfinished command retains the run instead of executing changed command
+configuration. Legacy snapshots without a plan use historical command-only recovery and do not gain
+new rules. Ordered attempts are preserved in JSONL history, SQLite history, and pending terminal
+reconciliation records.
 
 If an append outcome is ambiguous, Ensemble keeps the active owner and retries only the journal
 visibility check on later poll ticks. An exactly visible result advances without executing the
@@ -217,8 +239,13 @@ redispatched.
 Any non-passing result dominates a succeeded or concern step output and prevents finalization. It
 uses whole-issue retry regardless of per-step `on_failure`: a new cycle reruns the full pipeline and
 the full acceptance list while retaining prior attempts. Exhausting `max_cycles` records every
-attempt and moves the issue to `on_failure`. Artifact/handoff validation and Mission Control or
-generated-client presentation are separate contracts and are not performed by acceptance commands.
+attempt and moves the issue to `on_failure`.
+
+Pull-request results are an ordered suffix after the pre-final prefix. Startup resumes an incomplete
+suffix batch without remote calls. A failed batch blocks only affected delivery repositories and
+retains their exact delivery and pull-request identity. An explicit finalize retry appends a full
+new suffix batch; a passing retry returns the delivery to `waiting`, while failure remains blocked.
+This path does not consume pipeline cycles or use `max_cycles`.
 
 ## Retries and cycles
 

@@ -80,18 +80,33 @@ async fn web_cli_runs_todo_issue_to_completion_with_mock_acpx() {
     assert_eq!(history["issue_identifier"], ISSUE_ID);
     assert_eq!(history["outcome"], "succeeded");
     let acceptance = &history["acceptance_attempts"][0]["results"][0];
+    assert_eq!(acceptance["version"], 2);
     assert_eq!(acceptance["name"], "verify");
     assert_eq!(acceptance["status"], "passed");
     assert_eq!(acceptance["timing"]["kind"], "observed");
     assert!(acceptance["timing"]["started_at"].is_string());
     assert!(acceptance["timing"]["completed_at"].is_string());
     assert!(acceptance["timing"]["duration_ms"].is_u64());
-    assert_eq!(acceptance["stdout"]["total_bytes"], 40_000);
-    assert_eq!(acceptance["stdout"]["truncated"], true);
+    assert_eq!(acceptance["evidence"]["kind"], "command");
+    assert_eq!(acceptance["evidence"]["stdout"]["total_bytes"], 40_000);
+    assert_eq!(acceptance["evidence"]["stdout"]["truncated"], true);
     assert_eq!(
-        acceptance["stdout"]["tail"].as_str().unwrap().len(),
+        acceptance["evidence"]["stdout"]["tail"]
+            .as_str()
+            .unwrap()
+            .len(),
         32 * 1024
     );
+    let file = &history["acceptance_attempts"][0]["results"][1];
+    assert_eq!(file["name"], "required-artifact");
+    assert_eq!(file["status"], "passed");
+    assert_eq!(file["evidence"]["kind"], "file");
+    assert_eq!(file["evidence"]["observation"], "present");
+    let handoff = &history["acceptance_attempts"][0]["results"][2];
+    assert_eq!(handoff["name"], "implementation-handoff");
+    assert_eq!(handoff["status"], "passed");
+    assert_eq!(handoff["evidence"]["kind"], "handoff");
+    assert_eq!(handoff["evidence"]["sections"][0]["observation"], "present");
     assert!(
         history["steps_traversed"]
             .as_array()
@@ -154,11 +169,13 @@ async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() 
     assert_eq!(history["steps_traversed"][0], "implement");
     assert_eq!(history["attempts"], 1);
     let acceptance = &history["acceptance_attempts"][0]["results"][0];
+    assert_eq!(acceptance["version"], 2);
     assert_eq!(acceptance["name"], "verify");
     assert_eq!(acceptance["status"], "failed");
     assert_eq!(acceptance["timing"]["kind"], "observed");
-    assert_eq!(acceptance["exit_code"], 7);
-    assert!(acceptance["stderr"]["tail"]
+    assert_eq!(acceptance["evidence"]["kind"], "command");
+    assert_eq!(acceptance["evidence"]["exit_code"], 7);
+    assert!(acceptance["evidence"]["stderr"]["tail"]
         .as_str()
         .unwrap()
         .ends_with("acceptance-failed"));
@@ -171,6 +188,50 @@ async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() 
         acpx_log.lines().filter(|line| line.contains(" prompt ")).count(),
         2,
         "one agent cycle emits its visible prompt and hidden extraction prompt; exhaustion must not launch another cycle"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_file_and_handoff_are_durable_acceptance_failures() {
+    let fixture = TestFixture::new_with_acceptance("true").expect("fixture setup");
+    let port = reserve_local_port().expect("reserve local port");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_SKIP_REQUIRED_FILE", "1")
+        .env("ENSEMBLE_E2E_MISSING_HANDOFF", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = command.spawn().expect("spawn ensemble web");
+    let _guard = ChildGuard::new(child);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+
+    let history = wait_for_failed_history_record(&client, &base_url, &fixture.workspace_root)
+        .await
+        .expect("missing requirements should be durable");
+    let results = history["acceptance_attempts"][0]["results"]
+        .as_array()
+        .expect("acceptance results should be an array");
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0]["status"], "passed");
+    assert_eq!(results[1]["name"], "required-artifact");
+    assert_eq!(results[1]["status"], "failed");
+    assert_eq!(results[1]["evidence"]["observation"], "missing");
+    assert_eq!(results[2]["name"], "implementation-handoff");
+    assert_eq!(results[2]["status"], "failed");
+    assert_eq!(
+        results[2]["evidence"]["sections"][0]["observation"],
+        "missing"
     );
 }
 
@@ -192,15 +253,17 @@ impl TestFixture {
         let root = config_dir.path();
         let todo_path = root.join("TODO.md");
         let workspace_root = root.join("workspaces");
+        let repo_path = root.join("source");
         let mock_bin_dir = root.join("bin");
         let acpx_log_path = root.join("mock-acpx.log");
 
         fs::create_dir_all(&workspace_root)?;
         fs::create_dir_all(&mock_bin_dir)?;
+        init_git_repo(&repo_path)?;
         fs::write(&todo_path, todo_fixture())?;
         fs::write(
             root.join("config.yaml"),
-            config_yaml(&todo_path, &workspace_root, acceptance_run),
+            config_yaml(&todo_path, &workspace_root, &repo_path, acceptance_run),
         )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
 
@@ -239,7 +302,12 @@ fn todo_fixture() -> String {
     )
 }
 
-fn config_yaml(todo_path: &Path, workspace_root: &Path, acceptance_run: &str) -> String {
+fn config_yaml(
+    todo_path: &Path,
+    workspace_root: &Path,
+    repo_path: &Path,
+    acceptance_run: &str,
+) -> String {
     format!(
         r#"
 tracker:
@@ -252,6 +320,9 @@ tracker:
     - Done
 workspace:
   root: {}
+repos:
+  - path: {}
+    branch: main
 agents:
   builder:
     acpx_agent: builder
@@ -265,6 +336,15 @@ acceptance:
     - name: verify
       run: {}
       timeout_ms: 5000
+  required_files:
+    - name: required-artifact
+      repo: source
+      path: acceptance.txt
+  required_handoff_sections:
+    - name: implementation-handoff
+      step: implement
+      sections:
+        - artifact
 on_success: Done
 on_failure: Failed
 max_cycles: 1
@@ -280,8 +360,39 @@ agent:
 "#,
         yaml_quote(&todo_path.display().to_string()),
         yaml_quote(&workspace_root.display().to_string()),
+        yaml_quote(&repo_path.display().to_string()),
         yaml_quote(acceptance_run)
     )
+}
+
+fn init_git_repo(repo_path: &Path) -> io::Result<()> {
+    fs::create_dir_all(repo_path)?;
+    let run = |args: &[&str]| -> io::Result<()> {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(io::Error::other(format!(
+                "git {} failed with {status}",
+                args.join(" ")
+            )))
+        }
+    };
+    run(&["init", "-b", "main"])?;
+    fs::write(repo_path.join("README.md"), "fixture\n")?;
+    run(&["add", "README.md"])?;
+    run(&[
+        "-c",
+        "user.name=Ensemble E2E",
+        "-c",
+        "user.email=ensemble-e2e@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+    ])
 }
 
 async fn wait_for_failed_history_record(
@@ -347,13 +458,23 @@ if [[ " $* " == *" prompt "* ]]; then
 
   mkdir -p "$cwd/.ensemble"
   cat > "$cwd/.ensemble/mock-prompt.txt"
-  cat > "$cwd/.ensemble/verdict-implement.json" <<'JSON'
-{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}}
-JSON
+  if [[ "${ENSEMBLE_E2E_MISSING_HANDOFF:-}" == "1" ]]; then
+    printf '%s\n' '{"result":"succeeded","summary":"mock agent completed","output":{}}' > "$cwd/.ensemble/verdict-implement.json"
+  else
+    printf '%s\n' '{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}}' > "$cwd/.ensemble/verdict-implement.json"
+  fi
+  if [[ "${ENSEMBLE_E2E_SKIP_REQUIRED_FILE:-}" != "1" ]]; then
+    repo_worktree="$(find "$cwd/source" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+    printf 'artifact\n' > "$repo_worktree/acceptance.txt"
+  fi
 
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mock agent completed"}}}}'
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":{"type":"tool_call","name":"read_file","arguments":{"path":"Cargo.toml"}}}}}'
-  printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}},"stopReason":"end_turn"}}}'
+  if [[ "${ENSEMBLE_E2E_MISSING_HANDOFF:-}" == "1" ]]; then
+    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":{"result":"succeeded","summary":"mock agent completed","output":{}},"stopReason":"end_turn"}}}'
+  else
+    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}},"stopReason":"end_turn"}}}'
+  fi
   exit 0
 fi
 

@@ -318,6 +318,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
             field: Some(name.clone()),
             path: Some(format!("acceptance.commands.{}", name)),
         },
+        PipelineError::InvalidAcceptanceRequirement { kind, name, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid acceptance {kind} requirement '{name}': {reason}"),
+            section: "acceptance".to_string(),
+            field: Some(name.clone()),
+            path: Some(format!("acceptance.{kind}.{name}")),
+        },
         PipelineError::UnknownAgent { name } => ValidationIssue {
             kind: ValidationIssueKind::Config,
             message: format!("unknown agent reference: {}", name),

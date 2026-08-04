@@ -44,6 +44,12 @@ pub struct EnsembleConfig {
 pub struct AcceptanceConfig {
     #[serde(default)]
     pub commands: Vec<AcceptanceCommandConfig>,
+    #[serde(default)]
+    pub required_files: Vec<AcceptanceFileConfig>,
+    #[serde(default)]
+    pub required_handoff_sections: Vec<AcceptanceHandoffConfig>,
+    #[serde(default)]
+    pub required_pull_requests: Vec<AcceptancePullRequestConfig>,
 }
 
 /// One named acceptance command executed by `/bin/sh -lc`.
@@ -52,6 +58,38 @@ pub struct AcceptanceCommandConfig {
     pub name: String,
     pub run: String,
     pub timeout_ms: u64,
+}
+
+/// One exact repository-relative file required before finalization.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct AcceptanceFileConfig {
+    pub name: String,
+    pub repo: String,
+    #[schema(value_type = String)]
+    pub path: PathBuf,
+}
+
+/// Named top-level sections required in one persisted step output.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct AcceptanceHandoffConfig {
+    pub name: String,
+    pub step: String,
+    pub sections: Vec<String>,
+}
+
+/// One durable pull-request identity required after finalization.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct AcceptancePullRequestConfig {
+    pub name: String,
+    pub repo: String,
+}
+
+pub(crate) fn repository_key(repo: &RepoConfig, index: usize) -> String {
+    Path::new(&repo.path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("repo-{index}"))
 }
 
 /// Runtime configuration for blocked-on-human interaction handling.
@@ -1016,7 +1054,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         };
         let reason = if command.name.trim().is_empty() {
             Some("name must not be empty")
-        } else if !acceptance_names.insert(command.name.as_str()) {
+        } else if !acceptance_names.insert(command.name.clone()) {
             Some("name must be unique")
         } else if command.run.trim().is_empty() {
             Some("run must not be empty")
@@ -1029,6 +1067,143 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
             return Err(PipelineError::InvalidAcceptanceCommand {
                 name: display_name.to_string(),
                 reason: reason.to_string(),
+            });
+        }
+    }
+
+    let repository_matches = |key: &str| {
+        config
+            .repos
+            .iter()
+            .enumerate()
+            .filter(|(index, repo)| repository_key(repo, *index) == key)
+            .map(|(_, repo)| repo)
+            .collect::<Vec<_>>()
+    };
+    let validate_name = |names: &mut std::collections::HashSet<String>,
+                         kind: &str,
+                         name: &str|
+     -> Result<(), PipelineError> {
+        let display_name = if name.trim().is_empty() {
+            "<unnamed>"
+        } else {
+            name
+        };
+        let reason = if name.trim().is_empty() {
+            Some("name must not be empty")
+        } else if !names.insert(name.to_string()) {
+            Some("name must be unique across all acceptance checks")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: kind.to_string(),
+                name: display_name.to_string(),
+                reason: reason.to_string(),
+            });
+        }
+        Ok(())
+    };
+
+    for rule in &config.acceptance.required_files {
+        validate_name(&mut acceptance_names, "file", &rule.name)?;
+        let matches = repository_matches(&rule.repo);
+        if matches.len() != 1 {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "file".to_string(),
+                name: rule.name.clone(),
+                reason: format!(
+                    "repository key '{}' must resolve to exactly one configured repository (found {})",
+                    rule.repo,
+                    matches.len()
+                ),
+            });
+        }
+        if rule.path.as_os_str().is_empty()
+            || rule.path.is_absolute()
+            || rule.path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir
+                        | std::path::Component::RootDir
+                        | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "file".to_string(),
+                name: rule.name.clone(),
+                reason:
+                    "path must be a non-empty repository-relative path without parent traversal"
+                        .to_string(),
+            });
+        }
+    }
+
+    for rule in &config.acceptance.required_handoff_sections {
+        validate_name(&mut acceptance_names, "handoff", &rule.name)?;
+        if !config.steps.iter().any(|step| step.name == rule.step) {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "handoff".to_string(),
+                name: rule.name.clone(),
+                reason: format!("unknown step '{}'", rule.step),
+            });
+        }
+        if rule.sections.is_empty() {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "handoff".to_string(),
+                name: rule.name.clone(),
+                reason: "sections must not be empty".to_string(),
+            });
+        }
+        let mut sections = std::collections::HashSet::new();
+        if let Some(section) = rule
+            .sections
+            .iter()
+            .find(|section| section.trim().is_empty() || !sections.insert(section.as_str()))
+        {
+            let reason = if section.trim().is_empty() {
+                "section names must not be empty".to_string()
+            } else {
+                format!("duplicate section '{section}'")
+            };
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "handoff".to_string(),
+                name: rule.name.clone(),
+                reason,
+            });
+        }
+    }
+
+    for rule in &config.acceptance.required_pull_requests {
+        validate_name(&mut acceptance_names, "pull_request", &rule.name)?;
+        let matches = repository_matches(&rule.repo);
+        if matches.len() != 1 {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "pull_request".to_string(),
+                name: rule.name.clone(),
+                reason: format!(
+                    "repository key '{}' must resolve to exactly one configured repository (found {})",
+                    rule.repo,
+                    matches.len()
+                ),
+            });
+        }
+        let repo = matches[0];
+        if !repo.finalize.enabled
+            || !matches!(
+                repo.finalize.mode,
+                crate::workspace::finalize::FinalizeMode::PushAndPr
+            )
+        {
+            return Err(PipelineError::InvalidAcceptanceRequirement {
+                kind: "pull_request".to_string(),
+                name: rule.name.clone(),
+                reason: format!(
+                    "repository '{}' must use enabled finalize.mode: push_and_pr",
+                    rule.repo
+                ),
             });
         }
     }
@@ -1258,6 +1433,121 @@ on_failure: Failed
         assert_eq!(config.on_success, "Done");
         assert_eq!(config.on_failure, "Failed");
         assert!(config.acceptance.commands.is_empty());
+        assert!(config.acceptance.required_files.is_empty());
+        assert!(config.acceptance.required_handoff_sections.is_empty());
+        assert!(config.acceptance.required_pull_requests.is_empty());
+    }
+
+    #[test]
+    fn acceptance_parses_requirements() {
+        let yaml = format!(
+            "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\nacceptance:\n  required_files:\n    - name: release-notes\n      repo: ensemble\n      path: docs/release.md\n  required_handoff_sections:\n    - name: implementation-handoff\n      step: build\n      sections: [summary, testing]\n  required_pull_requests:\n    - name: ensemble-pr\n      repo: ensemble\n",
+            minimal_yaml()
+        );
+
+        let config = parse_config(&yaml).unwrap();
+
+        assert_eq!(
+            config.acceptance.required_files,
+            vec![AcceptanceFileConfig {
+                name: "release-notes".to_string(),
+                repo: "ensemble".to_string(),
+                path: PathBuf::from("docs/release.md"),
+            }]
+        );
+        assert_eq!(
+            config.acceptance.required_handoff_sections,
+            vec![AcceptanceHandoffConfig {
+                name: "implementation-handoff".to_string(),
+                step: "build".to_string(),
+                sections: vec!["summary".to_string(), "testing".to_string()],
+            }]
+        );
+        assert_eq!(
+            config.acceptance.required_pull_requests,
+            vec![AcceptancePullRequestConfig {
+                name: "ensemble-pr".to_string(),
+                repo: "ensemble".to_string(),
+            }]
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn acceptance_rejects_invalid_requirements() {
+        let cases = [
+            (
+                "blank name",
+                "required_files:\n    - name: '  '\n      repo: ensemble\n      path: docs/release.md",
+                "name must not be empty",
+            ),
+            (
+                "cross-kind duplicate",
+                "commands:\n    - name: duplicate\n      run: echo ok\n      timeout_ms: 1\n  required_files:\n    - name: duplicate\n      repo: ensemble\n      path: docs/release.md",
+                "unique across all acceptance checks",
+            ),
+            (
+                "unknown repository",
+                "required_files:\n    - name: file\n      repo: missing\n      path: docs/release.md",
+                "found 0",
+            ),
+            (
+                "unknown step",
+                "required_handoff_sections:\n    - name: handoff\n      step: missing\n      sections: [summary]",
+                "unknown step 'missing'",
+            ),
+            (
+                "empty sections",
+                "required_handoff_sections:\n    - name: handoff\n      step: build\n      sections: []",
+                "sections must not be empty",
+            ),
+            (
+                "duplicate sections",
+                "required_handoff_sections:\n    - name: handoff\n      step: build\n      sections: [summary, summary]",
+                "duplicate section 'summary'",
+            ),
+            (
+                "absolute path",
+                "required_files:\n    - name: file\n      repo: ensemble\n      path: /tmp/release.md",
+                "repository-relative path",
+            ),
+            (
+                "parent path",
+                "required_files:\n    - name: file\n      repo: ensemble\n      path: ../release.md",
+                "repository-relative path",
+            ),
+            (
+                "wrong delivery mode",
+                "required_pull_requests:\n    - name: pr\n      repo: other",
+                "push_and_pr",
+            ),
+        ];
+
+        for (label, acceptance, expected) in cases {
+            let yaml = format!(
+                "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\n  - path: /tmp/other\n    branch: main\n    finalize:\n      mode: push\nacceptance:\n  {acceptance}\n",
+                minimal_yaml()
+            );
+            let config = parse_config(&yaml).unwrap();
+            let error = validate_config(&config).expect_err(label);
+            assert!(
+                error.to_string().contains(expected),
+                "{label}: expected {expected:?}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn acceptance_rejects_ambiguous_repository_keys() {
+        let yaml = format!(
+            "{}\nrepos:\n  - path: /tmp/one/ensemble\n    branch: main\n  - path: /tmp/two/ensemble\n    branch: main\nacceptance:\n  required_files:\n    - name: file\n      repo: ensemble\n      path: docs/release.md\n",
+            minimal_yaml()
+        );
+
+        let config = parse_config(&yaml).unwrap();
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("found 2"));
     }
 
     #[test]

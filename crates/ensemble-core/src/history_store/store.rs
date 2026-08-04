@@ -485,29 +485,69 @@ mod tests {
             .await
             .unwrap();
         let mut record = sample_history("repo#1");
+        let mut command_result = crate::acceptance::AcceptanceResult::command(
+            "test".into(),
+            crate::acceptance::AcceptanceStatus::Passed,
+            "passed".into(),
+            Some(0),
+            crate::acceptance::AcceptanceOutput {
+                tail: "ok".into(),
+                total_bytes: 2,
+                truncated: false,
+            },
+            crate::acceptance::AcceptanceOutput {
+                tail: String::new(),
+                total_bytes: 0,
+                truncated: false,
+            },
+        );
+        command_result.timing = crate::acceptance::AcceptanceTiming::Observed {
+            started_at: "2026-08-04T09:00:00Z".parse().unwrap(),
+            completed_at: "2026-08-04T09:00:01Z".parse().unwrap(),
+            duration_ms: 1_234,
+        };
         record.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
             cycle: 1,
-            results: vec![crate::acceptance::AcceptanceResult {
-                name: "test".into(),
-                status: crate::acceptance::AcceptanceStatus::Passed,
-                timing: crate::acceptance::AcceptanceTiming::Observed {
-                    started_at: "2026-08-04T09:00:00Z".parse().unwrap(),
-                    completed_at: "2026-08-04T09:00:01Z".parse().unwrap(),
-                    duration_ms: 1_234,
-                },
-                exit_code: Some(0),
-                stdout: crate::acceptance::AcceptanceOutput {
-                    tail: "ok".into(),
-                    total_bytes: 2,
-                    truncated: false,
-                },
-                stderr: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                summary: "passed".into(),
-            }],
+            results: vec![
+                command_result,
+                crate::acceptance::AcceptanceResult::new(
+                    "artifact".into(),
+                    crate::acceptance::AcceptanceStatus::Passed,
+                    "present".into(),
+                    crate::acceptance::AcceptanceEvidence::File {
+                        repo: "repo".into(),
+                        path: "artifact.txt".into(),
+                        observation: crate::acceptance::FileObservation::Present,
+                    },
+                ),
+                crate::acceptance::AcceptanceResult::new(
+                    "handoff".into(),
+                    crate::acceptance::AcceptanceStatus::Passed,
+                    "complete".into(),
+                    crate::acceptance::AcceptanceEvidence::Handoff {
+                        step: "build".into(),
+                        output: crate::acceptance::HandoffOutputObservation::Object,
+                        sections: vec![crate::acceptance::HandoffSectionEvidence {
+                            name: "summary".into(),
+                            observation: crate::acceptance::HandoffSectionObservation::Present,
+                        }],
+                    },
+                ),
+                crate::acceptance::AcceptanceResult::new(
+                    "pull-request".into(),
+                    crate::acceptance::AcceptanceStatus::Passed,
+                    "published".into(),
+                    crate::acceptance::AcceptanceEvidence::PullRequest {
+                        repo: "repo".into(),
+                        delivery_phase: crate::acceptance::PullRequestDeliveryPhase::Published,
+                        base_branch: Some("main".into()),
+                        head_branch: Some("issue-1".into()),
+                        head_sha: Some("abc123".into()),
+                        pr_number: Some(12),
+                        pr_url: Some("https://github.com/acme/repo/pull/12".into()),
+                    },
+                ),
+            ],
         }];
 
         store.append_history_record("run-1", &record).await.unwrap();

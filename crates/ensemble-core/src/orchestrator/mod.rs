@@ -20,7 +20,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use crate::acceptance::{AcceptanceCommandRunner, AcceptanceStatus, ShellAcceptanceCommandRunner};
+use crate::acceptance::{
+    evaluate_file_requirement, evaluate_handoff_requirement, AcceptanceCommandRunner,
+    AcceptanceEvidence, AcceptanceStatus, ResolvedAcceptancePlan, ShellAcceptanceCommandRunner,
+};
 use crate::agent::cancellation::{
     await_worker_drain, await_worker_quiescence, has_available_state_worker_capacity,
     is_reconciliation_owned, live_worker_count, mark_all_for_drain, mark_issue_for_drain,
@@ -190,6 +193,12 @@ enum AcceptancePhaseOutcome {
         owner: AcceptanceOwnerIdentity,
     },
     RetainedForRecovery,
+}
+
+enum PreFinalAcceptanceCheck {
+    Command(crate::config::ensemble::AcceptanceCommandConfig),
+    File(crate::config::ensemble::AcceptanceFileConfig),
+    Handoff(crate::config::ensemble::AcceptanceHandoffConfig),
 }
 
 #[derive(Clone)]
@@ -1507,7 +1516,15 @@ impl Orchestrator {
             }
         };
 
-        let pipeline_run = PipelineRun::new(issue.id.clone(), cycle, dag);
+        let mut pipeline_run = PipelineRun::new(issue.id.clone(), cycle, dag);
+        let acceptance_plan = match ResolvedAcceptancePlan::from_config(&config_snapshot) {
+            Ok(plan) => plan,
+            Err(error) => {
+                warn!(issue_id = %issue.id, error = %error, "failed to freeze acceptance plan");
+                return;
+            }
+        };
+        pipeline_run.resolved_acceptance_plan = Some(acceptance_plan);
         let action = pipeline_run.start();
 
         info!(
@@ -1918,6 +1935,7 @@ impl Orchestrator {
         issue: &Issue,
         config: &EnsembleConfig,
     ) -> AcceptancePhaseOutcome {
+        let mut owned_worktrees = None;
         loop {
             let (baseline, mut candidate, run_id, owner) = {
                 let state = self.state.read().await;
@@ -1943,22 +1961,27 @@ impl Orchestrator {
                 (run.to_snapshot(), run, run_id, owner)
             };
 
+            let plan = candidate
+                .resolved_acceptance_plan
+                .clone()
+                .unwrap_or_else(|| legacy_command_plan(config));
             if let Err(error) = validate_acceptance_attempts(&candidate.to_snapshot(), config) {
                 warn!(issue_id = %issue.id, error = %error, "acceptance evidence does not match config");
                 return AcceptancePhaseOutcome::RetainedForRecovery;
             }
-            if config.acceptance.commands.is_empty() {
-                return AcceptancePhaseOutcome::Passed;
-            }
-
             let current_attempt = candidate
                 .acceptance_attempts
                 .iter()
                 .position(|attempt| attempt.cycle == candidate.cycle);
-            let command_to_run = if let Some(attempt_index) = current_attempt {
+            if plan.pre_final_len() == 0
+                && (plan.required_pull_requests.is_empty() || current_attempt.is_some())
+            {
+                return AcceptancePhaseOutcome::Passed;
+            }
+            let check_to_run = if let Some(attempt_index) = current_attempt {
                 let results = &candidate.acceptance_attempts[attempt_index].results;
-                if results.len() == config.acceptance.commands.len() {
-                    if results
+                if results.len() >= plan.pre_final_len() {
+                    if results[..plan.pre_final_len()]
                         .iter()
                         .all(|result| result.status == AcceptanceStatus::Passed)
                     {
@@ -1974,7 +1997,32 @@ impl Orchestrator {
                         owner,
                     };
                 }
-                config.acceptance.commands.get(results.len()).cloned()
+                let index = results.len();
+                if index < plan.commands.len() {
+                    if candidate.resolved_acceptance_plan.is_some() && !plan.matches_config(config)
+                    {
+                        warn!(issue_id = %issue.id, "configuration changed before an unfinished acceptance command");
+                        return AcceptancePhaseOutcome::RetainedForRecovery;
+                    }
+                    let Some(command) = config.acceptance.commands.get(index) else {
+                        return AcceptancePhaseOutcome::RetainedForRecovery;
+                    };
+                    if command.name != plan.commands[index] {
+                        return AcceptancePhaseOutcome::RetainedForRecovery;
+                    }
+                    Some(PreFinalAcceptanceCheck::Command(command.clone()))
+                } else {
+                    let index = index - plan.commands.len();
+                    if let Some(rule) = plan.required_files.get(index) {
+                        Some(PreFinalAcceptanceCheck::File(rule.clone()))
+                    } else {
+                        let index = index - plan.required_files.len();
+                        plan.required_handoff_sections
+                            .get(index)
+                            .cloned()
+                            .map(PreFinalAcceptanceCheck::Handoff)
+                    }
+                }
             } else {
                 candidate
                     .acceptance_attempts
@@ -1984,17 +2032,29 @@ impl Orchestrator {
                     });
                 None
             };
-            let transition_kind = if command_to_run.is_some() {
-                PipelineTransitionKind::AcceptanceCommandCompleted
+            let transition_kind = if check_to_run.is_some() {
+                PipelineTransitionKind::AcceptanceCheckCompleted
             } else {
                 PipelineTransitionKind::AcceptanceStarted
             };
 
-            let result = if let Some(command) = command_to_run.as_ref() {
-                let workspace_path = self.workspace_mgr.workspace_path(&issue.id);
-                Some(self.acceptance_runner.run(command, &workspace_path).await)
-            } else {
-                None
+            let result = match check_to_run.as_ref() {
+                Some(PreFinalAcceptanceCheck::Command(command)) => {
+                    let workspace_path = self.workspace_mgr.workspace_path(&issue.id);
+                    Some(self.acceptance_runner.run(command, &workspace_path).await)
+                }
+                Some(PreFinalAcceptanceCheck::File(rule)) => {
+                    let worktrees = owned_worktrees.get_or_insert_with(|| {
+                        self.workspace_mgr
+                            .owned_worktree_paths(&issue.id)
+                            .unwrap_or_default()
+                    });
+                    Some(evaluate_file_requirement(rule, worktrees))
+                }
+                Some(PreFinalAcceptanceCheck::Handoff(rule)) => {
+                    Some(evaluate_handoff_requirement(rule, &candidate.step_outputs))
+                }
+                None => None,
             };
             {
                 let state = self.state.read().await;
@@ -4227,6 +4287,7 @@ impl Orchestrator {
             .unwrap_or_default();
         let mut next_run = PipelineRun::new(issue_id.to_string(), retry_entry.attempt, dag);
         next_run.acceptance_attempts = acceptance_attempts;
+        next_run.resolved_acceptance_plan = Some(ResolvedAcceptancePlan::from_config(config).ok()?);
         state.insert_pipeline_run(issue_id, next_run, Arc::new(config.clone()));
         Self::transition_input_for_run(
             state,
@@ -6719,14 +6780,17 @@ impl Orchestrator {
             let Some(existing) = existing else {
                 return;
             };
-            let snapshot = self
-                .pipeline_journal
-                .latest_live_record_for_issue(issue_id)
-                .await
-                .ok()
-                .flatten()
-                .filter(|record| record.run_id.as_deref() == Some(existing.run_id.as_str()))
-                .and_then(|record| record.snapshot);
+            let snapshot = match self.load_delivery_snapshot(&existing).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    warn!(
+                        issue_id,
+                        error = %error,
+                        "finalize retry could not load its durable delivery snapshot"
+                    );
+                    return;
+                }
+            };
             (existing, snapshot)
         } else {
             let (mut prepared, snapshot) = match self
@@ -6772,8 +6836,11 @@ impl Orchestrator {
                 continue;
             };
             if repository.phase == DeliveryPhase::Blocked {
-                repository.phase = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
-                repository.retry_from = None;
+                let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
+                repository.phase = retry_from;
+                if retry_from != DeliveryPhase::Waiting {
+                    repository.retry_from = None;
+                }
                 repository.last_error = None;
             }
         }
@@ -8428,10 +8495,29 @@ fn validate_restored_snapshot_against_config(
     Ok(())
 }
 
+fn legacy_command_plan(config: &EnsembleConfig) -> ResolvedAcceptancePlan {
+    ResolvedAcceptancePlan {
+        config_digest: String::new(),
+        commands: config
+            .acceptance
+            .commands
+            .iter()
+            .map(|command| command.name.clone())
+            .collect(),
+        required_files: Vec::new(),
+        required_handoff_sections: Vec::new(),
+        required_pull_requests: Vec::new(),
+    }
+}
+
 fn validate_acceptance_attempts(
     snapshot: &PipelineRunSnapshot,
     config: &EnsembleConfig,
 ) -> Result<(), EnsembleError> {
+    let plan = snapshot
+        .resolved_acceptance_plan
+        .clone()
+        .unwrap_or_else(|| legacy_command_plan(config));
     let mut previous_cycle = 0;
     for attempt in &snapshot.acceptance_attempts {
         if attempt.cycle == 0 || attempt.cycle > snapshot.cycle || attempt.cycle <= previous_cycle {
@@ -8444,21 +8530,48 @@ fn validate_acceptance_attempts(
         if attempt.cycle != snapshot.cycle {
             continue;
         }
-        if attempt.results.len() > config.acceptance.commands.len() {
+        let pre_final_len = plan.pre_final_len();
+        if attempt.results.len() > pre_final_len && plan.required_pull_requests.is_empty() {
             return Err(AgentError::PromptError {
                 reason: format!(
-                    "persisted acceptance attempt {} has more results than configured commands",
+                    "persisted acceptance attempt {} has results beyond the frozen acceptance plan",
                     attempt.cycle
                 ),
             }
             .into());
         }
-        for (result, command) in attempt.results.iter().zip(&config.acceptance.commands) {
-            if result.name != command.name {
+        for (index, result) in attempt.results.iter().enumerate() {
+            let (expected_name, expected_kind) = if index < plan.commands.len() {
+                (&plan.commands[index], "command")
+            } else if index < plan.commands.len() + plan.required_files.len() {
+                let rule = &plan.required_files[index - plan.commands.len()];
+                (&rule.name, "file")
+            } else if index < pre_final_len {
+                let rule = &plan.required_handoff_sections
+                    [index - plan.commands.len() - plan.required_files.len()];
+                (&rule.name, "handoff")
+            } else {
+                let rule_index = (index - pre_final_len) % plan.required_pull_requests.len();
+                let rule = &plan.required_pull_requests[rule_index];
+                (&rule.name, "pull_request")
+            };
+            let kind_matches = matches!(
+                (&result.evidence, expected_kind),
+                (AcceptanceEvidence::Command { .. }, "command")
+                    | (AcceptanceEvidence::File { .. }, "file")
+                    | (AcceptanceEvidence::Handoff { .. }, "handoff")
+                    | (AcceptanceEvidence::PullRequest { .. }, "pull_request")
+            );
+            if result.name != *expected_name || !kind_matches {
+                let noun = if snapshot.resolved_acceptance_plan.is_none() {
+                    "configured command"
+                } else {
+                    "frozen acceptance check"
+                };
                 return Err(AgentError::PromptError {
                     reason: format!(
-                        "persisted acceptance result '{}' no longer matches configured command '{}'",
-                        result.name, command.name
+                        "persisted acceptance result '{}' no longer matches {noun} '{}'",
+                        result.name, expected_name
                     ),
                 }
                 .into());
@@ -9055,23 +9168,11 @@ mod tests {
         ) -> crate::acceptance::AcceptanceResult {
             self.started.wait().await;
             self.release.wait().await;
-            crate::acceptance::AcceptanceResult {
-                name: command.name.clone(),
-                status: AcceptanceStatus::Passed,
-                timing: crate::acceptance::AcceptanceTiming::Unknown,
-                exit_code: Some(0),
-                stdout: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                stderr: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                summary: "passed".into(),
-            }
+            acceptance_command_result(
+                &command.name,
+                AcceptanceStatus::Passed,
+                "passed".to_string(),
+            )
         }
     }
 
@@ -9092,23 +9193,11 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .pop_front()
                 .unwrap_or(AcceptanceStatus::Passed);
-            crate::acceptance::AcceptanceResult {
-                name: command.name.clone(),
-                timing: crate::acceptance::AcceptanceTiming::Unknown,
-                exit_code: (status == AcceptanceStatus::Passed).then_some(0),
-                summary: format!("{}: {status:?}", command.name),
+            acceptance_command_result(
+                &command.name,
                 status,
-                stdout: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                stderr: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-            }
+                format!("{}: {status:?}", command.name),
+            )
         }
     }
 
@@ -9662,6 +9751,7 @@ mod tests {
         pull_requests: std::sync::Mutex<Vec<crate::orchestrator::delivery::RemotePullRequest>>,
         pushes: AtomicUsize,
         creates: AtomicUsize,
+        lists: AtomicUsize,
     }
 
     #[async_trait]
@@ -9702,6 +9792,7 @@ mod tests {
             _repository_path: &Path,
             _repository_key: &str,
         ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
+            self.lists.fetch_add(1, Ordering::SeqCst);
             Ok(self.pull_requests.lock().unwrap().clone())
         }
 
@@ -9780,12 +9871,241 @@ mod tests {
         (orchestrator, workspace_temp, repo_temp, delivery)
     }
 
+    fn post_finalize_acceptance_snapshot(
+        rule_names: &[&str],
+        results: Vec<crate::acceptance::AcceptanceResult>,
+    ) -> PipelineRunSnapshot {
+        let config = make_config();
+        let dag = build_dag(&config.steps).unwrap();
+        let mut run = PipelineRun::new("1".into(), 1, dag);
+        run.resolved_acceptance_plan = Some(ResolvedAcceptancePlan {
+            config_digest: "frozen".into(),
+            commands: Vec::new(),
+            required_files: Vec::new(),
+            required_handoff_sections: Vec::new(),
+            required_pull_requests: rule_names
+                .iter()
+                .map(
+                    |name| crate::config::ensemble::AcceptancePullRequestConfig {
+                        name: (*name).into(),
+                        repo: "source-repo".into(),
+                    },
+                )
+                .collect(),
+        });
+        run.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt { cycle: 1, results }];
+        run.to_snapshot()
+    }
+
+    fn retained_pr_result(
+        name: &str,
+        status: AcceptanceStatus,
+    ) -> crate::acceptance::AcceptanceResult {
+        crate::acceptance::AcceptanceResult::new(
+            name.into(),
+            status,
+            format!("{name}: {status:?}"),
+            AcceptanceEvidence::PullRequest {
+                repo: "source-repo".into(),
+                delivery_phase: crate::acceptance::PullRequestDeliveryPhase::Waiting,
+                base_branch: Some("main".into()),
+                head_branch: Some("ensemble/repo-1".into()),
+                head_sha: Some("0123456789abcdef".into()),
+                pr_number: Some(420),
+                pr_url: Some("https://github.com/example/project/pull/420".into()),
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn post_finalize_acceptance_resumes_partial_batch_without_remote_calls() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".into());
+        repository.last_error = None;
+        let snapshot = post_finalize_acceptance_snapshot(
+            &["first", "second"],
+            vec![retained_pr_result("first", AcceptanceStatus::Passed)],
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+
+        let evaluated = orchestrator
+            .evaluate_post_final_acceptance(delivery.clone(), Some(&snapshot))
+            .await;
+
+        assert_eq!(evaluated, delivery);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        let results = &latest.snapshot.unwrap().acceptance_attempts[0].results;
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "second"]
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn post_finalize_acceptance_blocks_without_losing_delivery_identity() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = None;
+        repository.last_error = None;
+        let original = repository.clone();
+        let snapshot = post_finalize_acceptance_snapshot(&["required-pr"], Vec::new());
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+
+        let blocked = orchestrator
+            .evaluate_post_final_acceptance(delivery, Some(&snapshot))
+            .await;
+
+        let repository = &blocked.repositories["source-repo"];
+        assert_eq!(repository.phase, DeliveryPhase::Blocked);
+        assert_eq!(repository.retry_from, Some(DeliveryPhase::Waiting));
+        assert_eq!(repository.base_branch, original.base_branch);
+        assert_eq!(repository.head_branch, original.head_branch);
+        assert_eq!(repository.local_sha, original.local_sha);
+        assert_eq!(repository.pr_number, original.pr_number);
+        assert_eq!(repository.pr_url, original.pr_url);
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn post_finalize_acceptance_retry_appends_batch_and_returns_to_waiting() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".into());
+        repository.retry_from = Some(DeliveryPhase::Waiting);
+        repository.last_error = None;
+        let original = repository.clone();
+        let snapshot = post_finalize_acceptance_snapshot(
+            &["required-pr"],
+            vec![retained_pr_result("required-pr", AcceptanceStatus::Failed)],
+        );
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+
+        let waiting = orchestrator
+            .evaluate_post_final_acceptance(delivery, Some(&snapshot))
+            .await;
+
+        let repository = &waiting.repositories["source-repo"];
+        assert_eq!(repository.phase, DeliveryPhase::Waiting);
+        assert_eq!(repository.retry_from, None);
+        assert_eq!(repository.base_branch, original.base_branch);
+        assert_eq!(repository.head_branch, original.head_branch);
+        assert_eq!(repository.local_sha, original.local_sha);
+        assert_eq!(repository.pr_number, original.pr_number);
+        assert_eq!(repository.pr_url, original.pr_url);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.snapshot.unwrap().acceptance_attempts[0]
+                .results
+                .len(),
+            2
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn post_finalize_acceptance_retains_published_delivery_when_snapshot_is_missing() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Published;
+        repository.pr_number = None;
+        repository.pr_url = None;
+        repository.last_error = None;
+        let snapshot = post_finalize_acceptance_snapshot(&["required-pr"], Vec::new());
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        tokio::fs::remove_file(orchestrator.pipeline_journal.path_for_issue("1"))
+            .await
+            .unwrap();
+
+        let error = orchestrator
+            .load_delivery_snapshot(&delivery)
+            .await
+            .unwrap_err();
+        assert!(error.contains("missing durable delivery owner"));
+
+        orchestrator.process_delivery_recovery().await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.delivery.get("1"), Some(&delivery));
+        assert!(!state.completed.contains_key("1"));
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
     #[tokio::test]
     async fn ambiguous_pr_creation_reconciles_existing_pull_request_before_retry() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
         });
         let (orchestrator, _workspace, _repo, delivery) =
             recovery_test_orchestrator(Arc::clone(&remote)).await;
@@ -9818,6 +10138,7 @@ mod tests {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
         });
         let (orchestrator, _workspace, _repo, delivery) =
             recovery_test_orchestrator(Arc::clone(&remote)).await;
@@ -9848,6 +10169,7 @@ mod tests {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
         });
         let (orchestrator, _workspace, _repo, mut delivery) =
             recovery_test_orchestrator(Arc::clone(&remote)).await;
@@ -9906,6 +10228,7 @@ mod tests {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
         });
         let (orchestrator, _workspace, _repo, mut delivery) =
             recovery_test_orchestrator(Arc::clone(&remote)).await;
@@ -10013,6 +10336,7 @@ mod tests {
             ]),
             pushes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
         });
         let first = delivery_restart_orchestrator(
             config_dir.path(),
@@ -10085,6 +10409,7 @@ mod tests {
             ]),
             pushes: AtomicUsize::new(0),
             creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
         });
         let first = delivery_restart_orchestrator(
             config_dir.path(),
@@ -10279,7 +10604,8 @@ agent:
                 tracker,
                 agent_runner: runner,
                 acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
-                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                workspace_mgr: WorkspaceManager::new(&workspace_root, Some(cfg.repos.clone()))
+                    .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
@@ -10319,7 +10645,8 @@ agent:
                     cancellation_probe: None,
                 }),
                 acceptance_runner,
-                workspace_mgr: WorkspaceManager::new(&workspace_root, None).unwrap(),
+                workspace_mgr: WorkspaceManager::new(&workspace_root, Some(cfg.repos.clone()))
+                    .unwrap(),
                 refresh_requested: Arc::new(tokio::sync::Notify::new()),
                 cancellation_registry: new_cancellation_registry(),
                 event_bus: EventBus::new(),
@@ -10345,6 +10672,29 @@ agent:
         config
     }
 
+    fn acceptance_command_result(
+        name: &str,
+        status: AcceptanceStatus,
+        summary: String,
+    ) -> crate::acceptance::AcceptanceResult {
+        crate::acceptance::AcceptanceResult::command(
+            name.to_string(),
+            status.clone(),
+            summary,
+            (status == AcceptanceStatus::Passed).then_some(0),
+            crate::acceptance::AcceptanceOutput {
+                tail: String::new(),
+                total_bytes: 0,
+                truncated: false,
+            },
+            crate::acceptance::AcceptanceOutput {
+                tail: String::new(),
+                total_bytes: 0,
+                truncated: false,
+            },
+        )
+    }
+
     async fn install_succeeded_run(
         state: &Arc<RwLock<OrchestratorState>>,
         issue: &Issue,
@@ -10352,6 +10702,7 @@ agent:
     ) {
         let dag = build_dag(&config.steps).unwrap();
         let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        run.resolved_acceptance_plan = Some(ResolvedAcceptancePlan::from_config(config).unwrap());
         for step in run.step_states.values_mut() {
             *step = StepState::Passed;
         }
@@ -10470,7 +10821,7 @@ agent:
         assert_eq!(records[0].kind, PipelineTransitionKind::AcceptanceStarted);
         assert!(records[1..]
             .iter()
-            .all(|record| record.kind == PipelineTransitionKind::AcceptanceCommandCompleted));
+            .all(|record| record.kind == PipelineTransitionKind::AcceptanceCheckCompleted));
         for pair in records.windows(2) {
             assert!(pair[0].seq < pair[1].seq);
             assert!(
@@ -10482,6 +10833,234 @@ agent:
                         .len()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn acceptance_creates_a_durable_attempt_for_a_pull_request_only_plan() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-pr-only", "In Progress");
+        let mut config = acceptance_config(&[]);
+        let mut repo = crate::config::ensemble::RepoConfig {
+            path: "/tmp/primary".into(),
+            branch: "main".into(),
+            git_remote: "origin".into(),
+            finalize: Default::default(),
+        };
+        repo.finalize.mode = crate::workspace::finalize::FinalizeMode::PushAndPr;
+        config.repos = vec![repo];
+        config.acceptance.required_pull_requests =
+            vec![crate::config::ensemble::AcceptancePullRequestConfig {
+                name: "primary-pr".into(),
+                repo: "primary".into(),
+            }];
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(Default::default()),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Passed));
+        let state = state.read().await;
+        let attempts = &state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .acceptance_attempts;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].cycle, 1);
+        assert!(attempts[0].results.is_empty());
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, PipelineTransitionKind::AcceptanceStarted);
+    }
+
+    fn mixed_acceptance_config() -> EnsembleConfig {
+        let mut config = acceptance_config(&["command"]);
+        config.repos = vec![crate::config::ensemble::RepoConfig {
+            path: "/tmp/repo".into(),
+            branch: "main".into(),
+            git_remote: "origin".into(),
+            finalize: Default::default(),
+        }];
+        config.acceptance.required_files = vec![crate::config::ensemble::AcceptanceFileConfig {
+            name: "file".into(),
+            repo: "repo".into(),
+            path: "artifact.txt".into(),
+        }];
+        config.acceptance.required_handoff_sections =
+            vec![crate::config::ensemble::AcceptanceHandoffConfig {
+                name: "handoff".into(),
+                step: "build".into(),
+                sections: vec!["summary".into()],
+            }];
+        config
+    }
+
+    #[tokio::test]
+    async fn acceptance_runs_the_complete_mixed_prefix_in_frozen_order() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-mixed", "In Progress");
+        let config = mixed_acceptance_config();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Failed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        state
+            .write()
+            .await
+            .get_pipeline_run_mut(&issue.id)
+            .unwrap()
+            .step_outputs
+            .insert(
+                "build".into(),
+                crate::pipeline::verdict::StepOutput {
+                    result: StepResult::Succeeded,
+                    summary: None,
+                    output: Some(serde_json::json!({"summary": "done"})),
+                },
+            );
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Failed { .. }));
+        assert_eq!(
+            *calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec!["command"]
+        );
+        let state = state.read().await;
+        let results = &state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .acceptance_attempts[0]
+            .results;
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["command", "file", "handoff"]
+        );
+        assert!(matches!(
+            results[0].evidence,
+            AcceptanceEvidence::Command { .. }
+        ));
+        assert!(matches!(
+            results[1].evidence,
+            AcceptanceEvidence::File { .. }
+        ));
+        assert!(matches!(
+            results[2].evidence,
+            AcceptanceEvidence::Handoff { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn acceptance_configuration_drift_fails_closed_before_unfinished_command() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-drift", "In Progress");
+        let config = acceptance_config(&["command"]);
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new([AcceptanceStatus::Passed].into()),
+            calls: Arc::clone(&calls),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        let mut drifted = config.clone();
+        drifted.acceptance.commands[0].run = "different-secret-command".into();
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &drifted).await;
+
+        assert!(matches!(
+            outcome,
+            AcceptancePhaseOutcome::RetainedForRecovery
+        ));
+        assert!(calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn acceptance_resumes_a_mixed_prefix_at_the_first_missing_check() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let issue = test_issue("acceptance-mixed-resume", "In Progress");
+        let config = mixed_acceptance_config();
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = Arc::new(RecordingAcceptanceRunner {
+            statuses: std::sync::Mutex::new(Default::default()),
+            calls: Arc::clone(&calls),
+        });
+        let (orchestrator, state) =
+            make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
+        install_succeeded_run(&state, &issue, &config).await;
+        {
+            let mut state = state.write().await;
+            let run = state.get_pipeline_run_mut(&issue.id).unwrap();
+            run.step_outputs.insert(
+                "build".into(),
+                crate::pipeline::verdict::StepOutput {
+                    result: StepResult::Succeeded,
+                    summary: None,
+                    output: Some(serde_json::json!({"summary": "done"})),
+                },
+            );
+            run.acceptance_attempts
+                .push(crate::acceptance::AcceptanceAttempt {
+                    cycle: 1,
+                    results: vec![
+                        acceptance_command_result(
+                            "command",
+                            AcceptanceStatus::Passed,
+                            "passed".into(),
+                        ),
+                        crate::acceptance::AcceptanceResult::new(
+                            "file".into(),
+                            AcceptanceStatus::Passed,
+                            "present".into(),
+                            AcceptanceEvidence::File {
+                                repo: "repo".into(),
+                                path: "artifact.txt".into(),
+                                observation: crate::acceptance::FileObservation::Present,
+                            },
+                        ),
+                    ],
+                });
+        }
+
+        let outcome = orchestrator.run_acceptance_phase(&issue, &config).await;
+
+        assert!(matches!(outcome, AcceptancePhaseOutcome::Passed));
+        assert!(calls
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_empty());
+        assert_eq!(
+            state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .acceptance_attempts[0]
+                .results
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]
@@ -10505,23 +11084,11 @@ agent:
                 .acceptance_attempts
                 .push(crate::acceptance::AcceptanceAttempt {
                     cycle: 1,
-                    results: vec![crate::acceptance::AcceptanceResult {
-                        name: "first".into(),
-                        status: AcceptanceStatus::Passed,
-                        timing: crate::acceptance::AcceptanceTiming::Unknown,
-                        exit_code: Some(0),
-                        stdout: crate::acceptance::AcceptanceOutput {
-                            tail: String::new(),
-                            total_bytes: 0,
-                            truncated: false,
-                        },
-                        stderr: crate::acceptance::AcceptanceOutput {
-                            tail: String::new(),
-                            total_bytes: 0,
-                            truncated: false,
-                        },
-                        summary: "first passed".into(),
-                    }],
+                    results: vec![acceptance_command_result(
+                        "first",
+                        AcceptanceStatus::Passed,
+                        "first passed".into(),
+                    )],
                 });
         }
 
@@ -10933,23 +11500,11 @@ agent:
         let mut run = PipelineRun::new("issue".into(), 1, dag);
         run.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
             cycle: 1,
-            results: vec![crate::acceptance::AcceptanceResult {
-                name: "old-name".into(),
-                status: AcceptanceStatus::Passed,
-                timing: crate::acceptance::AcceptanceTiming::Unknown,
-                exit_code: Some(0),
-                stdout: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                stderr: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                summary: "passed".into(),
-            }],
+            results: vec![acceptance_command_result(
+                "old-name",
+                AcceptanceStatus::Passed,
+                "passed".into(),
+            )],
         }];
 
         let error =
@@ -10967,23 +11522,11 @@ agent:
         let mut run = PipelineRun::new("issue".into(), 2, dag);
         run.acceptance_attempts = vec![crate::acceptance::AcceptanceAttempt {
             cycle: 1,
-            results: vec![crate::acceptance::AcceptanceResult {
-                name: "old-name".into(),
-                status: AcceptanceStatus::Passed,
-                timing: crate::acceptance::AcceptanceTiming::Unknown,
-                exit_code: Some(0),
-                stdout: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                stderr: crate::acceptance::AcceptanceOutput {
-                    tail: String::new(),
-                    total_bytes: 0,
-                    truncated: false,
-                },
-                summary: "passed".into(),
-            }],
+            results: vec![acceptance_command_result(
+                "old-name",
+                AcceptanceStatus::Passed,
+                "passed".into(),
+            )],
         }];
 
         validate_restored_snapshot_against_config(&run.to_snapshot(), &config).unwrap();
