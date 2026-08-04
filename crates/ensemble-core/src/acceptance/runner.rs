@@ -1,12 +1,13 @@
 use std::path::Path;
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
-use crate::acceptance::{AcceptanceOutput, AcceptanceResult, AcceptanceStatus};
+use crate::acceptance::{AcceptanceOutput, AcceptanceResult, AcceptanceStatus, AcceptanceTiming};
 use crate::config::ensemble::AcceptanceCommandConfig;
 
 const OUTPUT_TAIL_LIMIT: usize = 32 * 1024;
@@ -30,6 +31,7 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
         command_config: &AcceptanceCommandConfig,
         issue_workspace: &Path,
     ) -> AcceptanceResult {
+        let timer = AcceptanceTimer::start();
         let mut command = Command::new("/bin/sh");
         command
             .arg("-lc")
@@ -45,10 +47,10 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                return unavailable_result(
+                return timer.finish(unavailable_result(
                     &command_config.name,
                     format!("acceptance command unavailable: {error}"),
-                );
+                ));
             }
         };
         let child_id = child.id();
@@ -67,10 +69,10 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
             Ok(wait_result) => match wait_result {
                 Ok(status) => Some(status),
                 Err(error) => {
-                    return unavailable_result(
+                    return timer.finish(unavailable_result(
                         &command_config.name,
                         format!("acceptance command unavailable while waiting: {error}"),
-                    );
+                    ));
                 }
             },
             Err(_) => None,
@@ -80,13 +82,18 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
         if let Some(status) = status {
             match tokio::time::timeout_at(deadline, &mut output_collection).await {
                 Ok(Ok((stdout, stderr))) => {
-                    return finish_result(&command_config.name, status, stdout, stderr);
+                    return timer.finish(finish_result(
+                        &command_config.name,
+                        status,
+                        stdout,
+                        stderr,
+                    ));
                 }
                 Ok(Err(error)) => {
-                    return unavailable_result(
+                    return timer.finish(unavailable_result(
                         &command_config.name,
                         format!("acceptance command output unavailable: {error}"),
-                    );
+                    ));
                 }
                 Err(_) => {}
             }
@@ -95,25 +102,26 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
         terminate_process_group(child_id);
         if status.is_none() {
             if let Err(error) = child.wait().await {
-                return unavailable_result(
+                return timer.finish(unavailable_result(
                     &command_config.name,
                     format!("acceptance command unavailable while reaping timeout: {error}"),
-                );
+                ));
             }
         }
 
         let (stdout, stderr) = match output_collection.await {
             Ok(outputs) => outputs,
             Err(error) => {
-                return unavailable_result(
+                return timer.finish(unavailable_result(
                     &command_config.name,
                     format!("acceptance command output unavailable: {error}"),
-                );
+                ));
             }
         };
-        AcceptanceResult {
+        timer.finish(AcceptanceResult {
             name: command_config.name.clone(),
             status: AcceptanceStatus::TimedOut,
+            timing: AcceptanceTiming::Unknown,
             exit_code: None,
             stdout,
             stderr,
@@ -121,7 +129,30 @@ impl AcceptanceCommandRunner for ShellAcceptanceCommandRunner {
                 "acceptance command '{}' timed out after {}ms",
                 command_config.name, command_config.timeout_ms
             ),
+        })
+    }
+}
+
+struct AcceptanceTimer {
+    started_at: chrono::DateTime<Utc>,
+    started: Instant,
+}
+
+impl AcceptanceTimer {
+    fn start() -> Self {
+        Self {
+            started_at: Utc::now(),
+            started: Instant::now(),
         }
+    }
+
+    fn finish(self, mut result: AcceptanceResult) -> AcceptanceResult {
+        result.timing = AcceptanceTiming::Observed {
+            started_at: self.started_at,
+            completed_at: Utc::now(),
+            duration_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        };
+        result
     }
 }
 
@@ -144,6 +175,7 @@ fn finish_result(
     AcceptanceResult {
         name: name.to_string(),
         status: acceptance_status,
+        timing: AcceptanceTiming::Unknown,
         exit_code: status.code(),
         stdout,
         stderr,
@@ -208,6 +240,7 @@ fn unavailable_result(name: &str, summary: String) -> AcceptanceResult {
     AcceptanceResult {
         name: name.to_string(),
         status: AcceptanceStatus::Unavailable,
+        timing: AcceptanceTiming::Unknown,
         exit_code: None,
         stdout: empty_output(),
         stderr: empty_output(),
@@ -240,7 +273,7 @@ fn terminate_process_group(_child_id: Option<u32>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::acceptance::AcceptanceStatus;
+    use crate::acceptance::{AcceptanceStatus, AcceptanceTiming};
     use crate::config::ensemble::AcceptanceCommandConfig;
     use crate::test_support::env::ENV_LOCK;
 
@@ -249,6 +282,20 @@ mod tests {
             name: name.to_string(),
             run: run.to_string(),
             timeout_ms,
+        }
+    }
+
+    fn observed_duration_ms(result: &AcceptanceResult) -> u64 {
+        match &result.timing {
+            AcceptanceTiming::Observed {
+                started_at,
+                completed_at,
+                duration_ms,
+            } => {
+                assert!(completed_at >= started_at);
+                *duration_ms
+            }
+            AcceptanceTiming::Unknown => panic!("new command result must have observed timing"),
         }
     }
 
@@ -281,6 +328,7 @@ mod tests {
         assert_eq!(result.stdout.total_bytes, result.stdout.tail.len() as u64);
         assert!(!result.stdout.truncated);
         assert_eq!(result.name, "context");
+        observed_duration_ms(&result);
     }
 
     #[tokio::test]
@@ -303,6 +351,8 @@ mod tests {
         assert_eq!(signal.status, AcceptanceStatus::Failed);
         assert_eq!(signal.exit_code, None);
         assert!(signal.summary.contains("signal"));
+        observed_duration_ms(&nonzero);
+        observed_duration_ms(&signal);
     }
 
     #[tokio::test]
@@ -355,6 +405,7 @@ mod tests {
 
         assert_eq!(result.status, AcceptanceStatus::TimedOut);
         assert_eq!(result.exit_code, None);
+        assert!(observed_duration_ms(&result) >= 40);
         assert!(
             !marker.exists(),
             "timed-out descendant escaped its process group"
@@ -405,5 +456,6 @@ mod tests {
         assert!(!result.summary.contains("super-secret-command"));
         assert!(result.stdout.tail.is_empty());
         assert!(result.stderr.tail.is_empty());
+        observed_duration_ms(&result);
     }
 }

@@ -82,6 +82,10 @@ async fn web_cli_runs_todo_issue_to_completion_with_mock_acpx() {
     let acceptance = &history["acceptance_attempts"][0]["results"][0];
     assert_eq!(acceptance["name"], "verify");
     assert_eq!(acceptance["status"], "passed");
+    assert_eq!(acceptance["timing"]["kind"], "observed");
+    assert!(acceptance["timing"]["started_at"].is_string());
+    assert!(acceptance["timing"]["completed_at"].is_string());
+    assert!(acceptance["timing"]["duration_ms"].is_u64());
     assert_eq!(acceptance["stdout"]["total_bytes"], 40_000);
     assert_eq!(acceptance["stdout"]["truncated"], true);
     assert_eq!(
@@ -152,6 +156,7 @@ async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() 
     let acceptance = &history["acceptance_attempts"][0]["results"][0];
     assert_eq!(acceptance["name"], "verify");
     assert_eq!(acceptance["status"], "failed");
+    assert_eq!(acceptance["timing"]["kind"], "observed");
     assert_eq!(acceptance["exit_code"], 7);
     assert!(acceptance["stderr"]["tail"]
         .as_str()

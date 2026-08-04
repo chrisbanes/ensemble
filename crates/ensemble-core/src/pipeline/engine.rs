@@ -2044,6 +2044,7 @@ mod tests {
             results: vec![crate::acceptance::AcceptanceResult {
                 name: "test".to_string(),
                 status: crate::acceptance::AcceptanceStatus::Passed,
+                timing: crate::acceptance::AcceptanceTiming::Unknown,
                 exit_code: Some(0),
                 stdout: crate::acceptance::AcceptanceOutput {
                     tail: "ok".to_string(),

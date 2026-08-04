@@ -490,6 +490,11 @@ mod tests {
             results: vec![crate::acceptance::AcceptanceResult {
                 name: "test".into(),
                 status: crate::acceptance::AcceptanceStatus::Passed,
+                timing: crate::acceptance::AcceptanceTiming::Observed {
+                    started_at: "2026-08-04T09:00:00Z".parse().unwrap(),
+                    completed_at: "2026-08-04T09:00:01Z".parse().unwrap(),
+                    duration_ms: 1_234,
+                },
                 exit_code: Some(0),
                 stdout: crate::acceptance::AcceptanceOutput {
                     tail: "ok".into(),

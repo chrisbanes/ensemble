@@ -187,12 +187,27 @@ store a lossy-UTF-8 rendering of only the final 32,768 raw bytes, the total obse
 a `truncated` flag. The runner drains both streams concurrently and terminates and reaps the command
 process group on timeout.
 
+Every newly executed result also records tagged timing:
+
+```json
+{
+  "kind": "observed",
+  "started_at": "2026-08-04T09:00:00Z",
+  "completed_at": "2026-08-04T09:00:01Z",
+  "duration_ms": 1234
+}
+```
+
+The boundaries use UTC wall-clock timestamps, while `duration_ms` uses a monotonic clock. Legacy
+results without a `timing` field deserialize as `{"kind":"unknown"}`; Ensemble preserves their
+evidence without inventing timestamps.
+
 Phase start and every completed result are journaled before Ensemble advances. After restart, the
 current cycle's durable results must be a declaration-order prefix of configured command names;
 Ensemble resumes with the first missing command. Thus an interrupted command without a durable result
 may repeat, while a durable prefix does not. Legacy snapshots and history records default to no
-attempts. Ordered attempts are also preserved in JSONL history, SQLite history, and pending terminal
-reconciliation records.
+attempts, and legacy results within an existing attempt default to unknown timing. Ordered attempts
+are also preserved in JSONL history, SQLite history, and pending terminal reconciliation records.
 
 If an append outcome is ambiguous, Ensemble keeps the active owner and retries only the journal
 visibility check on later poll ticks. An exactly visible result advances without executing the
