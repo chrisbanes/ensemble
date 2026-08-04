@@ -237,7 +237,15 @@ Parsed `config.yaml` payload:
 - `acceptance` (AcceptanceConfig, optional)
   - `commands` is an ordered list of `{ name, run, timeout_ms }` command definitions. Names must be
     unique and non-blank, `run` must be non-blank, and the required timeout must be positive.
-  - Missing `acceptance`, missing `commands`, and an empty list all mean no acceptance phase.
+  - `required_files` is an ordered list of `{ name, repo, path }` exact regular-file checks. `repo`
+    resolves one configured repository basename and `path` is non-empty and repository-relative,
+    without parent traversal.
+  - `required_handoff_sections` is an ordered list of `{ name, step, sections }` checks against one
+    persisted step output object. The step must exist; section names are non-blank and unique.
+  - `required_pull_requests` is an ordered list of `{ name, repo }` checks. The repository must have
+    finalization enabled in `push_and_pr` mode.
+  - Every acceptance name is non-blank and unique across all four lists. Missing lists default to
+    empty; when all four are empty there is no acceptance phase.
 
 #### 4.1.3 Agent Config
 
@@ -300,9 +308,13 @@ Per-issue pipeline execution state:
 - `step_states` (map of step name to StepState)
 - `acceptance_attempts` (ordered list, default empty)
   - Each attempt contains its 1-based pipeline `cycle` and declaration-order `results` prefix.
-  - Each result contains `name`, `status` (`passed`, `failed`, `timed_out`, or `unavailable`),
-    `timing`, optional `exit_code`, bounded `stdout` and `stderr`, and a human-readable `summary`.
-    The configured command string is never part of durable evidence.
+  - Newly written results use the version-2 envelope `{ version, name, status, summary, timing,
+    evidence }`. `status` is `passed`, `failed`, `timed_out`, or `unavailable`; `evidence.kind` is
+    `command`, `file`, `handoff`, or `pull_request`. Command evidence contains optional `exit_code`
+    and bounded `stdout`/`stderr`; the other variants retain only typed, non-secret observations.
+    Configured command strings and absolute repository paths are never durable evidence.
+  - Legacy unversioned flat command results remain readable and acquire unknown timing in memory.
+    New persistence always writes version 2; unsupported explicit versions fail to decode.
   - Newly executed results use tagged observed timing with UTC `started_at` and `completed_at`
     boundaries plus monotonic `duration_ms`. Legacy results without timing deserialize as tagged
     `unknown` timing and remain readable without invented timestamps.
@@ -334,12 +346,18 @@ Pipeline run recovery:
 - Ensemble appends pipeline transition records to
   `<config_dir>/state/pipeline-runs/<encoded_issue_id>.jsonl`.
 - Each recoverable transition includes a full `PipelineRun` snapshot.
-- Acceptance appends `acceptance_started` before its first command and
-  `acceptance_command_completed` after every completed result. A failed append stops the phase
-  before the next command, finalization, or retry decision. On restore, the current cycle's durable
-  results must match the configured command-name prefix; Ensemble resumes at the first missing
-  command, so only a
-  command interrupted before its result became durable may run again.
+- Acceptance appends `acceptance_started` before its first check and `acceptance_check_completed`
+  after every newly completed result. The legacy `acceptance_command_completed` transition remains
+  readable. A failed append stops before the next check, finalization, or retry decision.
+- A new run freezes a non-secret resolved acceptance plan and semantic configuration digest in its
+  snapshot. The plan stores command names, not command strings. Before an unfinished command,
+  digest drift retains the run for recovery rather than executing changed configuration. File and
+  handoff recovery uses the frozen descriptors. Legacy snapshots without a plan retain historical
+  command-only prefix behavior and do not gain newly configured rules.
+- Pre-final results must be a declaration-order prefix of commands, required files, then required
+  handoff sections. Ensemble resumes at the first missing check; only a check interrupted before its
+  result became durable may run again. All pre-final checks run, and any non-passing result takes the
+  whole-issue retry path.
 - If an append outcome is ambiguous, Ensemble retains the active owner and retries only journal
   visibility on later poll ticks. Exact visibility advances without rerunning the command;
   confirmed absence releases the owner so only the undurable command can be dispatched again.
@@ -365,6 +383,12 @@ Pipeline run recovery:
   dispatches no pipeline work, and does not project a terminal tracker state. `blocked` is likewise
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
+- Required pull-request checks run only after the retained delivery identity reaches `waiting` or
+  `published`. Results form one ordered suffix batch per evaluation. Restart resumes a partial
+  batch without push, creation, or discovery; an explicit finalize retry appends a complete new
+  batch and preserves prior evidence. Failure blocks only the affected delivery repository while
+  retaining its branch, SHA, pull-request number, and URL. Retry re-evaluates that retained identity
+  and returns to `waiting` when it passes; it never enters pipeline `max_cycles`.
 - On orchestrator startup, Ensemble restores the latest non-released snapshot for each issue before
   the first poll tick.
 - Delivery ownership is restored before candidate selection and excludes that issue from fresh

@@ -259,7 +259,7 @@ agent:
 
 ### acceptance
 
-`acceptance` is optional. Its `commands` list defaults to empty, which preserves the direct
+`acceptance` is optional. All four lists default to empty, which preserves the direct
 pipeline-success-to-finalization behavior.
 
 ```yaml
@@ -268,6 +268,17 @@ acceptance:
     - name: unit-tests
       run: cargo test --workspace
       timeout_ms: 900000
+  required_files:
+    - name: release-notes
+      repo: ensemble
+      path: docs/release-notes.md
+  required_handoff_sections:
+    - name: implementation-handoff
+      step: implement
+      sections: [summary, testing]
+  required_pull_requests:
+    - name: ensemble-pr
+      repo: ensemble
 ```
 
 Each command requires a unique, non-blank `name`, a non-blank `run` string, and a positive
@@ -277,10 +288,29 @@ parallelism, or acceptance-specific retry option. Commands inherit the orchestra
 run sequentially in declaration order in the issue workspace, and all commands run even after an
 earlier command does not pass.
 
-Acceptance starts only after every pipeline step and approval gate has passed, and before repository
-finalization. A non-passing command uses the existing whole-issue `max_cycles` retry path and, on
-exhaustion, writes `on_failure`; per-step `on_failure` settings do not apply. See
-[Pipeline Guide](pipelines.md#acceptance-commands) for evidence, recovery, and retry semantics.
+`required_files` runs next, in declaration order. Each entry needs a unique non-blank `name`, a
+`repo` that resolves exactly one configured repository basename, and an exact non-empty
+repository-relative `path` without `..`. The target must resolve inside Ensemble's owned worktree
+and be a regular file; symlinks that escape the repository fail.
+
+`required_handoff_sections` then checks the persisted `StepOutput.output` for a configured `step`.
+It must be an object containing every configured non-blank, unique top-level section. Missing,
+`null`, blank strings, empty arrays, and empty objects fail; `false` and `0` are present values.
+
+`required_pull_requests` runs after repository finalization. Its `repo` must resolve exactly one
+repository with `finalize.enabled: true` and `finalize.mode: push_and_pr`. It passes only when the
+retained delivery record has a pull-request number and URL in `waiting` or `published`; it does not
+search for or create a pull request.
+
+Names must be unique across commands, files, handoffs, and pull requests. Config validation rejects
+ambiguous repository basenames and invalid references before the service starts.
+
+Commands, files, and handoffs start only after every pipeline step and approval gate has passed and
+before repository finalization. Any non-passing pre-final check uses the existing whole-issue
+`max_cycles` retry path and, on exhaustion, writes `on_failure`; per-step `on_failure` settings do
+not apply. Pull-request requirements instead block the affected retained delivery and are retried by
+the finalize-retry control. See [Pipeline Guide](pipelines.md#acceptance-requirements) for evidence,
+recovery, and retry semantics.
 
 ### tracker
 

@@ -1,4 +1,4 @@
-use crate::config::ensemble::{HooksConfig, RepoConfig};
+use crate::config::ensemble::{repository_key, HooksConfig, RepoConfig};
 use crate::error::WorkspaceError;
 use crate::observability::events_contract::{
     elapsed_ms, WORKSPACE_PREPARE_FAILED, WORKSPACE_PREPARE_FINISHED, WORKSPACE_PREPARE_STARTED,
@@ -82,11 +82,7 @@ impl WorkspaceManager {
             .map(|repo_list| {
                 let mut repos_map = HashMap::new();
                 for (index, repo) in repo_list.into_iter().enumerate() {
-                    let name = Path::new(&repo.path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| format!("repo-{index}"));
+                    let name = repository_key(&repo, index);
                     repos_map.insert(name, repo);
                 }
                 repos_map
@@ -117,6 +113,21 @@ impl WorkspaceManager {
     /// Get the workspace path for an immutable issue identity without creating it.
     pub fn workspace_path(&self, issue_id: &str) -> PathBuf {
         self.root.join(issue_workspace_key(issue_id))
+    }
+
+    /// Resolve paths for an existing issue-owned workspace without preparing or pulling it.
+    pub(crate) fn owned_worktree_paths(
+        &self,
+        issue_id: &str,
+    ) -> Result<HashMap<String, PathBuf>, WorkspaceError> {
+        let metadata = self.load_metadata(issue_id)?;
+        Self::verify_ownership(&self.metadata_path(issue_id), &metadata, issue_id)?;
+        let coordinator = WorktreeCoordinator::new(
+            self.repos.clone(),
+            metadata.branch_date,
+            self.workspace_path(issue_id),
+        );
+        Ok(coordinator.worktree_paths(issue_id))
     }
 
     fn metadata_dir(&self) -> PathBuf {
@@ -587,6 +598,28 @@ mod tests {
         assert_eq!(metadata.issue_id, "NODE_42");
         assert_eq!(metadata.issue_identifier, "my-repo#42");
         assert!(!result.base_path.join(".ensemble-workspace.json").exists());
+    }
+
+    #[tokio::test]
+    async fn owned_worktree_paths_resolves_existing_paths_without_preparation() {
+        let root = TempDir::new().unwrap();
+        let (_repo, config) = setup_repo("owned");
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![config])).unwrap();
+        let prepared = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+
+        let resolved = mgr.owned_worktree_paths("NODE_42").unwrap();
+
+        assert_eq!(
+            resolved,
+            prepared
+                .worktrees
+                .into_iter()
+                .map(|(name, worktree)| (name, worktree.path))
+                .collect()
+        );
     }
 
     #[tokio::test]

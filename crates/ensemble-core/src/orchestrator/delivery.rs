@@ -434,7 +434,107 @@ pub(crate) fn reconcile_pull_requests(
     }
 }
 
+fn pull_request_delivery_phase(
+    phase: DeliveryPhase,
+) -> crate::acceptance::PullRequestDeliveryPhase {
+    use crate::acceptance::PullRequestDeliveryPhase as EvidencePhase;
+    match phase {
+        DeliveryPhase::Prepared => EvidencePhase::Prepared,
+        DeliveryPhase::PushInFlight => EvidencePhase::PushInFlight,
+        DeliveryPhase::ReconcilingPush => EvidencePhase::ReconcilingPush,
+        DeliveryPhase::PrCreateInFlight => EvidencePhase::PrCreateInFlight,
+        DeliveryPhase::ReconcilingPr => EvidencePhase::ReconcilingPr,
+        DeliveryPhase::Waiting => EvidencePhase::Waiting,
+        DeliveryPhase::Published => EvidencePhase::Published,
+        DeliveryPhase::Blocked => EvidencePhase::Blocked,
+    }
+}
+
+fn evaluate_pull_request_requirement(
+    rule: &crate::config::ensemble::AcceptancePullRequestConfig,
+    repository: &DeliveryRepository,
+) -> crate::acceptance::AcceptanceResult {
+    let timer = crate::acceptance::AcceptanceTimer::start();
+    let mut failures = Vec::new();
+    if !matches!(
+        repository.phase,
+        DeliveryPhase::Waiting | DeliveryPhase::Published
+    ) {
+        failures.push(format!(
+            "delivery phase is {:?}, expected waiting or published",
+            repository.phase
+        ));
+    }
+    if repository.pr_number.is_none() {
+        failures.push("durable pull request number is missing".to_string());
+    }
+    if repository.pr_url.is_none() {
+        failures.push("durable pull request URL is missing".to_string());
+    }
+    let complete_identity = if failures.is_empty() {
+        repository.pr_number.zip(repository.pr_url.as_deref())
+    } else {
+        None
+    };
+    let (status, summary) = if let Some((number, url)) = complete_identity {
+        (
+            crate::acceptance::AcceptanceStatus::Passed,
+            format!(
+                "required pull request '{}' has durable identity #{} at {}",
+                rule.name, number, url
+            ),
+        )
+    } else {
+        (
+            crate::acceptance::AcceptanceStatus::Failed,
+            format!(
+                "required pull request '{}' failed: {}",
+                rule.name,
+                failures.join(", ")
+            ),
+        )
+    };
+    timer.finish(crate::acceptance::AcceptanceResult::new(
+        rule.name.clone(),
+        status,
+        summary,
+        crate::acceptance::AcceptanceEvidence::PullRequest {
+            repo: rule.repo.clone(),
+            delivery_phase: pull_request_delivery_phase(repository.phase),
+            base_branch: Some(repository.base_branch.clone()),
+            head_branch: Some(repository.head_branch.clone()),
+            head_sha: Some(repository.local_sha.clone()),
+            pr_number: repository.pr_number,
+            pr_url: repository.pr_url.clone(),
+        },
+    ))
+}
+
 impl Orchestrator {
+    pub(super) async fn load_delivery_snapshot(
+        &self,
+        delivery: &DeliveryRecord,
+    ) -> Result<Option<PipelineRunSnapshot>, String> {
+        let record = self
+            .pipeline_journal
+            .latest_live_record_for_issue(&delivery.issue_id)
+            .await
+            .map_err(|error| format!("failed to read durable delivery owner: {error}"))?
+            .ok_or_else(|| {
+                format!(
+                    "missing durable delivery owner for issue '{}'",
+                    delivery.issue_id
+                )
+            })?;
+        if record.run_id.as_deref() != Some(delivery.run_id.as_str()) {
+            return Err(format!(
+                "durable delivery owner for issue '{}' belongs to a different run",
+                delivery.issue_id
+            ));
+        }
+        Ok(record.snapshot)
+    }
+
     pub(super) async fn process_delivery_recovery(&self) {
         let deliveries = {
             let state = self.state.read().await;
@@ -444,7 +544,9 @@ impl Orchestrator {
                 .filter(|delivery| {
                     matches!(
                         delivery.aggregate(),
-                        DeliveryAggregate::Active | DeliveryAggregate::Published
+                        DeliveryAggregate::Active
+                            | DeliveryAggregate::Waiting
+                            | DeliveryAggregate::Published
                     )
                 })
                 .cloned()
@@ -452,8 +554,32 @@ impl Orchestrator {
         };
 
         for delivery in deliveries {
+            let snapshot = match self.load_delivery_snapshot(&delivery).await {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    warn!(
+                        issue_id = %delivery.issue_id,
+                        error = %error,
+                        "delivery recovery could not load its durable snapshot"
+                    );
+                    continue;
+                }
+            };
+            let delivery = self
+                .evaluate_post_final_acceptance(delivery, snapshot.as_ref())
+                .await;
             if delivery.aggregate() == DeliveryAggregate::Published {
                 self.complete_published_delivery(&delivery).await;
+                continue;
+            }
+            if delivery.aggregate() == DeliveryAggregate::Waiting {
+                self.project_delivery_artifacts(&delivery.issue_id, &delivery)
+                    .await;
+                let finalize = Self::finalize_state_from_delivery(&delivery);
+                self.state
+                    .write()
+                    .await
+                    .set_finalize_state(&delivery.issue_id, finalize);
                 continue;
             }
             let workspace = match self
@@ -480,13 +606,6 @@ impl Orchestrator {
                     continue;
                 }
             };
-            let snapshot = self
-                .pipeline_journal
-                .latest_live_record_for_issue(&delivery.issue_id)
-                .await
-                .ok()
-                .flatten()
-                .and_then(|record| record.snapshot);
             let delivery = self
                 .advance_delivery_record(delivery, &workspace, snapshot.as_ref())
                 .await;
@@ -661,7 +780,131 @@ impl Orchestrator {
                 }
             }
         }
-        delivery
+        self.evaluate_post_final_acceptance(delivery, snapshot)
+            .await
+    }
+
+    pub(super) async fn evaluate_post_final_acceptance(
+        &self,
+        delivery: DeliveryRecord,
+        snapshot: Option<&PipelineRunSnapshot>,
+    ) -> DeliveryRecord {
+        let Some(mut candidate_snapshot) = snapshot.cloned() else {
+            return delivery;
+        };
+        let Some(plan) = candidate_snapshot.resolved_acceptance_plan.clone() else {
+            return delivery;
+        };
+        let rules = &plan.required_pull_requests;
+        if rules.is_empty()
+            || rules.iter().any(|rule| {
+                delivery
+                    .repositories
+                    .get(&rule.repo)
+                    .is_none_or(|repository| {
+                        !matches!(
+                            repository.phase,
+                            DeliveryPhase::Waiting | DeliveryPhase::Published
+                        )
+                    })
+            })
+        {
+            return delivery;
+        }
+        let Some(attempt_index) = candidate_snapshot
+            .acceptance_attempts
+            .iter()
+            .position(|attempt| attempt.cycle == candidate_snapshot.cycle)
+        else {
+            return delivery;
+        };
+        let pre_final_len = plan.pre_final_len();
+        let result_len = candidate_snapshot.acceptance_attempts[attempt_index]
+            .results
+            .len();
+        if result_len < pre_final_len {
+            return delivery;
+        }
+        let suffix_len = result_len - pre_final_len;
+        let retry_requested = rules.iter().any(|rule| {
+            delivery
+                .repositories
+                .get(&rule.repo)
+                .is_some_and(|repository| repository.retry_from == Some(DeliveryPhase::Waiting))
+        });
+        if suffix_len > 0 && suffix_len % rules.len() == 0 && !retry_requested {
+            let latest = &candidate_snapshot.acceptance_attempts[attempt_index].results
+                [result_len - rules.len()..result_len];
+            if latest
+                .iter()
+                .all(|result| result.status == crate::acceptance::AcceptanceStatus::Passed)
+            {
+                return delivery;
+            }
+            return self
+                .apply_post_final_acceptance_outcome(delivery, &candidate_snapshot, rules, latest)
+                .await;
+        }
+
+        let resume_index = suffix_len % rules.len();
+        let current = delivery;
+        for rule in rules.iter().skip(resume_index) {
+            let Some(repository) = current.repositories.get(&rule.repo) else {
+                return current;
+            };
+            let result = evaluate_pull_request_requirement(rule, repository);
+            candidate_snapshot.acceptance_attempts[attempt_index]
+                .results
+                .push(result);
+            if let Err(error) = self
+                .persist_delivery_record(&current, Some(&candidate_snapshot))
+                .await
+            {
+                warn!(
+                    issue_id = %current.issue_id,
+                    error = %error,
+                    "failed to persist post-final acceptance result"
+                );
+                return current;
+            }
+        }
+
+        let results = &candidate_snapshot.acceptance_attempts[attempt_index].results;
+        let latest = &results[results.len() - rules.len()..];
+        self.apply_post_final_acceptance_outcome(current, &candidate_snapshot, rules, latest)
+            .await
+    }
+
+    async fn apply_post_final_acceptance_outcome(
+        &self,
+        current: DeliveryRecord,
+        snapshot: &PipelineRunSnapshot,
+        rules: &[crate::config::ensemble::AcceptancePullRequestConfig],
+        latest: &[crate::acceptance::AcceptanceResult],
+    ) -> DeliveryRecord {
+        let mut candidate = current.clone();
+        for (rule, result) in rules.iter().zip(latest) {
+            let Some(repository) = candidate.repositories.get_mut(&rule.repo) else {
+                continue;
+            };
+            if result.status == crate::acceptance::AcceptanceStatus::Passed {
+                if repository.retry_from == Some(DeliveryPhase::Waiting) {
+                    repository.phase = DeliveryPhase::Waiting;
+                    repository.retry_from = None;
+                    repository.last_error = None;
+                }
+            } else {
+                repository.phase = DeliveryPhase::Blocked;
+                repository.retry_from = Some(DeliveryPhase::Waiting);
+                repository.last_error = Some(result.summary.clone());
+            }
+        }
+        if candidate == current {
+            return current;
+        }
+        self.persist_delivery_candidate(&current, candidate, Some(snapshot))
+            .await
+            .unwrap_or_else(|authoritative| authoritative)
     }
     async fn advance_delivery_pull_request(
         &self,
@@ -934,6 +1177,7 @@ impl Orchestrator {
                 .filter(|record| record.run_id.as_deref() == Some(delivery.run_id.as_str()))
                 .and_then(|record| record.snapshot),
         };
+        let persisted_snapshot = snapshot.clone();
         let input = PipelineTransitionInput {
             kind: PipelineTransitionKind::DeliveryOwned,
             issue_id: delivery.issue_id.clone(),
@@ -973,6 +1217,15 @@ impl Orchestrator {
         state
             .delivery
             .insert(delivery.issue_id.clone(), delivery.clone());
+        if let Some(snapshot) = persisted_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.issue_id == delivery.issue_id)
+        {
+            if let Some(run) = state.get_pipeline_run_mut(&delivery.issue_id) {
+                run.acceptance_attempts = snapshot.acceptance_attempts.clone();
+                run.resolved_acceptance_plan = snapshot.resolved_acceptance_plan.clone();
+            }
+        }
         Ok(())
     }
     pub(super) async fn prepare_delivery_record(
@@ -1137,5 +1390,32 @@ mod tests {
             reconcile_pull_requests("primary", &repo, &[]),
             PullRequestReconciliation::Create
         );
+    }
+
+    #[test]
+    fn post_finalize_acceptance_projects_only_retained_delivery_identity() {
+        let rule = crate::config::ensemble::AcceptancePullRequestConfig {
+            name: "primary-pr".into(),
+            repo: "primary".into(),
+        };
+        let mut repo = repository(DeliveryPhase::Waiting);
+        repo.pr_number = Some(420);
+        repo.pr_url = Some("https://github.com/example/project/pull/420".into());
+
+        let passed = evaluate_pull_request_requirement(&rule, &repo);
+        repo.pr_url = None;
+        let failed = evaluate_pull_request_requirement(&rule, &repo);
+
+        assert_eq!(passed.status, crate::acceptance::AcceptanceStatus::Passed);
+        assert_eq!(failed.status, crate::acceptance::AcceptanceStatus::Failed);
+        assert!(matches!(
+            passed.evidence,
+            crate::acceptance::AcceptanceEvidence::PullRequest {
+                pr_number: Some(420),
+                ref pr_url,
+                ..
+            } if pr_url.as_deref() == Some("https://github.com/example/project/pull/420")
+        ));
+        assert!(failed.summary.contains("URL"));
     }
 }

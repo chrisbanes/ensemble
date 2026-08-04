@@ -118,6 +118,30 @@ fn openapi_documents_agent_state_worker_caps_as_integer_maps() {
 }
 
 #[test]
+fn openapi_documents_versioned_acceptance_evidence() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+    let result = &spec["components"]["schemas"]["AcceptanceResult"];
+
+    assert_eq!(result["properties"]["version"]["type"], "integer");
+    assert_eq!(
+        result["properties"]["evidence"]["$ref"],
+        "#/components/schemas/AcceptanceEvidence"
+    );
+    assert!(result["properties"].get("exit_code").is_none());
+    assert!(result["properties"].get("stdout").is_none());
+    assert!(result["properties"].get("stderr").is_none());
+
+    let evidence = &spec["components"]["schemas"]["AcceptanceEvidence"];
+    assert_eq!(evidence["oneOf"].as_array().map(Vec::len), Some(4));
+    for variant in evidence["oneOf"].as_array().unwrap() {
+        assert!(variant["required"]
+            .as_array()
+            .is_some_and(|required| required.iter().any(|field| field == "kind")));
+    }
+}
+
+#[test]
 #[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();

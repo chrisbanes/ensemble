@@ -100,6 +100,7 @@ pub enum PipelineTransitionKind {
     ApprovalResolved,
     AcceptanceStarted,
     AcceptanceCommandCompleted,
+    AcceptanceCheckCompleted,
     StepRetryScheduled,
     FixupRetryScheduled,
     PipelineHalted,
@@ -1142,6 +1143,7 @@ mod tests {
         for kind in [
             PipelineTransitionKind::AcceptanceStarted,
             PipelineTransitionKind::AcceptanceCommandCompleted,
+            PipelineTransitionKind::AcceptanceCheckCompleted,
         ] {
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(
@@ -1149,6 +1151,11 @@ mod tests {
                 kind
             );
         }
+        assert_eq!(
+            serde_json::from_str::<PipelineTransitionKind>("\"acceptance_command_completed\"")
+                .unwrap(),
+            PipelineTransitionKind::AcceptanceCommandCompleted
+        );
     }
 
     #[tokio::test]
