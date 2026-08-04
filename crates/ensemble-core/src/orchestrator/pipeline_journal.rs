@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tracing::warn;
 
 use crate::history::model::HistoryRecord;
+use crate::orchestrator::delivery::DeliveryRecord;
 use crate::pipeline::engine::PipelineRunSnapshot;
 use crate::tracker::model::RetryEntry;
 
@@ -105,6 +106,7 @@ pub enum PipelineTransitionKind {
     PipelineSucceeded,
     PipelineFailed,
     PendingTerminalTransition,
+    DeliveryOwned,
     TerminalTransitionApplied,
     Released,
 }
@@ -144,6 +146,8 @@ pub struct PipelineTransitionRecord {
     pub snapshot: Option<PipelineRunSnapshot>,
     #[serde(default)]
     pub terminal_transition: Option<PendingTerminalTransition>,
+    #[serde(default)]
+    pub(crate) delivery: Option<DeliveryRecord>,
     pub written_at: DateTime<Utc>,
 }
 
@@ -159,6 +163,7 @@ impl PipelineTransitionRecord {
             && self.retry == input.retry
             && self.snapshot == input.snapshot
             && self.terminal_transition == input.terminal_transition
+            && self.delivery == input.delivery
     }
 }
 
@@ -174,6 +179,7 @@ pub struct PipelineTransitionInput {
     pub retry: Option<RetryEntry>,
     pub snapshot: Option<PipelineRunSnapshot>,
     pub terminal_transition: Option<PendingTerminalTransition>,
+    pub(crate) delivery: Option<DeliveryRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -266,6 +272,7 @@ impl PipelineRunJournal {
             retry: input.retry,
             snapshot: input.snapshot,
             terminal_transition: input.terminal_transition,
+            delivery: input.delivery,
             written_at: Utc::now(),
         };
 
@@ -288,6 +295,9 @@ impl PipelineRunJournal {
             return Err(write_error);
         }
         file.flush().await?;
+        if record.kind == PipelineTransitionKind::DeliveryOwned {
+            file.sync_data().await?;
+        }
         Ok(record)
     }
 
@@ -351,6 +361,7 @@ impl PipelineRunJournal {
             retry: None,
             snapshot: None,
             terminal_transition: None,
+            delivery: None,
         })
         .await
     }
@@ -388,6 +399,7 @@ impl PipelineRunJournal {
             retry: None,
             snapshot: None,
             terminal_transition: None,
+            delivery: None,
         })
         .await
         .map(Some)
@@ -554,13 +566,16 @@ fn invalid_data(reason: impl Into<String>) -> std::io::Error {
 fn is_live_restore_record(record: &PipelineTransitionRecord) -> bool {
     record.schema_version == SCHEMA_VERSION
         && !record.kind.is_terminal()
-        && record.snapshot.is_some()
+        && (record.snapshot.is_some() || record.delivery.is_some())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ensemble::{OnFailure, StepConfig, StepKind};
+    use crate::orchestrator::delivery::{
+        DeliveryMode, DeliveryPhase, DeliveryRecord, DeliveryRepository,
+    };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::{PipelineRun, StepState};
     use tempfile::tempdir;
@@ -589,6 +604,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delivery_transition_round_trips_as_latest_live_owner() {
+        let dir = tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+        let delivery = DeliveryRecord {
+            issue_id: "issue/1".to_string(),
+            identifier: "repo#1".to_string(),
+            run_id: "run-1".to_string(),
+            repositories: [(
+                "primary".to_string(),
+                DeliveryRepository {
+                    mode: DeliveryMode::PushAndPr,
+                    phase: DeliveryPhase::Prepared,
+                    remote: "origin".to_string(),
+                    base_branch: "main".to_string(),
+                    head_branch: "ensemble/repo-1".to_string(),
+                    local_sha: "0123456789abcdef".to_string(),
+                    observed_remote_sha: None,
+                    marker: "<!-- ensemble:delivery:v1 -->".to_string(),
+                    pr_number: None,
+                    pr_url: None,
+                    last_error: None,
+                    retry_from: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::DeliveryOwned,
+                issue_id: "issue/1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: None,
+                reason: None,
+                retry: None,
+                snapshot: None,
+                terminal_transition: None,
+                delivery: Some(delivery.clone()),
+            })
+            .await
+            .unwrap();
+
+        let latest = journal
+            .latest_live_record_for_issue("issue/1")
+            .await
+            .unwrap()
+            .expect("delivery remains a live owner");
+        assert_eq!(latest.delivery, Some(delivery));
+    }
+
+    #[tokio::test]
     async fn journal_appends_records_with_incrementing_seq() {
         let dir = tempdir().unwrap();
         let journal = PipelineRunJournal::new(dir.path());
@@ -605,6 +674,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -620,6 +690,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -666,6 +737,7 @@ mod tests {
                 retry: Some(old_retry.clone()),
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -701,6 +773,7 @@ mod tests {
                         retry: Some(newer_retry),
                         snapshot: Some(snapshot()),
                         terminal_transition: None,
+                        delivery: None,
                     })
                     .await
             }
@@ -741,6 +814,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -775,6 +849,7 @@ mod tests {
                 }),
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -803,6 +878,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -832,6 +908,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -857,6 +934,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -872,6 +950,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -904,6 +983,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -946,6 +1026,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: Some(pending.clone()),
+                delivery: None,
             })
             .await
             .unwrap();
@@ -971,6 +1052,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: Some(confirmed.clone()),
+                delivery: None,
             })
             .await
             .unwrap();
@@ -1021,6 +1103,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: Some(pending.clone()),
+                delivery: None,
             })
             .await
             .unwrap();
@@ -1084,6 +1167,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(snapshot()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();

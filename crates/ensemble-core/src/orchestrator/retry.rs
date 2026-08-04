@@ -172,6 +172,7 @@ pub(crate) async fn queue_manual_step_retry(
                 retry: Some(retry_entry.clone()),
                 snapshot: Some(mutated_run.clone()),
                 terminal_transition: None,
+                delivery: None,
             };
             Some((retry_entry, transition, mutated_run))
         }
@@ -287,6 +288,9 @@ pub(crate) async fn queue_manual_whole_issue_retry(
         identifier,
     ) = {
         let state = state.read().await;
+        if state.delivery.contains_key(request.issue_id) {
+            return Err(ManualStepRetryError::OwnerChanged);
+        }
         let previous_retry = state.retry_attempts.get(request.issue_id).cloned();
         let previous_waiting = state.waiting_on_human.get(request.issue_id).cloned();
         if previous_retry.is_none() && previous_waiting.is_none() {
@@ -340,6 +344,7 @@ pub(crate) async fn queue_manual_whole_issue_retry(
                 .map(|run| run.to_snapshot())
                 == previous_run.as_ref().map(|run| run.to_snapshot())
             && config_is_current
+            && !state.delivery.contains_key(request.issue_id)
             && state.is_claimed(request.issue_id) == was_claimed;
         if !owner_is_current {
             false
@@ -376,6 +381,7 @@ pub(crate) async fn queue_manual_whole_issue_retry(
         retry: None,
         snapshot: None,
         terminal_transition: None,
+        delivery: None,
     };
     let transition_for_reconciliation = transition.clone();
     if let Err(error) = transaction.append(transition).await {
@@ -800,6 +806,9 @@ mod tests {
         InteractionKind, InteractionRequest, InteractionResumeStrategy, InteractionStatus,
     };
     use crate::interaction::InteractionResponse;
+    use crate::orchestrator::delivery::{
+        canonical_marker, DeliveryMode, DeliveryPhase, DeliveryRecord, DeliveryRepository,
+    };
     use crate::orchestrator::state::WaitingOnHumanEntry;
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::engine::PipelineRun;
@@ -1384,6 +1393,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(previous_snapshot.clone()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();
@@ -1426,6 +1436,68 @@ mod tests {
             .expect("the previous owner must remain restart-visible");
         assert_eq!(latest.kind, PipelineTransitionKind::PipelineHalted);
         assert_eq!(latest.snapshot, Some(previous_snapshot));
+    }
+
+    #[tokio::test]
+    async fn whole_issue_retry_rejects_delivery_owned_issue_without_releasing_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = PipelineRunJournal::new(dir.path());
+        let state = manual_retry_state();
+        let interactions = manual_retry_store(dir.path()).await;
+        let delivery = DeliveryRecord {
+            issue_id: "issue-1".to_string(),
+            identifier: "repo#1".to_string(),
+            run_id: "run-1".to_string(),
+            repositories: [(
+                "primary".to_string(),
+                DeliveryRepository {
+                    mode: DeliveryMode::PushAndPr,
+                    phase: DeliveryPhase::Waiting,
+                    remote: "origin".to_string(),
+                    base_branch: "main".to_string(),
+                    head_branch: "ensemble/repo-1".to_string(),
+                    local_sha: "0123456789abcdef".to_string(),
+                    observed_remote_sha: Some("0123456789abcdef".to_string()),
+                    marker: canonical_marker("run-1", "issue-1", "primary"),
+                    pr_number: Some(420),
+                    pr_url: Some("https://github.com/example/project/pull/420".to_string()),
+                    last_error: None,
+                    retry_from: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        state
+            .write()
+            .await
+            .delivery
+            .insert("issue-1".to_string(), delivery.clone());
+
+        let error = queue_manual_whole_issue_retry(
+            &state,
+            &journal,
+            &interactions,
+            ManualWholeIssueRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+            },
+        )
+        .await
+        .expect_err("delivery owns whole-issue recovery");
+
+        assert!(matches!(error, ManualStepRetryError::OwnerChanged));
+        let state = state.read().await;
+        assert_eq!(state.delivery.get("issue-1"), Some(&delivery));
+        assert!(state.is_waiting_on_human("issue-1"));
+        assert!(state.is_claimed("issue-1"));
+        assert!(state.get_pipeline_run("issue-1").is_some());
+        drop(state);
+        assert!(journal
+            .read_records_for_issue("issue-1")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

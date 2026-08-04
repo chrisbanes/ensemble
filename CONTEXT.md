@@ -40,6 +40,10 @@ _Avoid_: Prompt, comment
 The recoverable post-pipeline phase that performs configured repository publication, if any, before an issue is considered complete.
 _Avoid_: Completion, cleanup
 
+**Delivery**:
+The durable owner of configured repository publication after pipeline work and approval are complete. It preserves exact local and remote identity until publication is confirmed, waiting on a pull request, or blocked for operator recovery.
+_Avoid_: Worker, tracker state
+
 **Workspace**:
 The issue-owned filesystem area in which repository worktrees and run artifacts persist across steps and retries.
 _Avoid_: Checkout, repository

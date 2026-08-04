@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig};
 use crate::history::artifacts::RunArtifacts;
+use crate::orchestrator::delivery::DeliveryRecord;
 use crate::orchestrator::pipeline_journal::PendingTerminalTransition;
 use crate::pipeline::engine::PipelineRun;
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
@@ -150,6 +151,8 @@ pub struct OrchestratorState {
     pub pipeline_runs: HashMap<String, PipelineRun>,
     /// Finalization state for issues that have finished pipeline execution.
     pub finalize: HashMap<String, IssueFinalizeState>,
+    /// Durable remote-publication owners that no longer consume worker capacity.
+    pub(crate) delivery: HashMap<String, DeliveryRecord>,
     /// Terminal tracker writes that must reconcile before local run release.
     pub pending_terminal_transitions: HashMap<String, PendingTerminalEntry>,
     /// Durable run artifacts collected before history is written.
@@ -195,6 +198,7 @@ impl OrchestratorState {
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
             finalize: HashMap::new(),
+            delivery: HashMap::new(),
             pending_terminal_transitions: HashMap::new(),
             artifacts: HashMap::new(),
             pipeline_configs: HashMap::new(),
@@ -320,6 +324,11 @@ impl OrchestratorState {
                 return Some(id.clone());
             }
         }
+        for (id, delivery) in &self.delivery {
+            if delivery.identifier == identifier {
+                return Some(id.clone());
+            }
+        }
         None
     }
 
@@ -374,6 +383,7 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        self.delivery.remove(issue_id);
         self.pending_terminal_transitions.remove(issue_id);
         self.artifacts.remove(issue_id);
         self.step_states.remove(issue_id);

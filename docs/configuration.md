@@ -418,6 +418,13 @@ you opt in per repo. Ensemble still records durable run artifacts for each compl
 including workspace paths, repo branch/HEAD/change metadata, per-step transcript metadata, and any
 finalize output such as pushed refs or PR URLs when finalization runs.
 
+For `push` and `push_and_pr`, Ensemble durably records the exact repository, branch, commit, and
+remote identity before mutation. Restart recovery reconciles that stored identity with the remote
+before retrying, so an ambiguous push or pull request response cannot silently duplicate
+publication. A `push_and_pr` repository remains claimed in a non-capacity-consuming waiting state
+after its uniquely matching pull request is found; merging or closing that pull request does not by
+itself project the issue to `on_success`.
+
 **Headless behavior:** if `finalize.approval_required: true` and Ensemble is running headless, startup emits a warning and finalize is skipped for that repo.
 
 **Migration note:** top-level `push_strategy` has been removed. Configure `repos[].finalize` instead.

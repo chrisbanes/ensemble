@@ -94,6 +94,11 @@ pub async fn reconcile_tracker_states(
             tracked_ids.push(issue_id.clone());
         }
     }
+    for issue_id in state.delivery.keys() {
+        if !tracked_ids.contains(issue_id) {
+            tracked_ids.push(issue_id.clone());
+        }
+    }
 
     if tracked_ids.is_empty() {
         return ReconcileTrackerResult {
@@ -126,6 +131,9 @@ pub async fn reconcile_tracker_states(
     let mut terminate_no_cleanup = Vec::new();
 
     for issue in refreshed {
+        if state.delivery.contains_key(&issue.id) {
+            continue;
+        }
         if !state.is_running(&issue.id) && !state.is_waiting_on_human(&issue.id) {
             continue;
         }

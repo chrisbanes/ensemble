@@ -1705,6 +1705,7 @@ mod tests {
                 retry: None,
                 snapshot: Some(previous_snapshot.clone()),
                 terminal_transition: None,
+                delivery: None,
             })
             .await
             .unwrap();

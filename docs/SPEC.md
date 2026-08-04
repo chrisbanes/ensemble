@@ -340,8 +340,34 @@ Pipeline run recovery:
 - If an append outcome is ambiguous, Ensemble retains the active owner and retries only journal
   visibility on later poll ticks. Exact visibility advances without rerunning the command;
   confirmed absence releases the owner so only the undurable command can be dispatched again.
+- Configured `push` and `push_and_pr` publication transfers ownership to a delivery payload in the
+  same versioned per-issue journal before any remote mutation. Repository entries are keyed in
+  deterministic order and retain the run ID, issue ID, configured repository key, mode, remote and
+  base branch, exact head branch and local commit SHA, observed remote SHA, pull request identity,
+  last error, retry origin, and a stored deterministic marker.
+- Delivery repository phases are `prepared`, `push_in_flight`, `reconciling_push`,
+  `pr_create_in_flight`, `reconciling_pr`, `waiting`, `published`, and `blocked`. The issue-level
+  delivery state is derived from those repository entries rather than serialized separately.
+- Before a push or pull request creation, Ensemble persists the corresponding in-flight phase, so
+  delivery owns publication before the remote mutation. On a normal response or ambiguous failure
+  it returns to reconciliation; it does not infer success from the mutation command alone. Once the
+  successful final step hands back after delivery reaches a durable waiting, published, or blocked
+  state, its agent capacity is released.
+- Push reconciliation advances only when the configured remote head equals the stored local SHA.
+  A different remote SHA blocks delivery. Pull request reconciliation adopts exactly one request
+  matching the configured repository, head and base branches, stored marker, and intended head
+  SHA. Multiple matches or conflicting identity block delivery; confirmed zero matches permits at
+  most one guarded creation attempt before reconciliation runs again.
+- `waiting` delivery remains claimed with its workspace and artifacts but occupies no agent slot,
+  dispatches no pipeline work, and does not project a terminal tracker state. `blocked` is likewise
+  retained for operator recovery. A fully `published` push-only delivery continues the existing
+  durable terminal-transition protocol; it does not republish the branch.
 - On orchestrator startup, Ensemble restores the latest non-released snapshot for each issue before
   the first poll tick.
+- Delivery ownership is restored before candidate selection and excludes that issue from fresh
+  dispatch, tracker disappearance cleanup, and workspace cleanup. Recovery reuses the stored run,
+  claim, repository identity, and workspace and reconciles remote state before considering another
+  mutation.
 - During normal tick dispatch, before starting a candidate as a fresh pipeline, Ensemble checks that
   issue's latest journal record. If it is live and contains a snapshot, Ensemble restores that run
   instead of appending a new `run_started` record.
@@ -1170,7 +1196,8 @@ claim state.
 
 2. `Claimed`
    - Orchestrator has reserved the issue to prevent duplicate dispatch.
-   - In practice, claimed issues are either `Running` or `RetryQueued`.
+   - In practice, claimed issues are `Running`, `RetryQueued`, `DeliveryOwned`, or
+     `TerminalReconciliation`.
 
 3. `Running`
    - The issue has an active pipeline owner in the `running` map. Zero or more step workers may be
@@ -1185,7 +1212,14 @@ claim state.
    - The claim and recoverable run data remain owned by the orchestrator while tracker I/O retries
      independently of agent capacity.
 
-6. `Released`
+6. `DeliveryOwned`
+   - Pipeline work and any required approval are complete, and configured repository publication is
+     durably reconciling, waiting on a pull request, or blocked for operator recovery.
+   - The claim, workspace, artifacts, and exact repository identity remain owned without making the
+     issue dispatch-eligible. Once the successful final step hands back, delivery recovery consumes
+     no agent capacity.
+
+7. `Released`
    - Claim removed because issue is terminal, non-active, missing, or retry path completed without
      re-dispatch.
 
