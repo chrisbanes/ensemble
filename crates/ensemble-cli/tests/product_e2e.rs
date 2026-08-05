@@ -1,9 +1,10 @@
 #![cfg(feature = "web-ui")]
 
+use serde::Serialize;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -795,6 +796,293 @@ fn redact_live_dogfood(value: &str, inputs: &LiveDogfoodInputs, token: Option<&s
     redacted
 }
 
+#[derive(Debug, Serialize)]
+struct LiveDogfoodEvidenceV1 {
+    format: &'static str,
+    schema_version: u8,
+    run: LiveDogfoodEvidenceRun,
+    outcome: LiveDogfoodEvidenceOutcome,
+    retained_logs: Vec<&'static str>,
+    snapshots: Vec<LiveDogfoodEvidenceSnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveDogfoodEvidenceRun {
+    marker: String,
+    issue_identifier: String,
+    workspace_identifier: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LiveDogfoodEvidenceOutcome {
+    InReview,
+    PreservedFailure,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LiveDogfoodEvidenceSnapshot {
+    PrePublication {
+        artifact: String,
+        generated_branch: String,
+        local_sha: String,
+        assertions: Vec<LiveDogfoodEvidenceAssertion>,
+    },
+    PostDelivery {
+        remote_branch: String,
+        remote_sha: String,
+        pull_request: LiveDogfoodEvidencePullRequest,
+        tracker_state: String,
+        review_target: String,
+        review_projection: String,
+        assertions: Vec<LiveDogfoodEvidenceAssertion>,
+    },
+    PreservedFailure {
+        last_observation: String,
+        assertions_not_reached: Vec<String>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct LiveDogfoodEvidenceAssertion {
+    name: &'static str,
+    satisfied: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveDogfoodEvidencePullRequest {
+    number: u64,
+    url: String,
+}
+
+impl LiveDogfoodEvidenceV1 {
+    fn new(run: &LiveDogfoodRun, issue_identifier: impl Into<String>) -> Self {
+        Self {
+            format: "ensemble.live-dogfood-evidence",
+            schema_version: 1,
+            run: LiveDogfoodEvidenceRun {
+                marker: run.marker.clone(),
+                issue_identifier: issue_identifier.into(),
+                workspace_identifier: format!("run/{}", run.marker),
+            },
+            outcome: LiveDogfoodEvidenceOutcome::InReview,
+            retained_logs: vec!["host.stdout.log", "host.stderr.log"],
+            snapshots: Vec::new(),
+        }
+    }
+
+    fn append_pre_publication(
+        &mut self,
+        artifact: impl Into<String>,
+        generated_branch: impl Into<String>,
+        local_sha: impl Into<String>,
+    ) -> Result<(), String> {
+        if !self.snapshots.is_empty() {
+            return Err("evidence-v1: pre-publication snapshot must be first".to_string());
+        }
+        let artifact = artifact.into();
+        if Path::new(&artifact).is_absolute() {
+            return Err("evidence-v1: artifact must be relative to the repository".to_string());
+        }
+        self.snapshots
+            .push(LiveDogfoodEvidenceSnapshot::PrePublication {
+                artifact,
+                generated_branch: generated_branch.into(),
+                local_sha: local_sha.into(),
+                assertions: vec![
+                    evidence_assertion("local_artifact_valid"),
+                    evidence_assertion("generated_branch_valid"),
+                    evidence_assertion("local_sha_captured"),
+                    evidence_assertion("agent_not_published"),
+                ],
+            });
+        Ok(())
+    }
+
+    fn append_preserved_failure(
+        &mut self,
+        phase: &str,
+        assertions_not_reached: impl IntoIterator<Item = impl Into<String>>,
+        inputs: &LiveDogfoodInputs,
+        token: Option<&str>,
+    ) -> Result<(), String> {
+        let assertions_not_reached = assertions_not_reached
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<String>>();
+        if assertions_not_reached.is_empty() {
+            return Err("evidence-v1: failure snapshot requires unreached assertions".to_string());
+        }
+        self.outcome = LiveDogfoodEvidenceOutcome::PreservedFailure;
+        self.snapshots
+            .push(LiveDogfoodEvidenceSnapshot::PreservedFailure {
+                last_observation: format!("{}: failed", redact_live_dogfood(phase, inputs, token)),
+                assertions_not_reached,
+            });
+        Ok(())
+    }
+
+    fn append_post_delivery(
+        &mut self,
+        remote_branch: impl Into<String>,
+        remote_sha: impl Into<String>,
+        pull_request_number: u64,
+        pull_request_url: impl Into<String>,
+        tracker_state: impl Into<String>,
+        review_target: impl Into<String>,
+        review_projection: impl Into<String>,
+    ) -> Result<(), String> {
+        if !matches!(
+            self.snapshots.as_slice(),
+            [LiveDogfoodEvidenceSnapshot::PrePublication { .. }]
+        ) {
+            return Err(
+                "evidence-v1: post-delivery snapshot requires one pre-publication snapshot"
+                    .to_string(),
+            );
+        }
+        self.outcome = LiveDogfoodEvidenceOutcome::InReview;
+        self.snapshots
+            .push(LiveDogfoodEvidenceSnapshot::PostDelivery {
+                remote_branch: remote_branch.into(),
+                remote_sha: remote_sha.into(),
+                pull_request: LiveDogfoodEvidencePullRequest {
+                    number: pull_request_number,
+                    url: pull_request_url.into(),
+                },
+                tracker_state: tracker_state.into(),
+                review_target: review_target.into(),
+                review_projection: review_projection.into(),
+                assertions: vec![
+                    evidence_assertion("remote_branch_matches_local_sha"),
+                    evidence_assertion("single_pull_request"),
+                    evidence_assertion("tracker_state_in_review"),
+                    evidence_assertion("review_projection_applied"),
+                    evidence_assertion("cross_surface_agreement"),
+                ],
+            });
+        Ok(())
+    }
+}
+
+fn evidence_assertion(name: &'static str) -> LiveDogfoodEvidenceAssertion {
+    LiveDogfoodEvidenceAssertion {
+        name,
+        satisfied: true,
+    }
+}
+
+fn ensure_no_live_dogfood_publication(
+    remote_heads: &str,
+    pull_requests: &str,
+) -> Result<(), String> {
+    if !remote_heads.trim().is_empty() {
+        return Err("verify pre-publication: generated remote branch already exists".to_string());
+    }
+    let pull_requests: Vec<Value> = serde_json::from_str(pull_requests)
+        .map_err(|_| "verify pre-publication: pull request observation was invalid".to_string())?;
+    if !pull_requests.is_empty() {
+        return Err("verify pre-publication: generated pull request already exists".to_string());
+    }
+    Ok(())
+}
+
+fn write_live_dogfood_evidence_v1(
+    run_root: &Path,
+    evidence: &LiveDogfoodEvidenceV1,
+) -> Result<(), String> {
+    write_live_dogfood_evidence_v1_with_replace(run_root, evidence, |from, to| fs::rename(from, to))
+}
+
+fn write_live_dogfood_evidence_v1_with_replace(
+    run_root: &Path,
+    evidence: &LiveDogfoodEvidenceV1,
+    replace: impl FnOnce(&Path, &Path) -> io::Result<()>,
+) -> Result<(), String> {
+    let target = run_root.join("evidence-v1.json");
+    let temporary = run_root.join(format!(
+        ".evidence-v1-{:x}-{:x}.tmp",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| "evidence-v1: clock was unavailable")?
+            .as_nanos(),
+        std::process::id()
+    ));
+    let serialized = serde_json::to_vec_pretty(evidence)
+        .map_err(|_| "evidence-v1: could not serialize document")?;
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|_| "evidence-v1: could not create temporary document")?;
+    file.write_all(&serialized)
+        .map_err(|_| "evidence-v1: could not write temporary document")?;
+    file.sync_all()
+        .map_err(|_| "evidence-v1: could not flush temporary document")?;
+    drop(file);
+    replace(&temporary, &target).map_err(|_| "evidence-v1: atomic replacement failed".to_string())
+}
+
+fn persist_live_dogfood_failure(
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+    inputs: &LiveDogfoodInputs,
+    pre_publication_captured: bool,
+    error: &str,
+) -> Result<(), String> {
+    let assertions_not_reached = if pre_publication_captured {
+        ["post_delivery"].as_slice()
+    } else {
+        ["pre_publication", "post_delivery"].as_slice()
+    };
+    evidence.append_preserved_failure(
+        live_dogfood_failure_observation(error),
+        assertions_not_reached.iter().copied(),
+        inputs,
+        None,
+    )?;
+    write_live_dogfood_evidence_v1(&run.root, evidence)
+}
+
+fn live_dogfood_failure_observation(error: &str) -> &'static str {
+    for (prefix, observation) in [
+        ("wait for host:", "wait for host"),
+        ("wait for Project status", "wait for Project status"),
+        (
+            "wait for pre-publication local artifact:",
+            "wait for local artifact",
+        ),
+        (
+            "verify pre-publication remote branch:",
+            "verify pre-publication remote branch",
+        ),
+        (
+            "verify pre-publication pull request:",
+            "verify pre-publication pull request",
+        ),
+        (
+            "wait for review-projected host state:",
+            "wait for review-projected host state",
+        ),
+        ("wait for public history:", "wait for public history"),
+        (
+            "verify published remote branch:",
+            "verify published remote branch",
+        ),
+        (
+            "verify published pull request:",
+            "verify published pull request",
+        ),
+        ("verify public host detail:", "verify public host detail"),
+    ] {
+        if error.starts_with(prefix) {
+            return observation;
+        }
+    }
+    "dispatch-and-later verification"
+}
+
 fn live_dogfood_config(inputs: &LiveDogfoodInputs, run: &LiveDogfoodRun) -> String {
     let artifact = run.expected_artifact();
     let prompt = format!(
@@ -1462,10 +1750,47 @@ async fn wait_for_live_history(
     }
 }
 
-fn verify_live_artifact(
+fn verify_live_review_detail(
+    detail: &Value,
+    expected_issue_identifier: &str,
+    pull_request_number: u64,
+    pull_request_url: &str,
+) -> Result<(String, String), String> {
+    if detail["issue_identifier"] != expected_issue_identifier {
+        return Err("verify public host detail: host reported an unexpected issue".to_string());
+    }
+    let matching_repositories = detail["artifacts"]["repos"]
+        .as_array()
+        .ok_or_else(|| "verify public host detail: review observation was unavailable".to_string())?
+        .iter()
+        .filter(|repository| {
+            repository["review_state"] == "In review"
+                && repository["review_projection"] == "applied"
+                && repository["pr_number"].as_u64() == Some(pull_request_number)
+                && repository["pr_url"].as_str() == Some(pull_request_url)
+        })
+        .collect::<Vec<_>>();
+    let [repository] = matching_repositories.as_slice() else {
+        return Err("verify public host detail: pull request did not agree".to_string());
+    };
+    Ok((
+        repository["review_state"]
+            .as_str()
+            .ok_or_else(|| "verify public host detail: review target was unavailable".to_string())?
+            .to_string(),
+        repository["review_projection"]
+            .as_str()
+            .ok_or_else(|| {
+                "verify public host detail: review projection was unavailable".to_string()
+            })?
+            .to_string(),
+    ))
+}
+
+fn verify_live_local_artifact(
     inputs: &LiveDogfoodInputs,
     run: &LiveDogfoodRun,
-) -> Result<(String, String), String> {
+) -> Result<(PathBuf, String, String), String> {
     let artifact = run.expected_artifact();
     let worktree = live_dogfood_worktree(&run.root.join("workspaces"))?;
     let actual_content = fs::read_to_string(worktree.join(&artifact.path))
@@ -1525,9 +1850,18 @@ fn verify_live_artifact(
     if message != artifact.commit_message {
         return Err("verify committed artifact: commit message did not match".to_string());
     }
+    Ok((worktree, branch, sha.to_string()))
+}
+
+fn verify_live_post_delivery(
+    inputs: &LiveDogfoodInputs,
+    worktree: &Path,
+    branch: &str,
+    sha: &str,
+) -> Result<(u64, String), String> {
     let remote_branch = live_git(
         "verify published remote branch",
-        &worktree,
+        worktree,
         [
             "ls-remote".to_string(),
             "--heads".to_string(),
@@ -1557,7 +1891,7 @@ fn verify_live_artifact(
             "--state".to_string(),
             "open".to_string(),
             "--head".to_string(),
-            branch.clone(),
+            branch.to_string(),
             "--json".to_string(),
             "number,url,headRefOid,baseRefName".to_string(),
         ],
@@ -1582,7 +1916,72 @@ fn verify_live_artifact(
                 .to_string(),
         );
     }
-    Ok((branch, sha.to_string()))
+    Ok((
+        pull_request["number"]
+            .as_u64()
+            .expect("verified pull request number"),
+        pull_request["url"]
+            .as_str()
+            .expect("verified pull request URL")
+            .to_string(),
+    ))
+}
+
+fn verify_no_live_dogfood_publication(
+    inputs: &LiveDogfoodInputs,
+    worktree: &Path,
+    branch: &str,
+) -> Result<(), String> {
+    let remote_heads = live_git(
+        "verify pre-publication remote branch",
+        worktree,
+        [
+            "ls-remote".to_string(),
+            "--heads".to_string(),
+            "origin".to_string(),
+            format!("refs/heads/{branch}"),
+        ],
+        inputs,
+    )?;
+    let pull_requests = live_gh(
+        "verify pre-publication pull request",
+        [
+            "pr".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            "chrisbanes/bamboon".to_string(),
+            "--state".to_string(),
+            "open".to_string(),
+            "--head".to_string(),
+            branch.to_string(),
+            "--json".to_string(),
+            "number,url".to_string(),
+        ],
+        inputs,
+    )?;
+    ensure_no_live_dogfood_publication(&remote_heads, &pull_requests)
+}
+
+async fn wait_for_live_pre_publication(
+    inputs: &LiveDogfoodInputs,
+    run: &LiveDogfoodRun,
+) -> Result<(PathBuf, String, String), String> {
+    let deadline = Instant::now() + Duration::from_secs(30 * 60);
+    loop {
+        match verify_live_local_artifact(inputs, run) {
+            Ok((worktree, branch, sha)) => {
+                verify_no_live_dogfood_publication(inputs, &worktree, &branch)?;
+                return Ok((worktree, branch, sha));
+            }
+            Err(error) if Instant::now() >= deadline => {
+                return Err(format!(
+                    "wait for pre-publication local artifact: timed out; last observation: {}",
+                    redact_live_dogfood(&error, inputs, None)
+                ));
+            }
+            Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+        }
+    }
 }
 
 fn live_dogfood_worktree(workspaces: &Path) -> Result<PathBuf, String> {
@@ -1648,8 +2047,25 @@ async fn live_bamboon_issue_publishes_pull_request() {
             issue_id: resources.issue_id,
             issue_number: resources.issue_number,
         };
+        let mut evidence = LiveDogfoodEvidenceV1::new(
+            &run,
+            format!("chrisbanes/bamboon#{}", resources.issue_number),
+        );
+        let mut pre_publication_captured = false;
         let port = reserve_local_port().map_err(|error| format!("reserve host port: {error}"))?;
-        let mut host = spawn_live_host(&inputs, &run, &token, port)?;
+        let mut host = match spawn_live_host(&inputs, &run, &token, port) {
+            Ok(host) => host,
+            Err(error) => {
+                let failure = persist_live_dogfood_failure(
+                    &mut evidence,
+                    &run,
+                    &inputs,
+                    pre_publication_captured,
+                    &error,
+                );
+                return Err(failure.err().unwrap_or(error));
+            }
+        };
         let client = reqwest::Client::new();
         let base_url = format!("http://127.0.0.1:{port}");
         let completed = async {
@@ -1657,19 +2073,57 @@ async fn live_bamboon_issue_publishes_pull_request() {
                 .await
                 .map_err(|error| format!("wait for host: {error}"))?;
             wait_for_live_project_status(&inputs, &resources.issue_id, "In progress").await?;
+            let (worktree, branch, sha) = wait_for_live_pre_publication(&inputs, &run).await?;
+            evidence.append_pre_publication(
+                run.expected_artifact().path.to_string_lossy(),
+                &branch,
+                &sha,
+            )?;
+            write_live_dogfood_evidence_v1(&run.root, &evidence)?;
+            pre_publication_captured = true;
             let detail =
                 wait_for_live_review_projection(&client, &base_url, resources.issue_number).await?;
             wait_for_live_project_status(&inputs, &resources.issue_id, "In review").await?;
             wait_for_live_history(&client, &base_url, resources.issue_number).await?;
-            let (branch, sha) = verify_live_artifact(&inputs, &run)?;
-            Ok::<_, String>((detail, branch, sha))
+            let (pull_request_number, pull_request_url) =
+                verify_live_post_delivery(&inputs, &worktree, &branch, &sha)?;
+            let (review_target, review_projection) = verify_live_review_detail(
+                &detail,
+                &format!("chrisbanes/bamboon#{}", resources.issue_number),
+                pull_request_number,
+                &pull_request_url,
+            )?;
+            evidence.append_post_delivery(
+                &branch,
+                &sha,
+                pull_request_number,
+                pull_request_url,
+                "In review",
+                review_target,
+                review_projection,
+            )?;
+            write_live_dogfood_evidence_v1(&run.root, &evidence)?;
+            Ok::<_, String>((branch, sha))
         }
         .await;
         let _ = host.kill();
         let _ = host.wait();
-        let (detail, branch, sha) = completed?;
-        if detail["issue_identifier"] != format!("chrisbanes/bamboon#{}", resources.issue_number) {
-            return Err("verify public host detail: host reported an unexpected issue".to_string());
+        let (branch, sha) = match completed {
+            Ok(completed) => completed,
+            Err(error) if error.starts_with("evidence-v1:") => return Err(error),
+            Err(error) => {
+                let failure = persist_live_dogfood_failure(
+                    &mut evidence,
+                    &run,
+                    &inputs,
+                    pre_publication_captured,
+                    &error,
+                );
+                return Err(failure.err().unwrap_or(error));
+            }
+        };
+        if evidence.snapshots.len() != 2 {
+            return Err("verify evidence-v1: post-delivery snapshot was not retained".to_string());
         }
         Ok((resources, branch, sha))
     }
@@ -1773,6 +2227,216 @@ fn live_dogfood_redaction_hides_private_inputs_and_tokens() {
 }
 
 #[test]
+fn live_dogfood_evidence_v1_schema_and_redaction_are_stable() {
+    let inputs =
+        LiveDogfoodInputs::from_values(Some("1"), Some("12"), Some("/tmp/private-bamboon"), None)
+            .unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-evidence".to_string(),
+        root: PathBuf::from("/tmp/private-run-root"),
+    };
+    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#34");
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-evidence.md",
+            "ensemble-live-dogfood-evidence",
+            "local-sha",
+        )
+        .unwrap();
+    evidence
+        .append_preserved_failure(
+            "verify public host detail",
+            ["post_delivery"],
+            &inputs,
+            Some("secret-token"),
+        )
+        .unwrap();
+
+    let serialized = serde_json::to_string_pretty(&evidence).unwrap();
+    let json: Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(json["format"], "ensemble.live-dogfood-evidence");
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["outcome"], "preserved_failure");
+    assert_eq!(json["snapshots"][0]["kind"], "pre_publication");
+    assert_eq!(json["snapshots"][1]["kind"], "preserved_failure");
+    for prohibited in [
+        "12",
+        "secret-token",
+        "/tmp/private-bamboon",
+        "/tmp/private-run-root",
+        "tracker:\n  project_number: 12",
+        "raw command output",
+    ] {
+        assert!(
+            !serialized.contains(prohibited),
+            "serialized evidence must redact {prohibited}"
+        );
+    }
+}
+
+#[test]
+fn live_dogfood_evidence_v1_atomic_write_replaces_only_complete_documents() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-atomic".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#35");
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-atomic.md",
+            "ensemble-live-dogfood-atomic",
+            "local-sha",
+        )
+        .unwrap();
+    fs::write(run.root.join("evidence-v1.json"), "{\"previous\":true}").unwrap();
+
+    write_live_dogfood_evidence_v1(&run.root, &evidence).unwrap();
+
+    let persisted: Value =
+        serde_json::from_str(&fs::read_to_string(run.root.join("evidence-v1.json")).unwrap())
+            .unwrap();
+    assert_eq!(persisted["format"], "ensemble.live-dogfood-evidence");
+    assert_eq!(persisted["snapshots"][0]["kind"], "pre_publication");
+    assert!(
+        fs::read_dir(&run.root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp")),
+        "successful atomic replacement must not leave a temporary evidence file"
+    );
+}
+
+#[test]
+fn live_dogfood_evidence_v1_failed_replacement_retains_prior_document() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-retention".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#36");
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-retention.md",
+            "ensemble-live-dogfood-retention",
+            "local-sha",
+        )
+        .unwrap();
+    let target = run.root.join("evidence-v1.json");
+    fs::write(&target, "{\"previous\":true}").unwrap();
+
+    let error = write_live_dogfood_evidence_v1_with_replace(&run.root, &evidence, |_from, _to| {
+        Err(io::Error::other("injected replacement failure"))
+    })
+    .unwrap_err();
+
+    assert_eq!(error, "evidence-v1: atomic replacement failed");
+    assert_eq!(fs::read_to_string(target).unwrap(), "{\"previous\":true}");
+    assert!(
+        fs::read_dir(&run.root).unwrap().any(|entry| entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".tmp")),
+        "failed replacement must retain its same-directory diagnostic"
+    );
+}
+
+#[test]
+fn live_dogfood_evidence_v1_snapshots_are_cumulative_and_ordered() {
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-order".to_string(),
+        root: PathBuf::from("/tmp/run-root-not-serialized"),
+    };
+    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#37");
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-order.md",
+            "ensemble-live-dogfood-order",
+            "local-sha",
+        )
+        .unwrap();
+    evidence
+        .append_post_delivery(
+            "ensemble-live-dogfood-order",
+            "remote-sha",
+            37,
+            "https://github.com/chrisbanes/bamboon/pull/37",
+            "In review",
+            "In review",
+            "applied",
+        )
+        .unwrap();
+
+    let json = serde_json::to_value(&evidence).unwrap();
+    assert_eq!(json["outcome"], "in_review");
+    assert_eq!(json["snapshots"][0]["kind"], "pre_publication");
+    assert_eq!(json["snapshots"][1]["kind"], "post_delivery");
+    assert_eq!(json["snapshots"][1]["remote_sha"], "remote-sha");
+    assert_eq!(json["snapshots"][1]["pull_request"]["number"], 37);
+}
+
+#[test]
+fn live_dogfood_pre_publication_rejects_agent_publication() {
+    assert!(ensure_no_live_dogfood_publication("", "[]").is_ok());
+    assert!(ensure_no_live_dogfood_publication(
+        "local-sha\trefs/heads/ensemble-live-dogfood-order",
+        "[]"
+    )
+    .unwrap_err()
+    .contains("remote branch"));
+    assert!(ensure_no_live_dogfood_publication(
+        "",
+        r#"[{"number":37,"url":"https://github.com/chrisbanes/bamboon/pull/37"}]"#
+    )
+    .unwrap_err()
+    .contains("pull request"));
+}
+
+#[test]
+fn live_dogfood_failure_evidence_keeps_the_safe_failure_phase() {
+    assert_eq!(
+        live_dogfood_failure_observation(
+            "wait for public history: timed out; last observation: raw command output"
+        ),
+        "wait for public history"
+    );
+    assert_eq!(
+        live_dogfood_failure_observation("unrecognized raw command output"),
+        "dispatch-and-later verification"
+    );
+}
+
+#[test]
+fn live_dogfood_post_delivery_requires_matching_host_pull_request() {
+    let detail = serde_json::json!({
+        "issue_identifier": "chrisbanes/bamboon#38",
+        "artifacts": {"repos": [{
+            "review_state": "In review",
+            "review_projection": "applied",
+            "pr_number": 38,
+            "pr_url": "https://github.com/chrisbanes/bamboon/pull/38"
+        }]}
+    });
+    assert!(verify_live_review_detail(
+        &detail,
+        "chrisbanes/bamboon#38",
+        38,
+        "https://github.com/chrisbanes/bamboon/pull/38",
+    )
+    .is_ok());
+    assert!(verify_live_review_detail(
+        &detail,
+        "chrisbanes/bamboon#38",
+        39,
+        "https://github.com/chrisbanes/bamboon/pull/39",
+    )
+    .unwrap_err()
+    .contains("pull request"));
+}
+
+#[test]
 fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
     let contributing = include_str!("../../../docs/contributing.md");
     for required in [
@@ -1784,6 +2448,12 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "Ensemble alone pushes",
         "`In review`",
         "never part of CI",
+        "evidence-v1.json",
+        "pre-publication",
+        "post-delivery",
+        "preserved failure",
+        "relative log names",
+        "post-restart",
     ] {
         assert!(
             contributing.contains(required),

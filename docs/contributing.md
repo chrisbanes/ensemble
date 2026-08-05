@@ -96,6 +96,21 @@ request for diagnosis. The test prints the redacted, run-scoped preservation loc
 or failure. Do not perform routine cleanup or fixture repair from the harness; merge/close,
 restart-recovery proof, and cleanup remain outside this slice.
 
+Once dispatch begins, the run retains one cumulative `<run-root>/evidence-v1.json` inspection
+document with format `ensemble.live-dogfood-evidence` and schema version 1. It records a
+pre-publication snapshot after local artifact, branch, and SHA validation but before any generated
+remote branch or pull request; a post-delivery snapshot is appended only after the host, Project,
+history, Git, and pull-request observations agree. Its preserved failure snapshot records a
+redacted last phase and assertions not reached. The document refers only to relative log names
+(such as `host.stdout.log`), stable run identities, and repository-relative artifacts: it excludes
+the private Project value, credentials, absolute paths, generated YAML, and raw command output.
+
+The harness writes `evidence-v1.json` by flushing a same-directory temporary file and atomically
+replacing the prior document. If a replacement fails, the prior document and temporary diagnostic
+are retained and the harness stops without cleanup or another publication attempt. A future
+post-restart snapshot must extend this same v1 document; restart behavior itself remains outside
+this tracer bullet.
+
 ## Project structure
 
 ```
