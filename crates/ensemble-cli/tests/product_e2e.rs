@@ -2502,6 +2502,14 @@ fn worktree_is_registered(listing: &str, worktree: &Path) -> bool {
         .any(|path| path == expected)
 }
 
+fn live_public_issue_released(detail: &Value) -> bool {
+    detail.get("running").is_some_and(Value::is_null)
+        && detail
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "Done" || status.starts_with("completed_"))
+}
+
 async fn wait_for_live_host_release(
     client: &reqwest::Client,
     base_url: &str,
@@ -2517,7 +2525,7 @@ async fn wait_for_live_host_release(
             Ok(response) if response.status().is_success() => response
                 .json::<Value>()
                 .await
-                .is_ok_and(|detail| detail["running"].is_null() && detail["status"] == "Done"),
+                .is_ok_and(|detail| live_public_issue_released(&detail)),
             _ => false,
         };
         let capacity_released = match client.get(format!("{base_url}/api/v1/state")).send().await {
@@ -4351,6 +4359,22 @@ fn live_dogfood_restart_rejects_ambiguous_public_agent_capacity() {
     ] {
         assert!(validate_live_public_agent_capacity(&state).is_err());
     }
+}
+
+#[test]
+fn live_dogfood_completed_history_snapshot_counts_as_released() {
+    assert!(live_public_issue_released(&serde_json::json!({
+        "running": null,
+        "status": "completed_succeeded",
+    })));
+    assert!(!live_public_issue_released(&serde_json::json!({
+        "running": {"step": "implement"},
+        "status": "completed_succeeded",
+    })));
+    assert!(!live_public_issue_released(&serde_json::json!({
+        "running": null,
+        "status": "In review",
+    })));
 }
 
 #[test]
