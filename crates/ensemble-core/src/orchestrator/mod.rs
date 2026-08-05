@@ -6,8 +6,10 @@ pub mod scheduler;
 pub mod state;
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -6210,118 +6212,115 @@ impl Orchestrator {
             .await;
     }
 
-    async fn complete_pending_terminal_transition(
-        &self,
-        issue_id: &str,
+    // Box this lifecycle boundary so the already-large tick future does not embed workspace
+    // cleanup's state machine and overflow Tokio's worker stack on terminal failure paths.
+    fn complete_pending_terminal_transition<'a>(
+        &'a self,
+        issue_id: &'a str,
         expected_run_id: Option<String>,
-    ) {
-        let pending = {
-            let state = self.state.read().await;
-            let Some(pending) = state.pending_terminal_transitions.get(issue_id).cloned() else {
-                return;
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let pending = {
+                let state = self.state.read().await;
+                let Some(pending) = state.pending_terminal_transitions.get(issue_id).cloned()
+                else {
+                    return;
+                };
+                if pending.run_id != expected_run_id {
+                    return;
+                }
+                if !pending.transition.tracker_write_confirmed {
+                    return;
+                }
+                pending
             };
-            if pending.run_id != expected_run_id {
-                return;
-            }
-            if !pending.transition.tracker_write_confirmed {
-                return;
-            }
-            pending
-        };
 
-        if let Err(error) = self
-            .clear_terminal_interaction_waiting_state(issue_id)
-            .await
-        {
-            warn!(
-                issue_id = %issue_id,
-                error = %error,
-                "failed to clear terminal interaction waiting state"
-            );
-            return;
-        }
-
-        if let Some(record) = pending.transition.history_record.as_ref() {
             if let Err(error) = self
-                .persist_history_record(pending.run_id.as_deref(), record)
+                .clear_terminal_interaction_waiting_state(issue_id)
                 .await
             {
                 warn!(
                     issue_id = %issue_id,
                     error = %error,
-                    "failed to persist terminal run history before release"
+                    "failed to clear terminal interaction waiting state"
                 );
                 return;
             }
-        }
 
-        if let Err(error) = self.workspace_mgr.remove_workspace(issue_id).await {
-            self.record_pending_terminal_transition_failure(issue_id, &pending, error.to_string())
+            if let Some(record) = pending.transition.history_record.as_ref() {
+                if let Err(error) = self
+                    .persist_history_record(pending.run_id.as_deref(), record)
+                    .await
+                {
+                    warn!(
+                        issue_id = %issue_id,
+                        error = %error,
+                        "failed to persist terminal run history before release"
+                    );
+                    return;
+                }
+            }
+
+            if let Err(error) = self.workspace_mgr.remove_workspace(issue_id).await {
+                self.record_pending_terminal_transition_failure(
+                    issue_id,
+                    &pending,
+                    error.to_string(),
+                )
                 .await;
-            warn!(
-                issue_id = %issue_id,
-                identifier = %pending.identifier,
-                error = %error,
-                "failed to clean terminal workspace before release"
-            );
-            return;
-        }
-
-        let pipeline_journal = self.pipeline_journal.clone();
-        let release_issue_id = issue_id.to_string();
-        let release_identifier = pending.identifier.clone();
-        let release_run_id = pending.run_id.clone();
-        let runtime = tokio::runtime::Handle::current();
-        // Keep the journal append off the Tokio worker stack: after workspace cleanup, this
-        // terminal transition chain is deep enough to exhaust that stack when appended inline.
-        let release_result = tokio::task::spawn_blocking(move || {
-            runtime.block_on(pipeline_journal.append_released(
-                &release_issue_id,
-                &release_identifier,
-                release_run_id,
-                "terminal tracker transition reconciled",
-            ))
-        })
-        .await;
-        let release_error = match release_result {
-            Ok(Ok(_)) => None,
-            Ok(Err(error)) => Some(error.to_string()),
-            Err(error) => Some(format!("pipeline release task failed: {error}")),
-        };
-        if let Some(error) = release_error {
-            warn!(
-                issue_id = %issue_id,
-                error,
-                "failed to persist pipeline release after terminal tracker transition"
-            );
-            return;
-        }
-
-        {
-            let mut state = self.state.write().await;
-            let Some(current) = state.pending_terminal_transitions.get(issue_id) else {
-                return;
-            };
-            if current.run_id != pending.run_id
-                || current.transition.target_state != pending.transition.target_state
-                || current.transition.outcome != pending.transition.outcome
-            {
+                warn!(
+                    issue_id = %issue_id,
+                    identifier = %pending.identifier,
+                    error = %error,
+                    "failed to clean terminal workspace before release"
+                );
                 return;
             }
 
-            let status = match pending.transition.outcome {
-                TerminalOutcome::Succeeded => "completed_succeeded",
-                TerminalOutcome::Failed => "completed_failed",
-            };
-            state.add_completed(
-                issue_id.to_string(),
-                pending.identifier.clone(),
-                status.to_string(),
-            );
-            state.release_claim(issue_id);
-            state.remove_pipeline_run(issue_id);
-            state.clear_finalize_state(issue_id);
-        }
+            if let Err(error) = self
+                .pipeline_journal
+                .append_released(
+                    issue_id,
+                    &pending.identifier,
+                    pending.run_id.clone(),
+                    "terminal tracker transition reconciled",
+                )
+                .await
+            {
+                warn!(
+                    issue_id = %issue_id,
+                    error = %error,
+                    "failed to persist pipeline release after terminal tracker transition"
+                );
+                return;
+            }
+
+            {
+                let mut state = self.state.write().await;
+                let Some(current) = state.pending_terminal_transitions.get(issue_id) else {
+                    return;
+                };
+                if current.run_id != pending.run_id
+                    || current.transition.target_state != pending.transition.target_state
+                    || current.transition.outcome != pending.transition.outcome
+                {
+                    return;
+                }
+
+                let status = match pending.transition.outcome {
+                    TerminalOutcome::Succeeded => "completed_succeeded",
+                    TerminalOutcome::Failed => "completed_failed",
+                };
+                state.add_completed(
+                    issue_id.to_string(),
+                    pending.identifier.clone(),
+                    status.to_string(),
+                );
+                state.release_claim(issue_id);
+                state.remove_pipeline_run(issue_id);
+                state.clear_finalize_state(issue_id);
+            }
+        })
     }
 
     async fn record_pending_terminal_transition_failure(
