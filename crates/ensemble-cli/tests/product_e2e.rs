@@ -846,18 +846,23 @@ agent:
     )
 }
 
+#[derive(Debug)]
 struct LiveDogfoodProject {
     id: String,
     status_field_id: String,
     ready_option_id: String,
 }
 
-struct LiveDogfoodResources {
+struct PreDispatchResources {
     issue_id: String,
     issue_number: u64,
     project_id: String,
     project_item_id: String,
-    dispatch_started: bool,
+}
+
+struct LiveDogfoodResources {
+    issue_id: String,
+    issue_number: u64,
 }
 
 fn run_live_command(
@@ -877,7 +882,7 @@ fn run_live_command(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{phase}: command timed out after 30 seconds"));
+                return Err(live_command_timeout(phase));
             }
             Err(error) => return Err(format!("{phase}: command wait failed: {error}")),
         }
@@ -899,6 +904,12 @@ fn run_live_command(
             "{phase}: command exited {status}; last observation: {last_observation}"
         ))
     }
+}
+
+fn live_command_timeout(phase: &str) -> String {
+    format!(
+        "{phase}: command timed out after 30 seconds; last observation: command was still running"
+    )
 }
 
 fn live_gh(
@@ -964,6 +975,10 @@ fn live_project_query(inputs: &LiveDogfoodInputs) -> Result<Value, String> {
 
 fn validate_live_project(inputs: &LiveDogfoodInputs) -> Result<LiveDogfoodProject, String> {
     let response = live_project_query(inputs)?;
+    validate_live_project_response(&response)
+}
+
+fn validate_live_project_response(response: &Value) -> Result<LiveDogfoodProject, String> {
     let project = &response["data"]["repository"]["projectV2"];
     if project["title"] != "Ensemble Dogfood" || project["viewerCanUpdate"] != true {
         return Err("preflight project discovery: Project title or write access did not match the fixture contract".to_string());
@@ -1089,20 +1104,25 @@ fn is_bamboon_remote(remote: &str) -> bool {
     )
 }
 
-fn live_preflight(inputs: &LiveDogfoodInputs, run: &LiveDogfoodRun) -> Result<String, String> {
+fn live_preflight(
+    inputs: &LiveDogfoodInputs,
+    run: &LiveDogfoodRun,
+) -> Result<(String, LiveDogfoodProject), String> {
     run_live_command("preflight gh", Command::new("gh"), inputs)?;
     let mut acpx = Command::new("acpx");
     acpx.arg("--version");
     let acpx_version = run_live_command("preflight ACPX", acpx, inputs)?;
     fs::write(run.root.join("acpx.version"), acpx_version)
         .map_err(|error| format!("preflight ACPX: could not retain version metadata: {error}"))?;
+    fs::write(run.root.join("agent.txt"), &inputs.agent)
+        .map_err(|error| format!("preflight ACPX: could not retain agent metadata: {error}"))?;
     validate_live_bamboon_clone(inputs)?;
     live_gh(
         "preflight GitHub access",
         ["api".to_string(), "user".to_string()],
         inputs,
     )?;
-    validate_live_project(inputs)?;
+    let project = validate_live_project(inputs)?;
     let token = live_gh(
         "preflight GitHub token",
         ["auth".to_string(), "token".to_string()],
@@ -1111,7 +1131,7 @@ fn live_preflight(inputs: &LiveDogfoodInputs, run: &LiveDogfoodRun) -> Result<St
     if token.trim().is_empty() {
         return Err("preflight GitHub token: gh returned an empty token".to_string());
     }
-    Ok(token.trim().to_string())
+    Ok((token.trim().to_string(), project))
 }
 
 fn live_project_item_status(
@@ -1154,10 +1174,22 @@ fn live_graphql_mutation(
         arguments.extend(["-F".to_string(), format!("{name}={value}")]);
     }
     let output = live_gh(phase, arguments, inputs)?;
-    serde_json::from_str(&output).map_err(|error| format!("{phase}: invalid response: {error}"))
+    parse_live_graphql_response(phase, &output)
 }
 
-fn rollback_pre_dispatch(resources: &LiveDogfoodResources, inputs: &LiveDogfoodInputs) {
+fn parse_live_graphql_response(phase: &str, output: &str) -> Result<Value, String> {
+    let response: Value = serde_json::from_str(output)
+        .map_err(|error| format!("{phase}: invalid response: {error}"))?;
+    if response["errors"]
+        .as_array()
+        .is_some_and(|errors| !errors.is_empty())
+    {
+        return Err(format!("{phase}: GraphQL returned errors"));
+    }
+    Ok(response)
+}
+
+fn rollback_pre_dispatch(resources: &PreDispatchResources, inputs: &LiveDogfoodInputs) {
     const REMOVE_ITEM: &str = r#"mutation($projectId: ID!, $itemId: ID!) {
   deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) { deletedItemId }
 }"#;
@@ -1235,35 +1267,32 @@ fn create_live_resources(
         Ok(value) => match value["data"]["addProjectV2ItemById"]["item"]["id"].as_str() {
             Some(id) => id.to_string(),
             None => {
-                let resources = LiveDogfoodResources {
+                let resources = PreDispatchResources {
                     issue_id,
                     issue_number,
                     project_id: project.id.clone(),
                     project_item_id: String::new(),
-                    dispatch_started: false,
                 };
                 rollback_pre_dispatch(&resources, inputs);
                 return Err("add synthetic issue to Project: missing Project item ID".to_string());
             }
         },
         Err(error) => {
-            let resources = LiveDogfoodResources {
+            let resources = PreDispatchResources {
                 issue_id,
                 issue_number,
                 project_id: project.id.clone(),
                 project_item_id: String::new(),
-                dispatch_started: false,
             };
             rollback_pre_dispatch(&resources, inputs);
             return Err(error);
         }
     };
-    let mut resources = LiveDogfoodResources {
+    let resources = PreDispatchResources {
         issue_id,
         issue_number,
         project_id: project.id.clone(),
         project_item_id,
-        dispatch_started: false,
     };
 
     const SET_STATUS: &str = r#"mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
@@ -1283,8 +1312,10 @@ fn create_live_resources(
         rollback_pre_dispatch(&resources, inputs);
         return Err(error);
     }
-    resources.dispatch_started = true;
-    Ok(resources)
+    Ok(LiveDogfoodResources {
+        issue_id: resources.issue_id,
+        issue_number: resources.issue_number,
+    })
 }
 
 fn spawn_live_host(
@@ -1414,7 +1445,6 @@ async fn wait_for_live_history(
 fn verify_live_artifact(
     inputs: &LiveDogfoodInputs,
     run: &LiveDogfoodRun,
-    resources: &LiveDogfoodResources,
 ) -> Result<(String, String), String> {
     let artifact = run.expected_artifact();
     let repo_root = run.root.join("workspaces").join("bamboon");
@@ -1488,11 +1518,10 @@ fn verify_live_artifact(
             "ls-remote".to_string(),
             "--heads".to_string(),
             "origin".to_string(),
-            branch.clone(),
         ],
         inputs,
     )?;
-    if !remote_branch.is_empty() {
+    if marker_owned_remote_branch(&remote_branch, &run.marker) {
         return Err("verify no remote branch: marker branch was published".to_string());
     }
     let pull_requests = live_gh(
@@ -1502,20 +1531,39 @@ fn verify_live_artifact(
             "list".to_string(),
             "--repo".to_string(),
             "chrisbanes/bamboon".to_string(),
-            "--head".to_string(),
-            branch.clone(),
+            "--state".to_string(),
+            "all".to_string(),
+            "--search".to_string(),
+            run.marker.clone(),
             "--json".to_string(),
-            "number".to_string(),
+            "number,title,headRefName".to_string(),
         ],
         inputs,
     )?;
-    if pull_requests != "[]\n" {
+    if marker_owned_pull_request(&pull_requests, &run.marker) {
         return Err(
             "verify no pull request: a pull request existed for the generated branch".to_string(),
         );
     }
-    let _ = resources;
     Ok((branch, sha.to_string()))
+}
+
+fn marker_owned_remote_branch(remote_heads: &str, marker: &str) -> bool {
+    remote_heads.lines().any(|line| line.contains(marker))
+}
+
+fn marker_owned_pull_request(pull_requests: &str, marker: &str) -> bool {
+    serde_json::from_str::<Value>(pull_requests)
+        .ok()
+        .and_then(|value| value.as_array().cloned())
+        .is_some_and(|pull_requests| {
+            pull_requests.iter().any(|pull_request| {
+                ["title", "headRefName"]
+                    .iter()
+                    .filter_map(|field| pull_request[*field].as_str())
+                    .any(|value| value.contains(marker))
+            })
+        })
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1524,8 +1572,7 @@ async fn live_bamboon_issue_commits_without_publication() {
     let inputs = LiveDogfoodInputs::from_env().expect("live dogfood inputs");
     let run = LiveDogfoodRun::create().expect("persistent live dogfood run directory");
     let result = async {
-        let token = live_preflight(&inputs, &run)?;
-        let project = validate_live_project(&inputs)?;
+        let (token, project) = live_preflight(&inputs, &run)?;
         let resources = create_live_resources(&inputs, &run, &project)?;
         wait_for_live_project_status(&inputs, &resources.issue_id, "Ready to implement").await?;
         let port = reserve_local_port().map_err(|error| format!("reserve host port: {error}"))?;
@@ -1540,7 +1587,7 @@ async fn live_bamboon_issue_commits_without_publication() {
             let detail =
                 wait_for_live_completion(&client, &base_url, resources.issue_number).await?;
             wait_for_live_history(&client, &base_url, resources.issue_number).await?;
-            let (branch, sha) = verify_live_artifact(&inputs, &run, &resources)?;
+            let (branch, sha) = verify_live_artifact(&inputs, &run)?;
             Ok::<_, String>((detail, branch, sha))
         }
         .await;
@@ -1666,4 +1713,67 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
             "contributing guide must document {required}"
         );
     }
+}
+
+#[test]
+fn live_dogfood_rejects_graphql_errors_before_dispatch() {
+    let error = parse_live_graphql_response(
+        "make synthetic issue ready",
+        r#"{"errors":[{"message":"fixture drift"}]}"#,
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "make synthetic issue ready: GraphQL returned errors");
+}
+
+#[test]
+fn live_dogfood_preflight_rejects_project_fixture_drift() {
+    let response = serde_json::json!({
+        "data": {"repository": {"projectV2": {
+            "id": "project-id",
+            "title": "Wrong Project",
+            "viewerCanUpdate": true,
+            "items": {"totalCount": 0},
+            "workflows": {"nodes": []},
+            "fields": {"nodes": [{
+                "id": "status-id",
+                "name": "Status",
+                "options": [
+                    {"id": "ready", "name": "Ready to implement"},
+                    {"id": "progress", "name": "In progress"},
+                    {"id": "review", "name": "In review"},
+                    {"id": "done", "name": "Done"}
+                ]
+            }]}
+        }}}
+    });
+
+    assert!(validate_live_project_response(&response)
+        .unwrap_err()
+        .contains("Project title or write access"));
+}
+
+#[test]
+fn live_dogfood_publication_observations_are_marker_scoped() {
+    let marker = "live-dogfood-2a-7-1";
+    assert!(marker_owned_remote_branch(
+        "deadbeef\trefs/heads/agent-live-dogfood-2a-7-1",
+        marker
+    ));
+    assert!(marker_owned_pull_request(
+        r#"[{"number":12,"title":"dogfood live-dogfood-2a-7-1","headRefName":"agent-branch"}]"#,
+        marker,
+    ));
+    assert!(!marker_owned_pull_request(
+        r#"[{"number":12,"title":"unrelated","headRefName":"agent-branch"}]"#,
+        marker,
+    ));
+}
+
+#[test]
+fn live_dogfood_command_timeouts_keep_a_safe_last_observation() {
+    assert_eq!(
+        live_command_timeout("preflight ACPX"),
+        "preflight ACPX: command timed out after 30 seconds; last observation: command was still running"
+    );
 }
