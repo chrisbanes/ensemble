@@ -1349,12 +1349,11 @@ impl LiveDogfoodEvidenceV1 {
             "evidence",
         ];
         if !self.snapshots.is_empty() {
-            self.final_state.retained.push("workspace_worktree");
-        }
-        if self.has_post_delivery() {
-            self.final_state
-                .retained
-                .extend(["generated_ref", "pull_request"]);
+            self.final_state.retained.extend([
+                "workspace_worktree",
+                "generated_ref",
+                "pull_request",
+            ]);
         }
     }
 
@@ -4484,6 +4483,32 @@ fn live_dogfood_failure_evidence_keeps_the_safe_failure_phase() {
 }
 
 #[test]
+fn live_dogfood_pre_delivery_failure_conservatively_reports_remote_residue() {
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-pre-delivery-failure".to_string(),
+        root: PathBuf::from("/tmp/ensemble-live-dogfood/live-dogfood-pre-delivery-failure"),
+    };
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Routine);
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-pre-delivery-failure.md",
+            "ensemble-live-dogfood-pre-delivery-failure",
+            "local-sha",
+        )
+        .unwrap();
+
+    evidence.preserve_discovered_artifacts();
+
+    let retained = serde_json::to_value(evidence).unwrap()["final_state"]["retained"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(retained.contains(&serde_json::json!("generated_ref")));
+    assert!(retained.contains(&serde_json::json!("pull_request")));
+}
+
+#[test]
 fn live_dogfood_post_delivery_requires_matching_host_pull_request() {
     let detail = serde_json::json!({
         "issue_identifier": "chrisbanes/bamboon#38",
@@ -4542,6 +4567,8 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "two configured polling intervals",
         "unchanged config",
         "not exist before dispatch",
+        "conservatively lists the generated ref",
+        "pull request until fresh observations",
     ] {
         assert!(
             contributing.contains(required),

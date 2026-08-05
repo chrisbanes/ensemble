@@ -155,7 +155,9 @@ deliberate cleanup procedure:
    request, ref/SHA, and worktree; the local config supplies the private Project number. Evidence may
    not exist before dispatch: for those setup failures, use the exact synthetic issue number printed
    with the rollback result and the same configured Project value. Do not copy the config into
-   diagnostics or infer a target from a title, marker search, or broad branch pattern.
+   diagnostics or infer a target from a title, marker search, or broad branch pattern. Once the
+   pre-publication snapshot exists, preserved-failure evidence conservatively lists the generated ref
+   and pull request until fresh observations prove they are absent.
 2. Before any mutation, revalidate each stored identity against fresh GitHub and Git observations: issue and Project
    item node ownership, pull-request number/URL/head/base/head SHA, generated full ref and SHA, and
    the worktree path beneath that run's workspace root. Stop if any read is missing, duplicated, or
