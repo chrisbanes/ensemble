@@ -157,7 +157,7 @@ async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() 
         .env("PATH", fixture.path_with_mock_bin())
         .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     let child = command.spawn().expect("spawn ensemble web");
     let _guard = ChildGuard::new(child);
     let client = reqwest::Client::new();
@@ -212,7 +212,7 @@ async fn missing_file_and_handoff_are_durable_acceptance_failures() {
         .env("ENSEMBLE_E2E_SKIP_REQUIRED_FILE", "1")
         .env("ENSEMBLE_E2E_MISSING_HANDOFF", "1")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     let child = command.spawn().expect("spawn ensemble web");
     let _guard = ChildGuard::new(child);
     let client = reqwest::Client::new();
