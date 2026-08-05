@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -708,6 +708,17 @@ impl LiveDogfoodMode {
             )),
         }
     }
+
+    fn from_os_input(value: Option<&OsStr>) -> Result<Self, String> {
+        let value = value
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok_or_else(|| format!("{LIVE_DOGFOOD_PRESERVE} must contain valid UTF-8"))
+            })
+            .transpose()?;
+        Self::from_input(value)
+    }
 }
 
 #[derive(Debug)]
@@ -720,12 +731,14 @@ struct LiveDogfoodInputs {
 
 impl LiveDogfoodInputs {
     fn from_env() -> Result<Self, String> {
-        Self::from_values_with_preserve(
+        let mode =
+            LiveDogfoodMode::from_os_input(std::env::var_os(LIVE_DOGFOOD_PRESERVE).as_deref())?;
+        Self::from_values_with_mode(
             std::env::var(LIVE_DOGFOOD_OPT_IN).ok().as_deref(),
             std::env::var(LIVE_DOGFOOD_PROJECT).ok().as_deref(),
             std::env::var(LIVE_DOGFOOD_BAMBOON_PATH).ok().as_deref(),
             std::env::var(LIVE_DOGFOOD_AGENT).ok().as_deref(),
-            std::env::var(LIVE_DOGFOOD_PRESERVE).ok().as_deref(),
+            mode,
         )
     }
 
@@ -744,6 +757,22 @@ impl LiveDogfoodInputs {
         bamboon_path: Option<&str>,
         agent: Option<&str>,
         preserve: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::from_values_with_mode(
+            opt_in,
+            project_number,
+            bamboon_path,
+            agent,
+            LiveDogfoodMode::from_input(preserve)?,
+        )
+    }
+
+    fn from_values_with_mode(
+        opt_in: Option<&str>,
+        project_number: Option<&str>,
+        bamboon_path: Option<&str>,
+        agent: Option<&str>,
+        mode: LiveDogfoodMode,
     ) -> Result<Self, String> {
         if opt_in != Some("1") {
             return Err(format!("{LIVE_DOGFOOD_OPT_IN} must be exactly 1"));
@@ -772,7 +801,7 @@ impl LiveDogfoodInputs {
                 .filter(|value| !value.is_empty())
                 .unwrap_or("codex")
                 .to_string(),
-            mode: LiveDogfoodMode::from_input(preserve)?,
+            mode,
         })
     }
 }
@@ -2471,6 +2500,17 @@ fn stop_and_reap_live_host(host: &mut Child) -> Result<(), String> {
     Ok(())
 }
 
+fn run_live_preserve_completion(
+    host: &mut Child,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+) -> Result<(), String> {
+    stop_and_reap_live_host(host)?;
+    evidence.append_transition("preserve_stop_and_reap_host", "succeeded");
+    evidence.preserve_certification();
+    write_live_dogfood_evidence_v1(&run.root, evidence)
+}
+
 fn finalize_live_restarted_run_failure(
     host: &mut Child,
     evidence: &mut LiveDogfoodEvidenceV1,
@@ -2494,12 +2534,21 @@ fn finalize_live_restarted_run_failure(
         .unwrap_or(error)
 }
 
+fn canonical_live_worktree_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| {
+        path.parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
+            .unwrap_or_else(|| path.to_path_buf())
+    })
+}
+
 fn worktree_is_registered(listing: &str, worktree: &Path) -> bool {
-    let expected = worktree.to_string_lossy();
+    let expected = canonical_live_worktree_path(worktree);
     listing
         .lines()
         .filter_map(|line| line.strip_prefix("worktree "))
-        .any(|path| path == expected)
+        .any(|path| canonical_live_worktree_path(Path::new(path)) == expected)
 }
 
 fn live_public_issue_released(detail: &Value) -> bool {
@@ -2651,16 +2700,11 @@ fn delete_live_remote_ref(
     plan: &LiveDogfoodCleanupPlan,
 ) -> Result<(), String> {
     revalidate_live_remote_ref(inputs, &inputs.bamboon_path, plan)?;
-    live_git(
-        "cleanup delete generated ref",
-        &inputs.bamboon_path,
-        [
-            "push".to_string(),
-            "origin".to_string(),
-            "--delete".to_string(),
-            plan.branch.clone(),
-        ],
+    delete_live_remote_ref_at_sha(
         inputs,
+        &inputs.bamboon_path,
+        &plan.branch,
+        &plan.expected_sha,
     )?;
     let remaining = live_git(
         "cleanup verify generated ref absence",
@@ -2677,6 +2721,27 @@ fn delete_live_remote_ref(
         return Err("cleanup delete generated ref: ref remained present".to_string());
     }
     Ok(())
+}
+
+fn delete_live_remote_ref_at_sha(
+    inputs: &LiveDogfoodInputs,
+    worktree: &Path,
+    branch: &str,
+    expected_sha: &str,
+) -> Result<(), String> {
+    live_git(
+        "cleanup delete generated ref",
+        worktree,
+        [
+            "push".to_string(),
+            format!("--force-with-lease=refs/heads/{branch}:{expected_sha}"),
+            "--delete".to_string(),
+            "origin".to_string(),
+            branch.to_string(),
+        ],
+        inputs,
+    )
+    .map(|_| ())
 }
 
 fn validate_live_final_absence(observations: [bool; 6]) -> Result<(), String> {
@@ -2780,8 +2845,72 @@ fn persist_live_cleanup_transition(
     step: LiveDogfoodCleanupStep,
     result: Result<(), String>,
 ) -> Result<(), String> {
-    record_live_cleanup_step(cleanup, evidence, step, result)?;
-    write_live_dogfood_evidence_v1(&run.root, evidence)
+    match record_live_cleanup_step(cleanup, evidence, step, result) {
+        Ok(()) => write_live_dogfood_evidence_v1(&run.root, evidence),
+        Err(error) => {
+            write_live_dogfood_evidence_v1(&run.root, evidence)
+                .map_err(|write_error| format!("{error}; {write_error}"))?;
+            Err(error)
+        }
+    }
+}
+
+trait LiveDogfoodCleanupActions {
+    async fn execute(&mut self, step: LiveDogfoodCleanupStep) -> Result<(), String>;
+}
+
+struct LiveDogfoodRoutineCleanupActions<'a> {
+    client: &'a reqwest::Client,
+    base_url: &'a str,
+    inputs: &'a LiveDogfoodInputs,
+    host: &'a mut Child,
+    worktree: &'a Path,
+    plan: &'a LiveDogfoodCleanupPlan,
+}
+
+impl LiveDogfoodCleanupActions for LiveDogfoodRoutineCleanupActions<'_> {
+    async fn execute(&mut self, step: LiveDogfoodCleanupStep) -> Result<(), String> {
+        match step {
+            LiveDogfoodCleanupStep::ClosePullRequest => {
+                close_live_pull_request(self.inputs, self.plan)
+            }
+            LiveDogfoodCleanupStep::ProjectDone => set_live_project_done(self.inputs, self.plan),
+            LiveDogfoodCleanupStep::WaitForHostRelease => {
+                wait_for_live_host_release(
+                    self.client,
+                    self.base_url,
+                    self.inputs,
+                    self.plan.issue_number,
+                    self.worktree,
+                )
+                .await
+            }
+            LiveDogfoodCleanupStep::StopAndReapHost => stop_and_reap_live_host(self.host),
+            LiveDogfoodCleanupStep::CloseIssue => close_live_issue(self.inputs, self.plan),
+            LiveDogfoodCleanupStep::RemoveProjectItem => {
+                remove_live_project_item(self.inputs, self.plan)
+            }
+            LiveDogfoodCleanupStep::DeleteGeneratedRef => {
+                delete_live_remote_ref(self.inputs, self.plan)
+            }
+            LiveDogfoodCleanupStep::VerifyFinalAbsence => {
+                verify_live_final_absence(self.inputs, self.host, self.worktree, self.plan)
+            }
+        }
+    }
+}
+
+async fn execute_live_cleanup_sequence(
+    actions: &mut impl LiveDogfoodCleanupActions,
+    cleanup: &mut LiveDogfoodCleanupRecorder,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+) -> Result<(), String> {
+    for step in LIVE_DOGFOOD_CLEANUP_ORDER {
+        let result = actions.execute(step).await;
+        persist_live_cleanup_transition(cleanup, evidence, run, step, result)?;
+    }
+    Ok(())
 }
 
 async fn run_live_routine_cleanup(
@@ -2814,80 +2943,15 @@ async fn run_live_routine_cleanup(
         }
     };
     let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan)?;
-
-    let result = close_live_pull_request(inputs, &plan);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::ClosePullRequest,
-        result,
-    )?;
-
-    let result = set_live_project_done(inputs, &plan);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::ProjectDone,
-        result,
-    )?;
-
-    let result =
-        wait_for_live_host_release(client, base_url, inputs, resources.issue_number, worktree)
-            .await;
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::WaitForHostRelease,
-        result,
-    )?;
-
-    let result = stop_and_reap_live_host(host);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::StopAndReapHost,
-        result,
-    )?;
-
-    let result = close_live_issue(inputs, &plan);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::CloseIssue,
-        result,
-    )?;
-
-    let result = remove_live_project_item(inputs, &plan);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::RemoveProjectItem,
-        result,
-    )?;
-
-    let result = delete_live_remote_ref(inputs, &plan);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::DeleteGeneratedRef,
-        result,
-    )?;
-
-    let result = verify_live_final_absence(inputs, host, worktree, &plan);
-    persist_live_cleanup_transition(
-        &mut cleanup,
-        evidence,
-        run,
-        LiveDogfoodCleanupStep::VerifyFinalAbsence,
-        result,
-    )?;
+    let mut actions = LiveDogfoodRoutineCleanupActions {
+        client,
+        base_url,
+        inputs,
+        host,
+        worktree,
+        plan: &plan,
+    };
+    execute_live_cleanup_sequence(&mut actions, &mut cleanup, evidence, run).await?;
     if !cleanup.is_complete() {
         return Err("cleanup final absence: transition plan was incomplete".to_string());
     }
@@ -2993,8 +3057,29 @@ fn rollback_pre_dispatch_after_error(
     error: String,
 ) -> String {
     match rollback_pre_dispatch(resources, inputs) {
-        Ok(()) => error,
-        Err(rollback_error) => format!("{error}; {rollback_error}"),
+        Ok(()) => format!(
+            "{error}; pre-dispatch rollback completed for synthetic issue #{}",
+            resources.issue_number
+        ),
+        Err(rollback_error) => format!(
+            "{error}; pre-dispatch rollback for synthetic issue #{} failed: {rollback_error}",
+            resources.issue_number
+        ),
+    }
+}
+
+fn start_live_pre_dispatch_host<H>(
+    resources: &PreDispatchResources,
+    reserve_port: impl FnOnce() -> Result<u16, String>,
+    spawn_host: impl FnOnce(u16) -> Result<H, String>,
+    rollback_after_error: impl FnOnce(&PreDispatchResources, String) -> String,
+) -> Result<(u16, H), String> {
+    match reserve_port() {
+        Err(error) => Err(rollback_after_error(resources, error)),
+        Ok(port) => match spawn_host(port) {
+            Ok(host) => Ok((port, host)),
+            Err(error) => Err(rollback_after_error(resources, error)),
+        },
     }
 }
 
@@ -3740,6 +3825,12 @@ async fn live_bamboon_issue_publishes_pull_request() {
                 &resources, &inputs, error,
             ));
         }
+        let (port, mut host) = start_live_pre_dispatch_host(
+            &resources,
+            || reserve_local_port().map_err(|error| format!("reserve host port: {error}")),
+            |port| spawn_live_host(&inputs, &run, &token, port, LiveDogfoodHostLifetime::First),
+            |resources, error| rollback_pre_dispatch_after_error(resources, &inputs, error),
+        )?;
         let resources = LiveDogfoodResources {
             issue_id: resources.issue_id,
             issue_number: resources.issue_number,
@@ -3752,21 +3843,6 @@ async fn live_bamboon_issue_publishes_pull_request() {
             inputs.mode,
         );
         let mut pre_publication_captured = false;
-        let port = reserve_local_port().map_err(|error| format!("reserve host port: {error}"))?;
-        let mut host =
-            match spawn_live_host(&inputs, &run, &token, port, LiveDogfoodHostLifetime::First) {
-                Ok(host) => host,
-                Err(error) => {
-                    let failure = persist_live_dogfood_failure(
-                        &mut evidence,
-                        &run,
-                        &inputs,
-                        pre_publication_captured,
-                        &error,
-                    );
-                    return Err(failure.err().unwrap_or(error));
-                }
-            };
         let client = reqwest::Client::new();
         let base_url = format!("http://127.0.0.1:{port}");
         let completed = async {
@@ -3946,7 +4022,9 @@ async fn live_bamboon_issue_publishes_pull_request() {
         }
         match inputs.mode {
             LiveDogfoodMode::Preserve => {
-                if let Err(error) = stop_and_reap_live_host(&mut restarted_host) {
+                if let Err(error) =
+                    run_live_preserve_completion(&mut restarted_host, &mut evidence, &run)
+                {
                     return Err(finalize_live_restarted_run_failure(
                         &mut restarted_host,
                         &mut evidence,
@@ -3956,9 +4034,6 @@ async fn live_bamboon_issue_publishes_pull_request() {
                         error,
                     ));
                 }
-                evidence.append_transition("preserve_stop_and_reap_host", "succeeded");
-                evidence.preserve_certification();
-                write_live_dogfood_evidence_v1(&run.root, &evidence)?;
             }
             LiveDogfoodMode::Routine => {
                 if let Err(error) = run_live_routine_cleanup(
@@ -4001,7 +4076,7 @@ async fn live_bamboon_issue_publishes_pull_request() {
             run.root.display()
         ),
         Err(error) => panic!(
-            "{error}\nlive dogfood artifacts are preserved: marker={} run_directory={}\ndeliberate cleanup procedure: inspect run_directory/evidence-v1.json and follow docs/contributing.md#ignored-live-dogfood-tracer-bullet; revalidate every stored identity before mutation",
+            "{error}\nlive dogfood artifacts are preserved: marker={} run_directory={}\ndeliberate cleanup procedure: inspect run_directory and evidence-v1.json when present, then follow docs/contributing.md#ignored-live-dogfood-tracer-bullet; revalidate every stored identity before mutation",
             run.marker,
             run.root.display()
         ),
@@ -4466,6 +4541,7 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "host-2.stderr.log",
         "two configured polling intervals",
         "unchanged config",
+        "not exist before dispatch",
     ] {
         assert!(
             contributing.contains(required),
@@ -4574,6 +4650,25 @@ fn live_dogfood_worktree_discovery_includes_the_issue_key_directory() {
     assert_eq!(live_dogfood_worktree(&workspaces).unwrap(), expected);
 }
 
+#[cfg(unix)]
+#[test]
+fn live_dogfood_worktree_registration_canonicalizes_symlinked_prefixes() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let canonical_root = temporary.path().join("canonical");
+    let canonical_worktree = canonical_root.join("issue-worktree");
+    let aliased_root = temporary.path().join("alias");
+    let aliased_worktree = aliased_root.join("issue-worktree");
+    fs::create_dir_all(&canonical_worktree).unwrap();
+    symlink(&canonical_root, &aliased_root).unwrap();
+    let listing = format!("worktree {}\n", canonical_worktree.display());
+
+    assert!(worktree_is_registered(&listing, &aliased_worktree));
+    fs::remove_dir(&canonical_worktree).unwrap();
+    assert!(worktree_is_registered(&listing, &aliased_worktree));
+}
+
 #[test]
 fn live_dogfood_preserve_input_is_exact_and_defaults_to_routine_cleanup() {
     assert_eq!(
@@ -4591,6 +4686,14 @@ fn live_dogfood_preserve_input_is_exact_and_defaults_to_routine_cleanup() {
     assert!(LiveDogfoodMode::from_input(Some("true")).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn live_dogfood_preserve_input_rejects_non_utf8_values() {
+    use std::os::unix::ffi::OsStrExt;
+
+    assert!(LiveDogfoodMode::from_os_input(Some(std::ffi::OsStr::from_bytes(&[0xff]))).is_err());
+}
+
 #[test]
 fn live_dogfood_evidence_records_the_selected_cleanup_mode() {
     let run = LiveDogfoodRun {
@@ -4602,6 +4705,35 @@ fn live_dogfood_evidence_records_the_selected_cleanup_mode() {
 
     let value = serde_json::to_value(evidence).unwrap();
     assert_eq!(value["mode"], "preserve");
+}
+
+#[test]
+fn live_dogfood_preserve_completion_only_reaps_and_records_preservation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-preserve-execution".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Preserve);
+    let mut child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+
+    run_live_preserve_completion(&mut child, &mut evidence, &run).unwrap();
+
+    assert!(child.try_wait().unwrap().is_some());
+    let value: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.path().join("evidence-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["outcome"], "preserved_certification");
+    assert_eq!(
+        value["transitions"],
+        serde_json::json!([{"phase": "preserve_stop_and_reap_host", "result": "succeeded"}])
+    );
+    assert_eq!(
+        value["final_state"]["absent"],
+        serde_json::json!(["active_child"])
+    );
 }
 
 #[test]
@@ -4674,6 +4806,66 @@ fn live_dogfood_pull_request_revalidation_requires_the_stored_identity() {
 }
 
 #[test]
+fn live_dogfood_remote_ref_deletion_rejects_a_replacement_sha() {
+    let temporary = tempfile::tempdir().unwrap();
+    let remote = temporary.path().join("remote.git");
+    let source = temporary.path().join("source");
+    init_git_repo(&source).unwrap();
+    let inputs =
+        LiveDogfoodInputs::from_values(Some("1"), Some("12"), source.to_str(), None).unwrap();
+    let git = |phase: &str, arguments: &[&str]| {
+        live_git(
+            phase,
+            &source,
+            arguments.iter().map(|argument| (*argument).to_string()),
+            &inputs,
+        )
+        .unwrap()
+    };
+    git(
+        "test initialize bare remote",
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        "test add remote",
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(
+        "test publish expected ref",
+        &["push", "-u", "origin", "main"],
+    );
+    let expected_sha = git("test read expected SHA", &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(source.join("README.md"), "replacement\n").unwrap();
+    git(
+        "test commit replacement",
+        &[
+            "-c",
+            "user.name=Ensemble E2E",
+            "-c",
+            "user.email=ensemble-e2e@example.invalid",
+            "commit",
+            "-am",
+            "replacement",
+        ],
+    );
+    git("test publish replacement ref", &["push", "origin", "main"]);
+    let replacement_sha = git("test read replacement SHA", &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    assert!(delete_live_remote_ref_at_sha(&inputs, &source, "main", &expected_sha).is_err());
+    assert_eq!(
+        git(
+            "test observe replacement ref",
+            &["ls-remote", "--heads", "origin", "refs/heads/main"],
+        ),
+        format!("{replacement_sha}\trefs/heads/main\n")
+    );
+}
+
+#[test]
 fn live_dogfood_cleanup_stops_after_a_failed_revalidation() {
     let plan = LiveDogfoodCleanupPlan::for_test();
     let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan).unwrap();
@@ -4695,6 +4887,64 @@ fn live_dogfood_cleanup_stops_after_a_failed_revalidation() {
             ("close_pull_request", "succeeded"),
             ("project_done", "preserved_failure"),
         ]
+    );
+}
+
+struct FailingLiveDogfoodCleanupActions {
+    attempted: Vec<LiveDogfoodCleanupStep>,
+    fail_at: LiveDogfoodCleanupStep,
+}
+
+impl LiveDogfoodCleanupActions for FailingLiveDogfoodCleanupActions {
+    async fn execute(&mut self, step: LiveDogfoodCleanupStep) -> Result<(), String> {
+        self.attempted.push(step);
+        if step == self.fail_at {
+            Err(format!("{} helper failed", step.name()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_dogfood_cleanup_execution_stops_after_a_helper_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-execution-stop".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan).unwrap();
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Routine);
+    let mut actions = FailingLiveDogfoodCleanupActions {
+        attempted: Vec::new(),
+        fail_at: LiveDogfoodCleanupStep::ProjectDone,
+    };
+
+    assert!(
+        execute_live_cleanup_sequence(&mut actions, &mut cleanup, &mut evidence, &run,)
+            .await
+            .is_err()
+    );
+
+    assert_eq!(
+        actions.attempted,
+        [
+            LiveDogfoodCleanupStep::ClosePullRequest,
+            LiveDogfoodCleanupStep::ProjectDone,
+        ]
+    );
+    let persisted: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.path().join("evidence-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        persisted["transitions"],
+        serde_json::json!([
+            {"phase": "close_pull_request", "result": "succeeded"},
+            {"phase": "project_done", "result": "preserved_failure"}
+        ])
     );
 }
 
@@ -4786,4 +5036,52 @@ fn live_dogfood_pre_dispatch_rollback_requires_exact_issue_and_item_ownership() 
         &resources,
     )
     .is_err());
+}
+
+#[test]
+fn live_dogfood_host_setup_failures_run_pre_dispatch_rollback() {
+    use std::cell::RefCell;
+
+    let resources = PreDispatchResources {
+        issue_id: "issue-node".to_string(),
+        issue_number: 47,
+        project_id: "project-node".to_string(),
+        project_item_id: "item-node".to_string(),
+    };
+    let actions = RefCell::new(Vec::new());
+    let reservation_error = start_live_pre_dispatch_host(
+        &resources,
+        || Err("reserve host port: unavailable".to_string()),
+        |_| {
+            actions.borrow_mut().push("spawn");
+            Ok(())
+        },
+        |_, error| {
+            actions.borrow_mut().push("rollback");
+            format!("{error}; rolled back")
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        reservation_error,
+        "reserve host port: unavailable; rolled back"
+    );
+    assert_eq!(*actions.borrow(), ["rollback"]);
+
+    actions.borrow_mut().clear();
+    let spawn_error = start_live_pre_dispatch_host(
+        &resources,
+        || Ok(42),
+        |_| {
+            actions.borrow_mut().push("spawn");
+            Err::<(), _>("start first host: unavailable".to_string())
+        },
+        |_, error| {
+            actions.borrow_mut().push("rollback");
+            format!("{error}; rolled back")
+        },
+    )
+    .unwrap_err();
+    assert_eq!(spawn_error, "start first host: unavailable; rolled back");
+    assert_eq!(*actions.borrow(), ["spawn", "rollback"]);
 }

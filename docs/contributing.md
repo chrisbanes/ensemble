@@ -150,10 +150,12 @@ stored node IDs and ownership. Any ambiguity stops that rollback too.
 For failure recovery, use the `run_directory` printed by the test as the scope for the
 deliberate cleanup procedure:
 
-1. Read `evidence-v1.json`, the retained generated config, and both host log pairs to find the last
-   successful transition. Evidence supplies the issue number, pull request, ref/SHA, and worktree;
-   the local config supplies the private Project number. Do not copy the config into diagnostics or
-   infer a target from a title, marker search, or broad branch pattern.
+1. For dispatch-and-later failures, read `evidence-v1.json`, the retained generated config, and both
+   host log pairs to find the last successful transition. Evidence supplies the issue number, pull
+   request, ref/SHA, and worktree; the local config supplies the private Project number. Evidence may
+   not exist before dispatch: for those setup failures, use the exact synthetic issue number printed
+   with the rollback result and the same configured Project value. Do not copy the config into
+   diagnostics or infer a target from a title, marker search, or broad branch pattern.
 2. Before any mutation, revalidate each stored identity against fresh GitHub and Git observations: issue and Project
    item node ownership, pull-request number/URL/head/base/head SHA, generated full ref and SHA, and
    the worktree path beneath that run's workspace root. Stop if any read is missing, duplicated, or
