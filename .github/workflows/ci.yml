@@ -89,6 +89,9 @@ jobs:
           cache: pnpm
           cache-dependency-path: crates/ensemble-ui/src-ui/pnpm-lock.yaml
 
+      - name: Test repository automation
+        run: node --test .github/scripts/auto-close-epics.test.mjs
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Install frontend dependencies

@@ -39,8 +39,23 @@
 
 - Epic label: `epic`
 - Epic label ID: `LA_kwDORzdwYM8AAAACuWX7NA`
+- Auto-close epic label: `auto-close-epic`
+- Auto-close epic label ID: `LA_kwDORzdwYM8AAAACu3F6Tg`
 - Human-work label: `ready-for-human`
 - Human-work label ID: `LA_kwDORzdwYM8AAAACuAxOsQ`
+
+Epics are not auto-closed by default. Applying `auto-close-epic` delegates
+closure authority to `.github/workflows/auto-close-epics.yml`. When an issue
+closes, that workflow walks its same-repository native parent chain and closes
+an open parent only when the parent also has `epic`, has at least one native
+sub-issue, every native sub-issue is closed, and no native blocker remains open.
+Missing metadata fails closed. The workflow then continues up the chain so
+opted-in nested epics can complete in one serialized run. Cross-repository
+parents are logged and left open because the repository workflow token does not
+have authority outside this repository.
+
+Do not apply `auto-close-epic` to coordination issues with completion gates that
+are not fully represented by native sub-issues and blockers.
 
 ## Priority
 
@@ -62,4 +77,6 @@
 - Automation description: Enabled Project workflows `Item closed` and
   `Pull request merged`; verified that merged-and-closed issue #182 moved from
   `In progress` to `Done` through `github-project-automation` and remained
-  unarchived.
+  unarchived. Repository workflow `Auto-close epics` closes explicitly opted-in
+  epic issues after their native sub-issues and blockers complete; `Item closed`
+  then projects the epic to `Done`.
