@@ -6267,19 +6267,32 @@ impl Orchestrator {
             return;
         }
 
-        if let Err(error) = self
-            .pipeline_journal
-            .append_released(
-                issue_id,
-                &pending.identifier,
-                pending.run_id.clone(),
-                "terminal tracker transition reconciled",
-            )
-            .await
-        {
+        let pipeline_journal = self.pipeline_journal.clone();
+        let release_issue_id = issue_id.to_string();
+        let release_identifier = pending.identifier.clone();
+        let release_run_id = pending.run_id.clone();
+        // Keep the journal append on a fresh poll stack: after workspace cleanup, this terminal
+        // transition chain is deep enough to exhaust a Tokio worker stack when appended inline.
+        let release_result = tokio::spawn(async move {
+            pipeline_journal
+                .append_released(
+                    &release_issue_id,
+                    &release_identifier,
+                    release_run_id,
+                    "terminal tracker transition reconciled",
+                )
+                .await
+        })
+        .await;
+        let release_error = match release_result {
+            Ok(Ok(_)) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(format!("pipeline release task failed: {error}")),
+        };
+        if let Some(error) = release_error {
             warn!(
                 issue_id = %issue_id,
-                error = %error,
+                error,
                 "failed to persist pipeline release after terminal tracker transition"
             );
             return;
