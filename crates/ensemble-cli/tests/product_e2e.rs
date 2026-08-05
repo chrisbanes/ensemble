@@ -1222,7 +1222,7 @@ fn create_live_resources(
     inputs: &LiveDogfoodInputs,
     run: &LiveDogfoodRun,
     project: &LiveDogfoodProject,
-) -> Result<LiveDogfoodResources, String> {
+) -> Result<PreDispatchResources, String> {
     let artifact = run.expected_artifact();
     let issue = live_gh(
         "create synthetic issue",
@@ -1312,10 +1312,7 @@ fn create_live_resources(
         rollback_pre_dispatch(&resources, inputs);
         return Err(error);
     }
-    Ok(LiveDogfoodResources {
-        issue_id: resources.issue_id,
-        issue_number: resources.issue_number,
-    })
+    Ok(resources)
 }
 
 fn spawn_live_host(
@@ -1521,8 +1518,31 @@ fn verify_live_artifact(
         ],
         inputs,
     )?;
-    if marker_owned_remote_branch(&remote_branch, &run.marker) {
+    if remote_branch_contains(&remote_branch, &branch)
+        || marker_owned_remote_branch(&remote_branch, &run.marker)
+    {
         return Err("verify no remote branch: marker branch was published".to_string());
+    }
+    let branch_pull_requests = live_gh(
+        "verify no pull request for generated branch",
+        [
+            "pr".to_string(),
+            "list".to_string(),
+            "--repo".to_string(),
+            "chrisbanes/bamboon".to_string(),
+            "--state".to_string(),
+            "all".to_string(),
+            "--head".to_string(),
+            branch.clone(),
+            "--json".to_string(),
+            "number".to_string(),
+        ],
+        inputs,
+    )?;
+    if branch_pull_requests != "[]\n" {
+        return Err(
+            "verify no pull request: a pull request existed for the generated branch".to_string(),
+        );
     }
     let pull_requests = live_gh(
         "verify no pull request",
@@ -1540,7 +1560,7 @@ fn verify_live_artifact(
         ],
         inputs,
     )?;
-    if marker_owned_pull_request(&pull_requests, &run.marker) {
+    if marker_owned_pull_request(&pull_requests, &run.marker)? {
         return Err(
             "verify no pull request: a pull request existed for the generated branch".to_string(),
         );
@@ -1552,18 +1572,21 @@ fn marker_owned_remote_branch(remote_heads: &str, marker: &str) -> bool {
     remote_heads.lines().any(|line| line.contains(marker))
 }
 
-fn marker_owned_pull_request(pull_requests: &str, marker: &str) -> bool {
-    serde_json::from_str::<Value>(pull_requests)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .is_some_and(|pull_requests| {
-            pull_requests.iter().any(|pull_request| {
-                ["title", "headRefName"]
-                    .iter()
-                    .filter_map(|field| pull_request[*field].as_str())
-                    .any(|value| value.contains(marker))
-            })
-        })
+fn remote_branch_contains(remote_heads: &str, branch: &str) -> bool {
+    remote_heads.lines().any(|line| {
+        line == format!("refs/heads/{branch}") || line.ends_with(&format!("\trefs/heads/{branch}"))
+    })
+}
+
+fn marker_owned_pull_request(pull_requests: &str, marker: &str) -> Result<bool, String> {
+    let pull_requests: Vec<Value> = serde_json::from_str(pull_requests)
+        .map_err(|error| format!("verify no pull request: invalid GitHub response: {error}"))?;
+    Ok(pull_requests.iter().any(|pull_request| {
+        ["title", "headRefName"]
+            .iter()
+            .filter_map(|field| pull_request[*field].as_str())
+            .any(|value| value.contains(marker))
+    }))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1574,7 +1597,16 @@ async fn live_bamboon_issue_commits_without_publication() {
     let result = async {
         let (token, project) = live_preflight(&inputs, &run)?;
         let resources = create_live_resources(&inputs, &run, &project)?;
-        wait_for_live_project_status(&inputs, &resources.issue_id, "Ready to implement").await?;
+        if let Err(error) =
+            wait_for_live_project_status(&inputs, &resources.issue_id, "Ready to implement").await
+        {
+            rollback_pre_dispatch(&resources, &inputs);
+            return Err(error);
+        }
+        let resources = LiveDogfoodResources {
+            issue_id: resources.issue_id,
+            issue_number: resources.issue_number,
+        };
         let port = reserve_local_port().map_err(|error| format!("reserve host port: {error}"))?;
         let mut host = spawn_live_host(&inputs, &run, &token, port)?;
         let client = reqwest::Client::new();
@@ -1760,14 +1792,21 @@ fn live_dogfood_publication_observations_are_marker_scoped() {
         "deadbeef\trefs/heads/agent-live-dogfood-2a-7-1",
         marker
     ));
+    assert!(remote_branch_contains(
+        "deadbeef\trefs/heads/ensemble-20260805-e2e-1",
+        "ensemble-20260805-e2e-1"
+    ));
     assert!(marker_owned_pull_request(
         r#"[{"number":12,"title":"dogfood live-dogfood-2a-7-1","headRefName":"agent-branch"}]"#,
         marker,
-    ));
+    )
+    .unwrap());
     assert!(!marker_owned_pull_request(
         r#"[{"number":12,"title":"unrelated","headRefName":"agent-branch"}]"#,
         marker,
-    ));
+    )
+    .unwrap());
+    assert!(marker_owned_pull_request("not JSON", marker).is_err());
 }
 
 #[test]
