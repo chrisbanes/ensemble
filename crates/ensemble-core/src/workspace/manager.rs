@@ -139,6 +139,11 @@ impl WorkspaceManager {
             .join(format!("{}.json", issue_workspace_key(issue_id)))
     }
 
+    #[cfg(test)]
+    pub(crate) fn metadata_path_for_test(&self, issue_id: &str) -> PathBuf {
+        self.metadata_path(issue_id)
+    }
+
     fn lifecycle_lock(&self, workspace_key: &str) -> Arc<WorkspaceLifecycleLock> {
         let canonical_root = Self::canonicalize_allow_missing(&self.root);
         let path = canonical_root.join(workspace_key);

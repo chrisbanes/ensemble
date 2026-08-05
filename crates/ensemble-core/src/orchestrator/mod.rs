@@ -87,9 +87,9 @@ use reconciler::{
     startup_terminal_cleanup, ReconcileAction,
 };
 use retry::{
-    current_time_ms, defer_retry, get_due_retries, next_attempt, queue_manual_step_retry,
-    queue_manual_whole_issue_retry, schedule_failure_retry, FailureRetryDisposition,
-    FailureRetryRequest, ManualStepRetryError, ManualStepRetryRequest,
+    calculate_backoff, current_time_ms, defer_retry, get_due_retries, next_attempt,
+    queue_manual_step_retry, queue_manual_whole_issue_retry, schedule_failure_retry,
+    FailureRetryDisposition, FailureRetryRequest, ManualStepRetryError, ManualStepRetryRequest,
     ManualWholeIssueRetryRequest,
 };
 use scheduler::{
@@ -170,6 +170,22 @@ impl Drop for PendingWorkerReservation {
 }
 
 const INTERACTION_RESUME_REASON_PREFIX: &str = "interaction_resume:";
+
+fn terminal_transition_retry_due(
+    transition: &PendingTerminalTransition,
+    max_backoff_ms: u64,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let Some(last_attempted_at) = transition.last_attempted_at else {
+        return true;
+    };
+    let elapsed_ms = now
+        .signed_duration_since(last_attempted_at)
+        .num_milliseconds();
+    let delay_ms =
+        i64::try_from(calculate_backoff(transition.attempt, max_backoff_ms)).unwrap_or(i64::MAX);
+    elapsed_ms >= delay_ms
+}
 
 fn interaction_id_from_resume_reason(reason: Option<&str>) -> Option<&str> {
     reason?.strip_prefix(INTERACTION_RESUME_REASON_PREFIX)
@@ -6087,6 +6103,10 @@ impl Orchestrator {
         };
 
         if pending.transition.tracker_write_confirmed {
+            let max_backoff_ms = self.config.read().await.agent.max_retry_backoff_ms;
+            if !terminal_transition_retry_due(&pending.transition, max_backoff_ms, Utc::now()) {
+                return;
+            }
             self.complete_pending_terminal_transition(issue_id, pending.run_id)
                 .await;
             return;
@@ -6117,38 +6137,12 @@ impl Orchestrator {
                     .await;
             }
             Err(error) => {
-                let refreshed_input = {
-                    let mut state = self.state.write().await;
-                    let Some(current) = state.pending_terminal_transitions.get_mut(issue_id) else {
-                        return;
-                    };
-                    if current.run_id != pending.run_id
-                        || current.transition.target_state != pending.transition.target_state
-                        || current.transition.outcome != pending.transition.outcome
-                    {
-                        return;
-                    }
-                    current.transition.attempt = current.transition.attempt.saturating_add(1);
-                    current.transition.last_error = Some(error.to_string());
-                    current.transition.last_attempted_at = Some(Utc::now());
-                    let current = current.clone();
-                    Self::pending_terminal_transition_input(
-                        &state,
-                        issue_id,
-                        &current,
-                        PipelineTransitionKind::PendingTerminalTransition,
-                    )
-                };
-
-                if let Some(input) = refreshed_input {
-                    if let Err(journal_error) = self.pipeline_journal.append(input).await {
-                        warn!(
-                            issue_id = %issue_id,
-                            error = %journal_error,
-                            "failed to refresh pending terminal transition retry metadata"
-                        );
-                    }
-                }
+                self.record_pending_terminal_transition_failure(
+                    issue_id,
+                    &pending,
+                    error.to_string(),
+                )
+                .await;
                 warn!(
                     issue_id = %issue_id,
                     target_state = %pending.transition.target_state,
@@ -6177,7 +6171,7 @@ impl Orchestrator {
             }
 
             let mut confirmed = current.clone();
-            confirmed.transition.tracker_write_confirmed = true;
+            confirmed.transition.confirm_tracker_write();
             let Some(input) = Self::pending_terminal_transition_input(
                 &state,
                 issue_id,
@@ -6209,7 +6203,7 @@ impl Orchestrator {
             {
                 return;
             }
-            current.transition.tracker_write_confirmed = true;
+            current.transition.confirm_tracker_write();
         }
 
         self.complete_pending_terminal_transition(issue_id, expected.run_id.clone())
@@ -6261,6 +6255,18 @@ impl Orchestrator {
             }
         }
 
+        if let Err(error) = self.workspace_mgr.remove_workspace(issue_id).await {
+            self.record_pending_terminal_transition_failure(issue_id, &pending, error.to_string())
+                .await;
+            warn!(
+                issue_id = %issue_id,
+                identifier = %pending.identifier,
+                error = %error,
+                "failed to clean terminal workspace before release"
+            );
+            return;
+        }
+
         if let Err(error) = self
             .pipeline_journal
             .append_released(
@@ -6303,6 +6309,46 @@ impl Orchestrator {
             state.release_claim(issue_id);
             state.remove_pipeline_run(issue_id);
             state.clear_finalize_state(issue_id);
+        }
+    }
+
+    async fn record_pending_terminal_transition_failure(
+        &self,
+        issue_id: &str,
+        expected: &PendingTerminalEntry,
+        error: String,
+    ) {
+        let refreshed_input = {
+            let mut state = self.state.write().await;
+            let Some(current) = state.pending_terminal_transitions.get_mut(issue_id) else {
+                return;
+            };
+            if current.run_id != expected.run_id
+                || current.transition.target_state != expected.transition.target_state
+                || current.transition.outcome != expected.transition.outcome
+            {
+                return;
+            }
+            current.transition.attempt = current.transition.attempt.saturating_add(1);
+            current.transition.last_error = Some(error);
+            current.transition.last_attempted_at = Some(Utc::now());
+            let current = current.clone();
+            Self::pending_terminal_transition_input(
+                &state,
+                issue_id,
+                &current,
+                PipelineTransitionKind::PendingTerminalTransition,
+            )
+        };
+
+        if let Some(input) = refreshed_input {
+            if let Err(journal_error) = self.pipeline_journal.append(input).await {
+                warn!(
+                    issue_id = %issue_id,
+                    error = %journal_error,
+                    "failed to refresh pending terminal transition retry metadata"
+                );
+            }
         }
     }
 
@@ -17517,6 +17563,7 @@ agent:
         let original_agent = original_config.steps[0].agent.clone();
         let mut current_config = original_config.clone();
         current_config.steps[0].agent = "replacement-agent".to_string();
+        let max_retry_backoff_ms = current_config.agent.max_retry_backoff_ms;
         let config = Arc::new(RwLock::new(current_config));
         let issue = test_issue("1", "Todo");
         let failures_remaining = Arc::new(RwLock::new(1));
@@ -17531,11 +17578,18 @@ agent:
             runs: Arc::clone(&agent_runs),
         });
         let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path(&issue.id);
+        let metadata_path = workspace_mgr.metadata_path_for_test(&issue.id);
+        let original_metadata = std::fs::read_to_string(&metadata_path).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let orchestrator = Orchestrator::new(
             Arc::clone(&config),
-            tracker,
-            runner,
+            Arc::clone(&tracker),
+            Arc::clone(&runner),
             workspace_mgr,
             config_dir.path(),
             shutdown_rx,
@@ -17592,10 +17646,85 @@ agent:
             assert!(!state.completed.contains_key("1"));
         }
         assert_eq!(agent_runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(workspace_path.exists());
 
+        std::fs::write(&metadata_path, "{not-json").unwrap();
         orchestrator.handle_tick().await;
 
-        let state = orchestrator.state.read().await;
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            let pending = state.pending_terminal_transitions.get("1").unwrap();
+            assert!(pending.transition.tracker_write_confirmed);
+            assert_eq!(pending.transition.attempt, 1);
+            assert!(pending.transition.last_attempted_at.is_some());
+            assert!(pending.transition.last_error.is_some());
+            assert!(!state.completed.contains_key("1"));
+        }
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::Released));
+        assert!(workspace_path.exists());
+
+        std::fs::write(&metadata_path, original_metadata).unwrap();
+        drop(orchestrator);
+
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let recovered = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        recovered.restore_pipeline_runs_from_journal().await;
+        let restored_pending = {
+            let mut state = recovered.state.write().await;
+            let pending = state.pending_terminal_transitions.get_mut("1").unwrap();
+            let restored = pending.transition.clone();
+            pending.transition.last_attempted_at = Some(Utc::now() + chrono::Duration::minutes(1));
+            restored
+        };
+        assert!(restored_pending.tracker_write_confirmed);
+        assert_eq!(restored_pending.attempt, 1);
+        assert!(restored_pending.last_attempted_at.is_some());
+        assert!(restored_pending.last_error.is_some());
+
+        recovered.handle_tick().await;
+        assert!(workspace_path.exists());
+        let restored_records = recovered
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(!restored_records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::Released));
+
+        let elapsed_backoff_ms =
+            calculate_backoff(restored_pending.attempt, max_retry_backoff_ms) + 1;
+        let retry_due_at =
+            Utc::now() - chrono::Duration::milliseconds(i64::try_from(elapsed_backoff_ms).unwrap());
+        recovered
+            .state
+            .write()
+            .await
+            .pending_terminal_transitions
+            .get_mut("1")
+            .unwrap()
+            .transition
+            .last_attempted_at = Some(retry_due_at);
+        recovered.handle_tick().await;
+
+        let state = recovered.state.read().await;
         assert!(!state.is_claimed("1"));
         assert!(state.pending_terminal_transitions.get("1").is_none());
         assert!(state.get_pipeline_run("1").is_none());
@@ -17611,8 +17740,9 @@ agent:
             ]
         );
         assert_eq!(agent_runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!workspace_path.exists());
 
-        let records = orchestrator
+        let records = recovered
             .pipeline_journal
             .read_records_for_issue("1")
             .await

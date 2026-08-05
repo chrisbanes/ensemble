@@ -456,14 +456,16 @@ Pipeline run recovery:
   configured state transition idempotently without rerunning pipeline steps or finalization, and
   persist updated attempt/error metadata after failures.
 - After the tracker write is confirmed, Ensemble records that applied state as a still-live journal
-  phase, clears any terminal interaction wait, and persists completion history idempotently. A
-  restart in this phase finishes those local effects without repeating tracker or agent work.
+  phase, clears any terminal interaction wait, persists completion history idempotently, and removes
+  the issue workspace. Workspace cleanup failure retains the pending transition for bounded-backoff
+  retry. A restart in this phase finishes those local effects without repeating tracker or agent
+  work.
 - Stale `Running` steps from a previous process are normalized to `Pending`; agent processes are not
   recovered across orchestrator restarts or in-process journal rehydration.
 - Ensemble appends `released` only after the terminal tracker transition is confirmed (or no
-  tracker write is supported) and completion history is durable. That boundary prevents older
-  snapshots for the issue from being restored after completion, stop, terminal reconciliation, or
-  whole-issue retry.
+  tracker write is supported), completion history is durable, and the issue workspace has been
+  removed. That boundary prevents older snapshots for the issue from being restored after
+  completion, stop, terminal reconciliation, or whole-issue retry.
 
 #### 4.1.7 StepOutput
 

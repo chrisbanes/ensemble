@@ -132,6 +132,15 @@ pub struct PendingTerminalTransition {
     pub history_record: Option<HistoryRecord>,
 }
 
+impl PendingTerminalTransition {
+    pub(crate) fn confirm_tracker_write(&mut self) {
+        self.tracker_write_confirmed = true;
+        self.attempt = 0;
+        self.last_error = None;
+        self.last_attempted_at = None;
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineTransitionRecord {
     pub schema_version: u32,
