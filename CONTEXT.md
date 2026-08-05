@@ -32,6 +32,14 @@ _Avoid_: Run, session
 The structured result by which a step reports success, failure, concern, summary, and downstream data.
 _Avoid_: Verdict
 
+**Artifact snapshot**:
+An immutable identity for material exposed by one step to downstream evaluation, ensuring sibling evaluators assess the same subject.
+_Avoid_: Current workspace, live files
+
+**Assessment**:
+A structured judgment about whether an artifact snapshot satisfies declared criteria, distinct from whether the evaluating step completed successfully.
+_Avoid_: Step result, execution result
+
 **Interaction request**:
 A durable question, approval, or handoff that blocks a run until a human resolves it.
 _Avoid_: Prompt, comment
