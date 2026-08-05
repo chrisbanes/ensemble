@@ -383,6 +383,12 @@ Pipeline run recovery:
   dispatches no pipeline work, and does not project a terminal tracker state. `blocked` is likewise
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
+- An optional `push_and_pr` `review_state` is an issue-level retained projection, never a terminal
+  outcome. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
+  `in_flight` before the tracker write and applies only after an exact target-state read. It writes
+  only after every configured repository is non-active and every pull request is uniquely durable
+  at its stored SHA. Read failures, terminal states, and unexpected states block the delivery while
+  retaining the claim, workspace, branch, SHA, pull request, and artifacts without redispatch.
 - Required pull-request checks run only after the retained delivery identity reaches `waiting` or
   `published`. Results form one ordered suffix batch per evaluation. Restart resumes a partial
   batch without push, creation, or discovery; an explicit finalize retry appends a complete new

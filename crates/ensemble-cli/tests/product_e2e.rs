@@ -808,6 +808,7 @@ fn live_dogfood_config(inputs: &LiveDogfoodInputs, run: &LiveDogfoodRun) -> Stri
   project_number: {}
   active_states:
     - Ready to implement
+    - In progress
   terminal_states:
     - Done
 workspace:
@@ -816,7 +817,9 @@ repos:
   - path: {}
     branch: main
     finalize:
-      mode: none
+      mode: push_and_pr
+      approval_required: false
+      review_state: In review
 agents:
   builder:
     acpx_agent: {}
@@ -1380,7 +1383,7 @@ async fn wait_for_live_project_status(
     }
 }
 
-async fn wait_for_live_completion(
+async fn wait_for_live_review_projection(
     client: &reqwest::Client,
     base_url: &str,
     issue_number: u64,
@@ -1394,7 +1397,19 @@ async fn wait_for_live_completion(
                     .json::<Value>()
                     .await
                     .map_err(|error| error.to_string())?;
-                if detail["status"] == "completed_succeeded" {
+                if detail["artifacts"]["repos"]
+                    .as_array()
+                    .is_some_and(|repositories| {
+                        repositories.iter().any(|repository| {
+                            repository["review_state"] == "In review"
+                                && repository["review_projection"] == "applied"
+                                && repository["pr_number"].as_u64().is_some()
+                                && repository["pr_url"]
+                                    .as_str()
+                                    .is_some_and(|url| !url.is_empty())
+                        })
+                    })
+                {
                     return Ok(detail);
                 }
                 detail["status"].as_str().unwrap_or("unknown").to_string()
@@ -1404,7 +1419,7 @@ async fn wait_for_live_completion(
         };
         if Instant::now() >= deadline {
             return Err(format!(
-                "wait for terminal host state: timed out; last observation: {}",
+                "wait for review-projected host state: timed out; last observation: {}",
                 last_observation
             ));
         }
@@ -1422,7 +1437,7 @@ async fn wait_for_live_history(
     loop {
         let response = client
             .get(format!(
-                "{base_url}/api/v1/history?outcome=succeeded&step=implement"
+                "{base_url}/api/v1/history?outcome=in_review&step=implement"
             ))
             .send()
             .await
@@ -1511,7 +1526,7 @@ fn verify_live_artifact(
         return Err("verify committed artifact: commit message did not match".to_string());
     }
     let remote_branch = live_git(
-        "verify no remote branch",
+        "verify published remote branch",
         &worktree,
         [
             "ls-remote".to_string(),
@@ -1520,51 +1535,51 @@ fn verify_live_artifact(
         ],
         inputs,
     )?;
-    if remote_branch_contains(&remote_branch, &branch)
-        || marker_owned_remote_branch(&remote_branch, &run.marker)
-    {
-        return Err("verify no remote branch: marker branch was published".to_string());
+    let expected_ref = format!("refs/heads/{branch}");
+    let matching_remote_heads: Vec<_> = remote_branch
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(_, reference)| *reference == expected_ref)
+        .collect();
+    if matching_remote_heads.len() != 1 || matching_remote_heads[0].0 != sha {
+        return Err(
+            "verify published remote branch: expected exactly one branch at the local commit"
+                .to_string(),
+        );
     }
     let branch_pull_requests = live_gh(
-        "verify no pull request for generated branch",
+        "verify published pull request for generated branch",
         [
             "pr".to_string(),
             "list".to_string(),
             "--repo".to_string(),
             "chrisbanes/bamboon".to_string(),
             "--state".to_string(),
-            "all".to_string(),
+            "open".to_string(),
             "--head".to_string(),
             branch.clone(),
             "--json".to_string(),
-            "number".to_string(),
+            "number,url,headRefOid,baseRefName".to_string(),
         ],
         inputs,
     )?;
-    if branch_pull_requests != "[]\n" {
+    let pull_requests: Vec<Value> =
+        serde_json::from_str(&branch_pull_requests).map_err(|error| {
+            format!("verify published pull request: invalid GitHub response: {error}")
+        })?;
+    let [pull_request] = pull_requests.as_slice() else {
         return Err(
-            "verify no pull request: a pull request existed for the generated branch".to_string(),
+            "verify published pull request: expected exactly one open pull request".to_string(),
         );
-    }
-    let pull_requests = live_gh(
-        "verify no pull request",
-        [
-            "pr".to_string(),
-            "list".to_string(),
-            "--repo".to_string(),
-            "chrisbanes/bamboon".to_string(),
-            "--state".to_string(),
-            "all".to_string(),
-            "--search".to_string(),
-            run.marker.clone(),
-            "--json".to_string(),
-            "number,title,headRefName".to_string(),
-        ],
-        inputs,
-    )?;
-    if marker_owned_pull_request(&pull_requests, &run.marker)? {
+    };
+    if pull_request["headRefOid"] != sha
+        || pull_request["baseRefName"] != "main"
+        || pull_request["number"].as_u64().is_none()
+        || pull_request["url"].as_str().is_none_or(str::is_empty)
+    {
         return Err(
-            "verify no pull request: a pull request existed for the generated branch".to_string(),
+            "verify published pull request: branch, base, commit, or identity did not match"
+                .to_string(),
         );
     }
     Ok((branch, sha.to_string()))
@@ -1617,7 +1632,7 @@ fn marker_owned_pull_request(pull_requests: &str, marker: &str) -> Result<bool, 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the explicitly provisioned private dogfood Project, clean Bamboon clone, ACPX, and model/network cost"]
-async fn live_bamboon_issue_commits_without_publication() {
+async fn live_bamboon_issue_publishes_pull_request() {
     let inputs = LiveDogfoodInputs::from_env().expect("live dogfood inputs");
     let run = LiveDogfoodRun::create().expect("persistent live dogfood run directory");
     let result = async {
@@ -1643,7 +1658,8 @@ async fn live_bamboon_issue_commits_without_publication() {
                 .map_err(|error| format!("wait for host: {error}"))?;
             wait_for_live_project_status(&inputs, &resources.issue_id, "In progress").await?;
             let detail =
-                wait_for_live_completion(&client, &base_url, resources.issue_number).await?;
+                wait_for_live_review_projection(&client, &base_url, resources.issue_number).await?;
+            wait_for_live_project_status(&inputs, &resources.issue_id, "In review").await?;
             wait_for_live_history(&client, &base_url, resources.issue_number).await?;
             let (branch, sha) = verify_live_artifact(&inputs, &run)?;
             Ok::<_, String>((detail, branch, sha))
@@ -1729,11 +1745,14 @@ fn live_dogfood_marker_artifact_and_config_are_run_scoped() {
     assert!(config.contains("project_number: 12"));
     assert!(config.contains("acpx_agent: 'codex'"));
     assert!(config.contains("tracker_state: In progress"));
+    assert!(config.contains("    - In progress"));
     assert!(config.contains("on_success: Done"));
     assert!(config.contains("max_cycles: 1"));
     assert!(config.contains("max_concurrent_agents: 1"));
     assert!(config.contains("max_step_parallelism: 1"));
-    assert!(config.contains("mode: none"));
+    assert!(config.contains("mode: push_and_pr"));
+    assert!(config.contains("approval_required: false"));
+    assert!(config.contains("review_state: In review"));
     assert!(!config.contains("api_key:"));
 }
 
@@ -1762,8 +1781,8 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "ENSEMBLE_DOGFOOD_BAMBOON_PATH",
         "ENSEMBLE_DOGFOOD_AGENT",
         "gh auth token",
-        "finalization set to",
-        "`none`",
+        "Ensemble alone pushes",
+        "`In review`",
         "never part of CI",
     ] {
         assert!(

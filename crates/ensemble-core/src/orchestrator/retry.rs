@@ -1467,6 +1467,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            review_projection: None,
         };
         state
             .write()

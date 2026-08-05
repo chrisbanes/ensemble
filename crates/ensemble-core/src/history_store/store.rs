@@ -457,7 +457,10 @@ mod tests {
                 finalize_mode: "push_and_pr".into(),
                 finalize_status: "succeeded".into(),
                 pushed_ref: Some("origin/ensemble/repo-1".into()),
+                pr_number: Some(12),
                 pr_url: Some("https://github.com/acme/repo/pull/12".into()),
+                review_state: None,
+                review_projection: None,
                 last_error: None,
             }],
             transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {

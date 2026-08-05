@@ -1045,6 +1045,66 @@ fn reject_legacy_agent_permission_policy(
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
+    let mut review_state: Option<&str> = None;
+    for (index, repo) in config.repos.iter().enumerate() {
+        let Some(target) = repo.finalize.review_state.as_deref() else {
+            continue;
+        };
+        let repo_key = repository_key(repo, index);
+        if target.trim().is_empty() {
+            return Err(PipelineError::InvalidFinalizeConfig {
+                repo: repo_key,
+                reason: "review_state must not be empty".to_string(),
+            });
+        }
+        if repo.finalize.mode != crate::workspace::finalize::FinalizeMode::PushAndPr {
+            return Err(PipelineError::InvalidFinalizeConfig {
+                repo: repo_key,
+                reason: "review_state is valid only with push_and_pr finalization".to_string(),
+            });
+        }
+        if target.eq_ignore_ascii_case(&config.on_success) {
+            return Err(PipelineError::InvalidFinalizeConfig {
+                repo: repo_key,
+                reason: "review_state must not equal on_success".to_string(),
+            });
+        }
+        if config
+            .tracker
+            .terminal_states
+            .iter()
+            .any(|state| target.eq_ignore_ascii_case(state))
+        {
+            return Err(PipelineError::InvalidFinalizeConfig {
+                repo: repo_key,
+                reason: "review_state must not be a configured terminal state".to_string(),
+            });
+        }
+        if let Some(existing) = review_state {
+            if !target.eq_ignore_ascii_case(existing) {
+                return Err(PipelineError::InvalidFinalizeConfig {
+                    repo: repo_key,
+                    reason: "all review_state values must use the same value".to_string(),
+                });
+            }
+        } else {
+            review_state = Some(target);
+        }
+    }
+    if review_state.is_some() {
+        for (index, repo) in config.repos.iter().enumerate() {
+            if repo.finalize.mode == crate::workspace::finalize::FinalizeMode::PushAndPr
+                && repo.finalize.review_state.is_none()
+            {
+                return Err(PipelineError::InvalidFinalizeConfig {
+                    repo: repository_key(repo, index),
+                    reason: "all push_and_pr repositories must opt in to the review_state"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
     let mut acceptance_names = std::collections::HashSet::new();
     for command in &config.acceptance.commands {
         let display_name = if command.name.trim().is_empty() {
@@ -1471,6 +1531,46 @@ on_failure: Failed
             }]
         );
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn review_state_requires_one_non_terminal_push_and_pr_target() {
+        let valid = format!(
+            "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: In review\n",
+            minimal_yaml()
+        );
+        let config = parse_config(&valid).unwrap();
+        assert_eq!(
+            config.repos[0].finalize.review_state.as_deref(),
+            Some("In review")
+        );
+        assert!(validate_config(&config).is_ok());
+
+        let cases = [
+            ("blank", "mode: push_and_pr\n      review_state: '  '", "must not be empty"),
+            ("push", "mode: push\n      review_state: In review", "push_and_pr"),
+            ("success", "mode: push_and_pr\n      review_state: Done", "on_success"),
+            ("partial", "mode: push_and_pr\n      review_state: In review\n  - path: /tmp/other\n    branch: main\n    finalize:\n      mode: push_and_pr", "must opt in"),
+            ("conflict", "mode: push_and_pr\n      review_state: In review\n  - path: /tmp/other\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: Needs review", "same value"),
+        ];
+        for (label, finalize, expected) in cases {
+            let yaml = format!(
+                "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      {finalize}\n",
+                minimal_yaml()
+            );
+            let config = parse_config(&yaml).unwrap();
+            let error = validate_config(&config).expect_err(label);
+            assert!(error.to_string().contains(expected), "{label}: {error}");
+        }
+
+        let terminal = format!(
+            "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: Failed\n",
+            minimal_yaml()
+        );
+        let mut config = parse_config(&terminal).unwrap();
+        config.tracker.terminal_states.push("Failed".to_string());
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("terminal"));
     }
 
     #[test]

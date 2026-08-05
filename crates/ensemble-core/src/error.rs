@@ -132,6 +132,8 @@ pub enum AgentError {
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
+    #[error("invalid repository finalization config for {repo}: {reason}")]
+    InvalidFinalizeConfig { repo: String, reason: String },
     #[error("invalid acceptance command {name}: {reason}")]
     InvalidAcceptanceCommand { name: String, reason: String },
     #[error("invalid acceptance {kind} requirement {name}: {reason}")]

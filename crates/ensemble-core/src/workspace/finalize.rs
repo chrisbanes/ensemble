@@ -26,6 +26,9 @@ pub struct RepoFinalizeConfig {
     pub mode: FinalizeMode,
     #[serde(default)]
     pub approval_required: bool,
+    /// Optional non-terminal tracker state projected after durable pull-request delivery.
+    #[serde(default)]
+    pub review_state: Option<String>,
 }
 
 impl Default for RepoFinalizeConfig {
@@ -34,6 +37,7 @@ impl Default for RepoFinalizeConfig {
             enabled: default_finalize_enabled(),
             mode: FinalizeMode::None,
             approval_required: false,
+            review_state: None,
         }
     }
 }

@@ -311,6 +311,13 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
     use crate::error::PipelineError;
 
     match e {
+        PipelineError::InvalidFinalizeConfig { repo, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid repository finalization config for '{repo}': {reason}"),
+            section: "workflow".to_string(),
+            field: Some("finalize.review_state".to_string()),
+            path: Some(format!("repos.{repo}.finalize.review_state")),
+        },
         PipelineError::InvalidAcceptanceCommand { name, reason } => ValidationIssue {
             kind: ValidationIssueKind::Config,
             message: format!("invalid acceptance command '{}': {}", name, reason),
