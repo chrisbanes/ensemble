@@ -94,22 +94,31 @@ the delivery record persists its remote branch and pull-request identity. From t
 preserves the run directory, host stdout/stderr, issue, Project item, workspace, branch, and pull
 request for diagnosis. The test prints the redacted, run-scoped preservation location on success
 or failure. Do not perform routine cleanup or fixture repair from the harness; merge/close,
-restart-recovery proof, and cleanup remain outside this slice.
+and cleanup remain outside this slice.
 
 Once dispatch begins, the run retains one cumulative `<run-root>/evidence-v1.json` inspection
 document with format `ensemble.live-dogfood-evidence` and schema version 1. It records a
 pre-publication snapshot after local artifact, branch, and SHA validation but before any generated
-remote branch or pull request; a post-delivery snapshot is appended only after the host, Project,
-history, Git, and pull-request observations agree. Its preserved failure snapshot records a
-redacted last phase and assertions not reached. The document refers only to relative log names
-(such as `host.stdout.log`), stable run identities, and repository-relative artifacts: it excludes
-the private Project value, credentials, absolute paths, generated YAML, and raw command output.
+remote branch or pull request; a post-delivery snapshot is appended only after the first host,
+Project, history, Git, and pull-request observations agree. Only then does the harness stop the
+first host. It starts a second host from the unchanged config, run root, and workspace root, then
+appends one `post_restart` snapshot. This post-restart proof requires two configured polling intervals
+showing the same retained delivery. It is black-box: it compares public host detail, state, and history with
+the marker-scoped GitHub pull request, Git ref, and persisted worktree/transcript artifacts; it
+does not inspect private orchestrator state. Its preserved failure snapshot records a redacted last
+phase and assertions not reached. The document refers only to stable run identities and
+repository-relative artifacts: it excludes the private Project value, credentials, absolute paths,
+generated YAML, and raw command output.
+
+Each host lifetime has separate relative log names: `host-1.stdout.log`, `host-1.stderr.log`,
+`host-2.stdout.log`, and `host-2.stderr.log`. On a restart mismatch, timeout, or ambiguous
+observation, the harness stops without another remote mutation and preserves the evidence,
+both host log pairs, run, worktree, branch, and pull request for diagnosis. Do not clean or repair
+those retained artifacts from the harness.
 
 The harness writes `evidence-v1.json` by flushing a same-directory temporary file and atomically
 replacing the prior document. If a replacement fails, the prior document and temporary diagnostic
-are retained and the harness stops without cleanup or another publication attempt. A future
-post-restart snapshot must extend this same v1 document; restart behavior itself remains outside
-this tracer bullet.
+are retained and the harness stops without cleanup or another publication attempt.
 
 ## Project structure
 

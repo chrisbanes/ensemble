@@ -686,6 +686,8 @@ const LIVE_DOGFOOD_PROJECT: &str = "ENSEMBLE_DOGFOOD_PROJECT_NUMBER";
 const LIVE_DOGFOOD_BAMBOON_PATH: &str = "ENSEMBLE_DOGFOOD_BAMBOON_PATH";
 const LIVE_DOGFOOD_AGENT: &str = "ENSEMBLE_DOGFOOD_AGENT";
 const LIVE_DOGFOOD_STATUSES: [&str; 4] = ["Ready to implement", "In progress", "In review", "Done"];
+const LIVE_DOGFOOD_POLL_INTERVAL_MS: u64 = 1_000;
+const LIVE_DOGFOOD_RESTART_STABLE_POLLS: usize = 2;
 static LIVE_DOGFOOD_SEQUENCE: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug)]
@@ -838,6 +840,22 @@ enum LiveDogfoodEvidenceSnapshot {
         review_projection: String,
         assertions: Vec<LiveDogfoodEvidenceAssertion>,
     },
+    PostRestart {
+        issue_identifier: String,
+        workspace_identifier: String,
+        generated_branch: String,
+        local_sha: String,
+        remote_sha: String,
+        pull_request: LiveDogfoodEvidencePullRequest,
+        review_target: String,
+        review_projection: String,
+        transcript_identity: String,
+        transcript_count: usize,
+        transcript_bytes: u64,
+        worktree_identity: String,
+        worktree_count: usize,
+        assertions: Vec<LiveDogfoodEvidenceAssertion>,
+    },
     PreservedFailure {
         last_observation: String,
         assertions_not_reached: Vec<String>,
@@ -867,7 +885,7 @@ impl LiveDogfoodEvidenceV1 {
                 workspace_identifier: format!("run/{}", run.marker),
             },
             outcome: LiveDogfoodEvidenceOutcome::InReview,
-            retained_logs: vec!["host.stdout.log", "host.stderr.log"],
+            retained_logs: LiveDogfoodHostLifetime::all_log_names().to_vec(),
             snapshots: Vec::new(),
         }
     }
@@ -964,6 +982,281 @@ impl LiveDogfoodEvidenceV1 {
             });
         Ok(())
     }
+
+    fn append_post_restart(
+        &mut self,
+        observation: &LiveDogfoodRecoveryObservation,
+    ) -> Result<(), String> {
+        if !matches!(
+            self.snapshots.as_slice(),
+            [
+                LiveDogfoodEvidenceSnapshot::PrePublication { .. },
+                LiveDogfoodEvidenceSnapshot::PostDelivery { .. }
+            ]
+        ) {
+            return Err(
+                "evidence-v1: post-restart snapshot requires pre-publication and post-delivery snapshots"
+                    .to_string(),
+            );
+        }
+        if self.run.issue_identifier != observation.issue_identifier
+            || self.run.workspace_identifier != observation.workspace_identifier
+        {
+            return Err(
+                "evidence-v1: post-restart identity did not match retained run".to_string(),
+            );
+        }
+        let [_, LiveDogfoodEvidenceSnapshot::PostDelivery {
+            remote_branch,
+            remote_sha,
+            pull_request,
+            review_target,
+            review_projection,
+            ..
+        }] = self.snapshots.as_slice()
+        else {
+            unreachable!("validated post-delivery snapshot order");
+        };
+        if remote_branch != &observation.branch
+            || remote_sha != &observation.remote_sha
+            || remote_sha != &observation.local_sha
+            || pull_request.number != observation.pull_request_number
+            || pull_request.url != observation.pull_request_url
+            || review_target != &observation.review_target
+            || review_projection != &observation.review_projection
+        {
+            return Err(
+                "evidence-v1: post-restart delivery did not match post-delivery".to_string(),
+            );
+        }
+        self.snapshots
+            .push(LiveDogfoodEvidenceSnapshot::PostRestart {
+                issue_identifier: observation.issue_identifier.clone(),
+                workspace_identifier: observation.workspace_identifier.clone(),
+                generated_branch: observation.branch.clone(),
+                local_sha: observation.local_sha.clone(),
+                remote_sha: observation.remote_sha.clone(),
+                pull_request: LiveDogfoodEvidencePullRequest {
+                    number: observation.pull_request_number,
+                    url: observation.pull_request_url.clone(),
+                },
+                review_target: observation.review_target.clone(),
+                review_projection: observation.review_projection.clone(),
+                transcript_identity: observation.transcript_identity.clone(),
+                transcript_count: observation.transcript_count,
+                transcript_bytes: observation.transcript_bytes,
+                worktree_identity: observation.worktree_identity.clone(),
+                worktree_count: observation.worktree_count,
+                assertions: vec![
+                    evidence_assertion("same_config_location"),
+                    evidence_assertion("same_delivery_identity"),
+                    evidence_assertion("no_redispatch_or_duplicate_delivery"),
+                    evidence_assertion("released_agent_capacity"),
+                    evidence_assertion("two_stable_polls"),
+                ],
+            });
+        Ok(())
+    }
+
+    fn has_post_delivery(&self) -> bool {
+        self.snapshots
+            .iter()
+            .any(|snapshot| matches!(snapshot, LiveDogfoodEvidenceSnapshot::PostDelivery { .. }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiveDogfoodRecoveryObservation {
+    issue_identifier: String,
+    run_identifier: String,
+    workspace_identifier: String,
+    branch: String,
+    local_sha: String,
+    remote_sha: String,
+    pull_request_number: u64,
+    pull_request_url: String,
+    review_target: String,
+    review_projection: String,
+    transcript_identity: String,
+    transcript_count: usize,
+    transcript_bytes: u64,
+    worktree_identity: String,
+    worktree_count: usize,
+    active_agents: usize,
+}
+
+impl LiveDogfoodRecoveryObservation {
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self {
+            issue_identifier: "chrisbanes/bamboon#39".to_string(),
+            run_identifier: "live-dogfood-restart-order".to_string(),
+            workspace_identifier: "run/live-dogfood-restart-order".to_string(),
+            branch: "ensemble-live-dogfood-restart-order".to_string(),
+            local_sha: "local-sha".to_string(),
+            remote_sha: "local-sha".to_string(),
+            pull_request_number: 39,
+            pull_request_url: "https://github.com/chrisbanes/bamboon/pull/39".to_string(),
+            review_target: "In review".to_string(),
+            review_projection: "applied".to_string(),
+            transcript_identity: "run/transcript-39".to_string(),
+            transcript_count: 1,
+            transcript_bytes: 999,
+            worktree_identity: "workspace/live-dogfood".to_string(),
+            worktree_count: 1,
+            active_agents: 0,
+        }
+    }
+
+    fn matches_recovery(&self, recovered: &Self) -> Result<(), String> {
+        for (name, expected, actual) in [
+            ("issue", &self.issue_identifier, &recovered.issue_identifier),
+            ("run", &self.run_identifier, &recovered.run_identifier),
+            (
+                "workspace",
+                &self.workspace_identifier,
+                &recovered.workspace_identifier,
+            ),
+            ("branch", &self.branch, &recovered.branch),
+            ("local SHA", &self.local_sha, &recovered.local_sha),
+            ("remote SHA", &self.remote_sha, &recovered.remote_sha),
+            (
+                "pull-request URL",
+                &self.pull_request_url,
+                &recovered.pull_request_url,
+            ),
+            (
+                "review target",
+                &self.review_target,
+                &recovered.review_target,
+            ),
+            (
+                "review projection",
+                &self.review_projection,
+                &recovered.review_projection,
+            ),
+            (
+                "transcript identity",
+                &self.transcript_identity,
+                &recovered.transcript_identity,
+            ),
+            (
+                "worktree identity",
+                &self.worktree_identity,
+                &recovered.worktree_identity,
+            ),
+        ] {
+            if expected != actual {
+                return Err(format!("verify restart recovery: {name} changed"));
+            }
+        }
+        if self.pull_request_number != recovered.pull_request_number {
+            return Err("verify restart recovery: pull-request number changed".to_string());
+        }
+        for (name, expected, actual) in [
+            (
+                "transcript count",
+                self.transcript_count,
+                recovered.transcript_count,
+            ),
+            (
+                "worktree count",
+                self.worktree_count,
+                recovered.worktree_count,
+            ),
+        ] {
+            if expected != actual {
+                return Err(format!("verify restart recovery: {name} changed"));
+            }
+        }
+        if self.transcript_bytes != recovered.transcript_bytes {
+            return Err("verify restart recovery: transcript bytes changed".to_string());
+        }
+        if recovered.active_agents != 0 {
+            return Err("verify restart recovery: public agent capacity was consumed".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn with_issue_identifier(mut self, value: &str) -> Self {
+        self.issue_identifier = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_run_identifier(mut self, value: &str) -> Self {
+        self.run_identifier = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_workspace_identifier(mut self, value: &str) -> Self {
+        self.workspace_identifier = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_branch(mut self, value: &str) -> Self {
+        self.branch = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_sha(mut self, value: &str) -> Self {
+        self.local_sha = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_pull_request(mut self, value: u64) -> Self {
+        self.pull_request_number = value;
+        self
+    }
+    #[cfg(test)]
+    fn with_review_projection(mut self, value: &str) -> Self {
+        self.review_projection = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_transcript_count(mut self, value: usize) -> Self {
+        self.transcript_count = value;
+        self
+    }
+    #[cfg(test)]
+    fn with_transcript_bytes(mut self, value: u64) -> Self {
+        self.transcript_bytes = value;
+        self
+    }
+    #[cfg(test)]
+    fn with_worktree_count(mut self, value: usize) -> Self {
+        self.worktree_count = value;
+        self
+    }
+    #[cfg(test)]
+    fn with_active_agents(mut self, value: usize) -> Self {
+        self.active_agents = value;
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+enum LiveDogfoodHostLifetime {
+    First,
+    Second,
+}
+
+impl LiveDogfoodHostLifetime {
+    fn log_names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::First => ("host-1.stdout.log", "host-1.stderr.log"),
+            Self::Second => ("host-2.stdout.log", "host-2.stderr.log"),
+        }
+    }
+
+    fn all_log_names() -> [&'static str; 4] {
+        [
+            "host-1.stdout.log",
+            "host-1.stderr.log",
+            "host-2.stdout.log",
+            "host-2.stderr.log",
+        ]
+    }
 }
 
 fn evidence_assertion(name: &'static str) -> LiveDogfoodEvidenceAssertion {
@@ -1031,7 +1324,9 @@ fn persist_live_dogfood_failure(
     pre_publication_captured: bool,
     error: &str,
 ) -> Result<(), String> {
-    let assertions_not_reached = if pre_publication_captured {
+    let assertions_not_reached = if evidence.has_post_delivery() {
+        ["post_restart"].as_slice()
+    } else if pre_publication_captured {
         ["post_delivery"].as_slice()
     } else {
         ["pre_publication", "post_delivery"].as_slice()
@@ -1075,6 +1370,30 @@ fn live_dogfood_failure_observation(error: &str) -> &'static str {
             "verify published pull request",
         ),
         ("verify public host detail:", "verify public host detail"),
+        ("wait for restarted host:", "wait for restarted host"),
+        ("start second host:", "start second host"),
+        (
+            "verify restart public detail:",
+            "verify restart public detail",
+        ),
+        (
+            "verify restart public history:",
+            "verify restart public history",
+        ),
+        (
+            "verify restart public state:",
+            "verify restart public state",
+        ),
+        ("verify restart delivery:", "verify restart delivery"),
+        (
+            "verify restart persisted worktree:",
+            "verify restart persisted worktree",
+        ),
+        (
+            "verify restart persisted transcript:",
+            "verify restart persisted transcript",
+        ),
+        ("verify restart recovery:", "verify restart recovery"),
     ] {
         if error.starts_with(prefix) {
             return observation;
@@ -1120,7 +1439,7 @@ on_success: Done
 on_failure: Done
 max_cycles: 1
 polling:
-  interval_ms: 1000
+  interval_ms: {LIVE_DOGFOOD_POLL_INTERVAL_MS}
 concurrency:
   max_concurrent_agents: 1
   max_step_parallelism: 1
@@ -1614,20 +1933,236 @@ fn create_live_resources(
     Ok(resources)
 }
 
+async fn capture_live_recovery_observation(
+    client: &reqwest::Client,
+    base_url: &str,
+    inputs: &LiveDogfoodInputs,
+    run: &LiveDogfoodRun,
+    issue_number: u64,
+    worktree: &Path,
+    branch: &str,
+    local_sha: &str,
+    expected_pull_request_number: u64,
+    expected_pull_request_url: &str,
+) -> Result<LiveDogfoodRecoveryObservation, String> {
+    let issue_identifier = format!("chrisbanes/bamboon#{issue_number}");
+    let detail = client
+        .get(format!(
+            "{base_url}/api/v1/chrisbanes%2Fbamboon%23{issue_number}"
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("verify restart public detail: request failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("verify restart public detail: request failed: {error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("verify restart public detail: invalid response: {error}"))?;
+    let (review_target, review_projection) = verify_live_review_detail(
+        &detail,
+        &issue_identifier,
+        expected_pull_request_number,
+        expected_pull_request_url,
+    )?;
+
+    let history = client
+        .get(format!(
+            "{base_url}/api/v1/history?outcome=in_review&step=implement"
+        ))
+        .send()
+        .await
+        .map_err(|error| format!("verify restart public history: request failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("verify restart public history: request failed: {error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("verify restart public history: invalid response: {error}"))?;
+    let history_count = history["records"]
+        .as_array()
+        .ok_or_else(|| "verify restart public history: records were unavailable".to_string())?
+        .iter()
+        .filter(|record| record["issue_identifier"] == issue_identifier)
+        .count();
+    if history_count != 1 {
+        return Err("verify restart public history: retained run count changed".to_string());
+    }
+
+    let state = client
+        .get(format!("{base_url}/api/v1/state"))
+        .send()
+        .await
+        .map_err(|error| format!("verify restart public state: request failed: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("verify restart public state: request failed: {error}"))?
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("verify restart public state: invalid response: {error}"))?;
+    let active_agents = validate_live_public_agent_capacity(&state)?;
+    let (pull_request_number, pull_request_url) =
+        verify_live_post_delivery(inputs, worktree, branch, local_sha)?;
+    if pull_request_number != expected_pull_request_number
+        || pull_request_url != expected_pull_request_url
+    {
+        return Err("verify restart delivery: pull-request identity changed".to_string());
+    }
+    let (
+        worktree_identity,
+        worktree_count,
+        transcript_identity,
+        transcript_count,
+        transcript_bytes,
+    ) = inspect_live_dogfood_persisted_artifacts(run, worktree)?;
+
+    Ok(LiveDogfoodRecoveryObservation {
+        issue_identifier,
+        run_identifier: run.marker.clone(),
+        workspace_identifier: format!("run/{}", run.marker),
+        branch: branch.to_string(),
+        local_sha: local_sha.to_string(),
+        remote_sha: local_sha.to_string(),
+        pull_request_number,
+        pull_request_url,
+        review_target,
+        review_projection,
+        transcript_identity,
+        transcript_count,
+        transcript_bytes,
+        worktree_identity,
+        worktree_count,
+        active_agents,
+    })
+}
+
+fn validate_live_public_agent_capacity(state: &Value) -> Result<usize, String> {
+    let active_agents = state["counts"]["running"].as_u64().ok_or_else(|| {
+        "verify restart public state: running capacity was unavailable".to_string()
+    })? as usize;
+    let running = state["running"]
+        .as_array()
+        .ok_or_else(|| "verify restart public state: running rows were unavailable".to_string())?;
+    if running.len() != active_agents {
+        return Err("verify restart public state: running capacity was inconsistent".to_string());
+    }
+    if !running.is_empty() {
+        return Err("verify restart public state: public agent capacity was consumed".to_string());
+    }
+    Ok(active_agents)
+}
+
+fn inspect_live_dogfood_persisted_artifacts(
+    run: &LiveDogfoodRun,
+    worktree: &Path,
+) -> Result<(String, usize, String, usize, u64), String> {
+    let workspaces = run.root.join("workspaces");
+    let discovered_worktree = live_dogfood_worktree(&workspaces)?;
+    if discovered_worktree != worktree {
+        return Err("verify restart persisted worktree: retained identity changed".to_string());
+    }
+    let worktree_identity = discovered_worktree
+        .strip_prefix(&workspaces)
+        .map_err(|_| "verify restart persisted worktree: identity was outside the run".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let runs = fs::read_dir(discovered_worktree.join(".ensemble").join("runs")).map_err(|_| {
+        "verify restart persisted transcript: retained run was unavailable".to_string()
+    })?;
+    let transcript_paths = runs
+        .map(|entry| {
+            entry
+                .map(|entry| {
+                    entry
+                        .path()
+                        .join("steps")
+                        .join("implement")
+                        .join("transcript.jsonl")
+                })
+                .map_err(|_| {
+                    "verify restart persisted transcript: run entry was unavailable".to_string()
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    let [transcript] = transcript_paths.as_slice() else {
+        return Err("verify restart persisted transcript: transcript count changed".to_string());
+    };
+    let transcript_identity = transcript
+        .strip_prefix(&workspaces)
+        .map_err(|_| {
+            "verify restart persisted transcript: identity was outside the run".to_string()
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let transcript_bytes = fs::metadata(transcript)
+        .map_err(|_| "verify restart persisted transcript: metadata was unavailable".to_string())?
+        .len();
+    Ok((
+        worktree_identity,
+        1,
+        transcript_identity,
+        1,
+        transcript_bytes,
+    ))
+}
+
+async fn verify_live_restart_stability(
+    client: &reqwest::Client,
+    base_url: &str,
+    inputs: &LiveDogfoodInputs,
+    run: &LiveDogfoodRun,
+    issue_number: u64,
+    worktree: &Path,
+    branch: &str,
+    local_sha: &str,
+    pull_request_number: u64,
+    pull_request_url: &str,
+    baseline: &LiveDogfoodRecoveryObservation,
+) -> Result<(), String> {
+    wait_for_server(client, base_url)
+        .await
+        .map_err(|error| format!("wait for restarted host: {error}"))?;
+    for _ in 0..LIVE_DOGFOOD_RESTART_STABLE_POLLS {
+        tokio::time::sleep(Duration::from_millis(LIVE_DOGFOOD_POLL_INTERVAL_MS)).await;
+        let recovered = capture_live_recovery_observation(
+            client,
+            base_url,
+            inputs,
+            run,
+            issue_number,
+            worktree,
+            branch,
+            local_sha,
+            pull_request_number,
+            pull_request_url,
+        )
+        .await?;
+        baseline.matches_recovery(&recovered)?;
+    }
+    Ok(())
+}
+
 fn spawn_live_host(
     inputs: &LiveDogfoodInputs,
     run: &LiveDogfoodRun,
     token: &str,
     port: u16,
+    lifetime: LiveDogfoodHostLifetime,
 ) -> Result<Child, String> {
-    fs::write(
-        run.root.join("config.yaml"),
-        live_dogfood_config(inputs, run),
-    )
-    .map_err(|error| format!("start host: could not write generated config: {error}"))?;
-    let stdout = fs::File::create(run.root.join("host.stdout.log"))
+    let config_path = run.root.join("config.yaml");
+    let config = live_dogfood_config(inputs, run);
+    match lifetime {
+        LiveDogfoodHostLifetime::First => fs::write(&config_path, config).map_err(|error| {
+            format!("start first host: could not write generated config: {error}")
+        })?,
+        LiveDogfoodHostLifetime::Second => {
+            verify_retained_live_dogfood_config(&config_path, &config)?
+        }
+    }
+    let (stdout_name, stderr_name) = lifetime.log_names();
+    let stdout = fs::File::create(run.root.join(stdout_name))
         .map_err(|error| format!("start host: could not create stdout log: {error}"))?;
-    let stderr = fs::File::create(run.root.join("host.stderr.log"))
+    let stderr = fs::File::create(run.root.join(stderr_name))
         .map_err(|error| format!("start host: could not create stderr log: {error}"))?;
     Command::new(env!("CARGO_BIN_EXE_ensemble"))
         .arg("web")
@@ -1644,6 +2179,16 @@ fn spawn_live_host(
         .stderr(Stdio::from(stderr))
         .spawn()
         .map_err(|error| format!("start host: could not spawn ensemble web: {error}"))
+}
+
+fn verify_retained_live_dogfood_config(config_path: &Path, expected: &str) -> Result<(), String> {
+    let existing = fs::read(config_path).map_err(|error| {
+        format!("start second host: could not read retained generated config: {error}")
+    })?;
+    if existing != expected.as_bytes() {
+        return Err("start second host: retained generated config changed".to_string());
+    }
+    Ok(())
 }
 
 async fn wait_for_live_project_status(
@@ -1988,18 +2533,24 @@ fn live_dogfood_worktree(workspaces: &Path) -> Result<PathBuf, String> {
     let workspace_entries = fs::read_dir(workspaces)
         .map_err(|error| format!("verify local commit: workspace root was unavailable: {error}"))?;
     let mut worktrees = Vec::new();
-    for entry in workspace_entries.filter_map(Result::ok) {
+    for entry in workspace_entries {
+        let entry = entry.map_err(|error| {
+            format!("verify local commit: workspace entry was unavailable: {error}")
+        })?;
         let repo_root = entry.path().join("bamboon");
         let repo_entries = match fs::read_dir(&repo_root) {
             Ok(entries) => entries,
             Err(_) => continue,
         };
-        worktrees.extend(
-            repo_entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path())
-                .filter(|path| path.is_dir()),
-        );
+        for entry in repo_entries {
+            let entry = entry.map_err(|error| {
+                format!("verify local commit: worktree entry was unavailable: {error}")
+            })?;
+            let path = entry.path();
+            if path.is_dir() {
+                worktrees.push(path);
+            }
+        }
     }
     match worktrees.as_slice() {
         [worktree] => Ok(worktree.clone()),
@@ -2053,19 +2604,20 @@ async fn live_bamboon_issue_publishes_pull_request() {
         );
         let mut pre_publication_captured = false;
         let port = reserve_local_port().map_err(|error| format!("reserve host port: {error}"))?;
-        let mut host = match spawn_live_host(&inputs, &run, &token, port) {
-            Ok(host) => host,
-            Err(error) => {
-                let failure = persist_live_dogfood_failure(
-                    &mut evidence,
-                    &run,
-                    &inputs,
-                    pre_publication_captured,
-                    &error,
-                );
-                return Err(failure.err().unwrap_or(error));
-            }
-        };
+        let mut host =
+            match spawn_live_host(&inputs, &run, &token, port, LiveDogfoodHostLifetime::First) {
+                Ok(host) => host,
+                Err(error) => {
+                    let failure = persist_live_dogfood_failure(
+                        &mut evidence,
+                        &run,
+                        &inputs,
+                        pre_publication_captured,
+                        &error,
+                    );
+                    return Err(failure.err().unwrap_or(error));
+                }
+            };
         let client = reqwest::Client::new();
         let base_url = format!("http://127.0.0.1:{port}");
         let completed = async {
@@ -2097,20 +2649,77 @@ async fn live_bamboon_issue_publishes_pull_request() {
                 &branch,
                 &sha,
                 pull_request_number,
-                pull_request_url,
+                &pull_request_url,
                 "In review",
                 review_target,
                 review_projection,
             )?;
             write_live_dogfood_evidence_v1(&run.root, &evidence)?;
-            Ok::<_, String>((branch, sha))
+            let baseline = capture_live_recovery_observation(
+                &client,
+                &base_url,
+                &inputs,
+                &run,
+                resources.issue_number,
+                &worktree,
+                &branch,
+                &sha,
+                pull_request_number,
+                &pull_request_url,
+            )
+            .await?;
+            Ok::<_, String>((
+                worktree,
+                branch,
+                sha,
+                pull_request_number,
+                pull_request_url,
+                baseline,
+            ))
         }
         .await;
         let _ = host.kill();
         let _ = host.wait();
-        let (branch, sha) = match completed {
-            Ok(completed) => completed,
-            Err(error) if error.starts_with("evidence-v1:") => return Err(error),
+        let (worktree, branch, sha, pull_request_number, pull_request_url, baseline) =
+            match completed {
+                Ok(completed) => completed,
+                Err(error) if error.starts_with("evidence-v1:") => return Err(error),
+                Err(error) => {
+                    let failure = persist_live_dogfood_failure(
+                        &mut evidence,
+                        &run,
+                        &inputs,
+                        pre_publication_captured,
+                        &error,
+                    );
+                    return Err(failure.err().unwrap_or(error));
+                }
+            };
+        if evidence.snapshots.len() != 2 || !evidence.has_post_delivery() {
+            return Err("verify evidence-v1: post-delivery snapshot was not retained".to_string());
+        }
+        let restart_port = match reserve_local_port() {
+            Ok(port) => port,
+            Err(error) => {
+                let error = format!("reserve restarted host port: {error}");
+                let failure = persist_live_dogfood_failure(
+                    &mut evidence,
+                    &run,
+                    &inputs,
+                    pre_publication_captured,
+                    &error,
+                );
+                return Err(failure.err().unwrap_or(error));
+            }
+        };
+        let mut restarted_host = match spawn_live_host(
+            &inputs,
+            &run,
+            &token,
+            restart_port,
+            LiveDogfoodHostLifetime::Second,
+        ) {
+            Ok(host) => host,
             Err(error) => {
                 let failure = persist_live_dogfood_failure(
                     &mut evidence,
@@ -2122,8 +2731,37 @@ async fn live_bamboon_issue_publishes_pull_request() {
                 return Err(failure.err().unwrap_or(error));
             }
         };
-        if evidence.snapshots.len() != 2 {
-            return Err("verify evidence-v1: post-delivery snapshot was not retained".to_string());
+        let restart_base_url = format!("http://127.0.0.1:{restart_port}");
+        let restarted = verify_live_restart_stability(
+            &client,
+            &restart_base_url,
+            &inputs,
+            &run,
+            resources.issue_number,
+            &worktree,
+            &branch,
+            &sha,
+            pull_request_number,
+            &pull_request_url,
+            &baseline,
+        )
+        .await;
+        let _ = restarted_host.kill();
+        let _ = restarted_host.wait();
+        if let Err(error) = restarted {
+            let failure = persist_live_dogfood_failure(
+                &mut evidence,
+                &run,
+                &inputs,
+                pre_publication_captured,
+                &error,
+            );
+            return Err(failure.err().unwrap_or(error));
+        }
+        evidence.append_post_restart(&baseline)?;
+        write_live_dogfood_evidence_v1(&run.root, &evidence)?;
+        if evidence.snapshots.len() != 3 {
+            return Err("verify evidence-v1: post-restart snapshot was not retained".to_string());
         }
         Ok((resources, branch, sha))
     }
@@ -2378,6 +3016,123 @@ fn live_dogfood_evidence_v1_snapshots_are_cumulative_and_ordered() {
 }
 
 #[test]
+fn live_dogfood_post_restart_evidence_is_ordered_and_redacted() {
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-restart-order".to_string(),
+        root: PathBuf::from("/tmp/private-run-root"),
+    };
+    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#39");
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-restart-order.md",
+            "ensemble-live-dogfood-restart-order",
+            "local-sha",
+        )
+        .unwrap();
+    assert!(evidence
+        .append_post_restart(&LiveDogfoodRecoveryObservation::for_test())
+        .is_err());
+    evidence
+        .append_post_delivery(
+            "ensemble-live-dogfood-restart-order",
+            "local-sha",
+            39,
+            "https://github.com/chrisbanes/bamboon/pull/39",
+            "In review",
+            "In review",
+            "applied",
+        )
+        .unwrap();
+    assert!(evidence
+        .append_post_restart(&LiveDogfoodRecoveryObservation::for_test().with_branch("other"))
+        .is_err());
+    evidence
+        .append_post_restart(&LiveDogfoodRecoveryObservation::for_test())
+        .unwrap();
+
+    let serialized = serde_json::to_string_pretty(&evidence).unwrap();
+    let json: Value = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["snapshots"][0]["kind"], "pre_publication");
+    assert_eq!(json["snapshots"][1]["kind"], "post_delivery");
+    assert_eq!(json["snapshots"][2]["kind"], "post_restart");
+    for prohibited in [
+        "12",
+        "/tmp/private-bamboon",
+        "/tmp/private-run-root",
+        "secret-token",
+    ] {
+        assert!(
+            !serialized.contains(prohibited),
+            "serialized evidence must redact {prohibited}"
+        );
+    }
+}
+
+#[test]
+fn live_dogfood_restart_observation_rejects_identity_or_redispatch_drift() {
+    let baseline = LiveDogfoodRecoveryObservation::for_test();
+    assert!(baseline.matches_recovery(&baseline).is_ok());
+
+    for changed in [
+        baseline
+            .clone()
+            .with_issue_identifier("chrisbanes/bamboon#40"),
+        baseline.clone().with_run_identifier("other-run"),
+        baseline
+            .clone()
+            .with_workspace_identifier("run/other-workspace"),
+        baseline.clone().with_branch("ensemble-other"),
+        baseline.clone().with_sha("other-sha"),
+        baseline.clone().with_pull_request(40),
+        baseline.clone().with_review_projection("missing"),
+        baseline.clone().with_transcript_count(2),
+        baseline.clone().with_transcript_bytes(456),
+        baseline.clone().with_worktree_count(2),
+        baseline.clone().with_active_agents(1),
+    ] {
+        assert!(baseline.matches_recovery(&changed).is_err());
+    }
+}
+
+#[test]
+fn live_dogfood_restart_reuses_config_and_separates_host_logs() {
+    let temporary = tempfile::tempdir().unwrap();
+    let config_path = temporary.path().join("config.yaml");
+    fs::write(&config_path, "retained: config\n").unwrap();
+    verify_retained_live_dogfood_config(&config_path, "retained: config\n").unwrap();
+    assert!(verify_retained_live_dogfood_config(&config_path, "changed: config\n").is_err());
+    assert_eq!(
+        LiveDogfoodHostLifetime::all_log_names(),
+        [
+            "host-1.stdout.log",
+            "host-1.stderr.log",
+            "host-2.stdout.log",
+            "host-2.stderr.log",
+        ]
+    );
+    assert_eq!(LIVE_DOGFOOD_RESTART_STABLE_POLLS, 2);
+}
+
+#[test]
+fn live_dogfood_restart_rejects_ambiguous_public_agent_capacity() {
+    assert_eq!(
+        validate_live_public_agent_capacity(&serde_json::json!({
+            "counts": {"running": 0},
+            "running": [],
+        }))
+        .unwrap(),
+        0
+    );
+    for state in [
+        serde_json::json!({"counts": {"running": 0}, "running": [{}]}),
+        serde_json::json!({"counts": {"running": 1}, "running": []}),
+    ] {
+        assert!(validate_live_public_agent_capacity(&state).is_err());
+    }
+}
+
+#[test]
 fn live_dogfood_pre_publication_rejects_agent_publication() {
     assert!(ensure_no_live_dogfood_publication("", "[]").is_ok());
     assert!(ensure_no_live_dogfood_publication(
@@ -2454,6 +3209,10 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "preserved failure",
         "relative log names",
         "post-restart",
+        "host-1.stdout.log",
+        "host-2.stderr.log",
+        "two configured polling intervals",
+        "unchanged config",
     ] {
         assert!(
             contributing.contains(required),
