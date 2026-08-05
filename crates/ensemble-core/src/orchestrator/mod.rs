@@ -6271,17 +6271,16 @@ impl Orchestrator {
         let release_issue_id = issue_id.to_string();
         let release_identifier = pending.identifier.clone();
         let release_run_id = pending.run_id.clone();
-        // Keep the journal append on a fresh poll stack: after workspace cleanup, this terminal
-        // transition chain is deep enough to exhaust a Tokio worker stack when appended inline.
-        let release_result = tokio::spawn(async move {
-            pipeline_journal
-                .append_released(
-                    &release_issue_id,
-                    &release_identifier,
-                    release_run_id,
-                    "terminal tracker transition reconciled",
-                )
-                .await
+        let runtime = tokio::runtime::Handle::current();
+        // Keep the journal append off the Tokio worker stack: after workspace cleanup, this
+        // terminal transition chain is deep enough to exhaust that stack when appended inline.
+        let release_result = tokio::task::spawn_blocking(move || {
+            runtime.block_on(pipeline_journal.append_released(
+                &release_issue_id,
+                &release_identifier,
+                release_run_id,
+                "terminal tracker transition reconciled",
+            ))
         })
         .await;
         let release_error = match release_result {
