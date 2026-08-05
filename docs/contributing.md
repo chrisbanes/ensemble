@@ -60,6 +60,41 @@ The test starts a real `ensemble web` server on localhost with a temporary
 config directory, a todo-file tracker fixture, and mock `acpx`. It does not
 require GitHub, Notion, real ACP credentials, or non-localhost network access.
 
+### Ignored live dogfood tracer bullet
+
+`live_bamboon_issue_commits_without_publication` is a deliberately expensive local-only
+tracer bullet. It is ignored, is never part of CI, and creates a real synthetic issue in the
+private, operator-provisioned **Ensemble Dogfood** Project. It launches a real ACPX agent against
+an issue-owned Bamboon worktree, so it can consume network access and model time.
+
+Run it only when you have the dedicated fixture and a clean Bamboon clone. The project number and
+clone path are private local setup values: do not put either in shell history, documentation,
+issues, or logs.
+
+```sh
+ENSEMBLE_LIVE_DOGFOOD=1 \
+  ENSEMBLE_DOGFOOD_PROJECT_NUMBER=<local-project-number> \
+  ENSEMBLE_DOGFOOD_BAMBOON_PATH=<absolute-clean-bamboon-clone> \
+  SKIP_UI_BUILD=1 \
+  cargo test -p ensemble-cli --features web-ui --test product_e2e \
+  live_bamboon_issue_commits_without_publication -- --ignored --nocapture
+```
+
+`ENSEMBLE_LIVE_DOGFOOD=1` is the exact mutation opt-in. The harness validates the linked Project,
+its empty fixture state and status mapping, GitHub/ACPX access, Bamboon identity, `main`, origin,
+and clone cleanliness before creating an issue; it never repairs fixture drift. ACPX defaults to
+the `codex` named agent; set a non-empty `ENSEMBLE_DOGFOOD_AGENT` only for an explicit local
+override. The GitHub credential comes from `gh auth token` only after the opt-in gate, is passed to
+the child host in memory as `GITHUB_TOKEN`, and is not written into generated YAML or diagnostics.
+
+The tracer bullet creates one marker-owned Markdown artifact and commit, with finalization set to
+`none`: neither the agent nor Ensemble may push a branch or create a pull request. From the point
+the issue is made ready to implement onward, it preserves the run directory, host stdout/stderr,
+issue, Project item, workspace, and local branch for diagnosis. The test prints the redacted,
+run-scoped preservation location on success or failure. Do not perform routine cleanup or fixture
+repair from the harness; publication, restart recovery, and cleanup are intentionally outside this
+slice.
+
 ## Project structure
 
 ```
