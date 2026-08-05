@@ -631,6 +631,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            review_projection: None,
         };
 
         journal

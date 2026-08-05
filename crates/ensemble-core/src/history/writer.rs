@@ -148,7 +148,10 @@ mod tests {
                 finalize_mode: "none".into(),
                 finalize_status: "not_required".into(),
                 pushed_ref: None,
+                pr_number: None,
                 pr_url: None,
+                review_state: None,
+                review_projection: None,
                 last_error: None,
             }],
             transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {

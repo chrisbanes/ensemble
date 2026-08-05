@@ -22,7 +22,13 @@ pub struct RepoArtifact {
     pub finalize_mode: String,
     pub finalize_status: String,
     pub pushed_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_projection: Option<String>,
     pub last_error: Option<String>,
 }
 
@@ -66,7 +72,10 @@ pub async fn collect_repo_artifact(
         finalize_mode: finalize_mode_name(finalize_mode).to_string(),
         finalize_status: finalize_status.to_string(),
         pushed_ref: None,
+        pr_number: None,
         pr_url: None,
+        review_state: None,
+        review_projection: None,
         last_error: None,
     }
 }

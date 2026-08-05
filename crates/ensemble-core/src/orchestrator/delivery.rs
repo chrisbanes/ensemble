@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use tokio::time::timeout;
 use tracing::warn;
@@ -10,6 +11,7 @@ use tracing::warn;
 use super::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind, TerminalOutcome};
 use super::state::{FinalizeStatus, IssueFinalizeState, RepoFinalizeState};
 use super::Orchestrator;
+use crate::history::model::HistoryRecord;
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
 use crate::workspace::finalize::FinalizeMode;
 
@@ -52,12 +54,41 @@ pub(crate) struct DeliveryRepository {
     pub retry_from: Option<DeliveryPhase>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct DeliveryRecord {
     pub issue_id: String,
     pub identifier: String,
     pub run_id: String,
     pub repositories: BTreeMap<String, DeliveryRepository>,
+    #[serde(default)]
+    pub review_projection: Option<ReviewProjection>,
+}
+
+/// The durable issue-level tracker projection owned by finalization delivery.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ReviewProjection {
+    pub target: String,
+    /// Every configured pull-request repository that must have durable delivery identity.
+    #[serde(default)]
+    pub repositories: Vec<String>,
+    pub phase: ReviewProjectionPhase,
+    pub diagnostic: Option<String>,
+    pub last_observed_state: Option<String>,
+    /// The exact history record prepared before the tracker state is changed.
+    #[serde(default)]
+    pub history_record: Option<HistoryRecord>,
+    /// Whether the prepared record has been persisted to the history stores.
+    #[serde(default)]
+    pub history_persisted: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReviewProjectionPhase {
+    Pending,
+    InFlight,
+    Applied,
+    Blocked,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +101,13 @@ pub(crate) enum DeliveryAggregate {
 
 impl DeliveryRecord {
     pub(crate) fn aggregate(&self) -> DeliveryAggregate {
+        if self
+            .review_projection
+            .as_ref()
+            .is_some_and(|projection| projection.phase == ReviewProjectionPhase::Blocked)
+        {
+            return DeliveryAggregate::Blocked;
+        }
         if self
             .repositories
             .values()
@@ -92,6 +130,33 @@ impl DeliveryRecord {
         } else {
             DeliveryAggregate::Active
         }
+    }
+
+    fn review_ready(&self) -> bool {
+        let repositories = self
+            .review_projection
+            .as_ref()
+            .map(|projection| &projection.repositories);
+        let repository_keys = repositories
+            .filter(|keys| !keys.is_empty())
+            .cloned()
+            .unwrap_or_else(|| self.repositories.keys().cloned().collect());
+        !repository_keys.is_empty()
+            && repository_keys.iter().all(|repository_key| {
+                match self.repositories.get(repository_key) {
+                    Some(repository) => match repository.mode {
+                        DeliveryMode::Push => repository.phase == DeliveryPhase::Published,
+                        DeliveryMode::PushAndPr => {
+                            repository.phase == DeliveryPhase::Waiting
+                                && repository.observed_remote_sha.as_deref()
+                                    == Some(repository.local_sha.as_str())
+                                && repository.pr_number.is_some()
+                                && repository.pr_url.is_some()
+                        }
+                    },
+                    None => false,
+                }
+            })
     }
 }
 
@@ -568,6 +633,7 @@ impl Orchestrator {
             let delivery = self
                 .evaluate_post_final_acceptance(delivery, snapshot.as_ref())
                 .await;
+            let delivery = self.advance_review_projection(delivery).await;
             if delivery.aggregate() == DeliveryAggregate::Published {
                 self.complete_published_delivery(&delivery).await;
                 continue;
@@ -623,6 +689,282 @@ impl Orchestrator {
         }
     }
 
+    pub(super) async fn advance_review_projection(
+        &self,
+        delivery: DeliveryRecord,
+    ) -> DeliveryRecord {
+        let Some(projection) = delivery.review_projection.as_ref() else {
+            return delivery;
+        };
+        if projection.phase == ReviewProjectionPhase::Blocked
+            || (projection.phase == ReviewProjectionPhase::Applied && projection.history_persisted)
+            || !delivery.review_ready()
+        {
+            return delivery;
+        }
+
+        let mut candidate = delivery;
+        if candidate
+            .review_projection
+            .as_ref()
+            .is_some_and(|projection| projection.phase == ReviewProjectionPhase::Applied)
+        {
+            return self.persist_applied_review_history(candidate).await;
+        }
+        if candidate
+            .review_projection
+            .as_ref()
+            .is_some_and(|projection| projection.phase == ReviewProjectionPhase::Pending)
+        {
+            self.project_delivery_artifacts(&candidate.issue_id, &candidate)
+                .await;
+            self.refresh_review_history(&mut candidate, true).await;
+            candidate
+                .review_projection
+                .as_mut()
+                .expect("checked above")
+                .phase = ReviewProjectionPhase::InFlight;
+            if self
+                .persist_delivery_record(&candidate, None)
+                .await
+                .is_err()
+            {
+                return candidate;
+            }
+        }
+
+        let target = candidate
+            .review_projection
+            .as_ref()
+            .expect("review projection is retained")
+            .target
+            .clone();
+        let observed = self
+            .tracker
+            .fetch_issue_states_by_ids(std::slice::from_ref(&candidate.issue_id))
+            .await;
+        let observed = match observed {
+            Ok(mut issues) if issues.len() == 1 => issues.pop().expect("one issue"),
+            Ok(issues) => {
+                return self
+                    .block_review_projection(
+                        candidate,
+                        format!(
+                            "tracker reconciliation returned {} issues for delivery identity",
+                            issues.len()
+                        ),
+                    )
+                    .await;
+            }
+            Err(error) => {
+                return self
+                    .block_review_projection(
+                        candidate,
+                        format!("tracker reconciliation read failed: {error}"),
+                    )
+                    .await;
+            }
+        };
+        if observed.state.eq_ignore_ascii_case(&target) {
+            let projection = candidate.review_projection.as_mut().expect("retained");
+            projection.last_observed_state = Some(observed.state);
+            return self.persist_applied_review_history(candidate).await;
+        }
+
+        let config = self.config.read().await;
+        let terminal = config
+            .tracker
+            .terminal_states
+            .iter()
+            .any(|state| state.eq_ignore_ascii_case(&observed.state));
+        let active = config
+            .tracker
+            .active_states
+            .iter()
+            .any(|state| state.eq_ignore_ascii_case(&observed.state));
+        drop(config);
+        if terminal || !active {
+            return self
+                .block_review_projection(
+                    candidate,
+                    format!(
+                        "unexpected tracker state '{}' during review projection",
+                        observed.state
+                    ),
+                )
+                .await;
+        }
+
+        if let Err(error) = self
+            .tracker
+            .set_issue_state(&candidate.issue_id, &target)
+            .await
+        {
+            let projection = candidate.review_projection.as_mut().expect("retained");
+            projection.last_observed_state = Some(observed.state);
+            projection.diagnostic =
+                Some(format!("review-state write needs reconciliation: {error}"));
+            let _ = self.persist_delivery_record(&candidate, None).await;
+            return candidate;
+        }
+
+        let confirmed = self
+            .tracker
+            .fetch_issue_states_by_ids(std::slice::from_ref(&candidate.issue_id))
+            .await;
+        match confirmed {
+            Ok(mut issues) if issues.len() == 1 => {
+                let issue = issues.pop().expect("one issue");
+                let projection = candidate.review_projection.as_mut().expect("retained");
+                projection.last_observed_state = Some(issue.state.clone());
+                if issue.state.eq_ignore_ascii_case(&target) {
+                    self.persist_applied_review_history(candidate).await
+                } else if issue.state.eq_ignore_ascii_case(&observed.state) {
+                    projection.diagnostic = Some("review-state write not yet observed".to_string());
+                    let _ = self.persist_delivery_record(&candidate, None).await;
+                    candidate
+                } else {
+                    self.block_review_projection(
+                        candidate,
+                        format!(
+                            "unexpected tracker state '{}' after review-state write",
+                            issue.state
+                        ),
+                    )
+                    .await
+                }
+            }
+            Ok(issues) => {
+                self.block_review_projection(
+                    candidate,
+                    format!(
+                        "tracker reconciliation returned {} issues after review-state write",
+                        issues.len()
+                    ),
+                )
+                .await
+            }
+            Err(error) => {
+                self.block_review_projection(
+                    candidate,
+                    format!("tracker reconciliation read failed after review-state write: {error}"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn block_review_projection(
+        &self,
+        delivery: DeliveryRecord,
+        diagnostic: String,
+    ) -> DeliveryRecord {
+        let mut candidate = delivery.clone();
+        let projection = candidate
+            .review_projection
+            .as_mut()
+            .expect("review projection is retained");
+        projection.phase = ReviewProjectionPhase::Blocked;
+        projection.diagnostic = Some(diagnostic);
+        if self
+            .persist_delivery_record(&candidate, None)
+            .await
+            .is_err()
+        {
+            return delivery;
+        }
+        candidate
+    }
+
+    async fn persist_applied_review_history(&self, mut delivery: DeliveryRecord) -> DeliveryRecord {
+        {
+            let projection = delivery.review_projection.as_mut().expect("retained");
+            projection.phase = ReviewProjectionPhase::Applied;
+            projection.diagnostic = None;
+        }
+        if self.persist_delivery_record(&delivery, None).await.is_err() {
+            return delivery;
+        }
+        self.project_delivery_artifacts(&delivery.issue_id, &delivery)
+            .await;
+        if delivery
+            .review_projection
+            .as_ref()
+            .expect("retained")
+            .history_persisted
+        {
+            return delivery;
+        }
+        self.refresh_review_history(&mut delivery, false).await;
+        if self.persist_delivery_record(&delivery, None).await.is_err() {
+            return delivery;
+        }
+        let record = delivery
+            .review_projection
+            .as_ref()
+            .expect("retained")
+            .history_record
+            .clone();
+        let Some(record) = record else {
+            return self
+                .block_review_projection(
+                    delivery,
+                    "review projection is missing its prepared history record".to_string(),
+                )
+                .await;
+        };
+        if let Err(error) = self
+            .persist_history_record(Some(&delivery.run_id), &record)
+            .await
+        {
+            let projection = delivery.review_projection.as_mut().expect("retained");
+            projection.diagnostic = Some(format!(
+                "review state is confirmed but in-review history persistence needs reconciliation: {error}"
+            ));
+            let _ = self.persist_delivery_record(&delivery, None).await;
+            return delivery;
+        }
+        delivery
+            .review_projection
+            .as_mut()
+            .expect("retained")
+            .history_persisted = true;
+        if self.persist_delivery_record(&delivery, None).await.is_err() {
+            return delivery;
+        }
+        delivery
+    }
+
+    async fn refresh_review_history(
+        &self,
+        delivery: &mut DeliveryRecord,
+        refresh_completed_at: bool,
+    ) {
+        let artifacts = self
+            .state
+            .read()
+            .await
+            .artifacts
+            .get(&delivery.issue_id)
+            .cloned();
+        let Some(record) = delivery
+            .review_projection
+            .as_mut()
+            .and_then(|projection| projection.history_record.as_mut())
+        else {
+            return;
+        };
+        if refresh_completed_at {
+            record.completed_at = Utc::now();
+            record.duration_seconds = record
+                .completed_at
+                .signed_duration_since(record.started_at)
+                .num_seconds()
+                .max(0) as u64;
+        }
+        record.artifacts = artifacts;
+    }
+
     async fn complete_published_delivery(&self, delivery: &DeliveryRecord) {
         let config = self.config.read().await.clone();
         let finalize = Self::finalize_state_from_delivery(delivery);
@@ -671,6 +1013,20 @@ impl Orchestrator {
                 .as_ref()
                 .map(|_| format!("{}/{}", repository.remote, repository.head_branch));
             artifact.pr_url = repository.pr_url.clone();
+            artifact.pr_number = repository.pr_number;
+            artifact.review_state = delivery
+                .review_projection
+                .as_ref()
+                .map(|projection| projection.target.clone());
+            artifact.review_projection = delivery.review_projection.as_ref().map(|projection| {
+                match projection.phase {
+                    ReviewProjectionPhase::Pending => "pending",
+                    ReviewProjectionPhase::InFlight => "in_flight",
+                    ReviewProjectionPhase::Applied => "applied",
+                    ReviewProjectionPhase::Blocked => "blocked",
+                }
+                .to_string()
+            });
             artifact.last_error = repository.last_error.clone();
         }
     }
@@ -1235,7 +1591,7 @@ impl Orchestrator {
         workspace: &crate::workspace::manager::WorkspaceResult,
         repository_keys: &[String],
     ) -> Result<(DeliveryRecord, Option<PipelineRunSnapshot>), String> {
-        let (run_id, snapshot) = {
+        let (run_id, snapshot, review_history) = {
             let state = self.state.read().await;
             let run_id = state
                 .running
@@ -1246,7 +1602,21 @@ impl Orchestrator {
             let snapshot = state
                 .get_pipeline_run(issue_id)
                 .map(PipelineRun::to_snapshot);
-            (run_id, snapshot)
+            let review_history = state
+                .running
+                .get(issue_id)
+                .zip(state.get_pipeline_run(issue_id))
+                .map(|(running, run)| {
+                    self.build_history_record(super::RunningHistoryRecordInput {
+                        outcome: "in_review",
+                        last_error: None,
+                        running_entry: running,
+                        run,
+                        completed_at: Utc::now(),
+                        artifacts: state.artifacts.get(issue_id).cloned(),
+                    })
+                });
+            (run_id, snapshot, review_history)
         };
         let configured_repositories = self.workspace_mgr.repos();
         let mut repositories = std::collections::BTreeMap::new();
@@ -1281,12 +1651,37 @@ impl Orchestrator {
                 },
             );
         }
+        let review_state = repository_keys.iter().find_map(|repository_key| {
+            configured_repositories
+                .get(repository_key)
+                .and_then(|config| config.finalize.review_state.clone())
+        });
+        let mut review_repositories = configured_repositories
+            .iter()
+            .filter_map(|(repository_key, config)| {
+                (config.finalize.enabled && config.finalize.mode != FinalizeMode::None)
+                    .then_some(repository_key.clone())
+            })
+            .collect::<Vec<_>>();
+        review_repositories.sort();
+        if review_state.is_some() && review_history.is_none() {
+            return Err("review projection requires a live run history record".to_string());
+        }
         Ok((
             DeliveryRecord {
                 issue_id: issue_id.to_string(),
                 identifier: issue_identifier.to_string(),
                 run_id,
                 repositories,
+                review_projection: review_state.map(|target| ReviewProjection {
+                    target,
+                    repositories: review_repositories,
+                    phase: ReviewProjectionPhase::Pending,
+                    diagnostic: None,
+                    last_observed_state: None,
+                    history_record: review_history,
+                    history_persisted: false,
+                }),
             },
             snapshot,
         ))
@@ -1336,12 +1731,96 @@ mod tests {
             identifier: "ensemble#420".to_string(),
             run_id: "run-420".to_string(),
             repositories,
+            review_projection: None,
         };
 
         assert_eq!(record.aggregate(), DeliveryAggregate::Waiting);
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.find("alpha").unwrap() < json.find("zeta").unwrap());
         assert!(!json.contains("aggregate"));
+    }
+
+    #[test]
+    fn review_projection_requires_durable_waiting_pr_identity() {
+        let mut repository = repository(DeliveryPhase::Waiting);
+        repository.observed_remote_sha = Some(repository.local_sha.clone());
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".into());
+        let record = DeliveryRecord {
+            issue_id: "issue-420".into(),
+            identifier: "ensemble#420".into(),
+            run_id: "run-420".into(),
+            repositories: BTreeMap::from([("primary".into(), repository)]),
+            review_projection: Some(ReviewProjection {
+                target: "In review".into(),
+                repositories: vec!["primary".into()],
+                phase: ReviewProjectionPhase::Pending,
+                diagnostic: None,
+                last_observed_state: None,
+                history_record: None,
+                history_persisted: false,
+            }),
+        };
+
+        assert!(record.review_ready());
+    }
+
+    #[test]
+    fn review_projection_waits_for_every_configured_pr_repository() {
+        let mut repository = repository(DeliveryPhase::Waiting);
+        repository.observed_remote_sha = Some(repository.local_sha.clone());
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".into());
+        let record = DeliveryRecord {
+            issue_id: "issue-420".into(),
+            identifier: "ensemble#420".into(),
+            run_id: "run-420".into(),
+            repositories: BTreeMap::from([("primary".into(), repository)]),
+            review_projection: Some(ReviewProjection {
+                target: "In review".into(),
+                repositories: vec!["primary".into(), "approval-gated".into()],
+                phase: ReviewProjectionPhase::Pending,
+                diagnostic: None,
+                last_observed_state: None,
+                history_record: None,
+                history_persisted: false,
+            }),
+        };
+
+        assert!(!record.review_ready());
+    }
+
+    #[test]
+    fn review_projection_waits_for_configured_push_repositories() {
+        let mut pull_request = repository(DeliveryPhase::Waiting);
+        pull_request.observed_remote_sha = Some(pull_request.local_sha.clone());
+        pull_request.pr_number = Some(420);
+        pull_request.pr_url = Some("https://github.com/example/project/pull/420".into());
+        let push = DeliveryRepository {
+            mode: DeliveryMode::Push,
+            phase: DeliveryPhase::Prepared,
+            ..pull_request.clone()
+        };
+        let record = DeliveryRecord {
+            issue_id: "issue-420".into(),
+            identifier: "ensemble#420".into(),
+            run_id: "run-420".into(),
+            repositories: BTreeMap::from([
+                ("pull-request".into(), pull_request),
+                ("push".into(), push),
+            ]),
+            review_projection: Some(ReviewProjection {
+                target: "In review".into(),
+                repositories: vec!["pull-request".into(), "push".into()],
+                phase: ReviewProjectionPhase::Pending,
+                diagnostic: None,
+                last_observed_state: None,
+                history_record: None,
+                history_persisted: false,
+            }),
+        };
+
+        assert!(!record.review_ready());
     }
 
     #[test]

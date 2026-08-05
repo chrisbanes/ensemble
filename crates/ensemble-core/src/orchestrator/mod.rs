@@ -456,7 +456,7 @@ pub struct OrchestratorRuntimeParts {
     pub workspace_root: std::path::PathBuf,
 }
 
-struct RunningHistoryRecordInput<'a> {
+pub(super) struct RunningHistoryRecordInput<'a> {
     outcome: &'a str,
     last_error: Option<String>,
     running_entry: &'a crate::tracker::model::RunningEntry,
@@ -3608,23 +3608,23 @@ impl Orchestrator {
                             {
                                 AcceptancePhaseOutcome::Passed => {}
                                 AcceptancePhaseOutcome::Failed { reason, owner } => {
-                                    self.schedule_acceptance_failure(
+                                    Box::pin(self.schedule_acceptance_failure(
                                         &acceptance_issue,
                                         &config_snapshot,
                                         &reason,
                                         &owner,
-                                    )
+                                    ))
                                     .await;
                                     return;
                                 }
                                 AcceptancePhaseOutcome::RetainedForRecovery => return,
                             }
-                            let finalize_state = self
-                                .finalize_and_stage_terminal_transition(
+                            let finalize_state =
+                                Box::pin(self.finalize_and_stage_terminal_transition(
                                     issue_id,
                                     &issue_identifier,
                                     &config_snapshot,
-                                )
+                                ))
                                 .await;
 
                             let (tracker_state, terminal_outcome, terminal_issue, history) = {
@@ -6446,9 +6446,10 @@ impl Orchestrator {
             let state = self.state.read().await;
             RunningAttemptIdentity::capture(&state, issue_id)
         };
-        let finalize_state = self
-            .run_finalize_phase(issue_id, issue_identifier, config)
-            .await;
+        // Finalization includes durable delivery reconciliation; heap-allocate its future so
+        // terminal failure handling does not inherit the full delivery state machine's stack use.
+        let finalize_state =
+            Box::pin(self.run_finalize_phase(issue_id, issue_identifier, config)).await;
         #[cfg(test)]
         self.wait_for_finalization_commit_test_barriers().await;
         if attempt.is_some() {
@@ -6635,6 +6636,7 @@ impl Orchestrator {
                     let delivery = self
                         .advance_delivery_record(delivery, workspace, snapshot.as_ref())
                         .await;
+                    let delivery = self.advance_review_projection(delivery).await;
                     repos.extend(Self::finalize_repositories_from_delivery(&delivery));
                     self.project_delivery_artifacts(issue_id, &delivery).await;
                 }
@@ -6825,9 +6827,13 @@ impl Orchestrator {
                     );
                     return;
                 }
+                let existing_projection = existing.review_projection.clone();
                 let mut repositories = existing.repositories;
                 repositories.extend(prepared.repositories);
                 prepared.repositories = repositories;
+                if existing_projection.is_some() {
+                    prepared.review_projection = existing_projection;
+                }
             }
             (prepared, snapshot)
         };
@@ -6863,6 +6869,7 @@ impl Orchestrator {
         let delivery = self
             .advance_delivery_record(delivery, &workspace, snapshot.as_ref())
             .await;
+        let delivery = self.advance_review_projection(delivery).await;
         self.project_delivery_artifacts(issue_id, &delivery).await;
 
         let (final_status, should_complete, last_error) = {
@@ -7011,7 +7018,10 @@ impl Orchestrator {
             .any(|step_state| matches!(step_state, StepState::Running { .. }))
     }
 
-    fn build_history_record(&self, input: RunningHistoryRecordInput<'_>) -> HistoryRecord {
+    pub(super) fn build_history_record(
+        &self,
+        input: RunningHistoryRecordInput<'_>,
+    ) -> HistoryRecord {
         let steps_traversed = input.run.traversed_steps_in_order();
 
         let duration_seconds = input
@@ -9548,6 +9558,7 @@ mod tests {
                     enabled: true,
                     mode: FinalizeMode::Push,
                     approval_required: true,
+                    review_state: None,
                 },
             },
         )
@@ -9649,6 +9660,7 @@ mod tests {
         let (repo_temp, mut repo_config) = create_finalize_repo().await;
         repo_config.finalize.mode = FinalizeMode::PushAndPr;
         repo_config.finalize.approval_required = false;
+        repo_config.finalize.review_state = Some("In review".to_string());
         let config = Arc::new(RwLock::new(make_config()));
         let issue = test_issue("1", "Todo");
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
@@ -9677,6 +9689,15 @@ mod tests {
             mutation_phases: std::sync::Mutex::new(Vec::new()),
         });
         orchestrator.delivery_remote = remote.clone();
+        let review_tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: issue.id.clone(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: false,
+        });
+        orchestrator.tracker = review_tracker.clone();
 
         {
             let cfg = config.read().await;
@@ -9707,10 +9728,20 @@ mod tests {
             crate::orchestrator::delivery::DeliveryPhase::Waiting
         );
         assert_eq!(delivery.repositories["source-repo"].pr_number, Some(420));
+        assert_eq!(
+            delivery.review_projection.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Applied
+        );
         assert!(!state.is_running(&issue.id));
         assert!(state.is_claimed(&issue.id));
+        assert!(!state.completed.contains_key(&issue.id));
         assert_eq!(live_worker_count(&orchestrator.cancellation_registry), 0);
         drop(state);
+
+        assert_eq!(review_tracker.writes.load(Ordering::SeqCst), 1);
+        assert!(review_tracker
+            .saw_in_flight_before_write
+            .load(Ordering::SeqCst));
 
         assert_eq!(
             *remote.mutation_phases.lock().unwrap(),
@@ -9752,6 +9783,93 @@ mod tests {
         pushes: AtomicUsize,
         creates: AtomicUsize,
         lists: AtomicUsize,
+    }
+
+    struct ReviewProjectionTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        journal: PipelineRunJournal,
+        issue_id: String,
+        writes: AtomicUsize,
+        saw_in_flight_before_write: AtomicBool,
+        fail_reads: bool,
+    }
+
+    #[async_trait]
+    impl IssueTracker for ReviewProjectionTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, crate::tracker::TrackerError> {
+            Ok(self.issues.read().await.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, crate::tracker::TrackerError> {
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|issue| {
+                    states
+                        .iter()
+                        .any(|state| state.eq_ignore_ascii_case(&issue.state))
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, crate::tracker::TrackerError> {
+            if self.fail_reads {
+                return Err(crate::tracker::TrackerError::ApiRequestFailed {
+                    reason: "simulated tracker read failure".to_string(),
+                });
+            }
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|issue| ids.contains(&issue.id))
+                .cloned()
+                .collect())
+        }
+
+        fn supports_writes(&self) -> bool {
+            true
+        }
+
+        async fn set_issue_state(
+            &self,
+            id: &str,
+            state: &str,
+        ) -> Result<(), crate::tracker::TrackerError> {
+            let latest = self
+                .journal
+                .latest_live_record_for_issue(&self.issue_id)
+                .await
+                .unwrap()
+                .unwrap();
+            self.saw_in_flight_before_write.store(
+                latest.delivery.as_ref().is_some_and(|delivery| {
+                    delivery
+                        .review_projection
+                        .as_ref()
+                        .is_some_and(|projection| {
+                            projection.phase
+                                == crate::orchestrator::delivery::ReviewProjectionPhase::InFlight
+                                && !projection.history_persisted
+                        })
+                }),
+                Ordering::SeqCst,
+            );
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            let mut issues = self.issues.write().await;
+            issues
+                .iter_mut()
+                .find(|issue| issue.id == id)
+                .expect("tracker owns issue")
+                .state = state.to_string();
+            Ok(())
+        }
     }
 
     #[async_trait]
@@ -9863,12 +9981,212 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            review_projection: None,
         };
         orchestrator
             .persist_delivery_record(&delivery, None)
             .await
             .unwrap();
         (orchestrator, workspace_temp, repo_temp, delivery)
+    }
+
+    fn review_projection_history() -> HistoryRecord {
+        HistoryRecord {
+            issue_identifier: "repo#1".to_string(),
+            issue_id: "1".to_string(),
+            outcome: "in_review".to_string(),
+            steps_traversed: vec!["build".to_string()],
+            attempts: 1,
+            tokens: TokenTotals {
+                input_tokens: 0,
+                output_tokens: 0,
+                total_tokens: 0,
+            },
+            duration_seconds: 0,
+            started_at: Utc::now(),
+            completed_at: Utc::now(),
+            last_error: None,
+            verdict: Some("approved".to_string()),
+            workspace_path: "/tmp/ensemble-test".to_string(),
+            acceptance_attempts: Vec::new(),
+            artifacts: None,
+        }
+    }
+
+    fn review_ready_delivery(mut delivery: DeliveryRecord) -> DeliveryRecord {
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        delivery.review_projection = Some(crate::orchestrator::delivery::ReviewProjection {
+            target: "In review".to_string(),
+            repositories: vec!["source-repo".to_string()],
+            phase: crate::orchestrator::delivery::ReviewProjectionPhase::Pending,
+            diagnostic: None,
+            last_observed_state: None,
+            history_record: Some(review_projection_history()),
+            history_persisted: false,
+        });
+        delivery
+    }
+
+    #[tokio::test]
+    async fn review_projection_persists_in_flight_then_history_before_applied() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, workspace, _repo, delivery) =
+            recovery_test_orchestrator(remote).await;
+        let tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "In Progress")])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: false,
+        });
+        orchestrator.tracker = tracker.clone();
+        let delivery = review_ready_delivery(delivery);
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let applied = orchestrator.advance_review_projection(delivery).await;
+
+        assert_eq!(
+            applied.review_projection.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Applied
+        );
+        assert!(
+            applied
+                .review_projection
+                .as_ref()
+                .unwrap()
+                .history_persisted
+        );
+        assert_eq!(tracker.writes.load(Ordering::SeqCst), 1);
+        assert!(tracker.saw_in_flight_before_write.load(Ordering::SeqCst));
+        let history = tokio::fs::read_to_string(workspace.path().join("ensemble_history.jsonl"))
+            .await
+            .unwrap();
+        assert_eq!(history.lines().count(), 1);
+        assert_eq!(
+            serde_json::from_str::<HistoryRecord>(history.lines().next().unwrap())
+                .unwrap()
+                .outcome,
+            "in_review"
+        );
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        let in_flight = records
+            .iter()
+            .position(|record| {
+                record.delivery.as_ref().is_some_and(|delivery| {
+                    delivery
+                        .review_projection
+                        .as_ref()
+                        .is_some_and(|projection| {
+                            projection.phase
+                                == crate::orchestrator::delivery::ReviewProjectionPhase::InFlight
+                        })
+                })
+            })
+            .unwrap();
+        let applied = records
+            .iter()
+            .position(|record| {
+                record.delivery.as_ref().is_some_and(|delivery| {
+                    delivery
+                        .review_projection
+                        .as_ref()
+                        .is_some_and(|projection| {
+                            projection.phase
+                                == crate::orchestrator::delivery::ReviewProjectionPhase::Applied
+                                && projection.history_persisted
+                        })
+                })
+            })
+            .unwrap();
+        assert!(in_flight < applied);
+    }
+
+    #[tokio::test]
+    async fn review_projection_adopts_already_target_state_without_write() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, delivery) =
+            recovery_test_orchestrator(remote).await;
+        let tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "In review")])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: false,
+        });
+        orchestrator.tracker = tracker.clone();
+        let delivery = review_ready_delivery(delivery);
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let applied = orchestrator.advance_review_projection(delivery).await;
+
+        assert_eq!(
+            applied.review_projection.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Applied
+        );
+        assert_eq!(tracker.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn review_projection_retains_unreadable_and_unexpected_observations_as_blocked() {
+        for (state, fail_reads) in [("In Progress", true), ("Done", false)] {
+            let remote = Arc::new(RecoveryDeliveryRemote {
+                pull_requests: std::sync::Mutex::new(Vec::new()),
+                pushes: AtomicUsize::new(0),
+                creates: AtomicUsize::new(0),
+                lists: AtomicUsize::new(0),
+            });
+            let (mut orchestrator, _workspace, _repo, delivery) =
+                recovery_test_orchestrator(remote).await;
+            let tracker = Arc::new(ReviewProjectionTracker {
+                issues: Arc::new(RwLock::new(vec![test_issue("1", state)])),
+                journal: orchestrator.pipeline_journal.clone(),
+                issue_id: "1".to_string(),
+                writes: AtomicUsize::new(0),
+                saw_in_flight_before_write: AtomicBool::new(false),
+                fail_reads,
+            });
+            orchestrator.tracker = tracker.clone();
+            let delivery = review_ready_delivery(delivery);
+            orchestrator
+                .persist_delivery_record(&delivery, None)
+                .await
+                .unwrap();
+
+            let blocked = orchestrator.advance_review_projection(delivery).await;
+
+            assert_eq!(
+                blocked.review_projection.as_ref().unwrap().phase,
+                crate::orchestrator::delivery::ReviewProjectionPhase::Blocked
+            );
+            assert_eq!(tracker.writes.load(Ordering::SeqCst), 0);
+            assert_eq!(orchestrator.state.read().await.delivery["1"], blocked);
+        }
     }
 
     fn post_finalize_acceptance_snapshot(
@@ -10311,6 +10629,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            review_projection: None,
         }
     }
 

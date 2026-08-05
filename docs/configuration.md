@@ -193,6 +193,7 @@ repos:
     finalize:
       mode: push_and_pr
       approval_required: true
+      review_state: In review
 
 agents:
   builder:
@@ -442,6 +443,7 @@ List of repositories for workspace setup. Paths can be absolute or relative to t
 | `finalize.enabled` | bool | `true` | Whether post-pipeline finalization is enabled for this repo |
 | `finalize.mode` | string | `none` | Finalization action: `none`, `push`, or `push_and_pr` |
 | `finalize.approval_required` | bool | `false` | Requires explicit approval from web/desktop UI before finalize runs |
+| `finalize.review_state` | string | none | Optional non-terminal tracker state projected after exact `push_and_pr` delivery |
 
 `finalize.mode` defaults to `none`, so Ensemble does not push branches or open pull requests unless
 you opt in per repo. Ensemble still records durable run artifacts for each completed issue,
@@ -454,6 +456,15 @@ before retrying, so an ambiguous push or pull request response cannot silently d
 publication. A `push_and_pr` repository remains claimed in a non-capacity-consuming waiting state
 after its uniquely matching pull request is found; merging or closing that pull request does not by
 itself project the issue to `on_success`.
+
+`finalize.review_state` is valid only with `push_and_pr`. It must be non-blank, must not be
+`on_success` or a configured terminal state, and every opt-in pull-request repository for one
+delivery must select the same target. Ensemble persists the issue-level projection as `pending`,
+`in_flight`, `applied`, or `blocked`. It persists `in_flight` before writing to the tracker and
+reconciles the exact target after every write. An unreadable, terminal, or unexpected observed
+state blocks the retained delivery; a confirmed active-state absence may retry on a later poll.
+The branch, SHA, pull-request identity, workspace, and claim remain retained throughout; this
+state consumes no agent capacity and never uses `on_success` or cleanup.
 
 **Headless behavior:** if `finalize.approval_required: true` and Ensemble is running headless, startup emits a warning and finalize is skipped for that repo.
 

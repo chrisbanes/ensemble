@@ -247,6 +247,13 @@ retains their exact delivery and pull-request identity. An explicit finalize ret
 new suffix batch; a passing retry returns the delivery to `waiting`, while failure remains blocked.
 This path does not consume pipeline cycles or use `max_cycles`.
 
+When `repos[].finalize.review_state` is configured, review is a separate delivery-owned,
+non-terminal projection. Only after every repository has durable non-active publication evidence
+and each pull request is uniquely reconciled at its stored SHA may Ensemble write the configured
+review state. The journal records `pending`, then `in_flight` before the tracker write, and
+`applied` only after an exact tracker read. Ambiguous or unexpected reconciliation blocks the
+retained delivery without another branch, pull request, terminal transition, or agent dispatch.
+
 ## Retries and cycles
 
 When a step fails or an agent errors out, Ensemble can retry. The `max_cycles` setting controls how many times:
