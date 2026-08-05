@@ -797,6 +797,10 @@ fn redact_live_dogfood(value: &str, inputs: &LiveDogfoodInputs, token: Option<&s
 
 fn live_dogfood_config(inputs: &LiveDogfoodInputs, run: &LiveDogfoodRun) -> String {
     let artifact = run.expected_artifact();
+    let prompt = format!(
+        "Work only on this issue. Create exactly {} with exactly this content:\n{} Commit it with exactly this message: {}. Run a lightweight verification. Do not push, create a pull request, or change any other tracked file. End with a JSON step output declaring success and a concise summary.",
+        artifact.path.display(), artifact.content, artifact.commit_message,
+    );
     format!(
         r#"tracker:
   kind: github
@@ -816,11 +820,7 @@ repos:
 agents:
   builder:
     acpx_agent: {}
-    prompt: >-
-      Work only on this issue. Create exactly {} with exactly this content:
-      {} Commit it with exactly this message: {}. Run a lightweight verification.
-      Do not push, create a pull request, or change any other tracked file. End with a JSON
-      step output declaring success and a concise summary.
+    prompt: {}
 steps:
   - name: implement
     agent: builder
@@ -840,9 +840,17 @@ agent:
         yaml_quote(&run.root.join("workspaces").display().to_string()),
         yaml_quote(&inputs.bamboon_path.display().to_string()),
         yaml_quote(&inputs.agent),
-        yaml_quote(&artifact.path.display().to_string()),
-        yaml_quote(&artifact.content),
-        yaml_quote(&artifact.commit_message),
+        yaml_string(&prompt),
+    )
+}
+
+fn yaml_string(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
     )
 }
 
@@ -1444,13 +1452,7 @@ fn verify_live_artifact(
     run: &LiveDogfoodRun,
 ) -> Result<(String, String), String> {
     let artifact = run.expected_artifact();
-    let repo_root = run.root.join("workspaces").join("bamboon");
-    let worktree = fs::read_dir(&repo_root)
-        .map_err(|error| format!("verify local commit: worktree root was unavailable: {error}"))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| path.is_dir())
-        .ok_or_else(|| "verify local commit: no Bamboon issue worktree was found".to_string())?;
+    let worktree = live_dogfood_worktree(&run.root.join("workspaces"))?;
     let actual_content = fs::read_to_string(worktree.join(&artifact.path))
         .map_err(|error| format!("verify local commit: expected artifact was absent: {error}"))?;
     if actual_content != artifact.content {
@@ -1566,6 +1568,30 @@ fn verify_live_artifact(
         );
     }
     Ok((branch, sha.to_string()))
+}
+
+fn live_dogfood_worktree(workspaces: &Path) -> Result<PathBuf, String> {
+    let workspace_entries = fs::read_dir(workspaces)
+        .map_err(|error| format!("verify local commit: workspace root was unavailable: {error}"))?;
+    let mut worktrees = Vec::new();
+    for entry in workspace_entries.filter_map(Result::ok) {
+        let repo_root = entry.path().join("bamboon");
+        let repo_entries = match fs::read_dir(&repo_root) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        worktrees.extend(
+            repo_entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| path.is_dir()),
+        );
+    }
+    match worktrees.as_slice() {
+        [worktree] => Ok(worktree.clone()),
+        [] => Err("verify local commit: no Bamboon issue worktree was found".to_string()),
+        _ => Err("verify local commit: multiple Bamboon issue worktrees were found".to_string()),
+    }
 }
 
 fn marker_owned_remote_branch(remote_heads: &str, marker: &str) -> bool {
@@ -1815,4 +1841,34 @@ fn live_dogfood_command_timeouts_keep_a_safe_last_observation() {
         live_command_timeout("preflight ACPX"),
         "preflight ACPX: command timed out after 30 seconds; last observation: command was still running"
     );
+}
+
+#[test]
+fn live_dogfood_config_parses_with_multiline_artifact_content() {
+    let inputs =
+        LiveDogfoodInputs::from_values(Some("1"), Some("12"), Some("/tmp/bamboon"), None).unwrap();
+    let run = LiveDogfoodRun {
+        marker: live_dogfood_marker(42, 7, 1),
+        root: PathBuf::from("/tmp/ensemble-live-dogfood/live-dogfood-2a-7-1"),
+    };
+
+    let config: serde_yaml::Value =
+        serde_yaml::from_str(&live_dogfood_config(&inputs, &run)).expect("live config must parse");
+    let prompt = config["agents"]["builder"]["prompt"]
+        .as_str()
+        .expect("live prompt must be a scalar");
+    assert!(prompt.contains("# Ensemble live dogfood\n\nMarker:"));
+}
+
+#[test]
+fn live_dogfood_worktree_discovery_includes_the_issue_key_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let workspaces = temporary.path().join("workspaces");
+    let expected = workspaces
+        .join("I_live_dogfood--expected-key")
+        .join("bamboon")
+        .join("ensemble-2026-08-05-I-live-dogfood");
+    fs::create_dir_all(&expected).unwrap();
+
+    assert_eq!(live_dogfood_worktree(&workspaces).unwrap(), expected);
 }
