@@ -600,6 +600,75 @@ impl Orchestrator {
         Ok(record.snapshot)
     }
 
+    pub(super) async fn reconcile_terminal_delivery_owners(&self) -> bool {
+        let deliveries = {
+            let state = self.state.read().await;
+            state.delivery.values().cloned().collect::<Vec<_>>()
+        };
+        if deliveries.is_empty() {
+            return true;
+        }
+
+        let issue_ids = deliveries
+            .iter()
+            .map(|delivery| delivery.issue_id.clone())
+            .collect::<Vec<_>>();
+        let observed_issues = match self.tracker.fetch_issue_states_by_ids(&issue_ids).await {
+            Ok(issues) => issues
+                .into_iter()
+                .map(|issue| (issue.id.clone(), issue))
+                .collect::<BTreeMap<_, _>>(),
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "delivery recovery could not refresh tracker ownership"
+                );
+                return false;
+            }
+        };
+        let (terminal_states, failure_state) = {
+            let config = self.config.read().await;
+            (
+                config
+                    .tracker
+                    .terminal_states
+                    .iter()
+                    .map(|state| state.to_lowercase())
+                    .collect::<Vec<_>>(),
+                config.on_failure.clone(),
+            )
+        };
+
+        let mut observed_all = true;
+        for delivery in deliveries {
+            let Some(issue) = observed_issues.get(&delivery.issue_id) else {
+                warn!(
+                    issue_id = %delivery.issue_id,
+                    "delivery recovery did not observe its tracker issue"
+                );
+                observed_all = false;
+                continue;
+            };
+            if terminal_states.contains(&issue.state.to_lowercase()) {
+                let outcome = if issue.state.eq_ignore_ascii_case(&failure_state) {
+                    TerminalOutcome::Failed
+                } else {
+                    TerminalOutcome::Succeeded
+                };
+                Box::pin(self.begin_terminal_transition_for_identity(
+                    &delivery.issue_id,
+                    &delivery.identifier,
+                    Some(issue.clone()),
+                    outcome,
+                    issue.state.clone(),
+                    None,
+                ))
+                .await;
+            }
+        }
+        observed_all
+    }
+
     pub(super) async fn process_delivery_recovery(&self) {
         let deliveries = {
             let state = self.state.read().await;

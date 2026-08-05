@@ -2534,12 +2534,21 @@ fn finalize_live_restarted_run_failure(
 }
 
 fn canonical_live_worktree_path(path: &Path) -> PathBuf {
-    fs::canonicalize(path).unwrap_or_else(|_| {
-        path.parent()
-            .and_then(|parent| fs::canonicalize(parent).ok())
-            .and_then(|parent| path.file_name().map(|name| parent.join(name)))
-            .unwrap_or_else(|| path.to_path_buf())
-    })
+    let mut existing = path;
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let (Some(parent), Some(file_name)) = (existing.parent(), existing.file_name()) else {
+            return path.to_path_buf();
+        };
+        missing.push(file_name.to_os_string());
+        existing = parent;
+    }
+
+    let mut canonical = fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
+    }
+    canonical
 }
 
 fn worktree_is_registered(listing: &str, worktree: &Path) -> bool {
@@ -4684,15 +4693,15 @@ fn live_dogfood_worktree_registration_canonicalizes_symlinked_prefixes() {
 
     let temporary = tempfile::tempdir().unwrap();
     let canonical_root = temporary.path().join("canonical");
-    let canonical_worktree = canonical_root.join("issue-worktree");
+    let canonical_worktree = canonical_root.join("run-root").join("issue-worktree");
     let aliased_root = temporary.path().join("alias");
-    let aliased_worktree = aliased_root.join("issue-worktree");
+    let aliased_worktree = aliased_root.join("run-root").join("issue-worktree");
     fs::create_dir_all(&canonical_worktree).unwrap();
     symlink(&canonical_root, &aliased_root).unwrap();
     let listing = format!("worktree {}\n", canonical_worktree.display());
 
     assert!(worktree_is_registered(&listing, &aliased_worktree));
-    fs::remove_dir(&canonical_worktree).unwrap();
+    fs::remove_dir_all(canonical_root.join("run-root")).unwrap();
     assert!(worktree_is_registered(&listing, &aliased_worktree));
 }
 

@@ -383,6 +383,10 @@ Pipeline run recovery:
   dispatches no pipeline work, and does not project a terminal tracker state. `blocked` is likewise
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
+- If the tracker moves a retained delivery to any configured terminal state, delivery recovery
+  stops remote mutation and enters the same durable terminal-transition protocol using the
+  observed state. Release removes the owned workspace and durable delivery claim before another
+  candidate can dispatch.
 - An optional `push_and_pr` `review_state` is an issue-level retained projection, never a terminal
   outcome. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
   `in_flight` before the tracker write and applies only after an exact target-state read. It writes
