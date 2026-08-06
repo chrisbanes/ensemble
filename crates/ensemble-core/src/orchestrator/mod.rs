@@ -6770,10 +6770,24 @@ impl Orchestrator {
                 )
                 .await;
             let persisted = match prepared {
-                Ok((delivery, snapshot)) => self
-                    .persist_delivery_record(&delivery, snapshot.as_ref())
-                    .await
-                    .map(|()| (delivery, snapshot)),
+                Ok((delivery, snapshot)) => {
+                    match self
+                        .persist_delivery_record(&delivery, snapshot.as_ref())
+                        .await
+                    {
+                        Ok(()) => Ok((delivery, snapshot)),
+                        Err(error) => {
+                            if let Some(history) = delivery.terminal_history.as_deref().cloned() {
+                                self.state
+                                    .write()
+                                    .await
+                                    .finalize_terminal_history
+                                    .insert(issue_id.to_string(), history);
+                            }
+                            Err(error)
+                        }
+                    }
+                }
                 Err(error) => Err(error),
             };
             match persisted {
@@ -10719,7 +10733,7 @@ mod tests {
             WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let mut orchestrator = Orchestrator::new(
-            config,
+            Arc::clone(&config),
             tracker,
             runner,
             workspace_mgr,
@@ -10728,25 +10742,38 @@ mod tests {
         );
         orchestrator.delivery_remote = remote.clone();
         {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            run.step_completed("build", succeeded_step_output(), false);
             let mut state = orchestrator.state.write().await;
-            state.claimed.insert("1".to_string());
-            state
-                .issue_run_ids
-                .insert("1".to_string(), "run-1".to_string());
-            state.set_finalize_state(
-                "1",
-                IssueFinalizeState {
-                    issue_identifier: "repo#1".to_string(),
-                    status: FinalizeStatus::Failed,
-                    repos: vec![RepoFinalizeState {
-                        repo: "source-repo".to_string(),
-                        mode: "push_and_pr".to_string(),
-                        approval_required: true,
-                        status: FinalizeStatus::Failed,
-                        last_error: Some("initial delivery persistence failed".to_string()),
-                    }],
-                },
-            );
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+        }
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+        let config_snapshot = config.read().await.clone();
+        let finalize = orchestrator
+            .run_finalize_phase("1", "repo#1", &config_snapshot)
+            .await;
+        assert_eq!(finalize.status, FinalizeStatus::Failed);
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .finalize_terminal_history
+            .contains_key("1"));
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = None;
+        {
+            let mut state = orchestrator.state.write().await;
+            state.remove_running("1");
+            state.remove_pipeline_run("1");
+            state.set_finalize_state("1", finalize);
         }
 
         orchestrator
@@ -10766,6 +10793,8 @@ mod tests {
             state.delivery["1"].repositories["source-repo"].phase,
             DeliveryPhase::AwaitingApproval
         );
+        assert!(state.delivery["1"].terminal_history.is_some());
+        assert!(!state.finalize_terminal_history.contains_key("1"));
         drop(state);
         assert_eq!(
             orchestrator.approve_finalize_delivery("1", "repo#1").await,

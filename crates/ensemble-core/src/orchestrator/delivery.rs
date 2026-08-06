@@ -1957,6 +1957,7 @@ impl Orchestrator {
         state
             .delivery
             .insert(delivery.issue_id.clone(), delivery.clone());
+        state.finalize_terminal_history.remove(&delivery.issue_id);
         if let Some(snapshot) = persisted_snapshot
             .as_ref()
             .filter(|snapshot| snapshot.issue_id == delivery.issue_id)
@@ -1986,13 +1987,15 @@ impl Orchestrator {
             let snapshot = state
                 .get_pipeline_run(issue_id)
                 .map(PipelineRun::to_snapshot);
-            let terminal_history = self.build_owned_history_record(
-                &state,
-                issue_id,
-                HISTORY_OUTCOME_SUCCEEDED,
-                None,
-                Utc::now(),
-            );
+            let terminal_history = self
+                .build_owned_history_record(
+                    &state,
+                    issue_id,
+                    HISTORY_OUTCOME_SUCCEEDED,
+                    None,
+                    Utc::now(),
+                )
+                .or_else(|| state.finalize_terminal_history.get(issue_id).cloned());
             (run_id, snapshot, terminal_history)
         };
         let configured_repositories = self.workspace_mgr.repos();

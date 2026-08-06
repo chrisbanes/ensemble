@@ -151,6 +151,8 @@ pub struct OrchestratorState {
     pub pipeline_runs: HashMap<String, PipelineRun>,
     /// Finalization state for issues that have finished pipeline execution.
     pub finalize: HashMap<String, IssueFinalizeState>,
+    /// Completion history retained while an initial delivery owner is retried.
+    pub(crate) finalize_terminal_history: HashMap<String, crate::history::model::HistoryRecord>,
     /// Durable remote-publication owners that no longer consume worker capacity.
     pub(crate) delivery: HashMap<String, DeliveryRecord>,
     /// Terminal tracker writes that must reconcile before local run release.
@@ -198,6 +200,7 @@ impl OrchestratorState {
             agent_rate_limits: None,
             pipeline_runs: HashMap::new(),
             finalize: HashMap::new(),
+            finalize_terminal_history: HashMap::new(),
             delivery: HashMap::new(),
             pending_terminal_transitions: HashMap::new(),
             artifacts: HashMap::new(),
@@ -383,6 +386,7 @@ impl OrchestratorState {
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
+        self.finalize_terminal_history.remove(issue_id);
         self.delivery.remove(issue_id);
         self.pending_terminal_transitions.remove(issue_id);
         self.artifacts.remove(issue_id);
@@ -406,6 +410,7 @@ impl OrchestratorState {
 
     pub fn clear_finalize_state(&mut self, issue_id: &str) {
         self.finalize.remove(issue_id);
+        self.finalize_terminal_history.remove(issue_id);
     }
 
     /// Update session metadata on a running entry.
