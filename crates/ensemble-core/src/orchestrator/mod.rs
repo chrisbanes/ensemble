@@ -7060,6 +7060,7 @@ impl Orchestrator {
             .advance_delivery_record(delivery, &workspace, snapshot.as_ref())
             .await;
         let delivery = self.advance_review_projection(delivery).await;
+        let terminal_history = delivery.terminal_history.as_deref().cloned();
         self.project_delivery_artifacts(issue_id, &delivery).await;
 
         let (final_status, should_complete, last_error) = {
@@ -7154,7 +7155,7 @@ impl Orchestrator {
                 issue,
                 outcome,
                 target_state,
-                None,
+                terminal_history,
             )
             .await;
         } else if let Some(error) = last_error {
@@ -11234,6 +11235,78 @@ mod tests {
         let repository = &state.delivery["1"].repositories["source-repo"];
         assert_eq!(repository.phase, DeliveryPhase::Waiting);
         assert_eq!(repository.local_sha, "stored-delivery-sha");
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn operator_retry_carries_delivery_history_into_terminal_cleanup() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.mode = DeliveryMode::Push;
+        repository.phase = DeliveryPhase::Blocked;
+        repository.retry_from = Some(DeliveryPhase::ReconcilingPush);
+        repository.last_error = Some("remote observation failed".to_string());
+        repository.pr_number = None;
+        repository.pr_url = None;
+        delivery.terminal_history.as_deref_mut().unwrap().outcome =
+            HISTORY_OUTCOME_SUCCEEDED.to_string();
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+        {
+            let mut state = orchestrator.state.write().await;
+            state.set_finalize_state(
+                "1",
+                IssueFinalizeState {
+                    issue_identifier: "repo#1".to_string(),
+                    status: FinalizeStatus::InProgress,
+                    repos: vec![RepoFinalizeState {
+                        repo: "source-repo".to_string(),
+                        mode: "push".to_string(),
+                        approval_required: false,
+                        status: FinalizeStatus::InProgress,
+                        last_error: None,
+                    }],
+                },
+            );
+        }
+
+        orchestrator.process_finalize_retries().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.delivery.contains_key("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.completed.contains_key("1"));
+        drop(state);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].issue_id, delivery.issue_id);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }

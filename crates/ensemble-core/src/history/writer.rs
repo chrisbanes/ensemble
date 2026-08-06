@@ -18,6 +18,17 @@ impl HistoryWriter {
         &self.path
     }
 
+    async fn sync_parent(&self) -> Result<(), std::io::Error> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            File::open(parent).await?.sync_all().await?;
+        }
+        Ok(())
+    }
+
     pub async fn append(&self, record: &HistoryRecord) -> Result<(), std::io::Error> {
         let mut line = serde_json::to_string(record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -41,13 +52,7 @@ impl HistoryWriter {
         file.flush().await?;
         file.sync_data().await?;
         if created {
-            if let Some(parent) = self
-                .path
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-            {
-                File::open(parent).await?.sync_all().await?;
-            }
+            self.sync_parent().await?;
         }
         Ok(())
     }
@@ -64,6 +69,13 @@ impl HistoryWriter {
                 if serde_json::from_str::<HistoryRecord>(&line)
                     .is_ok_and(|existing| existing == *record)
                 {
+                    OpenOptions::new()
+                        .read(true)
+                        .open(&self.path)
+                        .await?
+                        .sync_data()
+                        .await?;
+                    self.sync_parent().await?;
                     return Ok(());
                 }
             }
