@@ -887,7 +887,10 @@ impl Orchestrator {
         self.reconcile_pending_terminal_transitions().await;
         self.hydrate_waiting_on_human_from_store().await;
         self.process_interaction_thread_commands().await;
-        Box::pin(self.reconcile_and_recover_deliveries()).await;
+        let has_delivery = !self.state.read().await.delivery.is_empty();
+        if has_delivery {
+            Box::pin(self.reconcile_and_recover_deliveries()).await;
+        }
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
@@ -10048,6 +10051,45 @@ mod tests {
         (orchestrator, workspace_temp, repo_temp, delivery)
     }
 
+    async fn two_delivery_recovery_test_orchestrator(
+        remote: Arc<RecoveryDeliveryRemote>,
+    ) -> (
+        Orchestrator,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DeliveryRecord,
+    ) {
+        let (orchestrator, workspace, repo, missing_delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let mut observed_delivery = missing_delivery.clone();
+        observed_delivery.issue_id = "2".to_string();
+        observed_delivery.identifier = "repo#2".to_string();
+        observed_delivery.run_id = "run-2".to_string();
+        observed_delivery
+            .repositories
+            .get_mut("source-repo")
+            .unwrap()
+            .marker = canonical_marker("run-2", "2", "source-repo");
+        remote.pull_requests.lock().unwrap().push(
+            crate::orchestrator::delivery::RemotePullRequest {
+                repository_key: "source-repo".to_string(),
+                head_branch: observed_delivery.repositories["source-repo"]
+                    .head_branch
+                    .clone(),
+                base_branch: "main".to_string(),
+                head_sha: "0123456789abcdef".to_string(),
+                body: observed_delivery.repositories["source-repo"].marker.clone(),
+                number: 421,
+                url: "https://github.com/example/project/pull/421".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&observed_delivery, None)
+            .await
+            .unwrap();
+        (orchestrator, workspace, repo, missing_delivery)
+    }
+
     fn review_projection_history() -> HistoryRecord {
         HistoryRecord {
             issue_identifier: "repo#1".to_string(),
@@ -10696,6 +10738,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_delivery_does_not_report_success() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        orchestrator
+            .config
+            .write()
+            .await
+            .tracker
+            .terminal_states
+            .push("Cancelled".to_string());
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Cancelled")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.completed["1"].status, "completed_failed");
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn missing_tracker_issue_does_not_block_other_delivery_recovery() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
@@ -10704,35 +10797,37 @@ mod tests {
             lists: AtomicUsize::new(0),
         });
         let (mut orchestrator, _workspace, _repo, missing_delivery) =
-            recovery_test_orchestrator(Arc::clone(&remote)).await;
-        let mut observed_delivery = missing_delivery.clone();
-        observed_delivery.issue_id = "2".to_string();
-        observed_delivery.identifier = "repo#2".to_string();
-        observed_delivery.run_id = "run-2".to_string();
-        observed_delivery
-            .repositories
-            .get_mut("source-repo")
-            .unwrap()
-            .marker = canonical_marker("run-2", "2", "source-repo");
-        remote.pull_requests.lock().unwrap().push(
-            crate::orchestrator::delivery::RemotePullRequest {
-                repository_key: "source-repo".to_string(),
-                head_branch: observed_delivery.repositories["source-repo"]
-                    .head_branch
-                    .clone(),
-                base_branch: "main".to_string(),
-                head_sha: "0123456789abcdef".to_string(),
-                body: observed_delivery.repositories["source-repo"].marker.clone(),
-                number: 421,
-                url: "https://github.com/example/project/pull/421".to_string(),
-            },
-        );
-        orchestrator
-            .persist_delivery_record(&observed_delivery, None)
-            .await
-            .unwrap();
+            two_delivery_recovery_test_orchestrator(Arc::clone(&remote)).await;
         orchestrator.tracker = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![test_issue("2", "Todo")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.delivery.get("1"), Some(&missing_delivery));
+        assert_eq!(
+            state.delivery["2"].repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tracker_refresh_failure_does_not_block_other_delivery_recovery() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, missing_delivery) =
+            two_delivery_recovery_test_orchestrator(Arc::clone(&remote)).await;
+        orchestrator.tracker = Arc::new(FailingWorkflowStateTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("2", "Todo")])),
+            id_fetch_failures_remaining: AtomicUsize::new(2),
         });
 
         Box::pin(orchestrator.handle_tick()).await;

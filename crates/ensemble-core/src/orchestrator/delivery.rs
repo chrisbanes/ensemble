@@ -577,12 +577,10 @@ fn evaluate_pull_request_requirement(
 
 impl Orchestrator {
     pub(super) async fn reconcile_and_recover_deliveries(&self) {
-        if self.state.read().await.delivery.is_empty() {
+        let recoverable_issue_ids = self.reconcile_terminal_delivery_owners().await;
+        if recoverable_issue_ids.is_empty() {
             return;
         }
-        let Some(recoverable_issue_ids) = self.reconcile_terminal_delivery_owners().await else {
-            return;
-        };
 
         // Remote delivery recovery is another large state machine. Poll it only after terminal
         // ownership reconciliation has finished and released its future.
@@ -613,13 +611,13 @@ impl Orchestrator {
         Ok(record.snapshot)
     }
 
-    pub(super) async fn reconcile_terminal_delivery_owners(&self) -> Option<BTreeSet<String>> {
+    pub(super) async fn reconcile_terminal_delivery_owners(&self) -> BTreeSet<String> {
         let deliveries = {
             let state = self.state.read().await;
             state.delivery.values().cloned().collect::<Vec<_>>()
         };
         if deliveries.is_empty() {
-            return Some(BTreeSet::new());
+            return BTreeSet::new();
         }
 
         let issue_ids = deliveries
@@ -627,19 +625,36 @@ impl Orchestrator {
             .map(|delivery| delivery.issue_id.clone())
             .collect::<Vec<_>>();
         let observed_issues = match self.tracker.fetch_issue_states_by_ids(&issue_ids).await {
-            Ok(issues) => issues
-                .into_iter()
-                .map(|issue| (issue.id.clone(), issue))
-                .collect::<BTreeMap<_, _>>(),
+            Ok(issues) => issues,
             Err(error) => {
                 warn!(
                     error = %error,
                     "delivery recovery could not refresh tracker ownership"
                 );
-                return None;
+                let mut observed = Vec::new();
+                if issue_ids.len() > 1 {
+                    for issue_id in &issue_ids {
+                        match self
+                            .tracker
+                            .fetch_issue_states_by_ids(std::slice::from_ref(issue_id))
+                            .await
+                        {
+                            Ok(issues) => observed.extend(issues),
+                            Err(error) => warn!(
+                                issue_id = %issue_id,
+                                error = %error,
+                                "delivery recovery could not refresh one tracker owner"
+                            ),
+                        }
+                    }
+                }
+                observed
             }
-        };
-        let (terminal_states, failure_state) = {
+        }
+        .into_iter()
+        .map(|issue| (issue.id.clone(), issue))
+        .collect::<BTreeMap<_, _>>();
+        let (terminal_states, success_state) = {
             let config = self.config.read().await;
             (
                 config
@@ -648,7 +663,7 @@ impl Orchestrator {
                     .iter()
                     .map(|state| state.to_lowercase())
                     .collect::<Vec<_>>(),
-                config.on_failure.clone(),
+                config.on_success.clone(),
             )
         };
 
@@ -662,10 +677,10 @@ impl Orchestrator {
                 continue;
             };
             if terminal_states.contains(&issue.state.to_lowercase()) {
-                let outcome = if issue.state.eq_ignore_ascii_case(&failure_state) {
-                    TerminalOutcome::Failed
-                } else {
+                let outcome = if issue.state.eq_ignore_ascii_case(&success_state) {
                     TerminalOutcome::Succeeded
+                } else {
+                    TerminalOutcome::Failed
                 };
                 Box::pin(self.begin_terminal_transition_for_identity(
                     &delivery.issue_id,
@@ -680,7 +695,7 @@ impl Orchestrator {
                 recoverable_issue_ids.insert(delivery.issue_id);
             }
         }
-        Some(recoverable_issue_ids)
+        recoverable_issue_ids
     }
 
     pub(super) async fn process_delivery_recovery(
