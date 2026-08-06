@@ -7350,21 +7350,17 @@ impl Orchestrator {
         run_id: Option<&str>,
         record: &HistoryRecord,
     ) -> Result<(), std::io::Error> {
-        if let (Some(run_id), Some(store)) = (run_id, &self.history_store) {
-            if let Err(error) = store.append_history_record(run_id, record).await {
-                warn!(
-                    run_id = %run_id,
-                    issue_id = %record.issue_id,
-                    error = %error,
-                    "failed to append history record to sqlite"
-                );
-            }
-        }
+        let sqlite_result = if let (Some(run_id), Some(store)) = (run_id, &self.history_store) {
+            store.append_history_record(run_id, record).await
+        } else {
+            Ok(())
+        };
 
         let history_path = self.workspace_mgr.root().join("ensemble_history.jsonl");
         let _guard = self.history_write_lock.lock().await;
         let writer = HistoryWriter::new(history_path);
-        writer.append_if_absent(record).await
+        let jsonl_result = writer.append_if_absent(record).await;
+        sqlite_result.and(jsonl_result)
     }
 
     async fn append_history_record(&self, run_id: Option<&str>, record: HistoryRecord) {
@@ -11382,6 +11378,72 @@ mod tests {
             artifact.pr_url.as_deref(),
             Some("https://github.com/example/project/pull/420")
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_history_store_failure_preserves_delivery_workspace() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        let workspace = orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+        let history_path = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .db_path()
+            .clone();
+        std::fs::remove_file(&history_path).unwrap();
+        std::fs::create_dir(&history_path).unwrap();
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.completed.contains_key("1"));
+        assert!(state.pending_terminal_transitions.contains_key("1"));
+        drop(state);
+        assert!(workspace.base_path.exists());
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::TerminalTransitionApplied)
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
