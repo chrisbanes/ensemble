@@ -887,16 +887,7 @@ impl Orchestrator {
         self.reconcile_pending_terminal_transitions().await;
         self.hydrate_waiting_on_human_from_store().await;
         self.process_interaction_thread_commands().await;
-        let has_delivery = !self.state.read().await.delivery.is_empty();
-        if has_delivery {
-            if let Some(observed_issue_ids) =
-                Box::pin(self.reconcile_terminal_delivery_owners()).await
-            {
-                // Remote delivery recovery is another large state machine. Poll it only after
-                // terminal ownership reconciliation has finished and released its future.
-                Box::pin(self.process_delivery_recovery(Some(&observed_issue_ids))).await;
-            }
-        }
+        Box::pin(self.reconcile_and_recover_deliveries()).await;
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
@@ -10753,6 +10744,67 @@ mod tests {
             DeliveryPhase::Waiting
         );
         assert_eq!(remote.lists.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_cleanup_does_not_resume_delivery_recovery() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        std::fs::write(
+            orchestrator
+                .workspace_mgr
+                .metadata_path_for_test(&delivery.issue_id),
+            "{not-json",
+        )
+        .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.pending_terminal_transitions.contains_key("1"));
+        assert_eq!(
+            state.delivery["1"].repositories["source-repo"].phase,
+            DeliveryPhase::PrCreateInFlight
+        );
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.kind,
+            PipelineTransitionKind::PendingTerminalTransition
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }

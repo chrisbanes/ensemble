@@ -576,6 +576,19 @@ fn evaluate_pull_request_requirement(
 }
 
 impl Orchestrator {
+    pub(super) async fn reconcile_and_recover_deliveries(&self) {
+        if self.state.read().await.delivery.is_empty() {
+            return;
+        }
+        let Some(recoverable_issue_ids) = self.reconcile_terminal_delivery_owners().await else {
+            return;
+        };
+
+        // Remote delivery recovery is another large state machine. Poll it only after terminal
+        // ownership reconciliation has finished and released its future.
+        Box::pin(self.process_delivery_recovery(Some(&recoverable_issue_ids))).await;
+    }
+
     pub(super) async fn load_delivery_snapshot(
         &self,
         delivery: &DeliveryRecord,
@@ -639,7 +652,7 @@ impl Orchestrator {
             )
         };
 
-        let observed_issue_ids = observed_issues.keys().cloned().collect();
+        let mut recoverable_issue_ids = BTreeSet::new();
         for delivery in deliveries {
             let Some(issue) = observed_issues.get(&delivery.issue_id) else {
                 warn!(
@@ -663,9 +676,11 @@ impl Orchestrator {
                     None,
                 ))
                 .await;
+            } else {
+                recoverable_issue_ids.insert(delivery.issue_id);
             }
         }
-        Some(observed_issue_ids)
+        Some(recoverable_issue_ids)
     }
 
     pub(super) async fn process_delivery_recovery(
