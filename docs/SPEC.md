@@ -366,8 +366,9 @@ Pipeline run recovery:
   deterministic order and retain the run ID, issue ID, configured repository key, mode, remote and
   base branch, exact head branch and local commit SHA, observed remote SHA, pull request identity,
   last error, retry origin, a stored deterministic marker, and the prepared terminal history.
-- Delivery repository phases are `prepared`, `push_in_flight`, `reconciling_push`,
-  `pr_create_in_flight`, `reconciling_pr`, `waiting`, `published`, and `blocked`. The issue-level
+- Delivery repository phases are `awaiting_approval`, `prepared`, `push_in_flight`,
+  `reconciling_push`, `pr_create_in_flight`, `reconciling_pr`, `waiting`, `published`, and
+  `blocked`. The issue-level
   delivery state is derived from those repository entries rather than serialized separately.
 - Before a push or pull request creation, Ensemble persists the corresponding in-flight phase, so
   delivery owns publication before the remote mutation. On a normal response or ambiguous failure
