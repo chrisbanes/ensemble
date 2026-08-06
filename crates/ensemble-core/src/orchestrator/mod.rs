@@ -5895,13 +5895,14 @@ impl Orchestrator {
         .await;
     }
 
-    async fn persist_terminal_transition_intent(
+    async fn persist_terminal_transition(
         &self,
         issue_id: &str,
         identifier: &str,
         outcome: TerminalOutcome,
         target_state: String,
         history_record: Option<HistoryRecord>,
+        tracker_write_confirmed: bool,
     ) -> Option<PendingTerminalTransition> {
         let existing_record = self
             .pipeline_journal
@@ -5962,8 +5963,15 @@ impl Orchestrator {
         if history_record.is_some() {
             transition.history_record = history_record;
         }
+        if tracker_write_confirmed {
+            transition.confirm_tracker_write();
+        }
         let input = PipelineTransitionInput {
-            kind: PipelineTransitionKind::PendingTerminalTransition,
+            kind: if transition.tracker_write_confirmed {
+                PipelineTransitionKind::TerminalTransitionApplied
+            } else {
+                PipelineTransitionKind::PendingTerminalTransition
+            },
             issue_id: issue_id.to_string(),
             identifier: identifier.to_string(),
             run_id,
@@ -5997,18 +6005,57 @@ impl Orchestrator {
         history_record: Option<HistoryRecord>,
     ) {
         let Some(transition) = self
-            .persist_terminal_transition_intent(
+            .persist_terminal_transition(
                 issue_id,
                 identifier,
                 outcome,
                 target_state,
                 history_record,
+                false,
             )
             .await
         else {
             return;
         };
 
+        self.begin_persisted_terminal_transition(issue_id, identifier, issue, transition)
+            .await;
+    }
+
+    async fn begin_confirmed_terminal_transition_for_identity(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        issue: Option<Issue>,
+        outcome: TerminalOutcome,
+        target_state: String,
+        history_record: Option<HistoryRecord>,
+    ) {
+        let Some(transition) = self
+            .persist_terminal_transition(
+                issue_id,
+                identifier,
+                outcome,
+                target_state,
+                history_record,
+                true,
+            )
+            .await
+        else {
+            return;
+        };
+
+        self.begin_persisted_terminal_transition(issue_id, identifier, issue, transition)
+            .await;
+    }
+
+    async fn begin_persisted_terminal_transition(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        issue: Option<Issue>,
+        transition: PendingTerminalTransition,
+    ) {
         let issue = Some(issue.unwrap_or_else(|| {
             Self::terminal_issue_placeholder(issue_id, identifier, &transition.target_state)
         }));
@@ -6568,12 +6615,13 @@ impl Orchestrator {
         };
 
         let _ = self
-            .persist_terminal_transition_intent(
+            .persist_terminal_transition(
                 issue_id,
                 issue_identifier,
                 outcome,
                 target_state,
                 history_record,
+                false,
             )
             .await;
     }
@@ -10731,8 +10779,10 @@ mod tests {
             .await
             .unwrap();
         assert!(workspace.base_path.exists());
-        orchestrator.tracker = Arc::new(MockTracker {
+        let tracker_writes = Arc::new(RwLock::new(Vec::new()));
+        orchestrator.tracker = Arc::new(RecordingTracker {
             issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+            state_writes: Arc::clone(&tracker_writes),
         });
 
         Box::pin(orchestrator.handle_tick()).await;
@@ -10752,6 +10802,17 @@ mod tests {
             records.last().map(|record| record.kind),
             Some(PipelineTransitionKind::Released)
         );
+        assert!(records.iter().any(|record| {
+            record.kind == PipelineTransitionKind::TerminalTransitionApplied
+                && record
+                    .terminal_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.tracker_write_confirmed)
+        }));
+        assert!(!records
+            .iter()
+            .any(|record| { record.kind == PipelineTransitionKind::PendingTerminalTransition }));
+        assert!(tracker_writes.read().await.is_empty());
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);

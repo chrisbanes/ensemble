@@ -739,7 +739,7 @@ impl Orchestrator {
                 .get(&delivery.issue_id)
                 .cloned()
                 .or_else(|| history_record.artifacts.clone());
-            self.begin_terminal_transition_for_identity(
+            self.begin_confirmed_terminal_transition_for_identity(
                 &delivery.issue_id,
                 &delivery.identifier,
                 Some(issue.clone()),
