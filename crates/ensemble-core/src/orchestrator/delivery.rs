@@ -604,15 +604,17 @@ impl Orchestrator {
         issue_id: &str,
         identifier: &str,
     ) -> Result<bool, FinalizeApprovalError> {
-        let current = self
-            .state
-            .read()
-            .await
+        let state = self.state.read().await;
+        if state.pending_terminal_transitions.contains_key(issue_id) {
+            return Err(FinalizeApprovalError::NotAwaitingApproval);
+        }
+        let current = state
             .delivery
             .get(issue_id)
             .filter(|delivery| delivery.identifier == identifier)
             .cloned()
             .ok_or(FinalizeApprovalError::NotAwaitingApproval)?;
+        drop(state);
         if current.repositories.values().any(|repository| {
             repository.approval_required && repository.phase == DeliveryPhase::Blocked
         }) {
@@ -661,14 +663,17 @@ impl Orchestrator {
         issue_id: &str,
         identifier: &str,
     ) -> Result<(), FinalizeRetryError> {
-        let current = self
-            .state
-            .read()
-            .await
-            .delivery
-            .get(issue_id)
-            .filter(|delivery| delivery.identifier == identifier)
-            .cloned();
+        let current = {
+            let state = self.state.read().await;
+            if state.pending_terminal_transitions.contains_key(issue_id) {
+                return Err(FinalizeRetryError::NotFailed);
+            }
+            state
+                .delivery
+                .get(issue_id)
+                .filter(|delivery| delivery.identifier == identifier)
+                .cloned()
+        };
         let Some(current) = current else {
             let mut state = self.state.write().await;
             let finalize = state

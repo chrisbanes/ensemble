@@ -11288,7 +11288,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_terminal_cleanup_does_not_resume_delivery_recovery() {
+    async fn failed_terminal_cleanup_blocks_delivery_recovery_and_finalize_commands() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
@@ -11358,6 +11358,54 @@ mod tests {
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        drop(state);
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let repository = state
+                .delivery
+                .get_mut("1")
+                .unwrap()
+                .repositories
+                .get_mut("source-repo")
+                .unwrap();
+            repository.approval_required = true;
+            repository.phase = DeliveryPhase::AwaitingApproval;
+        }
+        assert_eq!(
+            orchestrator
+                .approve_finalize_delivery("1", &delivery.identifier)
+                .await,
+            Err(FinalizeApprovalError::NotAwaitingApproval)
+        );
+        {
+            let mut state = orchestrator.state.write().await;
+            let repository = state
+                .delivery
+                .get_mut("1")
+                .unwrap()
+                .repositories
+                .get_mut("source-repo")
+                .unwrap();
+            repository.phase = DeliveryPhase::Blocked;
+            repository.retry_from = Some(DeliveryPhase::Prepared);
+        }
+        assert_eq!(
+            orchestrator
+                .retry_finalize_delivery("1", &delivery.identifier)
+                .await,
+            Err(FinalizeRetryError::NotFailed)
+        );
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue("1")
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::PendingTerminalTransition
+        );
     }
 
     fn delivery_restart_orchestrator(
