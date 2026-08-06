@@ -19,6 +19,16 @@ type IssueAppendLock = tokio::sync::Mutex<()>;
 type IssueAppendLockRegistry = Mutex<HashMap<PathBuf, Weak<IssueAppendLock>>>;
 static ISSUE_APPEND_LOCKS: OnceLock<IssueAppendLockRegistry> = OnceLock::new();
 
+fn requires_durable_sync(kind: PipelineTransitionKind, created: bool) -> bool {
+    created
+        || matches!(
+            kind,
+            PipelineTransitionKind::DeliveryOwned
+                | PipelineTransitionKind::PendingTerminalTransition
+                | PipelineTransitionKind::TerminalTransitionApplied
+        )
+}
+
 pub(crate) struct PipelineIssueJournalTransaction<'a> {
     journal: &'a PipelineRunJournal,
     issue_id: String,
@@ -263,6 +273,11 @@ impl PipelineRunJournal {
         tokio::fs::create_dir_all(&self.root).await?;
         let path = self.path_for_issue(&input.issue_id);
         self.repair_trailing_record(&path).await?;
+        let created = match tokio::fs::metadata(&path).await {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+        };
         let seq = self
             .read_last_valid_record(&path)
             .await?
@@ -305,12 +320,11 @@ impl PipelineRunJournal {
             return Err(write_error);
         }
         file.flush().await?;
-        if matches!(
-            record.kind,
-            PipelineTransitionKind::DeliveryOwned
-                | PipelineTransitionKind::TerminalTransitionApplied
-        ) {
+        if requires_durable_sync(record.kind, created) {
             file.sync_data().await?;
+        }
+        if created {
+            tokio::fs::File::open(&self.root).await?.sync_all().await?;
         }
         Ok(record)
     }
@@ -594,6 +608,22 @@ mod tests {
     use crate::pipeline::engine::{PipelineRun, StepState};
     use tempfile::tempdir;
     use tokio::io::AsyncWriteExt;
+
+    #[test]
+    fn pending_terminal_intent_requires_durable_sync() {
+        assert!(requires_durable_sync(
+            PipelineTransitionKind::PendingTerminalTransition,
+            false,
+        ));
+    }
+
+    #[test]
+    fn newly_created_journal_requires_durable_sync() {
+        assert!(requires_durable_sync(
+            PipelineTransitionKind::RunStarted,
+            true,
+        ));
+    }
 
     fn step(name: &str, depends: Option<Vec<String>>) -> StepConfig {
         StepConfig {

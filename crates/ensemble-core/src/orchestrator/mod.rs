@@ -6344,6 +6344,12 @@ impl Orchestrator {
                 .clear_terminal_interaction_waiting_state(issue_id)
                 .await
             {
+                self.record_pending_terminal_transition_failure(
+                    issue_id,
+                    &pending,
+                    error.to_string(),
+                )
+                .await;
                 warn!(
                     issue_id = %issue_id,
                     error = %error,
@@ -7060,8 +7066,10 @@ impl Orchestrator {
             .advance_delivery_record(delivery, &workspace, snapshot.as_ref())
             .await;
         let delivery = self.advance_review_projection(delivery).await;
-        let terminal_history = delivery.terminal_history.as_deref().cloned();
         self.project_delivery_artifacts(issue_id, &delivery).await;
+        let terminal_history = self
+            .projected_terminal_history(&delivery, HISTORY_OUTCOME_SUCCEEDED)
+            .await;
 
         let (final_status, should_complete, last_error) = {
             let mut state = self.state.write().await;
@@ -11258,6 +11266,18 @@ mod tests {
         repository.pr_url = None;
         delivery.terminal_history.as_deref_mut().unwrap().outcome =
             HISTORY_OUTCOME_SUCCEEDED.to_string();
+        let run_id = delivery.run_id.clone();
+        delivery.terminal_history.as_deref_mut().unwrap().artifacts =
+            Some(crate::history::artifacts::RunArtifacts {
+                run_id,
+                workspace_path: "/tmp/ensemble-test".to_string(),
+                repos: vec![crate::history::artifacts::RepoArtifact {
+                    repo: "source-repo".to_string(),
+                    finalize_status: "pending".to_string(),
+                    ..Default::default()
+                }],
+                transcripts: Vec::new(),
+            });
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
@@ -11307,6 +11327,12 @@ mod tests {
         assert_eq!(history.total, 1);
         assert_eq!(history.records[0].issue_id, delivery.issue_id);
         assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
+        let artifact = &history.records[0].artifacts.as_ref().unwrap().repos[0];
+        assert_eq!(artifact.finalize_status, "succeeded");
+        assert_eq!(
+            artifact.pushed_ref.as_deref(),
+            Some("origin/ensemble/repo-1")
+        );
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }
@@ -11526,6 +11552,63 @@ mod tests {
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_interaction_cleanup_failure_uses_persisted_retry_backoff() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+        orchestrator
+            .interaction_store
+            .create(test_question_interaction(
+                &test_issue("1", "Done"),
+                1,
+                "terminal-interaction",
+            ))
+            .await
+            .unwrap();
+        orchestrator.interaction_store.fail_next_writes(1);
+
+        Box::pin(orchestrator.handle_tick()).await;
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        let pending = &state.pending_terminal_transitions["1"];
+        assert_eq!(pending.transition.attempt, 1);
+        assert!(pending
+            .transition
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("injected interaction write failure")));
+        assert!(pending.transition.last_attempted_at.is_some());
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.completed.contains_key("1"));
     }
 
     #[tokio::test]

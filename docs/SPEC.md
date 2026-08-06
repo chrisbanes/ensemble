@@ -1923,6 +1923,8 @@ Permission and user-input behavior on direct ACP paths is governed by `agent.per
 Policy requirements:
 
 - Each implementation should document its chosen permission and operator-confirmation posture.
+- Agent subprocesses must not inherit the host's `GITHUB_TOKEN`; tracker credentials remain owned
+  by the orchestrator process unless an explicit future agent-credential contract says otherwise.
 - Permission requests and user-input scenarios must not leave the orchestrator globally stalled.
   User-input waits should be issue-scoped, with other issues continuing to make progress.
 

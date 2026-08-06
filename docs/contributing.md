@@ -102,6 +102,9 @@ and clone cleanliness before creating an issue; it never repairs fixture drift. 
 the `codex` named agent; set a non-empty `ENSEMBLE_DOGFOOD_AGENT` only for an explicit local
 override. The GitHub credential comes from `gh auth token` only after the opt-in gate, is passed to
 the child host in memory as `GITHUB_TOKEN`, and is not written into generated YAML or diagnostics.
+Agent subprocesses remove `GITHUB_TOKEN` from their environment. The generated dogfood agent uses
+read-approved launch permissions and rejects permission escalation, leaving GitHub publication to
+the orchestrator host.
 
 The tracer bullet creates one marker-owned Markdown artifact and commit. The agent may not publish:
 after capturing that local commit, Ensemble alone pushes the generated branch and creates exactly
@@ -138,7 +141,9 @@ phase and assertions not reached. The document refers only to stable run identit
 repository-relative artifacts: it excludes the private Project value, credentials, absolute paths,
 generated YAML, and raw command output. It also records the selected routine or preserve mode,
 each ordered cleanup or preservation transition, the final absent state, and resources retained
-intentionally.
+intentionally. Routine cleanup persists an `attempting` transition before each action, then appends
+a success or preserved-failure transition after observing the result. If the
+result cannot be persisted, recovery treats the attempted action as ambiguous and revalidates it.
 
 Each host lifetime has separate relative log names: `host-1.stdout.log`, `host-1.stderr.log`,
 `host-2.stdout.log`, and `host-2.stderr.log`. On a restart mismatch, timeout, ambiguous observation,

@@ -33,10 +33,10 @@ use super::ResolvedCommand;
 /// Build an `AcpAgent` from a structured `ResolvedCommand`. The SDK's
 /// `McpServerStdio` spawns the child via `async_process::Command`.
 /// Because `McpServerStdio` has no working-directory field, we wrap the
-/// command with `sh -c 'cd "$1" && shift && exec "$@"'` and pass the
-/// workspace path as `$1` — the child process starts with the correct CWD
-/// while all agent args arrive as separate `argv` entries (no shell escaping
-/// needed for either the path or the args).
+/// command with a shell that removes the host's GitHub token, changes to the
+/// workspace passed as `$1`, and then executes the agent. All agent args arrive
+/// as separate `argv` entries, so neither paths nor arguments need shell
+/// escaping.
 fn build_acp_agent(cmd: &ResolvedCommand, workspace_path: &Path) -> AcpAgent {
     let name = cmd
         .program
@@ -45,7 +45,7 @@ fn build_acp_agent(cmd: &ResolvedCommand, workspace_path: &Path) -> AcpAgent {
         .unwrap_or_else(|| "agent".to_string());
     let mut args = vec![
         "-c".to_string(),
-        r#"cd "$1" && shift && exec "$@""#.to_string(),
+        r#"unset GITHUB_TOKEN; cd "$1" && shift && exec "$@""#.to_string(),
         name.clone(),
         workspace_path.to_string_lossy().to_string(),
         cmd.program.to_string_lossy().to_string(),
@@ -1124,7 +1124,7 @@ mod tests {
             config.arguments(),
             [
                 "-c",
-                r#"cd "$1" && shift && exec "$@""#,
+                r#"unset GITHUB_TOKEN; cd "$1" && shift && exec "$@""#,
                 "agent binary",
                 "/tmp/work space",
                 "/opt/agent binary",
@@ -1136,6 +1136,29 @@ mod tests {
             config.environment().get("AGENT_TOKEN").map(String::as_str),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn build_acp_agent_removes_host_github_token_from_child() {
+        let command = ResolvedCommand {
+            program: PathBuf::from("sh"),
+            args: vec![
+                "-c".to_string(),
+                r#"printf '%s' "${GITHUB_TOKEN-unset}""#.to_string(),
+            ],
+            env: Vec::new(),
+        };
+        let agent = build_acp_agent(&command, Path::new("/tmp"));
+        let config = agent.config();
+        let output = std::process::Command::new(config.command())
+            .args(config.arguments())
+            .envs(config.environment())
+            .env("GITHUB_TOKEN", "host-secret")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "unset");
     }
 
     #[test]

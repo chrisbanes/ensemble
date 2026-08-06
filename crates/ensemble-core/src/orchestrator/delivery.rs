@@ -897,7 +897,7 @@ impl Orchestrator {
         })
     }
 
-    async fn projected_terminal_history(
+    pub(super) async fn projected_terminal_history(
         &self,
         delivery: &DeliveryRecord,
         outcome: &'static str,
