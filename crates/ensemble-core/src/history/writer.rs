@@ -23,14 +23,32 @@ impl HistoryWriter {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
 
-        let mut file = OpenOptions::new()
-            .create(true)
+        let (mut file, created) = match OpenOptions::new()
+            .create_new(true)
             .append(true)
             .open(&self.path)
-            .await?;
+            .await
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                OpenOptions::new().append(true).open(&self.path).await?,
+                false,
+            ),
+            Err(error) => return Err(error),
+        };
 
         file.write_all(line.as_bytes()).await?;
         file.flush().await?;
+        file.sync_data().await?;
+        if created {
+            if let Some(parent) = self
+                .path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            {
+                File::open(parent).await?.sync_all().await?;
+            }
+        }
         Ok(())
     }
 

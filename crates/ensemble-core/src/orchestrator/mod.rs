@@ -6357,6 +6357,12 @@ impl Orchestrator {
                     .persist_history_record(pending.run_id.as_deref(), record)
                     .await
                 {
+                    self.record_pending_terminal_transition_failure(
+                        issue_id,
+                        &pending,
+                        error.to_string(),
+                    )
+                    .await;
                     warn!(
                         issue_id = %issue_id,
                         error = %error,
@@ -11429,7 +11435,10 @@ mod tests {
         assert!(state.delivery.contains_key("1"));
         assert!(state.is_claimed("1"));
         assert!(!state.completed.contains_key("1"));
-        assert!(state.pending_terminal_transitions.contains_key("1"));
+        let pending = &state.pending_terminal_transitions["1"];
+        assert_eq!(pending.transition.attempt, 1);
+        assert!(pending.transition.last_error.is_some());
+        assert!(pending.transition.last_attempted_at.is_some());
         drop(state);
         assert!(workspace.base_path.exists());
         let records = orchestrator
@@ -11439,7 +11448,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             records.last().map(|record| record.kind),
-            Some(PipelineTransitionKind::TerminalTransitionApplied)
+            Some(PipelineTransitionKind::PendingTerminalTransition)
         );
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
