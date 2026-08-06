@@ -6927,6 +6927,7 @@ impl Orchestrator {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let newly_prepared_repo_names = missing_repo_names.iter().cloned().collect::<HashSet<_>>();
         let (mut delivery, snapshot) = if missing_repo_names.is_empty() {
             let Some(existing) = existing else {
                 return;
@@ -6991,6 +6992,9 @@ impl Orchestrator {
                 continue;
             };
             if repository.phase == DeliveryPhase::AwaitingApproval {
+                if newly_prepared_repo_names.contains(repo_name) {
+                    continue;
+                }
                 repository.phase = DeliveryPhase::Prepared;
                 repository.last_error = None;
             } else if repository.phase == DeliveryPhase::Blocked {
@@ -10690,6 +10694,86 @@ mod tests {
         );
         assert!(projection.diagnostic.is_none());
         assert_eq!(state.finalize["1"].status, FinalizeStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn finalize_retry_reconstructs_pre_delivery_approval_failure() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = true;
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: Arc::new(AtomicUsize::new(0)),
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        orchestrator.delivery_remote = remote.clone();
+        {
+            let mut state = orchestrator.state.write().await;
+            state.claimed.insert("1".to_string());
+            state
+                .issue_run_ids
+                .insert("1".to_string(), "run-1".to_string());
+            state.set_finalize_state(
+                "1",
+                IssueFinalizeState {
+                    issue_identifier: "repo#1".to_string(),
+                    status: FinalizeStatus::Failed,
+                    repos: vec![RepoFinalizeState {
+                        repo: "source-repo".to_string(),
+                        mode: "push_and_pr".to_string(),
+                        approval_required: true,
+                        status: FinalizeStatus::Failed,
+                        last_error: Some("initial delivery persistence failed".to_string()),
+                    }],
+                },
+            );
+        }
+
+        orchestrator
+            .retry_finalize_delivery("1", "repo#1")
+            .await
+            .unwrap();
+        assert_eq!(
+            orchestrator.state.read().await.finalize["1"].status,
+            FinalizeStatus::InProgress
+        );
+
+        orchestrator.process_finalize_retries().await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.finalize["1"].status, FinalizeStatus::PendingApproval);
+        assert_eq!(
+            state.delivery["1"].repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        drop(state);
+        assert_eq!(
+            orchestrator.approve_finalize_delivery("1", "repo#1").await,
+            Ok(true)
+        );
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+
+        drop(repo_temp);
     }
 
     fn post_finalize_acceptance_snapshot(

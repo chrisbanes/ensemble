@@ -683,26 +683,14 @@ impl Orchestrator {
             for repository in &mut finalize.repos {
                 if repository.status == FinalizeStatus::Failed {
                     repository.last_error = None;
-                    repository.status = if repository.approval_required {
-                        FinalizeStatus::PendingApproval
-                    } else {
-                        FinalizeStatus::InProgress
-                    };
+                    repository.status = FinalizeStatus::InProgress;
                     changed = true;
                 }
             }
             if !changed {
                 return Err(FinalizeRetryError::NotFailed);
             }
-            finalize.status = if finalize
-                .repos
-                .iter()
-                .any(|repository| repository.status == FinalizeStatus::InProgress)
-            {
-                FinalizeStatus::InProgress
-            } else {
-                FinalizeStatus::PendingApproval
-            };
+            finalize.status = FinalizeStatus::InProgress;
             return Ok(());
         };
 
