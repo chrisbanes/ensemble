@@ -938,6 +938,21 @@ impl Orchestrator {
             .signed_duration_since(record.started_at)
             .num_seconds()
             .max(0) as u64;
+        if let Some(diagnostic) = delivery
+            .repositories
+            .values()
+            .filter(|repository| repository.phase == DeliveryPhase::Blocked)
+            .find_map(|repository| repository.last_error.clone())
+            .or_else(|| {
+                delivery
+                    .review_projection
+                    .as_ref()
+                    .filter(|projection| projection.phase == ReviewProjectionPhase::Blocked)
+                    .and_then(|projection| projection.diagnostic.clone())
+            })
+        {
+            record.last_error = Some(diagnostic);
+        }
         record.artifacts = artifacts;
         Some(record)
     }

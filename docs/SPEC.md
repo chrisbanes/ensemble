@@ -2072,10 +2072,6 @@ Behavior:
 5. On any error, fail the worker attempt. The orchestrator decides whether the failure is
    retryable or terminal.
 
-Note:
-
-- Workspaces are intentionally preserved after successful runs.
-
 ## 11. Issue Tracker Integration Contract (GitHub-Compatible)
 
 ### 11.1 Required Operations

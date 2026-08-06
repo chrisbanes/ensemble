@@ -11256,7 +11256,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_delivery_does_not_report_success() {
+    async fn cancelled_delivery_preserves_blocked_diagnostic_without_reporting_success() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
@@ -11270,6 +11270,15 @@ mod tests {
         repository.pr_number = Some(420);
         repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
         repository.last_error = None;
+        delivery.review_projection = Some(crate::orchestrator::delivery::ReviewProjection {
+            target: "In review".to_string(),
+            repositories: vec!["source-repo".to_string()],
+            phase: crate::orchestrator::delivery::ReviewProjectionPhase::Blocked,
+            diagnostic: Some("review state could not be confirmed".to_string()),
+            last_observed_state: Some("In progress".to_string()),
+            history_record: None,
+            history_persisted: false,
+        });
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
@@ -11311,6 +11320,10 @@ mod tests {
             .unwrap();
         assert_eq!(history.total, 1);
         assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_STOPPED);
+        assert_eq!(
+            history.records[0].last_error.as_deref(),
+            Some("review state could not be confirmed")
+        );
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
