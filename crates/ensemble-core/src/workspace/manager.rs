@@ -24,6 +24,8 @@ struct WorkspaceMetadata {
     branch_date: String,
     #[serde(default)]
     repositories: BTreeMap<String, String>,
+    #[serde(default)]
+    before_remove_completed: bool,
 }
 
 /// Manage per-issue workspace directories.
@@ -200,19 +202,8 @@ impl WorkspaceManager {
         })
     }
 
-    fn serialize_metadata(
-        &self,
-        issue_id: &str,
-        identifier: &str,
-        date: &str,
-    ) -> Result<Vec<u8>, WorkspaceError> {
-        serde_json::to_vec(&WorkspaceMetadata {
-            issue_id: issue_id.to_string(),
-            issue_identifier: identifier.to_string(),
-            branch_date: date.to_string(),
-            repositories: self.repository_identities(),
-        })
-        .map_err(|error| WorkspaceError::CreationFailed {
+    fn serialize_metadata(metadata: &WorkspaceMetadata) -> Result<Vec<u8>, WorkspaceError> {
+        serde_json::to_vec(metadata).map_err(|error| WorkspaceError::CreationFailed {
             reason: format!("failed to serialize workspace metadata: {error}"),
         })
     }
@@ -247,7 +238,13 @@ impl WorkspaceManager {
         })?;
         self.validate_path_inside_root(&metadata_dir)?;
 
-        let content = self.serialize_metadata(issue_id, identifier, date)?;
+        let content = Self::serialize_metadata(&WorkspaceMetadata {
+            issue_id: issue_id.to_string(),
+            issue_identifier: identifier.to_string(),
+            branch_date: date.to_string(),
+            repositories: self.repository_identities(),
+            before_remove_completed: false,
+        })?;
         self.write_metadata_temp(&content)?
             .persist_noclobber(self.metadata_path(issue_id))
             .map_err(|error| WorkspaceError::CreationFailed {
@@ -256,15 +253,10 @@ impl WorkspaceManager {
         Ok(())
     }
 
-    fn refresh_metadata(
-        &self,
-        issue_id: &str,
-        identifier: &str,
-        date: &str,
-    ) -> Result<(), WorkspaceError> {
-        let content = self.serialize_metadata(issue_id, identifier, date)?;
+    fn refresh_metadata(&self, metadata: &WorkspaceMetadata) -> Result<(), WorkspaceError> {
+        let content = Self::serialize_metadata(metadata)?;
         self.write_metadata_temp(&content)?
-            .persist(self.metadata_path(issue_id))
+            .persist(self.metadata_path(&metadata.issue_id))
             .map_err(|error| WorkspaceError::CreationFailed {
                 reason: format!("failed to refresh workspace metadata: {}", error.error),
             })?;
@@ -365,8 +357,8 @@ impl WorkspaceManager {
             Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
             self.verify_repository_configuration(&metadata_path, &metadata)?;
             if metadata.issue_identifier != identifier {
-                self.refresh_metadata(issue_id, identifier, &metadata.branch_date)?;
                 metadata.issue_identifier = identifier.to_string();
+                self.refresh_metadata(&metadata)?;
             }
             (false, metadata)
         } else {
@@ -383,6 +375,7 @@ impl WorkspaceManager {
                     issue_identifier: identifier.to_string(),
                     branch_date,
                     repositories: self.repository_identities(),
+                    before_remove_completed: false,
                 },
                 Err(create_error) => match self.load_metadata(issue_id) {
                     Ok(mut existing) => {
@@ -402,13 +395,11 @@ impl WorkspaceManager {
                             return Err(error);
                         }
                         if existing.issue_identifier != identifier {
-                            if let Err(error) =
-                                self.refresh_metadata(issue_id, identifier, &existing.branch_date)
-                            {
+                            existing.issue_identifier = identifier.to_string();
+                            if let Err(error) = self.refresh_metadata(&existing) {
                                 let _ = std::fs::remove_dir(&base_path);
                                 return Err(error);
                             }
-                            existing.issue_identifier = identifier.to_string();
                         }
                         existing
                     }
@@ -518,7 +509,7 @@ impl WorkspaceManager {
             return Ok(());
         }
         let metadata_path = self.metadata_path(issue_id);
-        let metadata = self.load_metadata(issue_id)?;
+        let mut metadata = self.load_metadata(issue_id)?;
         Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
         self.verify_repository_configuration(&metadata_path, &metadata)?;
         #[cfg(test)]
@@ -527,8 +518,15 @@ impl WorkspaceManager {
             resume_removal.wait().await;
         }
 
-        if let Some(script) = &self.hooks.before_remove {
+        if let Some(script) = self
+            .hooks
+            .before_remove
+            .as_ref()
+            .filter(|_| !metadata.before_remove_completed)
+        {
             run_hook_best_effort("before_remove", script, &base_path, self.hooks.timeout_ms).await;
+            metadata.before_remove_completed = true;
+            self.refresh_metadata(&metadata)?;
         }
 
         // Clean up worktrees first - use persisted branch date to avoid date drift
@@ -1402,16 +1400,22 @@ mod tests {
         assert!(test_path.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_remove_workspace_blocks_on_cleanup_failure() {
         let dir = TempDir::new().unwrap();
+        let marker = dir.path().join("before-remove-runs");
         let repos = vec![RepoConfig {
             path: "/nonexistent/path".to_string(),
             branch: "main".to_string(),
             git_remote: "origin".to_string(),
             finalize: Default::default(),
         }];
-        let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
+        let hooks = HooksConfig {
+            before_remove: Some("echo ran >> ../before-remove-runs".to_string()),
+            ..Default::default()
+        };
+        let mgr = WorkspaceManager::new_with_hooks(dir.path(), Some(repos), hooks).unwrap();
 
         let ws_path = mgr.workspace_path("NODE_CLEANUP");
         std::fs::create_dir_all(&ws_path).unwrap();
@@ -1420,10 +1424,18 @@ mod tests {
 
         let remove_result = mgr.remove_workspace("NODE_CLEANUP").await;
         assert!(remove_result.is_err());
+        let retry_result = mgr.remove_workspace("NODE_CLEANUP").await;
+        assert!(retry_result.is_err());
 
         assert!(
             ws_path.exists(),
             "workspace should not be deleted when cleanup fails"
+        );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran\n");
+        assert!(
+            mgr.load_metadata("NODE_CLEANUP")
+                .unwrap()
+                .before_remove_completed
         );
     }
 

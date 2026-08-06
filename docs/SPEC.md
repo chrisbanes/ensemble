@@ -1633,7 +1633,9 @@ repositories recorded when the workspace was created. Removing an absent canonic
 no sidecar remains idempotent; removing one with a valid matching leftover sidecar completes the
 interrupted cleanup. For an existing verified workspace, `before_remove` runs once in the base
 workspace before cleanup removes repository worktrees exhaustively, then the agent workspace, then
-the sidecar. A sidecar-removal failure is retryable because the valid sidecar remains authoritative.
+the sidecar. Completion of `before_remove` is recorded in the sidecar before worktree cleanup, so a
+cleanup retry resumes after the hook boundary. A sidecar-removal failure is retryable because the
+valid sidecar remains authoritative.
 Implementations do not scan, migrate, rename, or remove legacy identifier-only directories, and do
 not migrate or adopt in-workspace metadata.
 
