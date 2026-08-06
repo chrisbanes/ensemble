@@ -6,7 +6,7 @@ use crate::observability::events_contract::{
 use crate::workspace::coordinator::{WorktreeCoordinator, WorktreeInfo};
 use crate::workspace::hooks::run_hook_best_effort;
 use crate::workspace::key::issue_workspace_key;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -22,6 +22,8 @@ struct WorkspaceMetadata {
     issue_id: String,
     issue_identifier: String,
     branch_date: String,
+    #[serde(default)]
+    repositories: BTreeMap<String, String>,
 }
 
 /// Manage per-issue workspace directories.
@@ -120,8 +122,10 @@ impl WorkspaceManager {
         &self,
         issue_id: &str,
     ) -> Result<HashMap<String, PathBuf>, WorkspaceError> {
+        let metadata_path = self.metadata_path(issue_id);
         let metadata = self.load_metadata(issue_id)?;
-        Self::verify_ownership(&self.metadata_path(issue_id), &metadata, issue_id)?;
+        Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+        self.verify_repository_configuration(&metadata_path, &metadata)?;
         let coordinator = WorktreeCoordinator::new(
             self.repos.clone(),
             metadata.branch_date,
@@ -194,6 +198,7 @@ impl WorkspaceManager {
     }
 
     fn serialize_metadata(
+        &self,
         issue_id: &str,
         identifier: &str,
         date: &str,
@@ -202,6 +207,7 @@ impl WorkspaceManager {
             issue_id: issue_id.to_string(),
             issue_identifier: identifier.to_string(),
             branch_date: date.to_string(),
+            repositories: self.repository_identities(),
         })
         .map_err(|error| WorkspaceError::CreationFailed {
             reason: format!("failed to serialize workspace metadata: {error}"),
@@ -238,7 +244,7 @@ impl WorkspaceManager {
         })?;
         self.validate_path_inside_root(&metadata_dir)?;
 
-        let content = Self::serialize_metadata(issue_id, identifier, date)?;
+        let content = self.serialize_metadata(issue_id, identifier, date)?;
         self.write_metadata_temp(&content)?
             .persist_noclobber(self.metadata_path(issue_id))
             .map_err(|error| WorkspaceError::CreationFailed {
@@ -253,7 +259,7 @@ impl WorkspaceManager {
         identifier: &str,
         date: &str,
     ) -> Result<(), WorkspaceError> {
-        let content = Self::serialize_metadata(issue_id, identifier, date)?;
+        let content = self.serialize_metadata(issue_id, identifier, date)?;
         self.write_metadata_temp(&content)?
             .persist(self.metadata_path(issue_id))
             .map_err(|error| WorkspaceError::CreationFailed {
@@ -274,6 +280,29 @@ impl WorkspaceManager {
             path: metadata_path.display().to_string(),
             expected_issue_id: issue_id.to_string(),
             actual_issue_id: metadata.issue_id.clone(),
+        })
+    }
+
+    fn repository_identities(&self) -> BTreeMap<String, String> {
+        self.repos
+            .iter()
+            .map(|(key, repo)| (key.clone(), repo.path.clone()))
+            .collect()
+    }
+
+    fn verify_repository_configuration(
+        &self,
+        metadata_path: &Path,
+        metadata: &WorkspaceMetadata,
+    ) -> Result<(), WorkspaceError> {
+        let actual_repositories = self.repository_identities();
+        if metadata.repositories == actual_repositories {
+            return Ok(());
+        }
+        Err(WorkspaceError::RepositoryConfigurationMismatch {
+            path: metadata_path.display().to_string(),
+            expected_repositories: metadata.repositories.clone(),
+            actual_repositories,
         })
     }
 
@@ -311,7 +340,9 @@ impl WorkspaceManager {
                 });
             }
             let mut metadata = self.load_metadata(issue_id)?;
-            Self::verify_ownership(&self.metadata_path(issue_id), &metadata, issue_id)?;
+            let metadata_path = self.metadata_path(issue_id);
+            Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+            self.verify_repository_configuration(&metadata_path, &metadata)?;
             if metadata.issue_identifier != identifier {
                 self.refresh_metadata(issue_id, identifier, &metadata.branch_date)?;
                 metadata.issue_identifier = identifier.to_string();
@@ -330,6 +361,7 @@ impl WorkspaceManager {
                     issue_id: issue_id.to_string(),
                     issue_identifier: identifier.to_string(),
                     branch_date,
+                    repositories: self.repository_identities(),
                 },
                 Err(create_error) => match self.load_metadata(issue_id) {
                     Ok(mut existing) => {
@@ -337,6 +369,13 @@ impl WorkspaceManager {
                             &self.metadata_path(issue_id),
                             &existing,
                             issue_id,
+                        ) {
+                            let _ = std::fs::remove_dir(&base_path);
+                            return Err(error);
+                        }
+                        if let Err(error) = self.verify_repository_configuration(
+                            &self.metadata_path(issue_id),
+                            &existing,
                         ) {
                             let _ = std::fs::remove_dir(&base_path);
                             return Err(error);
@@ -439,6 +478,7 @@ impl WorkspaceManager {
             }
             let metadata = self.load_metadata(issue_id)?;
             Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+            self.verify_repository_configuration(&metadata_path, &metadata)?;
             std::fs::remove_file(&metadata_path).map_err(|error| {
                 WorkspaceError::CreationFailed {
                     reason: format!("failed to remove workspace metadata: {error}"),
@@ -449,6 +489,7 @@ impl WorkspaceManager {
         let metadata_path = self.metadata_path(issue_id);
         let metadata = self.load_metadata(issue_id)?;
         Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+        self.verify_repository_configuration(&metadata_path, &metadata)?;
         #[cfg(test)]
         if let Some((after_verification, resume_removal)) = &self.removal_test_barriers {
             after_verification.wait().await;
@@ -1283,6 +1324,28 @@ mod tests {
             ws_path.exists(),
             "workspace should not be deleted when cleanup fails"
         );
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_fails_closed_when_repository_configuration_changes() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let original_manager = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+        let workspace = original_manager
+            .prepare_workspace("NODE_CONFIG_DRIFT", "repo#42")
+            .await
+            .unwrap();
+        let metadata_path = original_manager.metadata_path("NODE_CONFIG_DRIFT");
+
+        let changed_manager = WorkspaceManager::new(root.path(), None).unwrap();
+        let result = changed_manager.remove_workspace("NODE_CONFIG_DRIFT").await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::RepositoryConfigurationMismatch { .. })
+        ));
+        assert!(workspace.base_path.exists());
+        assert!(metadata_path.exists());
     }
 
     #[tokio::test]

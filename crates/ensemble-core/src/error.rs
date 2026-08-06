@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -65,6 +66,14 @@ pub enum WorkspaceError {
         path: String,
         expected_issue_id: String,
         actual_issue_id: String,
+    },
+    #[error(
+        "workspace repository configuration mismatch at {path}: expected {expected_repositories:?}, found {actual_repositories:?}"
+    )]
+    RepositoryConfigurationMismatch {
+        path: String,
+        expected_repositories: BTreeMap<String, String>,
+        actual_repositories: BTreeMap<String, String>,
     },
     #[error("hook failed: {hook} — {reason}")]
     HookFailed { hook: String, reason: String },

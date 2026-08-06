@@ -1577,9 +1577,10 @@ Workspace persistence:
   identifier changes.
 - Successful runs do not auto-delete workspaces.
 - `<workspace.root>/.ensemble-workspace-metadata/<workspace_key>.json` stores `issue_id`,
-  `issue_identifier`, and the branch date used for repository worktrees. This manager-owned
-  sidecar, outside the agent workspace, is the ownership authority. Files inside an agent
-  workspace, including a forged `.ensemble-workspace.json`, have no lifecycle authority.
+  `issue_identifier`, the branch date used for repository worktrees, and the configured repository
+  identities (derived key and configured path). This manager-owned sidecar, outside the agent
+  workspace, is the ownership authority. Files inside an agent workspace, including a forged
+  `.ensemble-workspace.json`, have no lifecycle authority.
 - Built-in coordinated repository worktrees derive their branch identity from the same
   collision-resistant immutable-ID key. Display-identifier changes therefore reuse the same branch,
   while distinct issue IDs remain isolated even when lossy branch sanitization would otherwise
@@ -1599,22 +1600,25 @@ Algorithm summary:
 3. For a new directory, atomically create manager-owned owner metadata without replacing an
    existing sidecar, before hooks or repository worktree preparation. If metadata creation fails,
    remove the newly created empty directory.
-4. For an existing directory, load sidecar metadata and require `issue_id` to match before reuse,
-   hooks, repository worktree preparation, or any metadata write. `issue_identifier` is
-   informational display metadata and may be refreshed after immutable-ID verification using an
-   atomic replacement, so a failed refresh leaves the previous valid sidecar intact.
+4. For an existing directory, load sidecar metadata and require `issue_id` and the configured
+   repository identities to match before reuse, hooks, repository worktree preparation, or any
+   metadata write. `issue_identifier` is informational display metadata and may be refreshed after
+   verification using an atomic replacement, so a failed refresh leaves the previous valid
+   sidecar intact.
 5. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
 6. If `created_now=true`, run `after_create` hook if configured.
 
 Missing, malformed, ownerless legacy, or mismatched sidecar metadata is not repaired or adopted.
-Reuse and removal fail before any workspace side effect. Removing an absent canonical workspace
-with no sidecar remains idempotent; removing one with a valid matching leftover sidecar completes
-the interrupted cleanup. For an existing ownership-verified workspace, `before_remove` runs once
-in the base workspace before cleanup removes repository worktrees exhaustively, then the agent
-workspace, then the sidecar. A sidecar-removal failure is retryable because the valid sidecar
-remains authoritative. Implementations do not scan, migrate, rename, or remove legacy
-identifier-only directories, and do not migrate or adopt in-workspace metadata.
+Reuse and removal fail before any workspace side effect. This includes repository configuration
+drift: cleanup does not substitute newly configured repositories or abandon worktrees belonging to
+repositories recorded when the workspace was created. Removing an absent canonical workspace with
+no sidecar remains idempotent; removing one with a valid matching leftover sidecar completes the
+interrupted cleanup. For an existing verified workspace, `before_remove` runs once in the base
+workspace before cleanup removes repository worktrees exhaustively, then the agent workspace, then
+the sidecar. A sidecar-removal failure is retryable because the valid sidecar remains authoritative.
+Implementations do not scan, migrate, rename, or remove legacy identifier-only directories, and do
+not migrate or adopt in-workspace metadata.
 
 Notes:
 
