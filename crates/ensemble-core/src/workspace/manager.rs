@@ -226,6 +226,20 @@ impl WorkspaceManager {
         Ok(file)
     }
 
+    #[cfg(unix)]
+    fn sync_metadata_directory(&self) -> Result<(), WorkspaceError> {
+        std::fs::File::open(self.metadata_dir())
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| WorkspaceError::CreationFailed {
+                reason: format!("failed to flush workspace metadata directory: {error}"),
+            })
+    }
+
+    #[cfg(not(unix))]
+    fn sync_metadata_directory(&self) -> Result<(), WorkspaceError> {
+        Ok(())
+    }
+
     fn create_metadata(
         &self,
         issue_id: &str,
@@ -250,7 +264,7 @@ impl WorkspaceManager {
             .map_err(|error| WorkspaceError::CreationFailed {
                 reason: format!("failed to create workspace metadata: {}", error.error),
             })?;
-        Ok(())
+        self.sync_metadata_directory()
     }
 
     fn refresh_metadata(&self, metadata: &WorkspaceMetadata) -> Result<(), WorkspaceError> {
@@ -260,7 +274,7 @@ impl WorkspaceManager {
             .map_err(|error| WorkspaceError::CreationFailed {
                 reason: format!("failed to refresh workspace metadata: {}", error.error),
             })?;
-        Ok(())
+        self.sync_metadata_directory()
     }
 
     fn verify_ownership(
