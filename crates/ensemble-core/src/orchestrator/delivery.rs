@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -600,13 +600,13 @@ impl Orchestrator {
         Ok(record.snapshot)
     }
 
-    pub(super) async fn reconcile_terminal_delivery_owners(&self) -> bool {
+    pub(super) async fn reconcile_terminal_delivery_owners(&self) -> Option<BTreeSet<String>> {
         let deliveries = {
             let state = self.state.read().await;
             state.delivery.values().cloned().collect::<Vec<_>>()
         };
         if deliveries.is_empty() {
-            return true;
+            return Some(BTreeSet::new());
         }
 
         let issue_ids = deliveries
@@ -623,7 +623,7 @@ impl Orchestrator {
                     error = %error,
                     "delivery recovery could not refresh tracker ownership"
                 );
-                return false;
+                return None;
             }
         };
         let (terminal_states, failure_state) = {
@@ -639,14 +639,13 @@ impl Orchestrator {
             )
         };
 
-        let mut observed_all = true;
+        let observed_issue_ids = observed_issues.keys().cloned().collect();
         for delivery in deliveries {
             let Some(issue) = observed_issues.get(&delivery.issue_id) else {
                 warn!(
                     issue_id = %delivery.issue_id,
                     "delivery recovery did not observe its tracker issue"
                 );
-                observed_all = false;
                 continue;
             };
             if terminal_states.contains(&issue.state.to_lowercase()) {
@@ -666,22 +665,27 @@ impl Orchestrator {
                 .await;
             }
         }
-        observed_all
+        Some(observed_issue_ids)
     }
 
-    pub(super) async fn process_delivery_recovery(&self) {
+    pub(super) async fn process_delivery_recovery(
+        &self,
+        observed_issue_ids: Option<&BTreeSet<String>>,
+    ) {
         let deliveries = {
             let state = self.state.read().await;
             state
                 .delivery
                 .values()
                 .filter(|delivery| {
-                    matches!(
-                        delivery.aggregate(),
-                        DeliveryAggregate::Active
-                            | DeliveryAggregate::Waiting
-                            | DeliveryAggregate::Published
-                    )
+                    observed_issue_ids
+                        .is_none_or(|issue_ids| issue_ids.contains(&delivery.issue_id))
+                        && matches!(
+                            delivery.aggregate(),
+                            DeliveryAggregate::Active
+                                | DeliveryAggregate::Waiting
+                                | DeliveryAggregate::Published
+                        )
                 })
                 .cloned()
                 .collect::<Vec<_>>()

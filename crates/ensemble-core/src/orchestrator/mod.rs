@@ -888,10 +888,14 @@ impl Orchestrator {
         self.hydrate_waiting_on_human_from_store().await;
         self.process_interaction_thread_commands().await;
         let has_delivery = !self.state.read().await.delivery.is_empty();
-        if has_delivery && Box::pin(self.reconcile_terminal_delivery_owners()).await {
-            // Remote delivery recovery is another large state machine. Poll it only after terminal
-            // ownership reconciliation has finished and released its future.
-            Box::pin(self.process_delivery_recovery()).await;
+        if has_delivery {
+            if let Some(observed_issue_ids) =
+                Box::pin(self.reconcile_terminal_delivery_owners()).await
+            {
+                // Remote delivery recovery is another large state machine. Poll it only after
+                // terminal ownership reconciliation has finished and released its future.
+                Box::pin(self.process_delivery_recovery(Some(&observed_issue_ids))).await;
+            }
         }
         self.process_finalize_retries().await;
 
@@ -10470,7 +10474,7 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("missing durable delivery owner"));
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         assert_eq!(state.delivery.get("1"), Some(&delivery));
@@ -10502,7 +10506,7 @@ mod tests {
             },
         );
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         assert_eq!(
@@ -10534,7 +10538,7 @@ mod tests {
         };
         *remote.pull_requests.lock().unwrap() = vec![exact.clone(), exact];
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         let repository = &state.delivery["1"].repositories["source-repo"];
@@ -10631,7 +10635,7 @@ mod tests {
             .await
             .unwrap();
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         assert!(!state.delivery.contains_key("1"));
@@ -10696,6 +10700,59 @@ mod tests {
             Some(PipelineTransitionKind::Released)
         );
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_tracker_issue_does_not_block_other_delivery_recovery() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, missing_delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let mut observed_delivery = missing_delivery.clone();
+        observed_delivery.issue_id = "2".to_string();
+        observed_delivery.identifier = "repo#2".to_string();
+        observed_delivery.run_id = "run-2".to_string();
+        observed_delivery
+            .repositories
+            .get_mut("source-repo")
+            .unwrap()
+            .marker = canonical_marker("run-2", "2", "source-repo");
+        remote.pull_requests.lock().unwrap().push(
+            crate::orchestrator::delivery::RemotePullRequest {
+                repository_key: "source-repo".to_string(),
+                head_branch: observed_delivery.repositories["source-repo"]
+                    .head_branch
+                    .clone(),
+                base_branch: "main".to_string(),
+                head_sha: "0123456789abcdef".to_string(),
+                body: observed_delivery.repositories["source-repo"].marker.clone(),
+                number: 421,
+                url: "https://github.com/example/project/pull/421".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&observed_delivery, None)
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("2", "Todo")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.delivery.get("1"), Some(&missing_delivery));
+        assert_eq!(
+            state.delivery["2"].repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 1);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }
