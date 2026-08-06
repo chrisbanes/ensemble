@@ -10646,6 +10646,52 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn finalize_retry_requeues_a_blocked_review_projection() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, delivery) =
+            recovery_test_orchestrator(remote).await;
+        orchestrator.tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "In Progress")])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: true,
+        });
+        let delivery = review_ready_delivery(delivery);
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        let blocked = orchestrator.advance_review_projection(delivery).await;
+        assert_eq!(
+            blocked.review_projection.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Blocked
+        );
+
+        assert_eq!(
+            orchestrator
+                .retry_finalize_delivery("1", &blocked.identifier)
+                .await,
+            Ok(())
+        );
+
+        let state = orchestrator.state.read().await;
+        let projection = state.delivery["1"].review_projection.as_ref().unwrap();
+        assert_eq!(
+            projection.phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Pending
+        );
+        assert!(projection.diagnostic.is_none());
+        assert_eq!(state.finalize["1"].status, FinalizeStatus::InProgress);
+    }
+
     fn post_finalize_acceptance_snapshot(
         rule_names: &[&str],
         results: Vec<crate::acceptance::AcceptanceResult>,
@@ -11051,6 +11097,16 @@ mod tests {
         repository.pr_number = Some(420);
         repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
         repository.last_error = None;
+        delivery.terminal_history.as_deref_mut().unwrap().artifacts = Some(RunArtifacts {
+            run_id: delivery.run_id.clone(),
+            workspace_path: "/tmp/ensemble-test".to_string(),
+            repos: vec![crate::history::artifacts::RepoArtifact {
+                repo: "source-repo".to_string(),
+                finalize_status: "pending".to_string(),
+                ..Default::default()
+            }],
+            transcripts: Vec::new(),
+        });
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
@@ -11105,6 +11161,24 @@ mod tests {
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        let artifact = &history.records[0].artifacts.as_ref().unwrap().repos[0];
+        assert_eq!(artifact.finalize_status, "waiting");
+        assert_eq!(
+            artifact.pushed_ref.as_deref(),
+            Some("origin/ensemble/repo-1")
+        );
+        assert_eq!(artifact.pr_number, Some(420));
+        assert_eq!(
+            artifact.pr_url.as_deref(),
+            Some("https://github.com/example/project/pull/420")
+        );
     }
 
     #[tokio::test]

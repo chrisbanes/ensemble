@@ -724,6 +724,15 @@ impl Orchestrator {
             repository.last_error = None;
             changed = true;
         }
+        if let Some(projection) = candidate
+            .review_projection
+            .as_mut()
+            .filter(|projection| projection.phase == ReviewProjectionPhase::Blocked)
+        {
+            projection.phase = ReviewProjectionPhase::Pending;
+            projection.diagnostic = None;
+            changed = true;
+        }
         if !changed {
             return Err(FinalizeRetryError::NotFailed);
         }
@@ -898,7 +907,7 @@ impl Orchestrator {
                 .signed_duration_since(history_record.started_at)
                 .num_seconds()
                 .max(0) as u64;
-            history_record.artifacts = self
+            let mut artifacts = self
                 .state
                 .read()
                 .await
@@ -906,6 +915,10 @@ impl Orchestrator {
                 .get(&delivery.issue_id)
                 .cloned()
                 .or_else(|| history_record.artifacts.clone());
+            if let Some(artifacts) = artifacts.as_mut() {
+                Self::apply_delivery_artifacts(artifacts, delivery);
+            }
+            history_record.artifacts = artifacts;
             self.begin_confirmed_terminal_transition_for_identity(
                 &delivery.issue_id,
                 &delivery.identifier,
@@ -1323,6 +1336,13 @@ impl Orchestrator {
         let Some(artifacts) = state.artifacts.get_mut(issue_id) else {
             return;
         };
+        Self::apply_delivery_artifacts(artifacts, delivery);
+    }
+
+    fn apply_delivery_artifacts(
+        artifacts: &mut crate::history::artifacts::RunArtifacts,
+        delivery: &DeliveryRecord,
+    ) {
         for artifact in &mut artifacts.repos {
             let Some(repository) = delivery.repositories.get(&artifact.repo) else {
                 continue;
