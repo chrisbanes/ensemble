@@ -28,6 +28,11 @@ struct WorkspaceMetadata {
     before_remove_started: bool,
 }
 
+enum MetadataCreation {
+    Created(WorkspaceMetadata),
+    AlreadyExists,
+}
+
 /// Manage per-issue workspace directories.
 pub struct WorkspaceManager {
     root: PathBuf,
@@ -37,6 +42,8 @@ pub struct WorkspaceManager {
     preparation_test_barriers: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
     #[cfg(test)]
     removal_test_barriers: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    #[cfg(test)]
+    fail_metadata_directory_sync: bool,
 }
 
 /// Result of preparing a workspace for an issue.
@@ -104,6 +111,8 @@ impl WorkspaceManager {
             preparation_test_barriers: None,
             #[cfg(test)]
             removal_test_barriers: None,
+            #[cfg(test)]
+            fail_metadata_directory_sync: false,
         })
     }
 
@@ -228,6 +237,12 @@ impl WorkspaceManager {
 
     #[cfg(unix)]
     fn sync_metadata_directory(&self) -> Result<(), WorkspaceError> {
+        #[cfg(test)]
+        if self.fail_metadata_directory_sync {
+            return Err(WorkspaceError::CreationFailed {
+                reason: "injected workspace metadata directory sync failure".to_string(),
+            });
+        }
         std::fs::File::open(self.metadata_dir())
             .and_then(|directory| directory.sync_all())
             .map_err(|error| WorkspaceError::CreationFailed {
@@ -237,6 +252,12 @@ impl WorkspaceManager {
 
     #[cfg(not(unix))]
     fn sync_metadata_directory(&self) -> Result<(), WorkspaceError> {
+        #[cfg(test)]
+        if self.fail_metadata_directory_sync {
+            return Err(WorkspaceError::CreationFailed {
+                reason: "injected workspace metadata directory sync failure".to_string(),
+            });
+        }
         Ok(())
     }
 
@@ -245,26 +266,36 @@ impl WorkspaceManager {
         issue_id: &str,
         identifier: &str,
         date: &str,
-    ) -> Result<(), WorkspaceError> {
+    ) -> Result<MetadataCreation, WorkspaceError> {
         let metadata_dir = self.metadata_dir();
         std::fs::create_dir_all(&metadata_dir).map_err(|error| WorkspaceError::CreationFailed {
             reason: format!("failed to create workspace metadata directory: {error}"),
         })?;
         self.validate_path_inside_root(&metadata_dir)?;
 
-        let content = Self::serialize_metadata(&WorkspaceMetadata {
+        let metadata = WorkspaceMetadata {
             issue_id: issue_id.to_string(),
             issue_identifier: identifier.to_string(),
             branch_date: date.to_string(),
             repositories: self.repository_identities(),
             before_remove_started: false,
-        })?;
-        self.write_metadata_temp(&content)?
+        };
+        let content = Self::serialize_metadata(&metadata)?;
+        match self
+            .write_metadata_temp(&content)?
             .persist_noclobber(self.metadata_path(issue_id))
-            .map_err(|error| WorkspaceError::CreationFailed {
+        {
+            Ok(_) => {
+                self.sync_metadata_directory()?;
+                Ok(MetadataCreation::Created(metadata))
+            }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Ok(MetadataCreation::AlreadyExists)
+            }
+            Err(error) => Err(WorkspaceError::CreationFailed {
                 reason: format!("failed to create workspace metadata: {}", error.error),
-            })?;
-        self.sync_metadata_directory()
+            }),
+        }
     }
 
     fn refresh_metadata(&self, metadata: &WorkspaceMetadata) -> Result<(), WorkspaceError> {
@@ -384,14 +415,8 @@ impl WorkspaceManager {
             })?;
             let branch_date = chrono::Local::now().format("%Y-%m-%d").to_string();
             let metadata = match self.create_metadata(issue_id, identifier, &branch_date) {
-                Ok(()) => WorkspaceMetadata {
-                    issue_id: issue_id.to_string(),
-                    issue_identifier: identifier.to_string(),
-                    branch_date,
-                    repositories: self.repository_identities(),
-                    before_remove_started: false,
-                },
-                Err(create_error) => match self.load_metadata(issue_id) {
+                Ok(MetadataCreation::Created(metadata)) => metadata,
+                Ok(MetadataCreation::AlreadyExists) => match self.load_metadata(issue_id) {
                     Ok(mut existing) => {
                         if let Err(error) = Self::verify_ownership(
                             &self.metadata_path(issue_id),
@@ -418,15 +443,14 @@ impl WorkspaceManager {
                         existing
                     }
                     Err(load_error) => {
-                        let metadata_exists = self.metadata_path(issue_id).exists();
                         let _ = std::fs::remove_dir(&base_path);
-                        return Err(if metadata_exists {
-                            load_error
-                        } else {
-                            create_error
-                        });
+                        return Err(load_error);
                     }
                 },
+                Err(create_error) => {
+                    let _ = std::fs::remove_dir(&base_path);
+                    return Err(create_error);
+                }
             };
             if !base_path.is_dir() {
                 if let Err(cleanup_error) = std::fs::remove_dir_all(&base_path) {
@@ -909,6 +933,21 @@ mod tests {
 
         assert!(matches!(error, WorkspaceError::OwnershipMismatch { .. }));
         assert_eq!(std::fs::read_to_string(metadata_path).unwrap(), original);
+        assert!(!mgr.workspace_path("NODE_42").exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_ownership_directory_sync_failure_does_not_adopt_visible_sidecar() {
+        let (_dir, mut mgr) = setup();
+        mgr.fail_metadata_directory_sync = true;
+
+        let error = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, WorkspaceError::CreationFailed { .. }));
+        assert!(mgr.metadata_path("NODE_42").exists());
         assert!(!mgr.workspace_path("NODE_42").exists());
     }
 
