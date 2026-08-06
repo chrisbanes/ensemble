@@ -470,11 +470,11 @@ Pipeline run recovery:
 - Every tracker error is treated as potentially ambiguous. Startup and poll ticks replay the same
   configured state transition idempotently without rerunning pipeline steps or finalization, and
   persist updated attempt/error metadata after failures.
-- After the tracker write is confirmed, Ensemble records that applied state as a still-live journal
-  phase, clears any terminal interaction wait, persists completion history idempotently, and removes
-  the issue workspace. Workspace cleanup failure retains the pending transition for bounded-backoff
-  retry. A restart in this phase finishes those local effects without repeating tracker or agent
-  work.
+- After the tracker write is confirmed, Ensemble crash-durably records that applied state as a
+  still-live journal phase before clearing any terminal interaction wait, persisting completion
+  history idempotently, and removing the issue workspace. Workspace cleanup failure retains the
+  pending transition for bounded-backoff retry. A restart in this phase finishes those local effects
+  without repeating tracker or agent work.
 - Stale `Running` steps from a previous process are normalized to `Pending`; agent processes are not
   recovered across orchestrator restarts or in-process journal rehydration.
 - Ensemble appends `released` only after the terminal tracker transition is confirmed (or no

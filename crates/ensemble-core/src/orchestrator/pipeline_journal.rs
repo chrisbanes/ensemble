@@ -305,7 +305,11 @@ impl PipelineRunJournal {
             return Err(write_error);
         }
         file.flush().await?;
-        if record.kind == PipelineTransitionKind::DeliveryOwned {
+        if matches!(
+            record.kind,
+            PipelineTransitionKind::DeliveryOwned
+                | PipelineTransitionKind::TerminalTransitionApplied
+        ) {
             file.sync_data().await?;
         }
         Ok(record)
