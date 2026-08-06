@@ -365,7 +365,7 @@ Pipeline run recovery:
   same versioned per-issue journal before any remote mutation. Repository entries are keyed in
   deterministic order and retain the run ID, issue ID, configured repository key, mode, remote and
   base branch, exact head branch and local commit SHA, observed remote SHA, pull request identity,
-  last error, retry origin, and a stored deterministic marker.
+  last error, retry origin, a stored deterministic marker, and the prepared terminal history.
 - Delivery repository phases are `prepared`, `push_in_flight`, `reconciling_push`,
   `pr_create_in_flight`, `reconciling_pr`, `waiting`, `published`, and `blocked`. The issue-level
   delivery state is derived from those repository entries rather than serialized separately.
@@ -385,8 +385,9 @@ Pipeline run recovery:
   durable terminal-transition protocol; it does not republish the branch.
 - If the tracker moves a retained delivery to any configured terminal state, delivery recovery
   stops remote mutation and enters the same durable terminal-transition protocol using the
-  observed state. Release removes the owned workspace and durable delivery claim before another
-  candidate can dispatch.
+  observed state. It persists the prepared history as succeeded for the success state, failed for
+  the configured failure state, or stopped for any other terminal state. Release removes the owned
+  workspace and durable delivery claim before another candidate can dispatch.
 - An optional `push_and_pr` `review_state` is an issue-level retained projection, never a terminal
   outcome. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
   `in_flight` before the tracker write and applies only after an exact target-state read. It writes
@@ -1575,7 +1576,8 @@ Workspace persistence:
 
 - Workspaces are reused across runs for the same immutable issue ID, including when the display
   identifier changes.
-- Successful runs do not auto-delete workspaces.
+- Non-terminal runs retain their workspaces. After a terminal tracker transition is confirmed,
+  Ensemble removes the workspace before releasing the durable run owner.
 - `<workspace.root>/.ensemble-workspace-metadata/<workspace_key>.json` stores `issue_id`,
   `issue_identifier`, the branch date used for repository worktrees, and the configured repository
   identities (derived key and configured path). This manager-owned sidecar, outside the agent

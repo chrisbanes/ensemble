@@ -10,7 +10,9 @@ use tracing::warn;
 
 use super::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind, TerminalOutcome};
 use super::state::{FinalizeStatus, IssueFinalizeState, RepoFinalizeState};
-use super::Orchestrator;
+use super::{
+    Orchestrator, HISTORY_OUTCOME_FAILED, HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
+};
 use crate::history::model::HistoryRecord;
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
 use crate::workspace::finalize::FinalizeMode;
@@ -60,6 +62,8 @@ pub(crate) struct DeliveryRecord {
     pub identifier: String,
     pub run_id: String,
     pub repositories: BTreeMap<String, DeliveryRepository>,
+    #[serde(default)]
+    pub terminal_history: Option<Box<HistoryRecord>>,
     #[serde(default)]
     pub review_projection: Option<ReviewProjection>,
 }
@@ -654,7 +658,7 @@ impl Orchestrator {
         .into_iter()
         .map(|issue| (issue.id.clone(), issue))
         .collect::<BTreeMap<_, _>>();
-        let (terminal_states, success_state) = {
+        let (terminal_states, success_state, failure_state) = {
             let config = self.config.read().await;
             (
                 config
@@ -664,6 +668,7 @@ impl Orchestrator {
                     .map(|state| state.to_lowercase())
                     .collect::<Vec<_>>(),
                 config.on_success.clone(),
+                config.on_failure.clone(),
             )
         };
 
@@ -682,20 +687,68 @@ impl Orchestrator {
                 } else {
                     TerminalOutcome::Failed
                 };
-                Box::pin(self.begin_terminal_transition_for_identity(
-                    &delivery.issue_id,
-                    &delivery.identifier,
-                    Some(issue.clone()),
-                    outcome,
-                    issue.state.clone(),
-                    None,
-                ))
-                .await;
+                let history_outcome = if issue.state.eq_ignore_ascii_case(&success_state) {
+                    HISTORY_OUTCOME_SUCCEEDED
+                } else if issue.state.eq_ignore_ascii_case(&failure_state) {
+                    HISTORY_OUTCOME_FAILED
+                } else {
+                    HISTORY_OUTCOME_STOPPED
+                };
+                self.reconcile_terminal_delivery_owner(&delivery, issue, outcome, history_outcome)
+                    .await;
             } else {
                 recoverable_issue_ids.insert(delivery.issue_id);
             }
         }
         recoverable_issue_ids
+    }
+
+    fn reconcile_terminal_delivery_owner<'a>(
+        &'a self,
+        delivery: &'a DeliveryRecord,
+        issue: &'a crate::tracker::model::Issue,
+        outcome: TerminalOutcome,
+        history_outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let mut history_record = delivery.terminal_history.as_deref().cloned().or_else(|| {
+                delivery
+                    .review_projection
+                    .as_ref()
+                    .and_then(|projection| projection.history_record.clone())
+            });
+            let Some(history_record) = history_record.as_mut() else {
+                warn!(
+                    issue_id = %delivery.issue_id,
+                    "terminal delivery has no durable completion history"
+                );
+                return;
+            };
+            history_record.outcome = history_outcome.to_string();
+            history_record.completed_at = Utc::now();
+            history_record.duration_seconds = history_record
+                .completed_at
+                .signed_duration_since(history_record.started_at)
+                .num_seconds()
+                .max(0) as u64;
+            history_record.artifacts = self
+                .state
+                .read()
+                .await
+                .artifacts
+                .get(&delivery.issue_id)
+                .cloned()
+                .or_else(|| history_record.artifacts.clone());
+            self.begin_terminal_transition_for_identity(
+                &delivery.issue_id,
+                &delivery.identifier,
+                Some(issue.clone()),
+                outcome,
+                issue.state.clone(),
+                Some(history_record.clone()),
+            )
+            .await;
+        })
     }
 
     pub(super) async fn process_delivery_recovery(
@@ -1694,7 +1747,7 @@ impl Orchestrator {
         workspace: &crate::workspace::manager::WorkspaceResult,
         repository_keys: &[String],
     ) -> Result<(DeliveryRecord, Option<PipelineRunSnapshot>), String> {
-        let (run_id, snapshot, review_history) = {
+        let (run_id, snapshot, terminal_history) = {
             let state = self.state.read().await;
             let run_id = state
                 .running
@@ -1705,21 +1758,14 @@ impl Orchestrator {
             let snapshot = state
                 .get_pipeline_run(issue_id)
                 .map(PipelineRun::to_snapshot);
-            let review_history = state
-                .running
-                .get(issue_id)
-                .zip(state.get_pipeline_run(issue_id))
-                .map(|(running, run)| {
-                    self.build_history_record(super::RunningHistoryRecordInput {
-                        outcome: "in_review",
-                        last_error: None,
-                        running_entry: running,
-                        run,
-                        completed_at: Utc::now(),
-                        artifacts: state.artifacts.get(issue_id).cloned(),
-                    })
-                });
-            (run_id, snapshot, review_history)
+            let terminal_history = self.build_owned_history_record(
+                &state,
+                issue_id,
+                HISTORY_OUTCOME_SUCCEEDED,
+                None,
+                Utc::now(),
+            );
+            (run_id, snapshot, terminal_history)
         };
         let configured_repositories = self.workspace_mgr.repos();
         let mut repositories = std::collections::BTreeMap::new();
@@ -1767,6 +1813,10 @@ impl Orchestrator {
             })
             .collect::<Vec<_>>();
         review_repositories.sort();
+        let review_history = terminal_history.clone().map(|mut record| {
+            record.outcome = "in_review".to_string();
+            record
+        });
         if review_state.is_some() && review_history.is_none() {
             return Err("review projection requires a live run history record".to_string());
         }
@@ -1776,6 +1826,7 @@ impl Orchestrator {
                 identifier: issue_identifier.to_string(),
                 run_id,
                 repositories,
+                terminal_history: terminal_history.map(Box::new),
                 review_projection: review_state.map(|target| ReviewProjection {
                     target,
                     repositories: review_repositories,
@@ -1834,6 +1885,7 @@ mod tests {
             identifier: "ensemble#420".to_string(),
             run_id: "run-420".to_string(),
             repositories,
+            terminal_history: None,
             review_projection: None,
         };
 
@@ -1854,6 +1906,7 @@ mod tests {
             identifier: "ensemble#420".into(),
             run_id: "run-420".into(),
             repositories: BTreeMap::from([("primary".into(), repository)]),
+            terminal_history: None,
             review_projection: Some(ReviewProjection {
                 target: "In review".into(),
                 repositories: vec!["primary".into()],
@@ -1879,6 +1932,7 @@ mod tests {
             identifier: "ensemble#420".into(),
             run_id: "run-420".into(),
             repositories: BTreeMap::from([("primary".into(), repository)]),
+            terminal_history: None,
             review_projection: Some(ReviewProjection {
                 target: "In review".into(),
                 repositories: vec!["primary".into(), "approval-gated".into()],
@@ -1912,6 +1966,7 @@ mod tests {
                 ("pull-request".into(), pull_request),
                 ("push".into(), push),
             ]),
+            terminal_history: None,
             review_projection: Some(ReviewProjection {
                 target: "In review".into(),
                 repositories: vec!["pull-request".into(), "push".into()],

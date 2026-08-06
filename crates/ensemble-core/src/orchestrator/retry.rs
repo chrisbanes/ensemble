@@ -1467,6 +1467,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            terminal_history: None,
             review_projection: None,
         };
         state

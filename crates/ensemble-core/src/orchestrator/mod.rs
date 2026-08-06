@@ -6555,39 +6555,16 @@ impl Orchestrator {
 
         let history_record = {
             let state = self.state.read().await;
-            state.get_pipeline_run(issue_id).and_then(|run| {
-                state
-                    .running
-                    .get(issue_id)
-                    .map(|entry| {
-                        self.build_history_record(RunningHistoryRecordInput {
-                            outcome: match outcome {
-                                TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
-                                TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
-                            },
-                            last_error: last_error.clone(),
-                            running_entry: entry,
-                            run,
-                            completed_at,
-                            artifacts: state.artifacts.get(issue_id).cloned(),
-                        })
-                    })
-                    .or_else(|| {
-                        state.waiting_on_human.get(issue_id).map(|entry| {
-                            self.build_history_record_from_waiting(WaitingHistoryRecordInput {
-                                outcome: match outcome {
-                                    TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
-                                    TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
-                                },
-                                last_error: last_error.clone(),
-                                waiting_entry: entry,
-                                run,
-                                completed_at,
-                                artifacts: state.artifacts.get(issue_id).cloned(),
-                            })
-                        })
-                    })
-            })
+            self.build_owned_history_record(
+                &state,
+                issue_id,
+                match outcome {
+                    TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
+                    TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
+                },
+                last_error,
+                completed_at,
+            )
         };
 
         let _ = self
@@ -7117,6 +7094,43 @@ impl Orchestrator {
             acceptance_attempts: input.run.acceptance_attempts.clone(),
             artifacts: input.artifacts,
         }
+    }
+
+    pub(super) fn build_owned_history_record(
+        &self,
+        state: &OrchestratorState,
+        issue_id: &str,
+        outcome: &str,
+        last_error: Option<String>,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> Option<HistoryRecord> {
+        state.get_pipeline_run(issue_id).and_then(|run| {
+            state
+                .running
+                .get(issue_id)
+                .map(|entry| {
+                    self.build_history_record(RunningHistoryRecordInput {
+                        outcome,
+                        last_error: last_error.clone(),
+                        running_entry: entry,
+                        run,
+                        completed_at,
+                        artifacts: state.artifacts.get(issue_id).cloned(),
+                    })
+                })
+                .or_else(|| {
+                    state.waiting_on_human.get(issue_id).map(|entry| {
+                        self.build_history_record_from_waiting(WaitingHistoryRecordInput {
+                            outcome,
+                            last_error,
+                            waiting_entry: entry,
+                            run,
+                            completed_at,
+                            artifacts: state.artifacts.get(issue_id).cloned(),
+                        })
+                    })
+                })
+        })
     }
 
     fn build_history_record_from_waiting(
@@ -9789,6 +9803,7 @@ mod tests {
             crate::orchestrator::delivery::DeliveryPhase::Waiting
         );
         assert_eq!(delivery.repositories["source-repo"].pr_number, Some(420));
+        assert!(delivery.terminal_history.is_some());
         assert_eq!(
             delivery.review_projection.as_ref().unwrap().phase,
             crate::orchestrator::delivery::ReviewProjectionPhase::Applied
@@ -10042,6 +10057,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
         };
         orchestrator
@@ -10065,6 +10081,10 @@ mod tests {
         observed_delivery.issue_id = "2".to_string();
         observed_delivery.identifier = "repo#2".to_string();
         observed_delivery.run_id = "run-2".to_string();
+        if let Some(history) = observed_delivery.terminal_history.as_deref_mut() {
+            history.issue_id = "2".to_string();
+            history.issue_identifier = "repo#2".to_string();
+        }
         observed_delivery
             .repositories
             .get_mut("source-repo")
@@ -10783,6 +10803,16 @@ mod tests {
 
         let state = orchestrator.state.read().await;
         assert_eq!(state.completed["1"].status, "completed_failed");
+        drop(state);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_STOPPED);
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
@@ -10954,6 +10984,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
         }
     }
