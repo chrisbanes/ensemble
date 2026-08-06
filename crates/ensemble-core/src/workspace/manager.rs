@@ -84,10 +84,10 @@ impl WorkspaceManager {
             .map(|repo_list| {
                 let mut repos_map = HashMap::new();
                 for (index, mut repo) in repo_list.into_iter().enumerate() {
+                    let name = repository_key(&repo, index);
                     repo.path = super::canonicalize_allow_missing(Path::new(&repo.path))
                         .to_string_lossy()
                         .into_owned();
-                    let name = repository_key(&repo, index);
                     repos_map.insert(name, repo);
                 }
                 repos_map
@@ -679,6 +679,25 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn repository_key_uses_the_configured_symlink_name() {
+        let root = TempDir::new().unwrap();
+        let aliases = TempDir::new().unwrap();
+        let (repo, mut config) = setup_repo("actual");
+        let alias = aliases.path().join("configured-alias");
+        std::os::unix::fs::symlink(repo.path(), &alias).unwrap();
+        config.path = alias.to_string_lossy().into_owned();
+
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![config])).unwrap();
+
+        let configured = mgr.repos().get("configured-alias").unwrap();
+        assert_eq!(
+            Path::new(&configured.path),
+            repo.path().canonicalize().unwrap()
+        );
+    }
+
     #[tokio::test]
     async fn workspace_ownership_mismatch_blocks_reuse_without_modifying_workspace() {
         let (_dir, mgr) = setup();
@@ -966,7 +985,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn workspace_ownership_canonicalizes_equivalent_repository_paths() {
+    async fn workspace_ownership_fails_closed_when_an_equivalent_path_changes_the_key() {
         use std::os::unix::fs::symlink;
 
         let root = TempDir::new().unwrap();
@@ -986,17 +1005,17 @@ mod tests {
         };
         let alias_mgr = WorkspaceManager::new(root.path(), Some(vec![alias_repo])).unwrap();
 
-        let reused = alias_mgr
+        let error = alias_mgr
             .prepare_workspace("NODE_42", "my-repo#42")
             .await
-            .unwrap();
+            .unwrap_err();
 
-        assert!(!reused.created_now);
-        assert_eq!(
-            first.worktrees.keys().next(),
-            reused.worktrees.keys().next()
-        );
-        alias_mgr.remove_workspace("NODE_42").await.unwrap();
+        assert!(matches!(
+            error,
+            WorkspaceError::RepositoryConfigurationMismatch { .. }
+        ));
+        assert!(first.base_path.exists());
+        first_mgr.remove_workspace("NODE_42").await.unwrap();
         assert!(!first.base_path.exists());
     }
 

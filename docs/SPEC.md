@@ -1591,9 +1591,11 @@ Workspace persistence:
   Ensemble removes the workspace before releasing the durable run owner.
 - `<workspace.root>/.ensemble-workspace-metadata/<workspace_key>.json` stores `issue_id`,
   `issue_identifier`, the branch date used for repository worktrees, and the configured repository
-  identities (derived key and canonical repository path). Equivalent symlinked or lexical path
-  spellings resolve to the same identity. This manager-owned sidecar, outside the agent
-  workspace, is the ownership authority. Files inside an agent workspace, including a forged
+  identities (key derived from the configured path and canonical repository path). Equivalent
+  symlinked or lexical path spellings resolve to the same path identity when they preserve the
+  derived key. Changing the path's leaf-derived key is repository configuration drift and fails
+  closed so configured repository references are never silently renamed. This manager-owned
+  sidecar, outside the agent workspace, is the ownership authority. Files inside an agent workspace, including a forged
   `.ensemble-workspace.json`, have no lifecycle authority.
 - Built-in coordinated repository worktrees derive their branch identity from the same
   collision-resistant immutable-ID key. Display-identifier changes therefore reuse the same branch,

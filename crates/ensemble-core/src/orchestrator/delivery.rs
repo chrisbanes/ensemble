@@ -771,7 +771,16 @@ impl Orchestrator {
     pub(super) async fn reconcile_terminal_delivery_owners(&self) -> BTreeSet<String> {
         let deliveries = {
             let state = self.state.read().await;
-            state.delivery.values().cloned().collect::<Vec<_>>()
+            state
+                .delivery
+                .values()
+                .filter(|delivery| {
+                    !state
+                        .pending_terminal_transitions
+                        .contains_key(&delivery.issue_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
         };
         if deliveries.is_empty() {
             return BTreeSet::new();

@@ -11282,6 +11282,18 @@ mod tests {
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        let first_transition = latest.terminal_transition.unwrap();
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.pending_terminal_transitions["1"].transition,
+            first_transition
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
     }
 
     fn delivery_restart_orchestrator(
