@@ -603,7 +603,7 @@ impl Orchestrator {
         &self,
         issue_id: &str,
         identifier: &str,
-    ) -> Result<(), FinalizeApprovalError> {
+    ) -> Result<bool, FinalizeApprovalError> {
         let current = self
             .state
             .read()
@@ -653,7 +653,7 @@ impl Orchestrator {
             .write()
             .await
             .set_finalize_state(issue_id, Self::finalize_state_from_delivery(&authoritative));
-        Ok(())
+        Ok(changed)
     }
 
     pub(super) async fn retry_finalize_delivery(

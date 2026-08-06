@@ -83,7 +83,10 @@ impl WorkspaceManager {
             .filter(|r| !r.is_empty())
             .map(|repo_list| {
                 let mut repos_map = HashMap::new();
-                for (index, repo) in repo_list.into_iter().enumerate() {
+                for (index, mut repo) in repo_list.into_iter().enumerate() {
+                    repo.path = super::canonicalize_allow_missing(Path::new(&repo.path))
+                        .to_string_lossy()
+                        .into_owned();
                     let name = repository_key(&repo, index);
                     repos_map.insert(name, repo);
                 }
@@ -149,7 +152,7 @@ impl WorkspaceManager {
     }
 
     fn lifecycle_lock(&self, workspace_key: &str) -> Arc<WorkspaceLifecycleLock> {
-        let canonical_root = Self::canonicalize_allow_missing(&self.root);
+        let canonical_root = super::canonicalize_allow_missing(&self.root);
         let path = canonical_root.join(workspace_key);
         let mut locks = WORKSPACE_LIFECYCLE_LOCKS
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -295,15 +298,33 @@ impl WorkspaceManager {
         metadata_path: &Path,
         metadata: &WorkspaceMetadata,
     ) -> Result<(), WorkspaceError> {
-        let actual_repositories = self.repository_identities();
-        if metadata.repositories == actual_repositories {
+        let expected_repositories = Self::canonical_repository_identities(&metadata.repositories);
+        let actual_repositories =
+            Self::canonical_repository_identities(&self.repository_identities());
+        if expected_repositories == actual_repositories {
             return Ok(());
         }
         Err(WorkspaceError::RepositoryConfigurationMismatch {
             path: metadata_path.display().to_string(),
-            expected_repositories: metadata.repositories.clone(),
+            expected_repositories,
             actual_repositories,
         })
+    }
+
+    fn canonical_repository_identities(
+        repositories: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        repositories
+            .iter()
+            .map(|(key, path)| {
+                (
+                    key.clone(),
+                    super::canonicalize_allow_missing(Path::new(path))
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect()
     }
 
     /// Prepare (create or reuse) a workspace for the given immutable issue identity.
@@ -479,6 +500,16 @@ impl WorkspaceManager {
             let metadata = self.load_metadata(issue_id)?;
             Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
             self.verify_repository_configuration(&metadata_path, &metadata)?;
+            if !self.repos.is_empty() {
+                let coordinator =
+                    WorktreeCoordinator::new(self.repos.clone(), metadata.branch_date, base_path);
+                coordinator
+                    .cleanup_worktrees(issue_id)
+                    .await
+                    .map_err(|error| WorkspaceError::CreationFailed {
+                        reason: format!("worktree cleanup failed: {error}"),
+                    })?;
+            }
             std::fs::remove_file(&metadata_path).map_err(|error| {
                 WorkspaceError::CreationFailed {
                     reason: format!("failed to remove workspace metadata: {error}"),
@@ -536,8 +567,8 @@ impl WorkspaceManager {
     /// When `path` does not yet exist (pre-creation), its nearest existing ancestor
     /// is canonicalized and the missing components are re-appended.
     fn validate_path_inside_root(&self, path: &Path) -> Result<(), WorkspaceError> {
-        let canonical_root = Self::canonicalize_allow_missing(&self.root);
-        let canonical_path = Self::canonicalize_allow_missing(path);
+        let canonical_root = super::canonicalize_allow_missing(&self.root);
+        let canonical_path = super::canonicalize_allow_missing(path);
 
         if !canonical_path.starts_with(&canonical_root) {
             return Err(WorkspaceError::PathOutsideRoot {
@@ -545,26 +576,6 @@ impl WorkspaceManager {
             });
         }
         Ok(())
-    }
-
-    fn canonicalize_allow_missing(path: &Path) -> PathBuf {
-        let mut existing = path;
-        let mut missing = Vec::new();
-        while !existing.exists() {
-            let (Some(parent), Some(file_name)) = (existing.parent(), existing.file_name()) else {
-                return path.to_path_buf();
-            };
-            missing.push(file_name.to_os_string());
-            existing = parent;
-        }
-
-        let mut canonical = existing
-            .canonicalize()
-            .unwrap_or_else(|_| existing.to_path_buf());
-        for component in missing.into_iter().rev() {
-            canonical.push(component);
-        }
-        canonical
     }
 }
 
@@ -916,6 +927,77 @@ mod tests {
         mgr.remove_workspace("NODE_42").await.unwrap();
 
         assert!(!metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_ownership_absent_workspace_cleans_git_registration_and_branch() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let repo_path = repo.path.clone();
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+        let workspace = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let worktree = workspace.worktrees.values().next().unwrap();
+        let worktree_path = worktree.path.to_string_lossy().into_owned();
+        let branch = worktree.branch.clone();
+        std::fs::remove_dir_all(&workspace.base_path).unwrap();
+
+        assert!(
+            crate::workspace::worktree::worktree_exists(&repo_path, &worktree_path)
+                .await
+                .unwrap()
+        );
+        mgr.remove_workspace("NODE_42").await.unwrap();
+
+        assert!(
+            !crate::workspace::worktree::worktree_exists(&repo_path, &worktree_path)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !crate::workspace::worktree::branch_exists(&repo_path, &branch)
+                .await
+                .unwrap()
+        );
+        assert!(!mgr.metadata_path("NODE_42").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_ownership_canonicalizes_equivalent_repository_paths() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let (repo_dir, repo) = setup_repo("repo1");
+        let alias_parent = TempDir::new().unwrap();
+        let alias = alias_parent.path().join("repository-alias");
+        symlink(repo_dir.path(), &alias).unwrap();
+
+        let first_mgr = WorkspaceManager::new(root.path(), Some(vec![repo.clone()])).unwrap();
+        let first = first_mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let alias_repo = RepoConfig {
+            path: alias.to_string_lossy().into_owned(),
+            ..repo
+        };
+        let alias_mgr = WorkspaceManager::new(root.path(), Some(vec![alias_repo])).unwrap();
+
+        let reused = alias_mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+
+        assert!(!reused.created_now);
+        assert_eq!(
+            first.worktrees.keys().next(),
+            reused.worktrees.keys().next()
+        );
+        alias_mgr.remove_workspace("NODE_42").await.unwrap();
+        assert!(!first.base_path.exists());
     }
 
     #[cfg(unix)]

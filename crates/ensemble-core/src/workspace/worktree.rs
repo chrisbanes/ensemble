@@ -219,16 +219,12 @@ pub async fn worktree_exists(repo_path: &str, worktree_path: &str) -> Result<boo
     )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let worktree_path_normalized = Path::new(worktree_path)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(worktree_path).to_path_buf());
+    let worktree_path_normalized = super::canonicalize_allow_missing(Path::new(worktree_path));
 
     for line in stdout.lines() {
         if line.starts_with("worktree ") {
             let listed_path = line.strip_prefix("worktree ").unwrap_or(line);
-            let listed_path_normalized = Path::new(listed_path)
-                .canonicalize()
-                .unwrap_or_else(|_| Path::new(listed_path).to_path_buf());
+            let listed_path_normalized = super::canonicalize_allow_missing(Path::new(listed_path));
 
             if listed_path_normalized == worktree_path_normalized {
                 debug!(worktree_path = %worktree_path, "Worktree found in list");
@@ -310,21 +306,28 @@ pub async fn remove_worktree(
     worktree_path: &str,
     branch: &str,
 ) -> Result<(), WorktreeError> {
+    let normalized_worktree_path = super::canonicalize_allow_missing(Path::new(worktree_path));
+    let normalized_worktree_path = normalized_worktree_path.to_string_lossy();
     info!(
         repo_path = %repo_path,
-        worktree_path = %worktree_path,
+        worktree_path = %normalized_worktree_path,
         branch = %branch,
         "Removing worktree"
     );
 
-    if !worktree_exists(repo_path, worktree_path).await? {
+    if !worktree_exists(repo_path, &normalized_worktree_path).await? {
         warn!(worktree_path = %worktree_path, "Worktree does not exist");
         return Err(WorktreeError::NotFound {
             path: worktree_path.to_string(),
         });
     }
 
-    let args = ["worktree", "remove", "--force", worktree_path];
+    let args = [
+        "worktree",
+        "remove",
+        "--force",
+        normalized_worktree_path.as_ref(),
+    ];
     let command = git_command_label(&args);
     let error_command = command.clone();
     ensure_git_success(
@@ -583,7 +586,11 @@ mod tests {
             .await
             .expect_err("removing the main worktree should fail");
 
-        assert_git_command_failed(error, &format!("git worktree remove --force {repo_path}"));
+        let repo_path = crate::workspace::canonicalize_allow_missing(Path::new(&repo_path));
+        assert_git_command_failed(
+            error,
+            &format!("git worktree remove --force {}", repo_path.display()),
+        );
     }
 
     #[cfg(unix)]

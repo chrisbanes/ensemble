@@ -116,7 +116,7 @@ impl RegisteredOrchestrator {
     pub(crate) async fn approve_finalize(
         &self,
         command: FinalizeApprovalCommand,
-    ) -> Result<(), FinalizeApprovalError> {
+    ) -> Result<bool, FinalizeApprovalError> {
         let Some(command_tx) = self.command_sender() else {
             return Err(FinalizeApprovalError::RuntimeUnavailable);
         };

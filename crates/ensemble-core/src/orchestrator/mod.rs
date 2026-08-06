@@ -276,7 +276,7 @@ pub(crate) enum OrchestratorCommand {
     },
     ApproveFinalize {
         command: FinalizeApprovalCommand,
-        response: tokio::sync::oneshot::Sender<Result<(), FinalizeApprovalError>>,
+        response: tokio::sync::oneshot::Sender<Result<bool, FinalizeApprovalError>>,
     },
     RetryFinalize {
         command: FinalizeRetryCommand,
@@ -10120,7 +10120,7 @@ mod tests {
         );
 
         orchestrator.pipeline_journal.transaction_append_late_error = true;
-        for _ in 0..2 {
+        for newly_approved in [true, false] {
             let (response, result) = tokio::sync::oneshot::channel();
             orchestrator
                 .handle_command(OrchestratorCommand::ApproveFinalize {
@@ -10131,7 +10131,7 @@ mod tests {
                     response,
                 })
                 .await;
-            assert_eq!(result.await.unwrap(), Ok(()));
+            assert_eq!(result.await.unwrap(), Ok(newly_approved));
         }
         orchestrator.pipeline_journal.transaction_append_late_error = false;
 

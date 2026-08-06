@@ -452,7 +452,9 @@ Pipeline run recovery:
   and performs no remote mutation. Approval changes only the approved repositories to `prepared`,
   after which normal idempotent delivery recovery resumes; restart restores the same pending
   approval owner and history. Retrying a blocked approval-required delivery durably returns it to
-  `awaiting_approval`; a blocked delivery cannot be approved directly.
+  `awaiting_approval`; a blocked delivery cannot be approved directly. Replaying approval after
+  the durable phase has already advanced is idempotent and reports that the earlier approval was
+  confirmed rather than applied again.
 - Reconciliation keeps the exact cancelled worker drain-owned until it has fully drained and the
   post-drain retry disposition is committed. A scheduled disposition transfers ownership to its
   retry entry; an exhausted disposition persists the pending terminal transition before clearing
@@ -1555,7 +1557,9 @@ When the service starts:
 3. If the terminal-issues fetch fails, log a warning and continue startup.
 
 An absent canonical workspace with no sidecar is already clean. When the workspace is absent but a
-valid matching sidecar remains from interrupted cleanup, cleanup removes the sidecar and succeeds.
+valid matching sidecar remains from interrupted cleanup, cleanup uses the persisted repository
+identities and branch date to unregister any stale worktrees and delete their branches before it
+removes the sidecar. A Git cleanup failure retains the sidecar and durable owner for retry.
 A present workspace with missing, malformed, ownerless, or mismatched sidecar metadata is left
 untouched and reported as a cleanup failure; startup continues. Corrupt or mismatched leftover
 sidecars also fail closed.
@@ -1587,7 +1591,8 @@ Workspace persistence:
   Ensemble removes the workspace before releasing the durable run owner.
 - `<workspace.root>/.ensemble-workspace-metadata/<workspace_key>.json` stores `issue_id`,
   `issue_identifier`, the branch date used for repository worktrees, and the configured repository
-  identities (derived key and configured path). This manager-owned sidecar, outside the agent
+  identities (derived key and canonical repository path). Equivalent symlinked or lexical path
+  spellings resolve to the same identity. This manager-owned sidecar, outside the agent
   workspace, is the ownership authority. Files inside an agent workspace, including a forged
   `.ensemble-workspace.json`, have no lifecycle authority.
 - Built-in coordinated repository worktrees derive their branch identity from the same

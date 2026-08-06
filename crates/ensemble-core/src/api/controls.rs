@@ -546,9 +546,9 @@ pub async fn post_retry(
     operation_id = "postFinalizeApprove",
     params(("identifier" = String, Path, description = "Issue identifier")),
     responses(
-        (status = 200, description = "Finalize approved", body = FinalizeApproveResponse),
+        (status = 200, description = "Finalize approved or an earlier approval confirmed", body = FinalizeApproveResponse),
         (status = 404, description = "Issue not found", body = ApiError),
-        (status = 409, description = "Issue is not awaiting finalize approval", body = ApiError)
+        (status = 409, description = "Issue has no approval-gated delivery", body = ApiError)
     ),
     tag = "controls"
 )]
@@ -577,7 +577,7 @@ pub async fn post_finalize_approve(
 
     drop(lock);
 
-    match state
+    let newly_approved = match state
         .orchestrator_runtime
         .approve_finalize(FinalizeApprovalCommand {
             issue_id,
@@ -585,7 +585,7 @@ pub async fn post_finalize_approve(
         })
         .await
     {
-        Ok(()) => {}
+        Ok(newly_approved) => newly_approved,
         Err(FinalizeApprovalError::RuntimeUnavailable) => {
             return issue_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -607,7 +607,7 @@ pub async fn post_finalize_approve(
                 format!("failed to persist finalization approval: {error}"),
             );
         }
-    }
+    };
 
     state.refresh_requested.notify_one();
 
@@ -616,7 +616,12 @@ pub async fn post_finalize_approve(
         Json(FinalizeApproveResponse {
             approved: true,
             issue_identifier: identifier,
-            message: "finalize approved".to_string(),
+            message: if newly_approved {
+                "finalize approved"
+            } else {
+                "finalize was already approved"
+            }
+            .to_string(),
         }),
     )
         .into_response()
@@ -1206,6 +1211,10 @@ mod tests {
     }
 
     fn install_test_finalize_runtime(state: &AppState) {
+        install_test_finalize_runtime_with_approval_result(state, true);
+    }
+
+    fn install_test_finalize_runtime_with_approval_result(state: &AppState, newly_approved: bool) {
         let (command_tx, mut command_rx) = tokio::sync::mpsc::channel(1);
         state
             .orchestrator_runtime
@@ -1219,7 +1228,7 @@ mod tests {
                         let finalize = state.get_finalize_state_mut(&command.issue_id).unwrap();
                         finalize.status = FinalizeStatus::InProgress;
                         finalize.repos[0].status = FinalizeStatus::InProgress;
-                        let _ = response.send(Ok(()));
+                        let _ = response.send(Ok(newly_approved));
                     }
                     OrchestratorCommand::RetryFinalize { command, response } => {
                         let mut state = orchestrator_state.write().await;
@@ -1316,6 +1325,19 @@ mod tests {
         assert_eq!(finalize.status, FinalizeStatus::InProgress);
         assert_eq!(finalize.repos[0].status, FinalizeStatus::InProgress);
         assert!(!lock.completed.contains_key("NODE_888"));
+    }
+
+    #[tokio::test]
+    async fn test_finalize_approve_reports_idempotent_replay() {
+        let state = build_app_state_with_finalize_pending();
+        install_test_finalize_runtime_with_approval_result(&state, false);
+
+        let response = post_finalize_approve(State(state), Path("my-repo#888".to_string())).await;
+        let response = response.into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body["approved"], true);
+        assert_eq!(body["message"], "finalize was already approved");
     }
 
     #[tokio::test]
