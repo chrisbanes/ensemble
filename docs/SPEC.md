@@ -446,6 +446,13 @@ Pipeline run recovery:
 - Automated failures that exhaust `max_cycles` transfer ownership to the same durable pending
   terminal transition used by normal terminal outcomes; they are never represented by an absent
   retry alone.
+- Approval-required repository delivery transfers ownership to a durable `DeliveryOwned` record
+  with an `awaiting_approval` repository phase, completion history, and pipeline snapshot before
+  the completed worker and live pipeline run are released. This phase consumes no agent capacity
+  and performs no remote mutation. Approval changes only the approved repositories to `prepared`,
+  after which normal idempotent delivery recovery resumes; restart restores the same pending
+  approval owner and history. Retrying a blocked approval-required delivery durably returns it to
+  `awaiting_approval`; a blocked delivery cannot be approved directly.
 - Reconciliation keeps the exact cancelled worker drain-owned until it has fully drained and the
   post-drain retry disposition is committed. A scheduled disposition transfers ownership to its
   retry entry; an exhausted disposition persists the pending terminal transition before clearing

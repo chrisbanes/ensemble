@@ -9,6 +9,7 @@ use crate::observability::events::EventBus;
 use crate::orchestrator::retry::ManualStepRetryError;
 use crate::orchestrator::state::OrchestratorState;
 use crate::orchestrator::{
+    FinalizeApprovalCommand, FinalizeApprovalError, FinalizeRetryCommand, FinalizeRetryError,
     ManualStepRetryCommand, ManualWholeIssueRetryCommand, Orchestrator, OrchestratorCommand,
     OrchestratorRuntimeParts, QuiescingLatch,
 };
@@ -110,6 +111,40 @@ impl RegisteredOrchestrator {
         result
             .await
             .map_err(|_| ManualStepRetryError::RuntimeUnavailable)?
+    }
+
+    pub(crate) async fn approve_finalize(
+        &self,
+        command: FinalizeApprovalCommand,
+    ) -> Result<(), FinalizeApprovalError> {
+        let Some(command_tx) = self.command_sender() else {
+            return Err(FinalizeApprovalError::RuntimeUnavailable);
+        };
+        let (response, result) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(OrchestratorCommand::ApproveFinalize { command, response })
+            .await
+            .map_err(|_| FinalizeApprovalError::RuntimeUnavailable)?;
+        result
+            .await
+            .map_err(|_| FinalizeApprovalError::RuntimeUnavailable)?
+    }
+
+    pub(crate) async fn retry_finalize(
+        &self,
+        command: FinalizeRetryCommand,
+    ) -> Result<(), FinalizeRetryError> {
+        let Some(command_tx) = self.command_sender() else {
+            return Err(FinalizeRetryError::RuntimeUnavailable);
+        };
+        let (response, result) = tokio::sync::oneshot::channel();
+        command_tx
+            .send(OrchestratorCommand::RetryFinalize { command, response })
+            .await
+            .map_err(|_| FinalizeRetryError::RuntimeUnavailable)?;
+        result
+            .await
+            .map_err(|_| FinalizeRetryError::RuntimeUnavailable)?
     }
 
     fn command_sender(&self) -> Option<mpsc::Sender<OrchestratorCommand>> {

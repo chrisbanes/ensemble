@@ -1453,6 +1453,7 @@ mod tests {
                 DeliveryRepository {
                     mode: DeliveryMode::PushAndPr,
                     phase: DeliveryPhase::Waiting,
+                    approval_required: false,
                     remote: "origin".to_string(),
                     base_branch: "main".to_string(),
                     head_branch: "ensemble/repo-1".to_string(),

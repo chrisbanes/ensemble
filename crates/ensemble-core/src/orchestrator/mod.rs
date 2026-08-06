@@ -239,6 +239,32 @@ pub(crate) struct ManualWholeIssueRetryCommand {
     pub identifier: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizeApprovalCommand {
+    pub issue_id: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FinalizeApprovalError {
+    RuntimeUnavailable,
+    NotAwaitingApproval,
+    Persistence(String),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizeRetryCommand {
+    pub issue_id: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FinalizeRetryError {
+    RuntimeUnavailable,
+    NotFailed,
+    Persistence(String),
+}
+
 pub(crate) enum OrchestratorCommand {
     QueueManualStepRetry {
         command: ManualStepRetryCommand,
@@ -247,6 +273,14 @@ pub(crate) enum OrchestratorCommand {
     QueueManualWholeIssueRetry {
         command: ManualWholeIssueRetryCommand,
         response: tokio::sync::oneshot::Sender<Result<(), ManualStepRetryError>>,
+    },
+    ApproveFinalize {
+        command: FinalizeApprovalCommand,
+        response: tokio::sync::oneshot::Sender<Result<(), FinalizeApprovalError>>,
+    },
+    RetryFinalize {
+        command: FinalizeRetryCommand,
+        response: tokio::sync::oneshot::Sender<Result<(), FinalizeRetryError>>,
     },
 }
 
@@ -705,6 +739,26 @@ impl Orchestrator {
                     },
                 )
                 .await;
+                let _ = response.send(result);
+            }
+            OrchestratorCommand::ApproveFinalize { command, response } => {
+                if self.quiescing.is_requested() {
+                    let _ = response.send(Err(FinalizeApprovalError::RuntimeUnavailable));
+                    return;
+                }
+                let result = self
+                    .approve_finalize_delivery(&command.issue_id, &command.identifier)
+                    .await;
+                let _ = response.send(result);
+            }
+            OrchestratorCommand::RetryFinalize { command, response } => {
+                if self.quiescing.is_requested() {
+                    let _ = response.send(Err(FinalizeRetryError::RuntimeUnavailable));
+                    return;
+                }
+                let result = self
+                    .retry_finalize_delivery(&command.issue_id, &command.identifier)
+                    .await;
                 let _ = response.send(result);
             }
         }
@@ -6678,12 +6732,8 @@ impl Orchestrator {
 
             let mode_name = finalize_mode_name(&repo_config.finalize.mode).to_string();
 
-            if repo_config.finalize.approval_required {
-                let status = if headless {
-                    FinalizeStatus::SkippedHeadless
-                } else {
-                    FinalizeStatus::PendingApproval
-                };
+            if repo_config.finalize.approval_required && headless {
+                let status = FinalizeStatus::SkippedHeadless;
                 repos.push(RepoFinalizeState {
                     repo: repo_name.clone(),
                     mode: mode_name,
@@ -6694,6 +6744,15 @@ impl Orchestrator {
                 self.update_repo_artifact_finalize_status(issue_id, repo_name, status, None)
                     .await;
                 continue;
+            }
+            if repo_config.finalize.approval_required {
+                self.update_repo_artifact_finalize_status(
+                    issue_id,
+                    repo_name,
+                    FinalizeStatus::PendingApproval,
+                    None,
+                )
+                .await;
             }
             delivery_repo_names.push(repo_name.clone());
         }
@@ -6732,7 +6791,7 @@ impl Orchestrator {
                         repos.push(RepoFinalizeState {
                             repo: repo_name.clone(),
                             mode: finalize_mode_name(&repo_config.finalize.mode).to_string(),
-                            approval_required: false,
+                            approval_required: repo_config.finalize.approval_required,
                             status: FinalizeStatus::Failed,
                             last_error: Some(error.clone()),
                         });
@@ -6791,7 +6850,11 @@ impl Orchestrator {
                                     .repositories
                                     .get(&repo.repo)
                                     .is_none_or(|repository| {
-                                        repository.phase == DeliveryPhase::Blocked
+                                        matches!(
+                                            repository.phase,
+                                            DeliveryPhase::AwaitingApproval
+                                                | DeliveryPhase::Blocked
+                                        )
                                     })
                             })
                     })
@@ -6927,7 +6990,10 @@ impl Orchestrator {
             let Some(repository) = delivery.repositories.get_mut(repo_name) else {
                 continue;
             };
-            if repository.phase == DeliveryPhase::Blocked {
+            if repository.phase == DeliveryPhase::AwaitingApproval {
+                repository.phase = DeliveryPhase::Prepared;
+                repository.last_error = None;
+            } else if repository.phase == DeliveryPhase::Blocked {
                 let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
                 repository.phase = retry_from;
                 if retry_from != DeliveryPhase::Waiting {
@@ -6968,11 +7034,7 @@ impl Orchestrator {
                     let Some(repository) = delivery.repositories.get(&repo.repo) else {
                         continue;
                     };
-                    repo.status = match repository.phase {
-                        DeliveryPhase::Published => FinalizeStatus::Succeeded,
-                        DeliveryPhase::Blocked => FinalizeStatus::Failed,
-                        _ => FinalizeStatus::InProgress,
-                    };
+                    repo.status = Self::finalize_status_from_delivery(repository);
                     repo.last_error = repository.last_error.clone();
                 }
 
@@ -9844,6 +9906,8 @@ mod tests {
             )
             .await;
 
+        orchestrator.reconcile_and_recover_deliveries().await;
+
         let state = orchestrator.state.read().await;
         let delivery = state.delivery.get(&issue.id).expect("delivery owner");
         assert_eq!(
@@ -9898,6 +9962,230 @@ mod tests {
             })
             .expect("push in flight record");
         assert!(prepared < first_mutation);
+
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn approval_required_delivery_preserves_terminal_history_before_approval() {
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = true;
+        let config = Arc::new(RwLock::new(make_config()));
+        let issue = test_issue("1", "Todo");
+        let tracker_issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::clone(&tracker_issues),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: Arc::new(AtomicUsize::new(0)),
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        let remote = Arc::new(SuccessfulDeliveryRemote {
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: issue.id.clone(),
+            remote_sha: std::sync::Mutex::new(None),
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            mutation_phases: std::sync::Mutex::new(Vec::new()),
+        });
+        orchestrator.delivery_remote = remote.clone();
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, None);
+            state.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "build",
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let delivery = state.delivery.get(&issue.id).expect("delivery owner");
+        assert!(delivery.terminal_history.is_some());
+        assert_eq!(
+            delivery.repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        assert!(delivery.repositories["source-repo"].approval_required);
+        assert_eq!(
+            state.finalize[&issue.id].status,
+            FinalizeStatus::PendingApproval
+        );
+        assert!(remote.mutation_phases.lock().unwrap().is_empty());
+        drop(state);
+        let durable = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(durable.snapshot.is_some());
+        assert!(durable
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.terminal_history.is_some()));
+
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::ApproveFinalize {
+                command: FinalizeApprovalCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                },
+                response,
+            })
+            .await;
+        assert!(matches!(
+            result.await.unwrap(),
+            Err(FinalizeApprovalError::Persistence(_))
+        ));
+        assert_eq!(
+            orchestrator.state.read().await.delivery[&issue.id].repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = None;
+        let mut blocked = orchestrator.state.read().await.delivery[&issue.id].clone();
+        let repository = blocked.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Blocked;
+        repository.retry_from = Some(DeliveryPhase::Prepared);
+        repository.last_error = Some("push failed".to_string());
+        orchestrator
+            .persist_delivery_record(&blocked, None)
+            .await
+            .unwrap();
+
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::ApproveFinalize {
+                command: FinalizeApprovalCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                },
+                response,
+            })
+            .await;
+        assert_eq!(
+            result.await.unwrap(),
+            Err(FinalizeApprovalError::NotAwaitingApproval)
+        );
+
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::RetryFinalize {
+                command: FinalizeRetryCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                },
+                response,
+            })
+            .await;
+        assert_eq!(result.await.unwrap(), Ok(()));
+        assert_eq!(
+            orchestrator.state.read().await.delivery[&issue.id].repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        assert_eq!(
+            orchestrator.state.read().await.delivery[&issue.id].repositories["source-repo"]
+                .retry_from,
+            Some(DeliveryPhase::Prepared)
+        );
+
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        for _ in 0..2 {
+            let (response, result) = tokio::sync::oneshot::channel();
+            orchestrator
+                .handle_command(OrchestratorCommand::ApproveFinalize {
+                    command: FinalizeApprovalCommand {
+                        issue_id: issue.id.clone(),
+                        identifier: issue.identifier.clone(),
+                    },
+                    response,
+                })
+                .await;
+            assert_eq!(result.await.unwrap(), Ok(()));
+        }
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery[&issue.id].repositories["source-repo"].phase,
+            DeliveryPhase::Prepared
+        );
+        assert_eq!(state.finalize[&issue.id].status, FinalizeStatus::InProgress);
+        assert!(remote.mutation_phases.lock().unwrap().is_empty());
+        drop(state);
+        let durable = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.delivery.unwrap().repositories["source-repo"].phase,
+            DeliveryPhase::Prepared
+        );
+
+        orchestrator.reconcile_and_recover_deliveries().await;
+
+        let state = orchestrator.state.read().await;
+        let delivery = state.delivery.get(&issue.id).expect("delivery owner");
+        assert!(delivery.terminal_history.is_some());
+        assert_eq!(
+            delivery.repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+        drop(state);
+        assert_eq!(
+            *remote.mutation_phases.lock().unwrap(),
+            vec![DeliveryPhase::PushInFlight, DeliveryPhase::PrCreateInFlight,]
+        );
+
+        tracker_issues.write().await[0].state = "Done".to_string();
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.delivery.contains_key(&issue.id));
+        assert!(!state.is_claimed(&issue.id));
+        assert!(state.completed.contains_key(&issue.id));
+        drop(state);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
 
         drop(repo_temp);
     }
@@ -10091,6 +10379,7 @@ mod tests {
                 DeliveryRepository {
                     mode: DeliveryMode::PushAndPr,
                     phase: DeliveryPhase::PrCreateInFlight,
+                    approval_required: false,
                     remote: "origin".to_string(),
                     base_branch: "main".to_string(),
                     head_branch: "ensemble/repo-1".to_string(),
@@ -11031,6 +11320,7 @@ mod tests {
                 DeliveryRepository {
                     mode: DeliveryMode::PushAndPr,
                     phase: DeliveryPhase::PrCreateInFlight,
+                    approval_required: false,
                     remote: "origin".to_string(),
                     base_branch: "main".to_string(),
                     head_branch: "ensemble/repo-1".to_string(),

@@ -11,7 +11,8 @@ use tracing::warn;
 use super::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind, TerminalOutcome};
 use super::state::{FinalizeStatus, IssueFinalizeState, RepoFinalizeState};
 use super::{
-    Orchestrator, HISTORY_OUTCOME_FAILED, HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
+    FinalizeApprovalError, FinalizeRetryError, Orchestrator, HISTORY_OUTCOME_FAILED,
+    HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
 };
 use crate::history::model::HistoryRecord;
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
@@ -30,6 +31,7 @@ pub(crate) enum DeliveryMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeliveryPhase {
+    AwaitingApproval,
     Prepared,
     PushInFlight,
     ReconcilingPush,
@@ -44,6 +46,8 @@ pub(crate) enum DeliveryPhase {
 pub(crate) struct DeliveryRepository {
     pub mode: DeliveryMode,
     pub phase: DeliveryPhase,
+    #[serde(default)]
+    pub approval_required: bool,
     pub remote: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -160,6 +164,20 @@ impl DeliveryRecord {
                     },
                     None => false,
                 }
+            })
+    }
+
+    fn is_parked_for_approval(&self) -> bool {
+        self.repositories
+            .values()
+            .any(|repository| repository.phase == DeliveryPhase::AwaitingApproval)
+            && self.repositories.values().all(|repository| {
+                matches!(
+                    repository.phase,
+                    DeliveryPhase::AwaitingApproval
+                        | DeliveryPhase::Waiting
+                        | DeliveryPhase::Published
+                )
             })
     }
 }
@@ -508,6 +526,7 @@ fn pull_request_delivery_phase(
 ) -> crate::acceptance::PullRequestDeliveryPhase {
     use crate::acceptance::PullRequestDeliveryPhase as EvidencePhase;
     match phase {
+        DeliveryPhase::AwaitingApproval => EvidencePhase::Prepared,
         DeliveryPhase::Prepared => EvidencePhase::Prepared,
         DeliveryPhase::PushInFlight => EvidencePhase::PushInFlight,
         DeliveryPhase::ReconcilingPush => EvidencePhase::ReconcilingPush,
@@ -580,6 +599,140 @@ fn evaluate_pull_request_requirement(
 }
 
 impl Orchestrator {
+    pub(super) async fn approve_finalize_delivery(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+    ) -> Result<(), FinalizeApprovalError> {
+        let current = self
+            .state
+            .read()
+            .await
+            .delivery
+            .get(issue_id)
+            .filter(|delivery| delivery.identifier == identifier)
+            .cloned()
+            .ok_or(FinalizeApprovalError::NotAwaitingApproval)?;
+        if current.repositories.values().any(|repository| {
+            repository.approval_required && repository.phase == DeliveryPhase::Blocked
+        }) {
+            return Err(FinalizeApprovalError::NotAwaitingApproval);
+        }
+        let mut candidate = current.clone();
+        let mut approval_required = false;
+        let mut changed = false;
+        for repository in candidate.repositories.values_mut() {
+            if !repository.approval_required {
+                continue;
+            }
+            approval_required = true;
+            if repository.phase == DeliveryPhase::AwaitingApproval {
+                let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
+                repository.phase = retry_from;
+                if retry_from != DeliveryPhase::Waiting {
+                    repository.retry_from = None;
+                }
+                repository.last_error = None;
+                changed = true;
+            }
+        }
+        if !approval_required {
+            return Err(FinalizeApprovalError::NotAwaitingApproval);
+        }
+        let authoritative = if changed {
+            self.persist_delivery_record(&candidate, None)
+                .await
+                .map_err(FinalizeApprovalError::Persistence)?;
+            candidate
+        } else {
+            current
+        };
+        self.project_delivery_artifacts(issue_id, &authoritative)
+            .await;
+        self.state
+            .write()
+            .await
+            .set_finalize_state(issue_id, Self::finalize_state_from_delivery(&authoritative));
+        Ok(())
+    }
+
+    pub(super) async fn retry_finalize_delivery(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+    ) -> Result<(), FinalizeRetryError> {
+        let current = self
+            .state
+            .read()
+            .await
+            .delivery
+            .get(issue_id)
+            .filter(|delivery| delivery.identifier == identifier)
+            .cloned();
+        let Some(current) = current else {
+            let mut state = self.state.write().await;
+            let finalize = state
+                .get_finalize_state_mut(issue_id)
+                .ok_or(FinalizeRetryError::NotFailed)?;
+            let mut changed = false;
+            for repository in &mut finalize.repos {
+                if repository.status == FinalizeStatus::Failed {
+                    repository.last_error = None;
+                    repository.status = if repository.approval_required {
+                        FinalizeStatus::PendingApproval
+                    } else {
+                        FinalizeStatus::InProgress
+                    };
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Err(FinalizeRetryError::NotFailed);
+            }
+            finalize.status = if finalize
+                .repos
+                .iter()
+                .any(|repository| repository.status == FinalizeStatus::InProgress)
+            {
+                FinalizeStatus::InProgress
+            } else {
+                FinalizeStatus::PendingApproval
+            };
+            return Ok(());
+        };
+
+        let mut candidate = current;
+        let mut changed = false;
+        for repository in candidate.repositories.values_mut() {
+            if repository.phase != DeliveryPhase::Blocked {
+                continue;
+            }
+            if repository.approval_required {
+                repository.phase = DeliveryPhase::AwaitingApproval;
+            } else {
+                let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
+                repository.phase = retry_from;
+                if retry_from != DeliveryPhase::Waiting {
+                    repository.retry_from = None;
+                }
+            }
+            repository.last_error = None;
+            changed = true;
+        }
+        if !changed {
+            return Err(FinalizeRetryError::NotFailed);
+        }
+        self.persist_delivery_record(&candidate, None)
+            .await
+            .map_err(FinalizeRetryError::Persistence)?;
+        self.project_delivery_artifacts(issue_id, &candidate).await;
+        self.state
+            .write()
+            .await
+            .set_finalize_state(issue_id, Self::finalize_state_from_delivery(&candidate));
+        Ok(())
+    }
+
     pub(super) async fn reconcile_and_recover_deliveries(&self) {
         let recoverable_issue_ids = self.reconcile_terminal_delivery_owners().await;
         if recoverable_issue_ids.is_empty() {
@@ -775,6 +928,9 @@ impl Orchestrator {
         };
 
         for delivery in deliveries {
+            if delivery.is_parked_for_approval() {
+                continue;
+            }
             let snapshot = match self.load_delivery_snapshot(&delivery).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -1157,11 +1313,10 @@ impl Orchestrator {
             let Some(repository) = delivery.repositories.get(&artifact.repo) else {
                 continue;
             };
-            artifact.finalize_status = match repository.phase {
-                DeliveryPhase::Waiting => "waiting",
-                DeliveryPhase::Published => "succeeded",
-                DeliveryPhase::Blocked => "failed",
-                _ => "in_progress",
+            artifact.finalize_status = if repository.phase == DeliveryPhase::Waiting {
+                "waiting"
+            } else {
+                Self::finalize_status_name(&Self::finalize_status_from_delivery(repository))
             }
             .to_string();
             artifact.pushed_ref = repository
@@ -1187,13 +1342,22 @@ impl Orchestrator {
         }
     }
     pub(super) fn finalize_state_from_delivery(delivery: &DeliveryRecord) -> IssueFinalizeState {
+        let aggregate = delivery.aggregate();
         IssueFinalizeState {
             issue_identifier: delivery.identifier.clone(),
-            status: match delivery.aggregate() {
-                DeliveryAggregate::Published => FinalizeStatus::Succeeded,
+            status: match aggregate {
                 DeliveryAggregate::Blocked => FinalizeStatus::Failed,
+                DeliveryAggregate::Published => FinalizeStatus::Succeeded,
                 DeliveryAggregate::Active | DeliveryAggregate::Waiting => {
-                    FinalizeStatus::InProgress
+                    if delivery
+                        .repositories
+                        .values()
+                        .any(|repository| repository.phase == DeliveryPhase::AwaitingApproval)
+                    {
+                        FinalizeStatus::PendingApproval
+                    } else {
+                        FinalizeStatus::InProgress
+                    }
                 }
             },
             repos: Self::finalize_repositories_from_delivery(delivery),
@@ -1212,15 +1376,20 @@ impl Orchestrator {
                     DeliveryMode::PushAndPr => "push_and_pr",
                 }
                 .to_string(),
-                approval_required: false,
-                status: match repository.phase {
-                    DeliveryPhase::Published => FinalizeStatus::Succeeded,
-                    DeliveryPhase::Blocked => FinalizeStatus::Failed,
-                    _ => FinalizeStatus::InProgress,
-                },
+                approval_required: repository.approval_required,
+                status: Self::finalize_status_from_delivery(repository),
                 last_error: repository.last_error.clone(),
             })
             .collect()
+    }
+
+    pub(super) fn finalize_status_from_delivery(repository: &DeliveryRepository) -> FinalizeStatus {
+        match repository.phase {
+            DeliveryPhase::AwaitingApproval => FinalizeStatus::PendingApproval,
+            DeliveryPhase::Published => FinalizeStatus::Succeeded,
+            DeliveryPhase::Blocked => FinalizeStatus::Failed,
+            _ => FinalizeStatus::InProgress,
+        }
     }
     pub(super) async fn advance_delivery_record(
         &self,
@@ -1252,6 +1421,7 @@ impl Orchestrator {
                 let mut created_this_iteration = false;
                 let phase = delivery.repositories[&repository_key].phase;
                 delivery = match phase {
+                    DeliveryPhase::AwaitingApproval => break,
                     DeliveryPhase::Prepared
                     | DeliveryPhase::PushInFlight
                     | DeliveryPhase::ReconcilingPush => {
@@ -1786,7 +1956,12 @@ impl Orchestrator {
                 repository_key.clone(),
                 DeliveryRepository {
                     mode,
-                    phase: DeliveryPhase::Prepared,
+                    phase: if config.finalize.approval_required {
+                        DeliveryPhase::AwaitingApproval
+                    } else {
+                        DeliveryPhase::Prepared
+                    },
+                    approval_required: config.finalize.approval_required,
                     remote: config.git_remote.clone(),
                     base_branch: config.branch.clone(),
                     head_branch: identity.head_branch,
@@ -1850,6 +2025,7 @@ mod tests {
         DeliveryRepository {
             mode: DeliveryMode::PushAndPr,
             phase,
+            approval_required: false,
             remote: "origin".to_string(),
             base_branch: "main".to_string(),
             head_branch: "ensemble/issue-420".to_string(),
