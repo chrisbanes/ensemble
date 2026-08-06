@@ -548,7 +548,9 @@ pub async fn post_retry(
     responses(
         (status = 200, description = "Finalize approved or an earlier approval confirmed", body = FinalizeApproveResponse),
         (status = 404, description = "Issue not found", body = ApiError),
-        (status = 409, description = "Issue has no approval-gated delivery", body = ApiError)
+        (status = 409, description = "Issue has no approval-gated delivery", body = ApiError),
+        (status = 500, description = "Finalize approval could not be persisted", body = ApiError),
+        (status = 503, description = "Orchestrator runtime unavailable", body = ApiError)
     ),
     tag = "controls"
 )]
@@ -636,7 +638,9 @@ pub async fn post_finalize_approve(
     responses(
         (status = 200, description = "Finalize retried", body = FinalizeRetryResponse),
         (status = 404, description = "Issue not found", body = ApiError),
-        (status = 409, description = "Issue has no failed finalize state", body = ApiError)
+        (status = 409, description = "Issue has no failed finalize state", body = ApiError),
+        (status = 500, description = "Finalize retry could not be persisted", body = ApiError),
+        (status = 503, description = "Orchestrator runtime unavailable", body = ApiError)
     ),
     tag = "controls"
 )]
