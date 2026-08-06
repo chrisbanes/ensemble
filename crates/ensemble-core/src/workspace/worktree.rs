@@ -344,9 +344,7 @@ pub async fn remove_worktree(
 
     debug!(worktree_path = %worktree_path, "Worktree removed successfully");
 
-    if let Err(e) = delete_branch_if_exists(repo_path, branch).await {
-        warn!(error = %e, branch = %branch, "Failed to delete branch");
-    }
+    delete_branch_if_exists(repo_path, branch).await?;
 
     Ok(())
 }
@@ -591,6 +589,34 @@ mod tests {
             error,
             &format!("git worktree remove --force {}", repo_path.display()),
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remove_worktree_propagates_branch_deletion_failure() {
+        let repo = init_test_repo().await;
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let worktree_parent = TempDir::new().expect("worktree parent");
+        let worktree_path = worktree_parent.path().join("feature");
+        let worktree_path = worktree_path.to_string_lossy().into_owned();
+        create_worktree(&repo_path, &worktree_path, "feature", Some("main"))
+            .await
+            .expect("create feature worktree");
+        run_git(
+            &repo_path,
+            &["checkout", "--ignore-other-worktrees", "feature"],
+            "git checkout --ignore-other-worktrees feature",
+        )
+        .await
+        .expect("check out feature in the main worktree");
+
+        let error = remove_worktree(&repo_path, &worktree_path, "feature")
+            .await
+            .expect_err("deleting a branch checked out elsewhere should fail");
+
+        assert_git_command_failed(error, "git branch -D feature");
+        assert!(!Path::new(&worktree_path).exists());
+        assert!(branch_exists(&repo_path, "feature").await.unwrap());
     }
 
     #[cfg(unix)]
