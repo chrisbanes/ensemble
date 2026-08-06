@@ -25,7 +25,7 @@ struct WorkspaceMetadata {
     #[serde(default)]
     repositories: BTreeMap<String, String>,
     #[serde(default)]
-    before_remove_completed: bool,
+    before_remove_started: bool,
 }
 
 /// Manage per-issue workspace directories.
@@ -243,7 +243,7 @@ impl WorkspaceManager {
             issue_identifier: identifier.to_string(),
             branch_date: date.to_string(),
             repositories: self.repository_identities(),
-            before_remove_completed: false,
+            before_remove_started: false,
         })?;
         self.write_metadata_temp(&content)?
             .persist_noclobber(self.metadata_path(issue_id))
@@ -375,7 +375,7 @@ impl WorkspaceManager {
                     issue_identifier: identifier.to_string(),
                     branch_date,
                     repositories: self.repository_identities(),
-                    before_remove_completed: false,
+                    before_remove_started: false,
                 },
                 Err(create_error) => match self.load_metadata(issue_id) {
                     Ok(mut existing) => {
@@ -522,11 +522,11 @@ impl WorkspaceManager {
             .hooks
             .before_remove
             .as_ref()
-            .filter(|_| !metadata.before_remove_completed)
+            .filter(|_| !metadata.before_remove_started)
         {
-            run_hook_best_effort("before_remove", script, &base_path, self.hooks.timeout_ms).await;
-            metadata.before_remove_completed = true;
+            metadata.before_remove_started = true;
             self.refresh_metadata(&metadata)?;
+            run_hook_best_effort("before_remove", script, &base_path, self.hooks.timeout_ms).await;
         }
 
         // Clean up worktrees first - use persisted branch date to avoid date drift
@@ -1435,7 +1435,7 @@ mod tests {
         assert!(
             mgr.load_metadata("NODE_CLEANUP")
                 .unwrap()
-                .before_remove_completed
+                .before_remove_started
         );
     }
 

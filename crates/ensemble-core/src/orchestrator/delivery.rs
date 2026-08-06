@@ -887,48 +887,59 @@ impl Orchestrator {
         history_outcome: &'static str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
-            let mut history_record = delivery.terminal_history.as_deref().cloned().or_else(|| {
-                delivery
-                    .review_projection
-                    .as_ref()
-                    .and_then(|projection| projection.history_record.clone())
-            });
-            let Some(history_record) = history_record.as_mut() else {
+            let Some(history_record) = self
+                .projected_terminal_history(delivery, history_outcome)
+                .await
+            else {
                 warn!(
                     issue_id = %delivery.issue_id,
                     "terminal delivery has no durable completion history"
                 );
                 return;
             };
-            history_record.outcome = history_outcome.to_string();
-            history_record.completed_at = Utc::now();
-            history_record.duration_seconds = history_record
-                .completed_at
-                .signed_duration_since(history_record.started_at)
-                .num_seconds()
-                .max(0) as u64;
-            let mut artifacts = self
-                .state
-                .read()
-                .await
-                .artifacts
-                .get(&delivery.issue_id)
-                .cloned()
-                .or_else(|| history_record.artifacts.clone());
-            if let Some(artifacts) = artifacts.as_mut() {
-                Self::apply_delivery_artifacts(artifacts, delivery);
-            }
-            history_record.artifacts = artifacts;
             self.begin_confirmed_terminal_transition_for_identity(
                 &delivery.issue_id,
                 &delivery.identifier,
                 Some(issue.clone()),
                 outcome,
                 issue.state.clone(),
-                Some(history_record.clone()),
+                Some(history_record),
             )
             .await;
         })
+    }
+
+    async fn projected_terminal_history(
+        &self,
+        delivery: &DeliveryRecord,
+        outcome: &'static str,
+    ) -> Option<HistoryRecord> {
+        let mut record = delivery.terminal_history.as_deref().cloned().or_else(|| {
+            delivery
+                .review_projection
+                .as_ref()
+                .and_then(|projection| projection.history_record.clone())
+        })?;
+        let mut artifacts = self
+            .state
+            .read()
+            .await
+            .artifacts
+            .get(&delivery.issue_id)
+            .cloned()
+            .or_else(|| record.artifacts.clone());
+        if let Some(artifacts) = artifacts.as_mut() {
+            Self::apply_delivery_artifacts(artifacts, delivery);
+        }
+        record.outcome = outcome.to_string();
+        record.completed_at = Utc::now();
+        record.duration_seconds = record
+            .completed_at
+            .signed_duration_since(record.started_at)
+            .num_seconds()
+            .max(0) as u64;
+        record.artifacts = artifacts;
+        Some(record)
     }
 
     pub(super) async fn process_delivery_recovery(
@@ -1305,6 +1316,16 @@ impl Orchestrator {
     }
 
     async fn complete_published_delivery(&self, delivery: &DeliveryRecord) {
+        let Some(history_record) = self
+            .projected_terminal_history(delivery, HISTORY_OUTCOME_SUCCEEDED)
+            .await
+        else {
+            warn!(
+                issue_id = %delivery.issue_id,
+                "published delivery has no durable completion history"
+            );
+            return;
+        };
         let config = self.config.read().await.clone();
         let finalize = Self::finalize_state_from_delivery(delivery);
         self.state
@@ -1323,7 +1344,7 @@ impl Orchestrator {
             issue,
             TerminalOutcome::Succeeded,
             config.on_success,
-            None,
+            Some(history_record),
         )
         .await;
     }

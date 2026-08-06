@@ -11044,7 +11044,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_only_published_recovery_continues_terminal_transition() {
+    async fn push_only_published_recovery_persists_history_before_release() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
@@ -11080,6 +11080,16 @@ mod tests {
         drop(state);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].issue_id, delivery.issue_id);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
     }
 
     #[tokio::test]
