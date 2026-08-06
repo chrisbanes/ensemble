@@ -6044,7 +6044,7 @@ impl Orchestrator {
                 error = %error,
                 "failed to persist terminal transition intent"
             );
-            return Some(transition);
+            return (!tracker_write_confirmed).then_some(transition);
         }
         Some(transition)
     }
@@ -11101,6 +11101,70 @@ mod tests {
         assert!(!records
             .iter()
             .any(|record| { record.kind == PipelineTransitionKind::PendingTerminalTransition }));
+        assert!(tracker_writes.read().await.is_empty());
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn confirmed_terminal_transition_append_failure_preserves_delivery_workspace() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        let workspace = orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        let tracker_writes = Arc::new(RwLock::new(Vec::new()));
+        orchestrator.tracker = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+            state_writes: Arc::clone(&tracker_writes),
+        });
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.completed.contains_key("1"));
+        assert!(!state.pending_terminal_transitions.contains_key("1"));
+        drop(state);
+        assert!(workspace.base_path.exists());
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::DeliveryOwned)
+        );
         assert!(tracker_writes.read().await.is_empty());
         assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
