@@ -6761,6 +6761,20 @@ impl Orchestrator {
             let Some(workspace) = prepared_workspace.as_ref() else {
                 unreachable!("publication repositories require a prepared workspace");
             };
+            {
+                let mut state = self.state.write().await;
+                if let Some(history) = self.build_owned_history_record(
+                    &state,
+                    issue_id,
+                    HISTORY_OUTCOME_SUCCEEDED,
+                    None,
+                    Utc::now(),
+                ) {
+                    state
+                        .finalize_terminal_history
+                        .insert(issue_id.to_string(), history);
+                }
+            }
             let prepared = self
                 .prepare_delivery_record(
                     issue_id,
@@ -10215,6 +10229,11 @@ mod tests {
         lists: AtomicUsize,
     }
 
+    struct FailOnceIdentityRemote {
+        inner: RecoveryDeliveryRemote,
+        identity_failures: AtomicUsize,
+    }
+
     struct ReviewProjectionTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
         journal: PipelineRunJournal,
@@ -10353,6 +10372,70 @@ mod tests {
         ) -> Result<(), String> {
             self.creates.fetch_add(1, Ordering::SeqCst);
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl crate::orchestrator::delivery::DeliveryRemote for FailOnceIdentityRemote {
+        async fn local_identity(
+            &self,
+            repository_path: &Path,
+        ) -> Result<crate::orchestrator::delivery::LocalRepositoryIdentity, String> {
+            if self
+                .identity_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err("simulated local identity failure".to_string());
+            }
+            self.inner.local_identity(repository_path).await
+        }
+
+        async fn remote_head(
+            &self,
+            repository_path: &Path,
+            remote: &str,
+            head_branch: &str,
+        ) -> Result<Option<String>, String> {
+            self.inner
+                .remote_head(repository_path, remote, head_branch)
+                .await
+        }
+
+        async fn push(
+            &self,
+            repository_path: &Path,
+            remote: &str,
+            head_branch: &str,
+            local_sha: &str,
+        ) -> Result<(), String> {
+            self.inner
+                .push(repository_path, remote, head_branch, local_sha)
+                .await
+        }
+
+        async fn list_pull_requests(
+            &self,
+            repository_path: &Path,
+            repository_key: &str,
+        ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
+            self.inner
+                .list_pull_requests(repository_path, repository_key)
+                .await
+        }
+
+        async fn create_pull_request(
+            &self,
+            repository_path: &Path,
+            base_branch: &str,
+            head_branch: &str,
+            marker: &str,
+        ) -> Result<(), String> {
+            self.inner
+                .create_pull_request(repository_path, base_branch, head_branch, marker)
+                .await
         }
     }
 
@@ -10712,11 +10795,14 @@ mod tests {
 
     #[tokio::test]
     async fn finalize_retry_reconstructs_pre_delivery_approval_failure() {
-        let remote = Arc::new(RecoveryDeliveryRemote {
-            pull_requests: std::sync::Mutex::new(Vec::new()),
-            pushes: AtomicUsize::new(0),
-            creates: AtomicUsize::new(0),
-            lists: AtomicUsize::new(0),
+        let remote = Arc::new(FailOnceIdentityRemote {
+            inner: RecoveryDeliveryRemote {
+                pull_requests: std::sync::Mutex::new(Vec::new()),
+                pushes: AtomicUsize::new(0),
+                creates: AtomicUsize::new(0),
+                lists: AtomicUsize::new(0),
+            },
+            identity_failures: AtomicUsize::new(1),
         });
         let (repo_temp, mut repo_config) = create_finalize_repo().await;
         repo_config.finalize.mode = FinalizeMode::PushAndPr;
@@ -10752,9 +10838,6 @@ mod tests {
             state.add_running(&test_issue("1", "Todo"), None);
             state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
         }
-        orchestrator
-            .pipeline_journal
-            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
         let config_snapshot = config.read().await.clone();
         let finalize = orchestrator
             .run_finalize_phase("1", "repo#1", &config_snapshot)
@@ -10766,9 +10849,6 @@ mod tests {
             .await
             .finalize_terminal_history
             .contains_key("1"));
-        orchestrator
-            .pipeline_journal
-            .transaction_append_error_on_call = None;
         {
             let mut state = orchestrator.state.write().await;
             state.remove_running("1");
@@ -10800,7 +10880,7 @@ mod tests {
             orchestrator.approve_finalize_delivery("1", "repo#1").await,
             Ok(true)
         );
-        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.inner.pushes.load(Ordering::SeqCst), 0);
 
         drop(repo_temp);
     }
