@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -10,7 +10,10 @@ use tracing::warn;
 
 use super::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind, TerminalOutcome};
 use super::state::{FinalizeStatus, IssueFinalizeState, RepoFinalizeState};
-use super::Orchestrator;
+use super::{
+    FinalizeApprovalError, FinalizeRetryError, Orchestrator, HISTORY_OUTCOME_FAILED,
+    HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
+};
 use crate::history::model::HistoryRecord;
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
 use crate::workspace::finalize::FinalizeMode;
@@ -28,6 +31,7 @@ pub(crate) enum DeliveryMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeliveryPhase {
+    AwaitingApproval,
     Prepared,
     PushInFlight,
     ReconcilingPush,
@@ -42,6 +46,8 @@ pub(crate) enum DeliveryPhase {
 pub(crate) struct DeliveryRepository {
     pub mode: DeliveryMode,
     pub phase: DeliveryPhase,
+    #[serde(default)]
+    pub approval_required: bool,
     pub remote: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -60,6 +66,8 @@ pub(crate) struct DeliveryRecord {
     pub identifier: String,
     pub run_id: String,
     pub repositories: BTreeMap<String, DeliveryRepository>,
+    #[serde(default)]
+    pub terminal_history: Option<Box<HistoryRecord>>,
     #[serde(default)]
     pub review_projection: Option<ReviewProjection>,
 }
@@ -156,6 +164,20 @@ impl DeliveryRecord {
                     },
                     None => false,
                 }
+            })
+    }
+
+    fn is_parked_for_approval(&self) -> bool {
+        self.repositories
+            .values()
+            .any(|repository| repository.phase == DeliveryPhase::AwaitingApproval)
+            && self.repositories.values().all(|repository| {
+                matches!(
+                    repository.phase,
+                    DeliveryPhase::AwaitingApproval
+                        | DeliveryPhase::Waiting
+                        | DeliveryPhase::Published
+                )
             })
     }
 }
@@ -504,6 +526,7 @@ fn pull_request_delivery_phase(
 ) -> crate::acceptance::PullRequestDeliveryPhase {
     use crate::acceptance::PullRequestDeliveryPhase as EvidencePhase;
     match phase {
+        DeliveryPhase::AwaitingApproval => EvidencePhase::Prepared,
         DeliveryPhase::Prepared => EvidencePhase::Prepared,
         DeliveryPhase::PushInFlight => EvidencePhase::PushInFlight,
         DeliveryPhase::ReconcilingPush => EvidencePhase::ReconcilingPush,
@@ -576,6 +599,153 @@ fn evaluate_pull_request_requirement(
 }
 
 impl Orchestrator {
+    pub(super) async fn approve_finalize_delivery(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+    ) -> Result<bool, FinalizeApprovalError> {
+        let state = self.state.read().await;
+        if state.pending_terminal_transitions.contains_key(issue_id) {
+            return Err(FinalizeApprovalError::NotAwaitingApproval);
+        }
+        let current = state
+            .delivery
+            .get(issue_id)
+            .filter(|delivery| delivery.identifier == identifier)
+            .cloned()
+            .ok_or(FinalizeApprovalError::NotAwaitingApproval)?;
+        drop(state);
+        if current.repositories.values().any(|repository| {
+            repository.approval_required && repository.phase == DeliveryPhase::Blocked
+        }) {
+            return Err(FinalizeApprovalError::NotAwaitingApproval);
+        }
+        let mut candidate = current.clone();
+        let mut approval_required = false;
+        let mut changed = false;
+        for repository in candidate.repositories.values_mut() {
+            if !repository.approval_required {
+                continue;
+            }
+            approval_required = true;
+            if repository.phase == DeliveryPhase::AwaitingApproval {
+                let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
+                repository.phase = retry_from;
+                if retry_from != DeliveryPhase::Waiting {
+                    repository.retry_from = None;
+                }
+                repository.last_error = None;
+                changed = true;
+            }
+        }
+        if !approval_required {
+            return Err(FinalizeApprovalError::NotAwaitingApproval);
+        }
+        let authoritative = if changed {
+            self.persist_delivery_record(&candidate, None)
+                .await
+                .map_err(FinalizeApprovalError::Persistence)?;
+            candidate
+        } else {
+            current
+        };
+        self.project_delivery_artifacts(issue_id, &authoritative)
+            .await;
+        self.state
+            .write()
+            .await
+            .set_finalize_state(issue_id, Self::finalize_state_from_delivery(&authoritative));
+        Ok(changed)
+    }
+
+    pub(super) async fn retry_finalize_delivery(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+    ) -> Result<(), FinalizeRetryError> {
+        let current = {
+            let state = self.state.read().await;
+            if state.pending_terminal_transitions.contains_key(issue_id) {
+                return Err(FinalizeRetryError::NotFailed);
+            }
+            state
+                .delivery
+                .get(issue_id)
+                .filter(|delivery| delivery.identifier == identifier)
+                .cloned()
+        };
+        let Some(current) = current else {
+            let mut state = self.state.write().await;
+            let finalize = state
+                .get_finalize_state_mut(issue_id)
+                .ok_or(FinalizeRetryError::NotFailed)?;
+            let mut changed = false;
+            for repository in &mut finalize.repos {
+                if repository.status == FinalizeStatus::Failed {
+                    repository.last_error = None;
+                    repository.status = FinalizeStatus::InProgress;
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Err(FinalizeRetryError::NotFailed);
+            }
+            finalize.status = FinalizeStatus::InProgress;
+            return Ok(());
+        };
+
+        let mut candidate = current;
+        let mut changed = false;
+        for repository in candidate.repositories.values_mut() {
+            if repository.phase != DeliveryPhase::Blocked {
+                continue;
+            }
+            if repository.approval_required {
+                repository.phase = DeliveryPhase::AwaitingApproval;
+            } else {
+                let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
+                repository.phase = retry_from;
+                if retry_from != DeliveryPhase::Waiting {
+                    repository.retry_from = None;
+                }
+            }
+            repository.last_error = None;
+            changed = true;
+        }
+        if let Some(projection) = candidate
+            .review_projection
+            .as_mut()
+            .filter(|projection| projection.phase == ReviewProjectionPhase::Blocked)
+        {
+            projection.phase = ReviewProjectionPhase::Pending;
+            projection.diagnostic = None;
+            changed = true;
+        }
+        if !changed {
+            return Err(FinalizeRetryError::NotFailed);
+        }
+        self.persist_delivery_record(&candidate, None)
+            .await
+            .map_err(FinalizeRetryError::Persistence)?;
+        self.project_delivery_artifacts(issue_id, &candidate).await;
+        self.state
+            .write()
+            .await
+            .set_finalize_state(issue_id, Self::finalize_state_from_delivery(&candidate));
+        Ok(())
+    }
+
+    pub(super) async fn reconcile_and_recover_deliveries(&self) {
+        let recoverable_issue_ids = self.reconcile_terminal_delivery_owners().await;
+        if recoverable_issue_ids.is_empty() {
+            return;
+        }
+
+        // Remote delivery recovery is another large state machine. Poll it only after terminal
+        // ownership reconciliation has finished and released its future.
+        Box::pin(self.process_delivery_recovery(Some(&recoverable_issue_ids))).await;
+    }
+
     pub(super) async fn load_delivery_snapshot(
         &self,
         delivery: &DeliveryRecord,
@@ -600,25 +770,208 @@ impl Orchestrator {
         Ok(record.snapshot)
     }
 
-    pub(super) async fn process_delivery_recovery(&self) {
+    pub(super) async fn reconcile_terminal_delivery_owners(&self) -> BTreeSet<String> {
         let deliveries = {
             let state = self.state.read().await;
             state
                 .delivery
                 .values()
                 .filter(|delivery| {
-                    matches!(
-                        delivery.aggregate(),
-                        DeliveryAggregate::Active
-                            | DeliveryAggregate::Waiting
-                            | DeliveryAggregate::Published
-                    )
+                    !state
+                        .pending_terminal_transitions
+                        .contains_key(&delivery.issue_id)
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if deliveries.is_empty() {
+            return BTreeSet::new();
+        }
+
+        let issue_ids = deliveries
+            .iter()
+            .map(|delivery| delivery.issue_id.clone())
+            .collect::<Vec<_>>();
+        let observed_issues = match self.tracker.fetch_issue_states_by_ids(&issue_ids).await {
+            Ok(issues) => issues,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "delivery recovery could not refresh tracker ownership"
+                );
+                let mut observed = Vec::new();
+                if issue_ids.len() > 1 {
+                    for issue_id in &issue_ids {
+                        match self
+                            .tracker
+                            .fetch_issue_states_by_ids(std::slice::from_ref(issue_id))
+                            .await
+                        {
+                            Ok(issues) => observed.extend(issues),
+                            Err(error) => warn!(
+                                issue_id = %issue_id,
+                                error = %error,
+                                "delivery recovery could not refresh one tracker owner"
+                            ),
+                        }
+                    }
+                }
+                observed
+            }
+        }
+        .into_iter()
+        .map(|issue| (issue.id.clone(), issue))
+        .collect::<BTreeMap<_, _>>();
+        let (terminal_states, success_state, failure_state) = {
+            let config = self.config.read().await;
+            (
+                config
+                    .tracker
+                    .terminal_states
+                    .iter()
+                    .map(|state| state.to_lowercase())
+                    .collect::<Vec<_>>(),
+                config.on_success.clone(),
+                config.on_failure.clone(),
+            )
+        };
+
+        let mut recoverable_issue_ids = BTreeSet::new();
+        for delivery in deliveries {
+            let Some(issue) = observed_issues.get(&delivery.issue_id) else {
+                warn!(
+                    issue_id = %delivery.issue_id,
+                    "delivery recovery did not observe its tracker issue"
+                );
+                continue;
+            };
+            if terminal_states.contains(&issue.state.to_lowercase()) {
+                let outcome = if issue.state.eq_ignore_ascii_case(&success_state) {
+                    TerminalOutcome::Succeeded
+                } else {
+                    TerminalOutcome::Failed
+                };
+                let history_outcome = if issue.state.eq_ignore_ascii_case(&success_state) {
+                    HISTORY_OUTCOME_SUCCEEDED
+                } else if issue.state.eq_ignore_ascii_case(&failure_state) {
+                    HISTORY_OUTCOME_FAILED
+                } else {
+                    HISTORY_OUTCOME_STOPPED
+                };
+                self.reconcile_terminal_delivery_owner(&delivery, issue, outcome, history_outcome)
+                    .await;
+            } else {
+                recoverable_issue_ids.insert(delivery.issue_id);
+            }
+        }
+        recoverable_issue_ids
+    }
+
+    fn reconcile_terminal_delivery_owner<'a>(
+        &'a self,
+        delivery: &'a DeliveryRecord,
+        issue: &'a crate::tracker::model::Issue,
+        outcome: TerminalOutcome,
+        history_outcome: &'static str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let Some(history_record) = self
+                .projected_terminal_history(delivery, history_outcome)
+                .await
+            else {
+                warn!(
+                    issue_id = %delivery.issue_id,
+                    "terminal delivery has no durable completion history"
+                );
+                return;
+            };
+            self.begin_confirmed_terminal_transition_for_identity(
+                &delivery.issue_id,
+                &delivery.identifier,
+                Some(issue.clone()),
+                outcome,
+                issue.state.clone(),
+                Some(history_record),
+            )
+            .await;
+        })
+    }
+
+    pub(super) async fn projected_terminal_history(
+        &self,
+        delivery: &DeliveryRecord,
+        outcome: &'static str,
+    ) -> Option<HistoryRecord> {
+        let mut record = delivery.terminal_history.as_deref().cloned().or_else(|| {
+            delivery
+                .review_projection
+                .as_ref()
+                .and_then(|projection| projection.history_record.clone())
+        })?;
+        let mut artifacts = self
+            .state
+            .read()
+            .await
+            .artifacts
+            .get(&delivery.issue_id)
+            .cloned()
+            .or_else(|| record.artifacts.clone());
+        if let Some(artifacts) = artifacts.as_mut() {
+            Self::apply_delivery_artifacts(artifacts, delivery);
+        }
+        record.outcome = outcome.to_string();
+        record.completed_at = Utc::now();
+        record.duration_seconds = record
+            .completed_at
+            .signed_duration_since(record.started_at)
+            .num_seconds()
+            .max(0) as u64;
+        if let Some(diagnostic) = delivery
+            .repositories
+            .values()
+            .filter(|repository| repository.phase == DeliveryPhase::Blocked)
+            .find_map(|repository| repository.last_error.clone())
+            .or_else(|| {
+                delivery
+                    .review_projection
+                    .as_ref()
+                    .filter(|projection| projection.phase == ReviewProjectionPhase::Blocked)
+                    .and_then(|projection| projection.diagnostic.clone())
+            })
+        {
+            record.last_error = Some(diagnostic);
+        }
+        record.artifacts = artifacts;
+        Some(record)
+    }
+
+    pub(super) async fn process_delivery_recovery(
+        &self,
+        observed_issue_ids: Option<&BTreeSet<String>>,
+    ) {
+        let deliveries = {
+            let state = self.state.read().await;
+            state
+                .delivery
+                .values()
+                .filter(|delivery| {
+                    observed_issue_ids
+                        .is_none_or(|issue_ids| issue_ids.contains(&delivery.issue_id))
+                        && matches!(
+                            delivery.aggregate(),
+                            DeliveryAggregate::Active
+                                | DeliveryAggregate::Waiting
+                                | DeliveryAggregate::Published
+                        )
                 })
                 .cloned()
                 .collect::<Vec<_>>()
         };
 
         for delivery in deliveries {
+            if delivery.is_parked_for_approval() {
+                continue;
+            }
             let snapshot = match self.load_delivery_snapshot(&delivery).await {
                 Ok(snapshot) => snapshot,
                 Err(error) => {
@@ -966,6 +1319,16 @@ impl Orchestrator {
     }
 
     async fn complete_published_delivery(&self, delivery: &DeliveryRecord) {
+        let Some(history_record) = self
+            .projected_terminal_history(delivery, HISTORY_OUTCOME_SUCCEEDED)
+            .await
+        else {
+            warn!(
+                issue_id = %delivery.issue_id,
+                "published delivery has no durable completion history"
+            );
+            return;
+        };
         let config = self.config.read().await.clone();
         let finalize = Self::finalize_state_from_delivery(delivery);
         self.state
@@ -984,7 +1347,7 @@ impl Orchestrator {
             issue,
             TerminalOutcome::Succeeded,
             config.on_success,
-            None,
+            Some(history_record),
         )
         .await;
     }
@@ -997,15 +1360,21 @@ impl Orchestrator {
         let Some(artifacts) = state.artifacts.get_mut(issue_id) else {
             return;
         };
+        Self::apply_delivery_artifacts(artifacts, delivery);
+    }
+
+    fn apply_delivery_artifacts(
+        artifacts: &mut crate::history::artifacts::RunArtifacts,
+        delivery: &DeliveryRecord,
+    ) {
         for artifact in &mut artifacts.repos {
             let Some(repository) = delivery.repositories.get(&artifact.repo) else {
                 continue;
             };
-            artifact.finalize_status = match repository.phase {
-                DeliveryPhase::Waiting => "waiting",
-                DeliveryPhase::Published => "succeeded",
-                DeliveryPhase::Blocked => "failed",
-                _ => "in_progress",
+            artifact.finalize_status = if repository.phase == DeliveryPhase::Waiting {
+                "waiting"
+            } else {
+                Self::finalize_status_name(&Self::finalize_status_from_delivery(repository))
             }
             .to_string();
             artifact.pushed_ref = repository
@@ -1031,13 +1400,22 @@ impl Orchestrator {
         }
     }
     pub(super) fn finalize_state_from_delivery(delivery: &DeliveryRecord) -> IssueFinalizeState {
+        let aggregate = delivery.aggregate();
         IssueFinalizeState {
             issue_identifier: delivery.identifier.clone(),
-            status: match delivery.aggregate() {
-                DeliveryAggregate::Published => FinalizeStatus::Succeeded,
+            status: match aggregate {
                 DeliveryAggregate::Blocked => FinalizeStatus::Failed,
+                DeliveryAggregate::Published => FinalizeStatus::Succeeded,
                 DeliveryAggregate::Active | DeliveryAggregate::Waiting => {
-                    FinalizeStatus::InProgress
+                    if delivery
+                        .repositories
+                        .values()
+                        .any(|repository| repository.phase == DeliveryPhase::AwaitingApproval)
+                    {
+                        FinalizeStatus::PendingApproval
+                    } else {
+                        FinalizeStatus::InProgress
+                    }
                 }
             },
             repos: Self::finalize_repositories_from_delivery(delivery),
@@ -1056,15 +1434,20 @@ impl Orchestrator {
                     DeliveryMode::PushAndPr => "push_and_pr",
                 }
                 .to_string(),
-                approval_required: false,
-                status: match repository.phase {
-                    DeliveryPhase::Published => FinalizeStatus::Succeeded,
-                    DeliveryPhase::Blocked => FinalizeStatus::Failed,
-                    _ => FinalizeStatus::InProgress,
-                },
+                approval_required: repository.approval_required,
+                status: Self::finalize_status_from_delivery(repository),
                 last_error: repository.last_error.clone(),
             })
             .collect()
+    }
+
+    pub(super) fn finalize_status_from_delivery(repository: &DeliveryRepository) -> FinalizeStatus {
+        match repository.phase {
+            DeliveryPhase::AwaitingApproval => FinalizeStatus::PendingApproval,
+            DeliveryPhase::Published => FinalizeStatus::Succeeded,
+            DeliveryPhase::Blocked => FinalizeStatus::Failed,
+            _ => FinalizeStatus::InProgress,
+        }
     }
     pub(super) async fn advance_delivery_record(
         &self,
@@ -1096,6 +1479,7 @@ impl Orchestrator {
                 let mut created_this_iteration = false;
                 let phase = delivery.repositories[&repository_key].phase;
                 delivery = match phase {
+                    DeliveryPhase::AwaitingApproval => break,
                     DeliveryPhase::Prepared
                     | DeliveryPhase::PushInFlight
                     | DeliveryPhase::ReconcilingPush => {
@@ -1573,6 +1957,7 @@ impl Orchestrator {
         state
             .delivery
             .insert(delivery.issue_id.clone(), delivery.clone());
+        state.finalize_terminal_history.remove(&delivery.issue_id);
         if let Some(snapshot) = persisted_snapshot
             .as_ref()
             .filter(|snapshot| snapshot.issue_id == delivery.issue_id)
@@ -1591,7 +1976,7 @@ impl Orchestrator {
         workspace: &crate::workspace::manager::WorkspaceResult,
         repository_keys: &[String],
     ) -> Result<(DeliveryRecord, Option<PipelineRunSnapshot>), String> {
-        let (run_id, snapshot, review_history) = {
+        let (run_id, snapshot, terminal_history) = {
             let state = self.state.read().await;
             let run_id = state
                 .running
@@ -1602,21 +1987,16 @@ impl Orchestrator {
             let snapshot = state
                 .get_pipeline_run(issue_id)
                 .map(PipelineRun::to_snapshot);
-            let review_history = state
-                .running
-                .get(issue_id)
-                .zip(state.get_pipeline_run(issue_id))
-                .map(|(running, run)| {
-                    self.build_history_record(super::RunningHistoryRecordInput {
-                        outcome: "in_review",
-                        last_error: None,
-                        running_entry: running,
-                        run,
-                        completed_at: Utc::now(),
-                        artifacts: state.artifacts.get(issue_id).cloned(),
-                    })
-                });
-            (run_id, snapshot, review_history)
+            let terminal_history = self
+                .build_owned_history_record(
+                    &state,
+                    issue_id,
+                    HISTORY_OUTCOME_SUCCEEDED,
+                    None,
+                    Utc::now(),
+                )
+                .or_else(|| state.finalize_terminal_history.get(issue_id).cloned());
+            (run_id, snapshot, terminal_history)
         };
         let configured_repositories = self.workspace_mgr.repos();
         let mut repositories = std::collections::BTreeMap::new();
@@ -1637,7 +2017,12 @@ impl Orchestrator {
                 repository_key.clone(),
                 DeliveryRepository {
                     mode,
-                    phase: DeliveryPhase::Prepared,
+                    phase: if config.finalize.approval_required {
+                        DeliveryPhase::AwaitingApproval
+                    } else {
+                        DeliveryPhase::Prepared
+                    },
+                    approval_required: config.finalize.approval_required,
                     remote: config.git_remote.clone(),
                     base_branch: config.branch.clone(),
                     head_branch: identity.head_branch,
@@ -1664,6 +2049,10 @@ impl Orchestrator {
             })
             .collect::<Vec<_>>();
         review_repositories.sort();
+        let review_history = terminal_history.clone().map(|mut record| {
+            record.outcome = "in_review".to_string();
+            record
+        });
         if review_state.is_some() && review_history.is_none() {
             return Err("review projection requires a live run history record".to_string());
         }
@@ -1673,6 +2062,7 @@ impl Orchestrator {
                 identifier: issue_identifier.to_string(),
                 run_id,
                 repositories,
+                terminal_history: terminal_history.map(Box::new),
                 review_projection: review_state.map(|target| ReviewProjection {
                     target,
                     repositories: review_repositories,
@@ -1696,6 +2086,7 @@ mod tests {
         DeliveryRepository {
             mode: DeliveryMode::PushAndPr,
             phase,
+            approval_required: false,
             remote: "origin".to_string(),
             base_branch: "main".to_string(),
             head_branch: "ensemble/issue-420".to_string(),
@@ -1731,6 +2122,7 @@ mod tests {
             identifier: "ensemble#420".to_string(),
             run_id: "run-420".to_string(),
             repositories,
+            terminal_history: None,
             review_projection: None,
         };
 
@@ -1751,6 +2143,7 @@ mod tests {
             identifier: "ensemble#420".into(),
             run_id: "run-420".into(),
             repositories: BTreeMap::from([("primary".into(), repository)]),
+            terminal_history: None,
             review_projection: Some(ReviewProjection {
                 target: "In review".into(),
                 repositories: vec!["primary".into()],
@@ -1776,6 +2169,7 @@ mod tests {
             identifier: "ensemble#420".into(),
             run_id: "run-420".into(),
             repositories: BTreeMap::from([("primary".into(), repository)]),
+            terminal_history: None,
             review_projection: Some(ReviewProjection {
                 target: "In review".into(),
                 repositories: vec!["primary".into(), "approval-gated".into()],
@@ -1809,6 +2203,7 @@ mod tests {
                 ("pull-request".into(), pull_request),
                 ("push".into(), push),
             ]),
+            terminal_history: None,
             review_projection: Some(ReviewProjection {
                 target: "In review".into(),
                 repositories: vec!["pull-request".into(), "push".into()],

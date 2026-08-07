@@ -365,9 +365,10 @@ Pipeline run recovery:
   same versioned per-issue journal before any remote mutation. Repository entries are keyed in
   deterministic order and retain the run ID, issue ID, configured repository key, mode, remote and
   base branch, exact head branch and local commit SHA, observed remote SHA, pull request identity,
-  last error, retry origin, and a stored deterministic marker.
-- Delivery repository phases are `prepared`, `push_in_flight`, `reconciling_push`,
-  `pr_create_in_flight`, `reconciling_pr`, `waiting`, `published`, and `blocked`. The issue-level
+  last error, retry origin, a stored deterministic marker, and the prepared terminal history.
+- Delivery repository phases are `awaiting_approval`, `prepared`, `push_in_flight`,
+  `reconciling_push`, `pr_create_in_flight`, `reconciling_pr`, `waiting`, `published`, and
+  `blocked`. The issue-level
   delivery state is derived from those repository entries rather than serialized separately.
 - Before a push or pull request creation, Ensemble persists the corresponding in-flight phase, so
   delivery owns publication before the remote mutation. On a normal response or ambiguous failure
@@ -383,6 +384,11 @@ Pipeline run recovery:
   dispatches no pipeline work, and does not project a terminal tracker state. `blocked` is likewise
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
+- If the tracker moves a retained delivery to any configured terminal state, delivery recovery
+  stops remote mutation and enters the same durable terminal-transition protocol using the
+  observed state. It persists the prepared history as succeeded for the success state, failed for
+  the configured failure state, or stopped for any other terminal state. Release removes the owned
+  workspace and durable delivery claim before another candidate can dispatch.
 - An optional `push_and_pr` `review_state` is an issue-level retained projection, never a terminal
   outcome. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
   `in_flight` before the tracker write and applies only after an exact target-state read. It writes
@@ -441,6 +447,15 @@ Pipeline run recovery:
 - Automated failures that exhaust `max_cycles` transfer ownership to the same durable pending
   terminal transition used by normal terminal outcomes; they are never represented by an absent
   retry alone.
+- Approval-required repository delivery transfers ownership to a durable `DeliveryOwned` record
+  with an `awaiting_approval` repository phase, completion history, and pipeline snapshot before
+  the completed worker and live pipeline run are released. This phase consumes no agent capacity
+  and performs no remote mutation. Approval changes only the approved repositories to `prepared`,
+  after which normal idempotent delivery recovery resumes; restart restores the same pending
+  approval owner and history. Retrying a blocked approval-required delivery durably returns it to
+  `awaiting_approval`; a blocked delivery cannot be approved directly. Replaying approval after
+  the durable phase has already advanced is idempotent and reports that the earlier approval was
+  confirmed rather than applied again.
 - Reconciliation keeps the exact cancelled worker drain-owned until it has fully drained and the
   post-drain retry disposition is committed. A scheduled disposition transfers ownership to its
   retry entry; an exhausted disposition persists the pending terminal transition before clearing
@@ -455,15 +470,17 @@ Pipeline run recovery:
 - Every tracker error is treated as potentially ambiguous. Startup and poll ticks replay the same
   configured state transition idempotently without rerunning pipeline steps or finalization, and
   persist updated attempt/error metadata after failures.
-- After the tracker write is confirmed, Ensemble records that applied state as a still-live journal
-  phase, clears any terminal interaction wait, and persists completion history idempotently. A
-  restart in this phase finishes those local effects without repeating tracker or agent work.
+- After the tracker write is confirmed, Ensemble crash-durably records that applied state as a
+  still-live journal phase before clearing any terminal interaction wait, persisting completion
+  history idempotently, and removing the issue workspace. Workspace cleanup failure retains the
+  pending transition for bounded-backoff retry. A restart in this phase finishes those local effects
+  without repeating tracker or agent work.
 - Stale `Running` steps from a previous process are normalized to `Pending`; agent processes are not
   recovered across orchestrator restarts or in-process journal rehydration.
 - Ensemble appends `released` only after the terminal tracker transition is confirmed (or no
-  tracker write is supported) and completion history is durable. That boundary prevents older
-  snapshots for the issue from being restored after completion, stop, terminal reconciliation, or
-  whole-issue retry.
+  tracker write is supported), completion history is durable, and the issue workspace has been
+  removed. That boundary prevents older snapshots for the issue from being restored after
+  completion, stop, terminal reconciliation, or whole-issue retry.
 
 #### 4.1.7 StepOutput
 
@@ -1541,7 +1558,9 @@ When the service starts:
 3. If the terminal-issues fetch fails, log a warning and continue startup.
 
 An absent canonical workspace with no sidecar is already clean. When the workspace is absent but a
-valid matching sidecar remains from interrupted cleanup, cleanup removes the sidecar and succeeds.
+valid matching sidecar remains from interrupted cleanup, cleanup uses the persisted repository
+identities and branch date to unregister any stale worktrees and delete their branches before it
+removes the sidecar. A Git cleanup failure retains the sidecar and durable owner for retry.
 A present workspace with missing, malformed, ownerless, or mismatched sidecar metadata is left
 untouched and reported as a cleanup failure; startup continues. Corrupt or mismatched leftover
 sidecars also fail closed.
@@ -1569,11 +1588,16 @@ Workspace persistence:
 
 - Workspaces are reused across runs for the same immutable issue ID, including when the display
   identifier changes.
-- Successful runs do not auto-delete workspaces.
+- Non-terminal runs retain their workspaces. After a terminal tracker transition is confirmed,
+  Ensemble removes the workspace before releasing the durable run owner.
 - `<workspace.root>/.ensemble-workspace-metadata/<workspace_key>.json` stores `issue_id`,
-  `issue_identifier`, and the branch date used for repository worktrees. This manager-owned
-  sidecar, outside the agent workspace, is the ownership authority. Files inside an agent
-  workspace, including a forged `.ensemble-workspace.json`, have no lifecycle authority.
+  `issue_identifier`, the branch date used for repository worktrees, and the configured repository
+  identities (key derived from the configured path and canonical repository path). Equivalent
+  symlinked or lexical path spellings resolve to the same path identity when they preserve the
+  derived key. Changing the path's leaf-derived key is repository configuration drift and fails
+  closed so configured repository references are never silently renamed. This manager-owned
+  sidecar, outside the agent workspace, is the ownership authority. Files inside an agent workspace, including a forged
+  `.ensemble-workspace.json`, have no lifecycle authority.
 - Built-in coordinated repository worktrees derive their branch identity from the same
   collision-resistant immutable-ID key. Display-identifier changes therefore reuse the same branch,
   while distinct issue IDs remain isolated even when lossy branch sanitization would otherwise
@@ -1593,22 +1617,28 @@ Algorithm summary:
 3. For a new directory, atomically create manager-owned owner metadata without replacing an
    existing sidecar, before hooks or repository worktree preparation. If metadata creation fails,
    remove the newly created empty directory.
-4. For an existing directory, load sidecar metadata and require `issue_id` to match before reuse,
-   hooks, repository worktree preparation, or any metadata write. `issue_identifier` is
-   informational display metadata and may be refreshed after immutable-ID verification using an
-   atomic replacement, so a failed refresh leaves the previous valid sidecar intact.
+4. For an existing directory, load sidecar metadata and require `issue_id` and the configured
+   repository identities to match before reuse, hooks, repository worktree preparation, or any
+   metadata write. `issue_identifier` is informational display metadata and may be refreshed after
+   verification using an atomic replacement, so a failed refresh leaves the previous valid
+   sidecar intact.
 5. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
 6. If `created_now=true`, run `after_create` hook if configured.
 
 Missing, malformed, ownerless legacy, or mismatched sidecar metadata is not repaired or adopted.
-Reuse and removal fail before any workspace side effect. Removing an absent canonical workspace
-with no sidecar remains idempotent; removing one with a valid matching leftover sidecar completes
-the interrupted cleanup. For an existing ownership-verified workspace, `before_remove` runs once
-in the base workspace before cleanup removes repository worktrees exhaustively, then the agent
-workspace, then the sidecar. A sidecar-removal failure is retryable because the valid sidecar
-remains authoritative. Implementations do not scan, migrate, rename, or remove legacy
-identifier-only directories, and do not migrate or adopt in-workspace metadata.
+Reuse and removal fail before any workspace side effect. This includes repository configuration
+drift: cleanup does not substitute newly configured repositories or abandon worktrees belonging to
+repositories recorded when the workspace was created. Removing an absent canonical workspace with
+no sidecar remains idempotent; removing one with a valid matching leftover sidecar completes the
+interrupted cleanup. For an existing verified workspace, `before_remove` runs once in the base
+workspace before cleanup removes repository worktrees exhaustively, then the agent workspace, then
+the sidecar. A crash-durable, at-most-once `before_remove` boundary is recorded in the sidecar before
+invoking the best-effort hook, so a cleanup retry resumes after the hook boundary without
+duplicating external side effects. A sidecar-removal failure is retryable because the valid sidecar
+remains authoritative.
+Implementations do not scan, migrate, rename, or remove legacy identifier-only directories, and do
+not migrate or adopt in-workspace metadata.
 
 Notes:
 
@@ -1893,6 +1923,8 @@ Permission and user-input behavior on direct ACP paths is governed by `agent.per
 Policy requirements:
 
 - Each implementation should document its chosen permission and operator-confirmation posture.
+- Agent subprocesses must not inherit the host's `GITHUB_TOKEN`; tracker credentials remain owned
+  by the orchestrator process unless an explicit future agent-credential contract says otherwise.
 - Permission requests and user-input scenarios must not leave the orchestrator globally stalled.
   User-input waits should be issue-scoped, with other issues continuing to make progress.
 
@@ -2041,10 +2073,6 @@ Behavior:
 4. Forward ACP `session/update` events to orchestrator.
 5. On any error, fail the worker attempt. The orchestrator decides whether the failure is
    retryable or terminal.
-
-Note:
-
-- Workspaces are intentionally preserved after successful runs.
 
 ## 11. Issue Tracker Integration Contract (GitHub-Compatible)
 

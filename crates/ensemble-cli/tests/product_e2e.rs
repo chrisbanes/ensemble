@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
@@ -157,7 +157,7 @@ async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() 
         .env("PATH", fixture.path_with_mock_bin())
         .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     let child = command.spawn().expect("spawn ensemble web");
     let _guard = ChildGuard::new(child);
     let client = reqwest::Client::new();
@@ -212,7 +212,7 @@ async fn missing_file_and_handoff_are_durable_acceptance_failures() {
         .env("ENSEMBLE_E2E_SKIP_REQUIRED_FILE", "1")
         .env("ENSEMBLE_E2E_MISSING_HANDOFF", "1")
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::inherit());
     let child = command.spawn().expect("spawn ensemble web");
     let _guard = ChildGuard::new(child);
     let client = reqwest::Client::new();
@@ -685,25 +685,60 @@ const LIVE_DOGFOOD_OPT_IN: &str = "ENSEMBLE_LIVE_DOGFOOD";
 const LIVE_DOGFOOD_PROJECT: &str = "ENSEMBLE_DOGFOOD_PROJECT_NUMBER";
 const LIVE_DOGFOOD_BAMBOON_PATH: &str = "ENSEMBLE_DOGFOOD_BAMBOON_PATH";
 const LIVE_DOGFOOD_AGENT: &str = "ENSEMBLE_DOGFOOD_AGENT";
+const LIVE_DOGFOOD_PRESERVE: &str = "ENSEMBLE_LIVE_DOGFOOD_PRESERVE";
 const LIVE_DOGFOOD_STATUSES: [&str; 4] = ["Ready to implement", "In progress", "In review", "Done"];
 const LIVE_DOGFOOD_POLL_INTERVAL_MS: u64 = 1_000;
 const LIVE_DOGFOOD_RESTART_STABLE_POLLS: usize = 2;
 static LIVE_DOGFOOD_SEQUENCE: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum LiveDogfoodMode {
+    Routine,
+    Preserve,
+}
+
+impl LiveDogfoodMode {
+    fn from_input(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("") => Ok(Self::Routine),
+            Some("1") => Ok(Self::Preserve),
+            Some(_) => Err(format!(
+                "{LIVE_DOGFOOD_PRESERVE} must be exactly 1 when set"
+            )),
+        }
+    }
+
+    fn from_os_input(value: Option<&OsStr>) -> Result<Self, String> {
+        let value = value
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok_or_else(|| format!("{LIVE_DOGFOOD_PRESERVE} must contain valid UTF-8"))
+            })
+            .transpose()?;
+        Self::from_input(value)
+    }
+}
 
 #[derive(Debug)]
 struct LiveDogfoodInputs {
     project_number: u64,
     bamboon_path: PathBuf,
     agent: String,
+    mode: LiveDogfoodMode,
 }
 
 impl LiveDogfoodInputs {
     fn from_env() -> Result<Self, String> {
-        Self::from_values(
+        let mode =
+            LiveDogfoodMode::from_os_input(std::env::var_os(LIVE_DOGFOOD_PRESERVE).as_deref())?;
+        Self::from_values_with_mode(
             std::env::var(LIVE_DOGFOOD_OPT_IN).ok().as_deref(),
             std::env::var(LIVE_DOGFOOD_PROJECT).ok().as_deref(),
             std::env::var(LIVE_DOGFOOD_BAMBOON_PATH).ok().as_deref(),
             std::env::var(LIVE_DOGFOOD_AGENT).ok().as_deref(),
+            mode,
         )
     }
 
@@ -712,6 +747,32 @@ impl LiveDogfoodInputs {
         project_number: Option<&str>,
         bamboon_path: Option<&str>,
         agent: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::from_values_with_preserve(opt_in, project_number, bamboon_path, agent, None)
+    }
+
+    fn from_values_with_preserve(
+        opt_in: Option<&str>,
+        project_number: Option<&str>,
+        bamboon_path: Option<&str>,
+        agent: Option<&str>,
+        preserve: Option<&str>,
+    ) -> Result<Self, String> {
+        Self::from_values_with_mode(
+            opt_in,
+            project_number,
+            bamboon_path,
+            agent,
+            LiveDogfoodMode::from_input(preserve)?,
+        )
+    }
+
+    fn from_values_with_mode(
+        opt_in: Option<&str>,
+        project_number: Option<&str>,
+        bamboon_path: Option<&str>,
+        agent: Option<&str>,
+        mode: LiveDogfoodMode,
     ) -> Result<Self, String> {
         if opt_in != Some("1") {
             return Err(format!("{LIVE_DOGFOOD_OPT_IN} must be exactly 1"));
@@ -740,7 +801,264 @@ impl LiveDogfoodInputs {
                 .filter(|value| !value.is_empty())
                 .unwrap_or("codex")
                 .to_string(),
+            mode,
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct LiveDogfoodCleanupPlan {
+    issue_id: String,
+    issue_number: u64,
+    project_id: String,
+    project_item_id: String,
+    status_field_id: String,
+    done_option_id: String,
+    pull_request: LiveDogfoodPullRequestIdentity,
+    branch: String,
+    expected_sha: String,
+    worktree_identity: String,
+}
+
+impl LiveDogfoodCleanupPlan {
+    fn validate(&self) -> Result<(), String> {
+        for (name, value) in [
+            ("issue ID", &self.issue_id),
+            ("Project ID", &self.project_id),
+            ("Project item ID", &self.project_item_id),
+            ("Status field ID", &self.status_field_id),
+            ("Done option ID", &self.done_option_id),
+            ("pull-request ID", &self.pull_request.id),
+            ("pull-request URL", &self.pull_request.url),
+            ("generated branch", &self.branch),
+            ("expected SHA", &self.expected_sha),
+            ("worktree identity", &self.worktree_identity),
+        ] {
+            if value.is_empty() {
+                return Err(format!("cleanup plan: stored {name} was missing"));
+            }
+        }
+        if self.issue_number == 0 || self.pull_request.number == 0 {
+            return Err("cleanup plan: numeric identity was missing".to_string());
+        }
+        if self.pull_request.head != self.branch
+            || self.pull_request.sha != self.expected_sha
+            || self.pull_request.base != "main"
+        {
+            return Err(
+                "cleanup plan: pull request did not match the stored ref identity".to_string(),
+            );
+        }
+        if Path::new(&self.worktree_identity).is_absolute()
+            || self.worktree_identity.starts_with("../")
+        {
+            return Err("cleanup plan: worktree was not run-owned".to_string());
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn for_test() -> Self {
+        Self {
+            issue_id: "issue-node".to_string(),
+            issue_number: 47,
+            project_id: "project-node".to_string(),
+            project_item_id: "item-node".to_string(),
+            status_field_id: "status-node".to_string(),
+            done_option_id: "done-option".to_string(),
+            pull_request: LiveDogfoodPullRequestIdentity {
+                id: "pr-node".to_string(),
+                number: 48,
+                url: "https://github.com/chrisbanes/bamboon/pull/48".to_string(),
+                state: "OPEN".to_string(),
+                head: "ensemble-live-dogfood".to_string(),
+                sha: "expected-sha".to_string(),
+                base: "main".to_string(),
+            },
+            branch: "ensemble-live-dogfood".to_string(),
+            expected_sha: "expected-sha".to_string(),
+            worktree_identity: "issue/bamboon/ensemble-live-dogfood".to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_pull_request_sha(mut self, value: &str) -> Self {
+        self.pull_request.sha = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_pull_request_base(mut self, value: &str) -> Self {
+        self.pull_request.base = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_issue_id(mut self, value: &str) -> Self {
+        self.issue_id = value.to_string();
+        self
+    }
+    #[cfg(test)]
+    fn with_worktree(mut self, value: &str) -> Self {
+        self.worktree_identity = value.to_string();
+        self
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveDogfoodCleanupStep {
+    ClosePullRequest,
+    ProjectDone,
+    WaitForHostRelease,
+    StopAndReapHost,
+    CloseIssue,
+    RemoveProjectItem,
+    DeleteGeneratedRef,
+    VerifyFinalAbsence,
+}
+
+const LIVE_DOGFOOD_CLEANUP_ORDER: [LiveDogfoodCleanupStep; 8] = [
+    LiveDogfoodCleanupStep::ClosePullRequest,
+    LiveDogfoodCleanupStep::ProjectDone,
+    LiveDogfoodCleanupStep::WaitForHostRelease,
+    LiveDogfoodCleanupStep::StopAndReapHost,
+    LiveDogfoodCleanupStep::CloseIssue,
+    LiveDogfoodCleanupStep::RemoveProjectItem,
+    LiveDogfoodCleanupStep::DeleteGeneratedRef,
+    LiveDogfoodCleanupStep::VerifyFinalAbsence,
+];
+
+impl LiveDogfoodCleanupStep {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ClosePullRequest => "close_pull_request",
+            Self::ProjectDone => "project_done",
+            Self::WaitForHostRelease => "wait_for_host_release",
+            Self::StopAndReapHost => "stop_and_reap_host",
+            Self::CloseIssue => "close_issue",
+            Self::RemoveProjectItem => "remove_project_item",
+            Self::DeleteGeneratedRef => "delete_generated_ref",
+            Self::VerifyFinalAbsence => "verify_final_absence",
+        }
+    }
+
+    fn ordinal(self) -> usize {
+        LIVE_DOGFOOD_CLEANUP_ORDER
+            .iter()
+            .position(|candidate| *candidate == self)
+            .expect("every cleanup step must appear in the cleanup order")
+    }
+}
+
+struct LiveDogfoodCleanupRecorder {
+    next_step: usize,
+    failed: bool,
+    transitions: Vec<(&'static str, &'static str)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LiveDogfoodPullRequestIdentity {
+    id: String,
+    number: u64,
+    url: String,
+    state: String,
+    head: String,
+    sha: String,
+    base: String,
+}
+
+impl LiveDogfoodPullRequestIdentity {
+    fn validate_against(
+        &self,
+        plan: &LiveDogfoodCleanupPlan,
+        expected_state: &str,
+    ) -> Result<(), String> {
+        if self.id != plan.pull_request.id
+            || self.number != plan.pull_request.number
+            || self.url != plan.pull_request.url
+            || self.state != expected_state
+            || self.head != plan.branch
+            || self.sha != plan.expected_sha
+            || self.base != "main"
+        {
+            return Err(
+                "cleanup pull request revalidation: stored identity no longer matched".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+impl LiveDogfoodCleanupPlan {
+    fn from_live(
+        resources: &LiveDogfoodResources,
+        run: &LiveDogfoodRun,
+        worktree: &Path,
+        branch: &str,
+        sha: &str,
+        pull_request: &LiveDogfoodPullRequestIdentity,
+    ) -> Result<Self, String> {
+        let worktree_identity = worktree
+            .strip_prefix(run.root.join("workspaces"))
+            .map_err(|_| "cleanup plan: captured worktree was outside the run root".to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let plan = Self {
+            issue_id: resources.issue_id.clone(),
+            issue_number: resources.issue_number,
+            project_id: resources.project.id.clone(),
+            project_item_id: resources.project_item_id.clone(),
+            status_field_id: resources.project.status_field_id.clone(),
+            done_option_id: resources.project.done_option_id.clone(),
+            pull_request: pull_request.clone(),
+            branch: branch.to_string(),
+            expected_sha: sha.to_string(),
+            worktree_identity,
+        };
+        plan.validate()?;
+        Ok(plan)
+    }
+}
+
+impl LiveDogfoodCleanupRecorder {
+    fn new(plan: &LiveDogfoodCleanupPlan) -> Result<Self, String> {
+        plan.validate()?;
+        Ok(Self {
+            next_step: 0,
+            failed: false,
+            transitions: Vec::new(),
+        })
+    }
+
+    fn attempt(
+        &mut self,
+        step: LiveDogfoodCleanupStep,
+        result: Result<(), &str>,
+    ) -> Result<(), String> {
+        if self.failed || step.ordinal() != self.next_step {
+            return Err(
+                "cleanup plan: later mutation was unreachable after a failed or out-of-order step"
+                    .to_string(),
+            );
+        }
+        let name = step.name();
+        match result {
+            Ok(()) => {
+                self.transitions.push((name, "succeeded"));
+                self.next_step += 1;
+                Ok(())
+            }
+            Err(error) => {
+                self.transitions.push((name, "preserved_failure"));
+                self.failed = true;
+                Err(format!("cleanup plan: {name} failed revalidation: {error}"))
+            }
+        }
+    }
+
+    fn transitions(&self) -> Vec<(&'static str, &'static str)> {
+        self.transitions.clone()
+    }
+    fn is_complete(&self) -> bool {
+        !self.failed && self.next_step == LIVE_DOGFOOD_CLEANUP_ORDER.len()
     }
 }
 
@@ -803,9 +1121,12 @@ struct LiveDogfoodEvidenceV1 {
     format: &'static str,
     schema_version: u8,
     run: LiveDogfoodEvidenceRun,
+    mode: LiveDogfoodMode,
     outcome: LiveDogfoodEvidenceOutcome,
     retained_logs: Vec<&'static str>,
     snapshots: Vec<LiveDogfoodEvidenceSnapshot>,
+    transitions: Vec<LiveDogfoodEvidenceTransition>,
+    final_state: LiveDogfoodEvidenceFinalState,
 }
 
 #[derive(Debug, Serialize)]
@@ -820,6 +1141,20 @@ struct LiveDogfoodEvidenceRun {
 enum LiveDogfoodEvidenceOutcome {
     InReview,
     PreservedFailure,
+    PreservedCertification,
+    RoutineCleaned,
+}
+
+#[derive(Debug, Serialize)]
+struct LiveDogfoodEvidenceTransition {
+    phase: &'static str,
+    result: &'static str,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct LiveDogfoodEvidenceFinalState {
+    absent: Vec<&'static str>,
+    retained: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -875,7 +1210,11 @@ struct LiveDogfoodEvidencePullRequest {
 }
 
 impl LiveDogfoodEvidenceV1 {
-    fn new(run: &LiveDogfoodRun, issue_identifier: impl Into<String>) -> Self {
+    fn new(
+        run: &LiveDogfoodRun,
+        issue_identifier: impl Into<String>,
+        mode: LiveDogfoodMode,
+    ) -> Self {
         Self {
             format: "ensemble.live-dogfood-evidence",
             schema_version: 1,
@@ -884,9 +1223,12 @@ impl LiveDogfoodEvidenceV1 {
                 issue_identifier: issue_identifier.into(),
                 workspace_identifier: format!("run/{}", run.marker),
             },
+            mode,
             outcome: LiveDogfoodEvidenceOutcome::InReview,
             retained_logs: LiveDogfoodHostLifetime::all_log_names().to_vec(),
             snapshots: Vec::new(),
+            transitions: Vec::new(),
+            final_state: LiveDogfoodEvidenceFinalState::default(),
         }
     }
 
@@ -939,6 +1281,99 @@ impl LiveDogfoodEvidenceV1 {
                 assertions_not_reached,
             });
         Ok(())
+    }
+
+    fn append_transition(&mut self, phase: &'static str, result: &'static str) {
+        self.transitions
+            .push(LiveDogfoodEvidenceTransition { phase, result });
+    }
+
+    fn preserve_certification(&mut self) {
+        self.outcome = LiveDogfoodEvidenceOutcome::PreservedCertification;
+        self.final_state.absent = vec!["active_child"];
+        self.final_state.retained = vec![
+            "synthetic_issue",
+            "project_item",
+            "generated_ref",
+            "pull_request",
+            "generated_config",
+            "workspace_worktree",
+            "host_logs",
+            "evidence",
+        ];
+    }
+
+    fn preserve_after_transitions(&mut self) {
+        self.outcome = LiveDogfoodEvidenceOutcome::PreservedFailure;
+        self.final_state.absent.clear();
+        self.final_state.retained.clear();
+
+        for (transition, absent, retained) in [
+            ("close_pull_request", "open_pull_request", "pull_request"),
+            ("close_issue", "open_synthetic_issue", "synthetic_issue"),
+            ("remove_project_item", "project_item", "project_item"),
+            ("delete_generated_ref", "generated_ref", "generated_ref"),
+            (
+                "wait_for_host_release",
+                "workspace_worktree",
+                "workspace_worktree",
+            ),
+        ] {
+            if self.transition_succeeded(transition) {
+                self.final_state.absent.push(absent);
+            } else {
+                self.final_state.retained.push(retained);
+            }
+        }
+        if self.transition_succeeded("stop_and_reap_host")
+            || self.transition_succeeded("failure_host_reap")
+            || self.transition_succeeded("failure_child_absence")
+        {
+            self.final_state.absent.push("active_child");
+        } else {
+            self.final_state.retained.push("active_child");
+        }
+        self.final_state
+            .retained
+            .extend(["generated_config", "host_logs", "evidence"]);
+    }
+
+    fn preserve_discovered_artifacts(&mut self) {
+        self.outcome = LiveDogfoodEvidenceOutcome::PreservedFailure;
+        self.final_state.absent = vec!["active_child"];
+        self.final_state.retained = vec![
+            "synthetic_issue",
+            "project_item",
+            "generated_config",
+            "host_logs",
+            "evidence",
+        ];
+        if !self.snapshots.is_empty() {
+            self.final_state.retained.extend([
+                "workspace_worktree",
+                "generated_ref",
+                "pull_request",
+            ]);
+        }
+    }
+
+    fn transition_succeeded(&self, phase: &str) -> bool {
+        self.transitions
+            .iter()
+            .any(|transition| transition.phase == phase && transition.result == "succeeded")
+    }
+
+    fn routine_cleaned(&mut self) {
+        self.outcome = LiveDogfoodEvidenceOutcome::RoutineCleaned;
+        self.final_state.absent = vec![
+            "open_synthetic_issue",
+            "project_item",
+            "generated_ref",
+            "open_pull_request",
+            "workspace_worktree",
+            "active_child",
+        ];
+        self.final_state.retained = vec!["generated_config", "host_logs", "evidence"];
     }
 
     fn append_post_delivery(
@@ -1062,6 +1497,12 @@ impl LiveDogfoodEvidenceV1 {
         self.snapshots
             .iter()
             .any(|snapshot| matches!(snapshot, LiveDogfoodEvidenceSnapshot::PostDelivery { .. }))
+    }
+
+    fn has_post_restart(&self) -> bool {
+        self.snapshots
+            .iter()
+            .any(|snapshot| matches!(snapshot, LiveDogfoodEvidenceSnapshot::PostRestart { .. }))
     }
 }
 
@@ -1314,7 +1755,11 @@ fn write_live_dogfood_evidence_v1_with_replace(
     file.sync_all()
         .map_err(|_| "evidence-v1: could not flush temporary document")?;
     drop(file);
-    replace(&temporary, &target).map_err(|_| "evidence-v1: atomic replacement failed".to_string())
+    replace(&temporary, &target)
+        .map_err(|_| "evidence-v1: atomic replacement failed".to_string())?;
+    fs::File::open(run_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| "evidence-v1: could not flush run directory".to_string())
 }
 
 fn persist_live_dogfood_failure(
@@ -1324,7 +1769,12 @@ fn persist_live_dogfood_failure(
     pre_publication_captured: bool,
     error: &str,
 ) -> Result<(), String> {
-    let assertions_not_reached = if evidence.has_post_delivery() {
+    if evidence.final_state.absent.is_empty() && evidence.final_state.retained.is_empty() {
+        evidence.preserve_discovered_artifacts();
+    }
+    let assertions_not_reached = if evidence.has_post_restart() {
+        ["cleanup_completion"].as_slice()
+    } else if evidence.has_post_delivery() {
         ["post_restart"].as_slice()
     } else if pre_publication_captured {
         ["post_delivery"].as_slice()
@@ -1430,6 +1880,7 @@ repos:
 agents:
   builder:
     acpx_agent: {}
+    permission_mode: approve_reads
     prompt: {}
 steps:
   - name: implement
@@ -1444,6 +1895,8 @@ concurrency:
   max_concurrent_agents: 1
   max_step_parallelism: 1
 agent:
+  permission_request_policy:
+    mode: reject_all
   turn_timeout_ms: 1800000
 "#,
         inputs.project_number,
@@ -1469,6 +1922,7 @@ struct LiveDogfoodProject {
     id: String,
     status_field_id: String,
     ready_option_id: String,
+    done_option_id: String,
 }
 
 struct PreDispatchResources {
@@ -1481,6 +1935,8 @@ struct PreDispatchResources {
 struct LiveDogfoodResources {
     issue_id: String,
     issue_number: u64,
+    project: LiveDogfoodProject,
+    project_item_id: String,
 }
 
 fn run_live_command(
@@ -1657,6 +2113,14 @@ fn validate_live_project_response(response: &Value) -> Result<LiveDogfoodProject
                 "preflight project discovery: Ready status ID was unavailable".to_string()
             })?
             .to_string(),
+        done_option_id: status_field["options"]
+            .as_array()
+            .and_then(|options| options.last())
+            .and_then(|option| option["id"].as_str())
+            .ok_or_else(|| {
+                "preflight project discovery: Done status ID was unavailable".to_string()
+            })?
+            .to_string(),
     })
 }
 
@@ -1683,21 +2147,7 @@ fn validate_live_bamboon_clone(inputs: &LiveDogfoodInputs) -> Result<(), String>
     if branch.trim() != "main" {
         return Err("preflight Bamboon branch: checked-out branch must be main".to_string());
     }
-    let remote = live_git(
-        "preflight Bamboon remote",
-        root,
-        [
-            "remote".to_string(),
-            "get-url".to_string(),
-            "origin".to_string(),
-        ],
-        inputs,
-    )?;
-    if !is_bamboon_remote(remote.trim()) {
-        return Err(
-            "preflight Bamboon remote: origin must identify chrisbanes/bamboon".to_string(),
-        );
-    }
+    validated_live_bamboon_remote(inputs, root, "preflight Bamboon remote")?;
     let status = live_git(
         "preflight Bamboon cleanliness",
         root,
@@ -1720,6 +2170,28 @@ fn is_bamboon_remote(remote: &str) -> bool {
             | "ssh://git@github.com/chrisbanes/bamboon"
             | "https://github.com/chrisbanes/bamboon"
     )
+}
+
+fn validated_live_bamboon_remote(
+    inputs: &LiveDogfoodInputs,
+    worktree: &Path,
+    phase: &str,
+) -> Result<String, String> {
+    let remote = live_git(
+        phase,
+        worktree,
+        [
+            "remote".to_string(),
+            "get-url".to_string(),
+            "origin".to_string(),
+        ],
+        inputs,
+    )?;
+    let remote = remote.trim();
+    if !is_bamboon_remote(remote) {
+        return Err(format!("{phase}: origin must identify chrisbanes/bamboon"));
+    }
+    Ok(remote.to_string())
 }
 
 fn live_preflight(
@@ -1776,6 +2248,768 @@ fn live_project_item_status(
     )
 }
 
+fn revalidate_live_project_item(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<String, String> {
+    let response = live_project_query(inputs)?;
+    let item = validate_live_project_item_identity(
+        &response,
+        &plan.project_id,
+        &plan.project_item_id,
+        &plan.issue_id,
+        plan.issue_number,
+        "cleanup Project item",
+    )?;
+    item["fieldValues"]["nodes"]
+        .as_array()
+        .and_then(|fields| {
+            fields.iter().find_map(|field| {
+                (field["field"]["name"] == "Status")
+                    .then(|| field["name"].as_str().map(ToString::to_string))
+                    .flatten()
+            })
+        })
+        .ok_or_else(|| {
+            "cleanup Project item: stored Status observation was unavailable".to_string()
+        })
+}
+
+fn validate_live_project_item_identity<'a>(
+    response: &'a Value,
+    project_id: &str,
+    project_item_id: &str,
+    issue_id: &str,
+    issue_number: u64,
+    phase: &str,
+) -> Result<&'a Value, String> {
+    let project = &response["data"]["repository"]["projectV2"];
+    if project["id"].as_str() != Some(project_id) {
+        return Err(format!(
+            "{phase}: stored Project identity no longer matched"
+        ));
+    }
+    let matching = project["items"]["nodes"]
+        .as_array()
+        .ok_or_else(|| format!("{phase}: Project items were unavailable"))?
+        .iter()
+        .filter(|item| item["id"].as_str() == Some(project_item_id))
+        .collect::<Vec<_>>();
+    let [item] = matching.as_slice() else {
+        return Err(format!("{phase}: stored item was missing or ambiguous"));
+    };
+    if item["content"]["id"].as_str() != Some(issue_id)
+        || item["content"]["number"].as_u64() != Some(issue_number)
+    {
+        return Err(format!("{phase}: stored item ownership no longer matched"));
+    }
+    Ok(item)
+}
+
+fn capture_live_pull_request_identity(
+    inputs: &LiveDogfoodInputs,
+    number: u64,
+    expected_state: &str,
+) -> Result<LiveDogfoodPullRequestIdentity, String> {
+    let output = live_gh(
+        "cleanup pull request revalidation",
+        [
+            "pr".to_string(),
+            "view".to_string(),
+            number.to_string(),
+            "--repo".to_string(),
+            "chrisbanes/bamboon".to_string(),
+            "--json".to_string(),
+            "id,number,url,state,headRefName,headRefOid,baseRefName".to_string(),
+        ],
+        inputs,
+    )?;
+    let value: Value = serde_json::from_str(&output)
+        .map_err(|_| "cleanup pull request revalidation: invalid GitHub response".to_string())?;
+    let identity = LiveDogfoodPullRequestIdentity {
+        id: value["id"]
+            .as_str()
+            .ok_or_else(|| {
+                "cleanup pull request revalidation: node ID was unavailable".to_string()
+            })?
+            .to_string(),
+        number: value["number"].as_u64().ok_or_else(|| {
+            "cleanup pull request revalidation: number was unavailable".to_string()
+        })?,
+        url: value["url"]
+            .as_str()
+            .ok_or_else(|| "cleanup pull request revalidation: URL was unavailable".to_string())?
+            .to_string(),
+        state: value["state"]
+            .as_str()
+            .ok_or_else(|| "cleanup pull request revalidation: state was unavailable".to_string())?
+            .to_string(),
+        head: value["headRefName"]
+            .as_str()
+            .ok_or_else(|| {
+                "cleanup pull request revalidation: head ref was unavailable".to_string()
+            })?
+            .to_string(),
+        sha: value["headRefOid"]
+            .as_str()
+            .ok_or_else(|| {
+                "cleanup pull request revalidation: head SHA was unavailable".to_string()
+            })?
+            .to_string(),
+        base: value["baseRefName"]
+            .as_str()
+            .ok_or_else(|| {
+                "cleanup pull request revalidation: base ref was unavailable".to_string()
+            })?
+            .to_string(),
+    };
+    if identity.state != expected_state {
+        return Err("cleanup pull request revalidation: state no longer matched".to_string());
+    }
+    Ok(identity)
+}
+
+fn revalidate_live_issue(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+    expected_state: &str,
+) -> Result<(), String> {
+    revalidate_live_issue_identity(
+        inputs,
+        &plan.issue_id,
+        plan.issue_number,
+        expected_state,
+        "cleanup issue",
+    )
+}
+
+fn revalidate_live_issue_identity(
+    inputs: &LiveDogfoodInputs,
+    issue_id: &str,
+    issue_number: u64,
+    expected_state: &str,
+    phase: &str,
+) -> Result<(), String> {
+    let output = live_gh(
+        &format!("{phase} revalidation"),
+        [
+            "api".to_string(),
+            format!("repos/chrisbanes/bamboon/issues/{issue_number}"),
+        ],
+        inputs,
+    )?;
+    let issue: Value = serde_json::from_str(&output)
+        .map_err(|_| format!("{phase} revalidation: invalid GitHub response"))?;
+    validate_live_issue_identity(&issue, issue_id, issue_number, expected_state, phase)
+}
+
+fn validate_live_issue_identity(
+    issue: &Value,
+    issue_id: &str,
+    issue_number: u64,
+    expected_state: &str,
+    phase: &str,
+) -> Result<(), String> {
+    if issue["node_id"].as_str() != Some(issue_id)
+        || issue["number"].as_u64() != Some(issue_number)
+        || issue["state"].as_str() != Some(expected_state)
+    {
+        return Err(format!(
+            "{phase} revalidation: stored issue identity or state no longer matched"
+        ));
+    }
+    Ok(())
+}
+
+fn revalidate_live_remote_ref(
+    inputs: &LiveDogfoodInputs,
+    worktree: &Path,
+    plan: &LiveDogfoodCleanupPlan,
+    remote_url: &str,
+) -> Result<(), String> {
+    let remote_refs = live_git(
+        "cleanup generated ref revalidation",
+        worktree,
+        [
+            "ls-remote".to_string(),
+            "--heads".to_string(),
+            remote_url.to_string(),
+            format!("refs/heads/{}", plan.branch),
+        ],
+        inputs,
+    )?;
+    let expected = format!("{}\trefs/heads/{}", plan.expected_sha, plan.branch);
+    if remote_refs.lines().collect::<Vec<_>>() != [expected] {
+        return Err("cleanup generated ref revalidation: stored ref no longer matched".to_string());
+    }
+    Ok(())
+}
+
+fn revalidate_live_pull_request(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+    expected_state: &str,
+) -> Result<(), String> {
+    capture_live_pull_request_identity(inputs, plan.pull_request.number, expected_state)?
+        .validate_against(plan, expected_state)
+}
+
+fn close_live_pull_request(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<(), String> {
+    revalidate_live_pull_request(inputs, plan, "OPEN")?;
+    live_gh(
+        "cleanup close pull request",
+        [
+            "pr".to_string(),
+            "close".to_string(),
+            plan.pull_request.number.to_string(),
+            "--repo".to_string(),
+            "chrisbanes/bamboon".to_string(),
+        ],
+        inputs,
+    )?;
+    revalidate_live_pull_request(inputs, plan, "CLOSED")
+}
+
+fn set_live_project_done(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<(), String> {
+    if revalidate_live_project_item(inputs, plan)? != "In review" {
+        return Err("cleanup Project item: expected In review before Done".to_string());
+    }
+    set_live_project_item_status(
+        "cleanup project Done",
+        inputs,
+        &plan.project_id,
+        &plan.project_item_id,
+        &plan.status_field_id,
+        &plan.done_option_id,
+    )?;
+    if revalidate_live_project_item(inputs, plan)? != "Done" {
+        return Err("cleanup Project item: Done mutation was not observed".to_string());
+    }
+    Ok(())
+}
+
+fn stop_and_reap_live_host(host: &mut Child) -> Result<(), String> {
+    if host
+        .try_wait()
+        .map_err(|error| format!("cleanup stop host: status unavailable: {error}"))?
+        .is_none()
+    {
+        host.kill()
+            .map_err(|error| format!("cleanup stop host: kill failed: {error}"))?;
+        host.wait()
+            .map_err(|error| format!("cleanup stop host: reap failed: {error}"))?;
+    }
+    if host
+        .try_wait()
+        .map_err(|error| format!("cleanup stop host: final status unavailable: {error}"))?
+        .is_none()
+    {
+        return Err("cleanup stop host: child was not reaped".to_string());
+    }
+    Ok(())
+}
+
+fn run_live_preserve_completion(
+    host: &mut Child,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+) -> Result<(), String> {
+    stop_and_reap_live_host(host)?;
+    evidence.append_transition("preserve_stop_and_reap_host", "succeeded");
+    evidence.preserve_certification();
+    write_live_dogfood_evidence_v1(&run.root, evidence)
+}
+
+fn finalize_live_restarted_run_failure(
+    host: &mut Child,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+    inputs: &LiveDogfoodInputs,
+    pre_publication_captured: bool,
+    mut error: String,
+) -> String {
+    let child_was_active = host.try_wait().map_or(true, |status| status.is_none());
+    match stop_and_reap_live_host(host) {
+        Ok(()) if child_was_active => evidence.append_transition("failure_host_reap", "succeeded"),
+        Ok(()) => evidence.append_transition("failure_child_absence", "succeeded"),
+        Err(reap_error) => {
+            error = format!("{error}; {reap_error}");
+            evidence.append_transition("failure_host_reap", "preserved_failure");
+        }
+    }
+    evidence.preserve_after_transitions();
+    persist_live_dogfood_failure(evidence, run, inputs, pre_publication_captured, &error)
+        .err()
+        .unwrap_or(error)
+}
+
+fn canonical_live_worktree_path(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut missing = Vec::new();
+    while !existing.exists() {
+        let (Some(parent), Some(file_name)) = (existing.parent(), existing.file_name()) else {
+            return path.to_path_buf();
+        };
+        missing.push(file_name.to_os_string());
+        existing = parent;
+    }
+
+    let mut canonical = fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in missing.into_iter().rev() {
+        canonical.push(component);
+    }
+    canonical
+}
+
+fn worktree_is_registered(listing: &str, worktree: &Path) -> bool {
+    let expected = canonical_live_worktree_path(worktree);
+    listing
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .any(|path| canonical_live_worktree_path(Path::new(path)) == expected)
+}
+
+fn live_public_issue_released(detail: &Value) -> bool {
+    detail.get("running").is_some_and(Value::is_null)
+        && detail
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status == "Done" || status.starts_with("completed_"))
+}
+
+async fn wait_for_live_host_release(
+    client: &reqwest::Client,
+    base_url: &str,
+    inputs: &LiveDogfoodInputs,
+    issue_number: u64,
+    worktree: &Path,
+) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let detail_url = format!("{base_url}/api/v1/chrisbanes%2Fbamboon%23{issue_number}");
+    loop {
+        let public_released = match client.get(&detail_url).send().await {
+            Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => true,
+            Ok(response) if response.status().is_success() => response
+                .json::<Value>()
+                .await
+                .is_ok_and(|detail| live_public_issue_released(&detail)),
+            _ => false,
+        };
+        let capacity_released = match client.get(format!("{base_url}/api/v1/state")).send().await {
+            Ok(response) if response.status().is_success() => response
+                .json::<Value>()
+                .await
+                .is_ok_and(|state| validate_live_public_agent_capacity(&state).is_ok()),
+            _ => false,
+        };
+        let worktree_absent = !worktree.exists();
+        let worktree_unregistered = live_git(
+            "cleanup worktree release observation",
+            &inputs.bamboon_path,
+            [
+                "worktree".to_string(),
+                "list".to_string(),
+                "--porcelain".to_string(),
+            ],
+            inputs,
+        )
+        .is_ok_and(|listing| !worktree_is_registered(&listing, worktree));
+        if public_released && capacity_released && worktree_absent && worktree_unregistered {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "cleanup wait for host release: timed out; last observation: public_released={public_released}, capacity_released={capacity_released}, worktree_absent={worktree_absent}, worktree_unregistered={worktree_unregistered}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(LIVE_DOGFOOD_POLL_INTERVAL_MS)).await;
+    }
+}
+
+fn close_live_issue(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<(), String> {
+    close_live_issue_identity(inputs, &plan.issue_id, plan.issue_number, "cleanup issue")
+}
+
+fn close_live_issue_identity(
+    inputs: &LiveDogfoodInputs,
+    issue_id: &str,
+    issue_number: u64,
+    phase: &str,
+) -> Result<(), String> {
+    revalidate_live_issue_identity(inputs, issue_id, issue_number, "open", phase)?;
+    live_gh(
+        &format!("{phase} close"),
+        [
+            "api".to_string(),
+            "--method".to_string(),
+            "PATCH".to_string(),
+            format!("repos/chrisbanes/bamboon/issues/{issue_number}"),
+            "-f".to_string(),
+            "state=closed".to_string(),
+        ],
+        inputs,
+    )?;
+    revalidate_live_issue_identity(inputs, issue_id, issue_number, "closed", phase)
+}
+
+fn remove_live_project_item(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<(), String> {
+    if revalidate_live_project_item(inputs, plan)? != "Done" {
+        return Err("cleanup remove Project item: expected Done item".to_string());
+    }
+    delete_live_project_item(
+        inputs,
+        &plan.project_id,
+        &plan.project_item_id,
+        "cleanup remove Project item",
+    )
+}
+
+fn delete_live_project_item(
+    inputs: &LiveDogfoodInputs,
+    project_id: &str,
+    project_item_id: &str,
+    phase: &str,
+) -> Result<(), String> {
+    const REMOVE_ITEM: &str = r#"mutation($projectId: ID!, $itemId: ID!) {
+  deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) { deletedItemId }
+}"#;
+    live_graphql_mutation(
+        phase,
+        REMOVE_ITEM,
+        [
+            ("projectId".to_string(), project_id.to_string()),
+            ("itemId".to_string(), project_item_id.to_string()),
+        ],
+        inputs,
+    )?;
+    let response = live_project_query(inputs)?;
+    validate_live_project_item_absence(&response, project_id, project_item_id)
+}
+
+fn validate_live_project_item_absence(
+    response: &Value,
+    project_id: &str,
+    project_item_id: &str,
+) -> Result<(), String> {
+    let project = &response["data"]["repository"]["projectV2"];
+    if project["id"].as_str() != Some(project_id) {
+        return Err("cleanup Project item absence: Project identity did not match".to_string());
+    }
+    let items = project["items"]["nodes"]
+        .as_array()
+        .ok_or_else(|| "cleanup Project item absence: items were unavailable".to_string())?;
+    if items
+        .iter()
+        .any(|item| item["id"].as_str() == Some(project_item_id))
+    {
+        return Err("cleanup Project item absence: item remained present".to_string());
+    }
+    Ok(())
+}
+
+fn delete_live_remote_ref(
+    inputs: &LiveDogfoodInputs,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<(), String> {
+    let remote = validated_live_bamboon_remote(
+        inputs,
+        &inputs.bamboon_path,
+        "cleanup generated ref origin revalidation",
+    )?;
+    revalidate_live_remote_ref(inputs, &inputs.bamboon_path, plan, &remote)?;
+    delete_live_remote_ref_at_sha(
+        inputs,
+        &inputs.bamboon_path,
+        &remote,
+        &plan.branch,
+        &plan.expected_sha,
+    )?;
+    let remaining = live_git(
+        "cleanup verify generated ref absence",
+        &inputs.bamboon_path,
+        [
+            "ls-remote".to_string(),
+            "--heads".to_string(),
+            remote,
+            format!("refs/heads/{}", plan.branch),
+        ],
+        inputs,
+    )?;
+    if !remaining.trim().is_empty() {
+        return Err("cleanup delete generated ref: ref remained present".to_string());
+    }
+    Ok(())
+}
+
+fn delete_live_remote_ref_at_sha(
+    inputs: &LiveDogfoodInputs,
+    worktree: &Path,
+    remote: &str,
+    branch: &str,
+    expected_sha: &str,
+) -> Result<(), String> {
+    live_git(
+        "cleanup delete generated ref",
+        worktree,
+        [
+            "push".to_string(),
+            format!("--force-with-lease=refs/heads/{branch}:{expected_sha}"),
+            "--delete".to_string(),
+            remote.to_string(),
+            branch.to_string(),
+        ],
+        inputs,
+    )
+    .map(|_| ())
+}
+
+fn validate_live_final_absence(observations: [bool; 6]) -> Result<(), String> {
+    let names = [
+        "pull request closed",
+        "issue closed",
+        "Project item absent",
+        "generated ref absent",
+        "workspace worktree absent",
+        "active child absent",
+    ];
+    let missing = observations
+        .into_iter()
+        .zip(names)
+        .filter_map(|(satisfied, name)| (!satisfied).then_some(name))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "cleanup final absence: required observations failed: {}",
+            missing.join(", ")
+        ))
+    }
+}
+
+fn verify_live_final_absence(
+    inputs: &LiveDogfoodInputs,
+    host: &mut Child,
+    worktree: &Path,
+    plan: &LiveDogfoodCleanupPlan,
+) -> Result<(), String> {
+    let pull_request_closed = revalidate_live_pull_request(inputs, plan, "CLOSED").is_ok();
+    let issue_closed = revalidate_live_issue(inputs, plan, "closed").is_ok();
+    let project_item_absent = live_project_query(inputs).is_ok_and(|response| {
+        validate_live_project_item_absence(&response, &plan.project_id, &plan.project_item_id)
+            .is_ok()
+    });
+    let generated_ref_absent = live_git(
+        "cleanup final generated ref observation",
+        &inputs.bamboon_path,
+        [
+            "ls-remote".to_string(),
+            "--heads".to_string(),
+            "origin".to_string(),
+            format!("refs/heads/{}", plan.branch),
+        ],
+        inputs,
+    )
+    .is_ok_and(|output| output.trim().is_empty());
+    let workspace_worktree_absent = !worktree.exists()
+        && live_git(
+            "cleanup final worktree observation",
+            &inputs.bamboon_path,
+            [
+                "worktree".to_string(),
+                "list".to_string(),
+                "--porcelain".to_string(),
+            ],
+            inputs,
+        )
+        .is_ok_and(|listing| !worktree_is_registered(&listing, worktree));
+    let active_child_absent = host.try_wait().is_ok_and(|status| status.is_some());
+
+    validate_live_final_absence([
+        pull_request_closed,
+        issue_closed,
+        project_item_absent,
+        generated_ref_absent,
+        workspace_worktree_absent,
+        active_child_absent,
+    ])
+}
+
+fn record_live_cleanup_step(
+    cleanup: &mut LiveDogfoodCleanupRecorder,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    step: LiveDogfoodCleanupStep,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    match result {
+        Ok(()) => {
+            cleanup.attempt(step, Ok(()))?;
+            evidence.append_transition(step.name(), "succeeded");
+            Ok(())
+        }
+        Err(error) => {
+            cleanup
+                .attempt(step, Err(error.as_str()))
+                .expect_err("failed cleanup step must stop the recorder");
+            evidence.append_transition(step.name(), "preserved_failure");
+            Err(error)
+        }
+    }
+}
+
+fn persist_live_cleanup_result(
+    cleanup: &mut LiveDogfoodCleanupRecorder,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+    step: LiveDogfoodCleanupStep,
+    result: Result<(), String>,
+    persist: &mut impl FnMut(&Path, &LiveDogfoodEvidenceV1) -> Result<(), String>,
+) -> Result<(), String> {
+    match record_live_cleanup_step(cleanup, evidence, step, result) {
+        Ok(()) => persist(&run.root, evidence),
+        Err(error) => {
+            persist(&run.root, evidence)
+                .map_err(|write_error| format!("{error}; {write_error}"))?;
+            Err(error)
+        }
+    }
+}
+
+trait LiveDogfoodCleanupActions {
+    async fn execute(&mut self, step: LiveDogfoodCleanupStep) -> Result<(), String>;
+}
+
+struct LiveDogfoodRoutineCleanupActions<'a> {
+    client: &'a reqwest::Client,
+    base_url: &'a str,
+    inputs: &'a LiveDogfoodInputs,
+    host: &'a mut Child,
+    worktree: &'a Path,
+    plan: &'a LiveDogfoodCleanupPlan,
+}
+
+impl LiveDogfoodCleanupActions for LiveDogfoodRoutineCleanupActions<'_> {
+    async fn execute(&mut self, step: LiveDogfoodCleanupStep) -> Result<(), String> {
+        match step {
+            LiveDogfoodCleanupStep::ClosePullRequest => {
+                close_live_pull_request(self.inputs, self.plan)
+            }
+            LiveDogfoodCleanupStep::ProjectDone => set_live_project_done(self.inputs, self.plan),
+            LiveDogfoodCleanupStep::WaitForHostRelease => {
+                wait_for_live_host_release(
+                    self.client,
+                    self.base_url,
+                    self.inputs,
+                    self.plan.issue_number,
+                    self.worktree,
+                )
+                .await
+            }
+            LiveDogfoodCleanupStep::StopAndReapHost => stop_and_reap_live_host(self.host),
+            LiveDogfoodCleanupStep::CloseIssue => close_live_issue(self.inputs, self.plan),
+            LiveDogfoodCleanupStep::RemoveProjectItem => {
+                remove_live_project_item(self.inputs, self.plan)
+            }
+            LiveDogfoodCleanupStep::DeleteGeneratedRef => {
+                delete_live_remote_ref(self.inputs, self.plan)
+            }
+            LiveDogfoodCleanupStep::VerifyFinalAbsence => {
+                verify_live_final_absence(self.inputs, self.host, self.worktree, self.plan)
+            }
+        }
+    }
+}
+
+async fn execute_live_cleanup_sequence(
+    actions: &mut impl LiveDogfoodCleanupActions,
+    cleanup: &mut LiveDogfoodCleanupRecorder,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+) -> Result<(), String> {
+    execute_live_cleanup_sequence_with_writer(
+        actions,
+        cleanup,
+        evidence,
+        run,
+        write_live_dogfood_evidence_v1,
+    )
+    .await
+}
+
+async fn execute_live_cleanup_sequence_with_writer(
+    actions: &mut impl LiveDogfoodCleanupActions,
+    cleanup: &mut LiveDogfoodCleanupRecorder,
+    evidence: &mut LiveDogfoodEvidenceV1,
+    run: &LiveDogfoodRun,
+    mut persist: impl FnMut(&Path, &LiveDogfoodEvidenceV1) -> Result<(), String>,
+) -> Result<(), String> {
+    for step in LIVE_DOGFOOD_CLEANUP_ORDER {
+        evidence.append_transition(step.name(), "attempting");
+        persist(&run.root, evidence)?;
+        let result = actions.execute(step).await;
+        persist_live_cleanup_result(cleanup, evidence, run, step, result, &mut persist)?;
+    }
+    Ok(())
+}
+
+async fn run_live_routine_cleanup(
+    client: &reqwest::Client,
+    base_url: &str,
+    inputs: &LiveDogfoodInputs,
+    run: &LiveDogfoodRun,
+    resources: &LiveDogfoodResources,
+    host: &mut Child,
+    worktree: &Path,
+    branch: &str,
+    sha: &str,
+    pull_request_number: u64,
+    evidence: &mut LiveDogfoodEvidenceV1,
+) -> Result<(), String> {
+    let plan = (|| {
+        let pull_request = capture_live_pull_request_identity(inputs, pull_request_number, "OPEN")?;
+        LiveDogfoodCleanupPlan::from_live(resources, run, worktree, branch, sha, &pull_request)
+    })();
+    let plan = match plan {
+        Ok(plan) => {
+            evidence.append_transition("prepare_cleanup", "succeeded");
+            write_live_dogfood_evidence_v1(&run.root, evidence)?;
+            plan
+        }
+        Err(error) => {
+            evidence.append_transition("prepare_cleanup", "preserved_failure");
+            write_live_dogfood_evidence_v1(&run.root, evidence)?;
+            return Err(error);
+        }
+    };
+    let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan)?;
+    let mut actions = LiveDogfoodRoutineCleanupActions {
+        client,
+        base_url,
+        inputs,
+        host,
+        worktree,
+        plan: &plan,
+    };
+    execute_live_cleanup_sequence(&mut actions, &mut cleanup, evidence, run).await?;
+    if !cleanup.is_complete() {
+        return Err("cleanup final absence: transition plan was incomplete".to_string());
+    }
+    evidence.routine_cleaned();
+    write_live_dogfood_evidence_v1(&run.root, evidence)
+}
+
 fn live_graphql_mutation(
     phase: &str,
     query: &str,
@@ -1795,6 +3029,30 @@ fn live_graphql_mutation(
     parse_live_graphql_response(phase, &output)
 }
 
+fn set_live_project_item_status(
+    phase: &str,
+    inputs: &LiveDogfoodInputs,
+    project_id: &str,
+    item_id: &str,
+    field_id: &str,
+    option_id: &str,
+) -> Result<Value, String> {
+    const SET_STATUS: &str = r#"mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+  updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: {singleSelectOptionId: $optionId}}) { projectV2Item { id } }
+}"#;
+    live_graphql_mutation(
+        phase,
+        SET_STATUS,
+        [
+            ("projectId".to_string(), project_id.to_string()),
+            ("itemId".to_string(), item_id.to_string()),
+            ("fieldId".to_string(), field_id.to_string()),
+            ("optionId".to_string(), option_id.to_string()),
+        ],
+        inputs,
+    )
+}
+
 fn parse_live_graphql_response(phase: &str, output: &str) -> Result<Value, String> {
     let response: Value = serde_json::from_str(output)
         .map_err(|error| format!("{phase}: invalid response: {error}"))?;
@@ -1807,33 +3065,73 @@ fn parse_live_graphql_response(phase: &str, output: &str) -> Result<Value, Strin
     Ok(response)
 }
 
-fn rollback_pre_dispatch(resources: &PreDispatchResources, inputs: &LiveDogfoodInputs) {
-    const REMOVE_ITEM: &str = r#"mutation($projectId: ID!, $itemId: ID!) {
-  deleteProjectV2Item(input: {projectId: $projectId, itemId: $itemId}) { deletedItemId }
-}"#;
+fn validate_pre_dispatch_project_item_identity(
+    response: &Value,
+    resources: &PreDispatchResources,
+) -> Result<(), String> {
+    validate_live_project_item_identity(
+        response,
+        &resources.project_id,
+        &resources.project_item_id,
+        &resources.issue_id,
+        resources.issue_number,
+        "pre-dispatch rollback Project item",
+    )
+    .map(|_| ())
+}
+
+fn rollback_pre_dispatch(
+    resources: &PreDispatchResources,
+    inputs: &LiveDogfoodInputs,
+) -> Result<(), String> {
     if !resources.project_item_id.is_empty() {
-        let _ = live_graphql_mutation(
-            "pre-dispatch rollback project item",
-            REMOVE_ITEM,
-            [
-                ("projectId".to_string(), resources.project_id.clone()),
-                ("itemId".to_string(), resources.project_item_id.clone()),
-            ],
+        let before = live_project_query(inputs)?;
+        validate_pre_dispatch_project_item_identity(&before, resources)?;
+        delete_live_project_item(
             inputs,
-        );
+            &resources.project_id,
+            &resources.project_item_id,
+            "pre-dispatch rollback project item",
+        )?;
     }
-    let _ = live_gh(
-        "pre-dispatch rollback issue",
-        [
-            "api".to_string(),
-            "--method".to_string(),
-            "PATCH".to_string(),
-            format!("repos/chrisbanes/bamboon/issues/{}", resources.issue_number),
-            "-f".to_string(),
-            "state=closed".to_string(),
-        ],
+    close_live_issue_identity(
         inputs,
-    );
+        &resources.issue_id,
+        resources.issue_number,
+        "pre-dispatch rollback issue",
+    )
+}
+
+fn rollback_pre_dispatch_after_error(
+    resources: &PreDispatchResources,
+    inputs: &LiveDogfoodInputs,
+    error: String,
+) -> String {
+    match rollback_pre_dispatch(resources, inputs) {
+        Ok(()) => format!(
+            "{error}; pre-dispatch rollback completed for synthetic issue #{}",
+            resources.issue_number
+        ),
+        Err(rollback_error) => format!(
+            "{error}; pre-dispatch rollback for synthetic issue #{} failed: {rollback_error}",
+            resources.issue_number
+        ),
+    }
+}
+
+fn start_live_pre_dispatch_host<H>(
+    resources: &PreDispatchResources,
+    reserve_port: impl FnOnce() -> Result<u16, String>,
+    spawn_host: impl FnOnce(u16) -> Result<H, String>,
+    rollback_after_error: impl FnOnce(&PreDispatchResources, String) -> String,
+) -> Result<(u16, H), String> {
+    match reserve_port() {
+        Err(error) => Err(rollback_after_error(resources, error)),
+        Ok(port) => match spawn_host(port) {
+            Ok(host) => Ok((port, host)),
+            Err(error) => Err(rollback_after_error(resources, error)),
+        },
+    }
 }
 
 fn create_live_resources(
@@ -1885,25 +3183,15 @@ fn create_live_resources(
         Ok(value) => match value["data"]["addProjectV2ItemById"]["item"]["id"].as_str() {
             Some(id) => id.to_string(),
             None => {
-                let resources = PreDispatchResources {
-                    issue_id,
-                    issue_number,
-                    project_id: project.id.clone(),
-                    project_item_id: String::new(),
-                };
-                rollback_pre_dispatch(&resources, inputs);
-                return Err("add synthetic issue to Project: missing Project item ID".to_string());
+                return Err(format!(
+                    "add synthetic issue to Project: missing Project item ID; synthetic issue #{issue_number} is retained because Project-item ownership is ambiguous"
+                ));
             }
         },
         Err(error) => {
-            let resources = PreDispatchResources {
-                issue_id,
-                issue_number,
-                project_id: project.id.clone(),
-                project_item_id: String::new(),
-            };
-            rollback_pre_dispatch(&resources, inputs);
-            return Err(error);
+            return Err(format!(
+                "{error}; synthetic issue #{issue_number} is retained because Project-item creation is ambiguous"
+            ));
         }
     };
     let resources = PreDispatchResources {
@@ -1913,22 +3201,15 @@ fn create_live_resources(
         project_item_id,
     };
 
-    const SET_STATUS: &str = r#"mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
-  updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: {singleSelectOptionId: $optionId}}) { projectV2Item { id } }
-}"#;
-    if let Err(error) = live_graphql_mutation(
+    if let Err(error) = set_live_project_item_status(
         "make synthetic issue ready",
-        SET_STATUS,
-        [
-            ("projectId".to_string(), project.id.clone()),
-            ("itemId".to_string(), resources.project_item_id.clone()),
-            ("fieldId".to_string(), project.status_field_id.clone()),
-            ("optionId".to_string(), project.ready_option_id.clone()),
-        ],
         inputs,
+        &project.id,
+        &resources.project_item_id,
+        &project.status_field_id,
+        &project.ready_option_id,
     ) {
-        rollback_pre_dispatch(&resources, inputs);
-        return Err(error);
+        return Err(rollback_pre_dispatch_after_error(&resources, inputs, error));
     }
     Ok(resources)
 }
@@ -2591,33 +3872,28 @@ async fn live_bamboon_issue_publishes_pull_request() {
         if let Err(error) =
             wait_for_live_project_status(&inputs, &resources.issue_id, "Ready to implement").await
         {
-            rollback_pre_dispatch(&resources, &inputs);
-            return Err(error);
+            return Err(rollback_pre_dispatch_after_error(
+                &resources, &inputs, error,
+            ));
         }
+        let (port, mut host) = start_live_pre_dispatch_host(
+            &resources,
+            || reserve_local_port().map_err(|error| format!("reserve host port: {error}")),
+            |port| spawn_live_host(&inputs, &run, &token, port, LiveDogfoodHostLifetime::First),
+            |resources, error| rollback_pre_dispatch_after_error(resources, &inputs, error),
+        )?;
         let resources = LiveDogfoodResources {
             issue_id: resources.issue_id,
             issue_number: resources.issue_number,
+            project,
+            project_item_id: resources.project_item_id,
         };
         let mut evidence = LiveDogfoodEvidenceV1::new(
             &run,
             format!("chrisbanes/bamboon#{}", resources.issue_number),
+            inputs.mode,
         );
         let mut pre_publication_captured = false;
-        let port = reserve_local_port().map_err(|error| format!("reserve host port: {error}"))?;
-        let mut host =
-            match spawn_live_host(&inputs, &run, &token, port, LiveDogfoodHostLifetime::First) {
-                Ok(host) => host,
-                Err(error) => {
-                    let failure = persist_live_dogfood_failure(
-                        &mut evidence,
-                        &run,
-                        &inputs,
-                        pre_publication_captured,
-                        &error,
-                    );
-                    return Err(failure.err().unwrap_or(error));
-                }
-            };
         let client = reqwest::Client::new();
         let base_url = format!("http://127.0.0.1:{port}");
         let completed = async {
@@ -2678,13 +3954,32 @@ async fn live_bamboon_issue_publishes_pull_request() {
             ))
         }
         .await;
-        let _ = host.kill();
-        let _ = host.wait();
+        let first_host_stopped = stop_and_reap_live_host(&mut host);
         let (worktree, branch, sha, pull_request_number, pull_request_url, baseline) =
             match completed {
-                Ok(completed) => completed,
-                Err(error) if error.starts_with("evidence-v1:") => return Err(error),
-                Err(error) => {
+                Ok(completed) => {
+                    if let Err(error) = first_host_stopped {
+                        evidence.preserve_discovered_artifacts();
+                        evidence.final_state.absent.clear();
+                        evidence.final_state.retained.push("active_child");
+                        let failure = persist_live_dogfood_failure(
+                            &mut evidence,
+                            &run,
+                            &inputs,
+                            pre_publication_captured,
+                            &error,
+                        );
+                        return Err(failure.err().unwrap_or(error));
+                    }
+                    completed
+                }
+                Err(mut error) => {
+                    if let Err(reap_error) = first_host_stopped {
+                        evidence.preserve_discovered_artifacts();
+                        evidence.final_state.absent.clear();
+                        evidence.final_state.retained.push("active_child");
+                        error = format!("{error}; {reap_error}");
+                    }
                     let failure = persist_live_dogfood_failure(
                         &mut evidence,
                         &run,
@@ -2746,30 +4041,85 @@ async fn live_bamboon_issue_publishes_pull_request() {
             &baseline,
         )
         .await;
-        let _ = restarted_host.kill();
-        let _ = restarted_host.wait();
         if let Err(error) = restarted {
-            let failure = persist_live_dogfood_failure(
+            return Err(finalize_live_restarted_run_failure(
+                &mut restarted_host,
                 &mut evidence,
                 &run,
                 &inputs,
                 pre_publication_captured,
-                &error,
-            );
-            return Err(failure.err().unwrap_or(error));
+                error,
+            ));
         }
-        evidence.append_post_restart(&baseline)?;
-        write_live_dogfood_evidence_v1(&run.root, &evidence)?;
-        if evidence.snapshots.len() != 3 {
-            return Err("verify evidence-v1: post-restart snapshot was not retained".to_string());
+        let post_restart_evidence = (|| {
+            evidence.append_post_restart(&baseline)?;
+            write_live_dogfood_evidence_v1(&run.root, &evidence)?;
+            if evidence.snapshots.len() != 3 {
+                return Err(
+                    "verify evidence-v1: post-restart snapshot was not retained".to_string()
+                );
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(error) = post_restart_evidence {
+            return Err(finalize_live_restarted_run_failure(
+                &mut restarted_host,
+                &mut evidence,
+                &run,
+                &inputs,
+                pre_publication_captured,
+                error,
+            ));
         }
-        Ok((resources, branch, sha))
+        match inputs.mode {
+            LiveDogfoodMode::Preserve => {
+                if let Err(error) =
+                    run_live_preserve_completion(&mut restarted_host, &mut evidence, &run)
+                {
+                    return Err(finalize_live_restarted_run_failure(
+                        &mut restarted_host,
+                        &mut evidence,
+                        &run,
+                        &inputs,
+                        pre_publication_captured,
+                        error,
+                    ));
+                }
+            }
+            LiveDogfoodMode::Routine => {
+                if let Err(error) = run_live_routine_cleanup(
+                    &client,
+                    &restart_base_url,
+                    &inputs,
+                    &run,
+                    &resources,
+                    &mut restarted_host,
+                    &worktree,
+                    &branch,
+                    &sha,
+                    pull_request_number,
+                    &mut evidence,
+                )
+                .await
+                {
+                    return Err(finalize_live_restarted_run_failure(
+                        &mut restarted_host,
+                        &mut evidence,
+                        &run,
+                        &inputs,
+                        pre_publication_captured,
+                        error,
+                    ));
+                }
+            }
+        }
+        Ok((resources, branch, sha, inputs.mode))
     }
     .await;
 
     match result {
-        Ok((resources, branch, sha)) => eprintln!(
-            "live dogfood preserved marker={} issue={} branch={} sha={} run_directory={}",
+        Ok((resources, branch, sha, mode)) => eprintln!(
+            "live dogfood completed mode={mode:?} marker={} issue={} branch={} sha={} run_directory={}",
             run.marker,
             resources.issue_number,
             branch,
@@ -2777,7 +4127,7 @@ async fn live_bamboon_issue_publishes_pull_request() {
             run.root.display()
         ),
         Err(error) => panic!(
-            "{error}\nlive dogfood dispatch-and-later artifacts are preserved: marker={} run_directory={}",
+            "{error}\nlive dogfood artifacts are preserved: marker={} run_directory={}\ndeliberate cleanup procedure: inspect run_directory and evidence-v1.json when present, then follow docs/contributing.md#ignored-live-dogfood-tracer-bullet; revalidate every stored identity before mutation",
             run.marker,
             run.root.display()
         ),
@@ -2873,7 +4223,8 @@ fn live_dogfood_evidence_v1_schema_and_redaction_are_stable() {
         marker: "live-dogfood-evidence".to_string(),
         root: PathBuf::from("/tmp/private-run-root"),
     };
-    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#34");
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#34", LiveDogfoodMode::Routine);
     evidence
         .append_pre_publication(
             "docs/ensemble-dogfood/live-dogfood-evidence.md",
@@ -2919,7 +4270,8 @@ fn live_dogfood_evidence_v1_atomic_write_replaces_only_complete_documents() {
         marker: "live-dogfood-atomic".to_string(),
         root: temporary.path().to_path_buf(),
     };
-    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#35");
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#35", LiveDogfoodMode::Routine);
     evidence
         .append_pre_publication(
             "docs/ensemble-dogfood/live-dogfood-atomic.md",
@@ -2953,7 +4305,8 @@ fn live_dogfood_evidence_v1_failed_replacement_retains_prior_document() {
         marker: "live-dogfood-retention".to_string(),
         root: temporary.path().to_path_buf(),
     };
-    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#36");
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#36", LiveDogfoodMode::Routine);
     evidence
         .append_pre_publication(
             "docs/ensemble-dogfood/live-dogfood-retention.md",
@@ -2987,7 +4340,8 @@ fn live_dogfood_evidence_v1_snapshots_are_cumulative_and_ordered() {
         marker: "live-dogfood-order".to_string(),
         root: PathBuf::from("/tmp/run-root-not-serialized"),
     };
-    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#37");
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#37", LiveDogfoodMode::Routine);
     evidence
         .append_pre_publication(
             "docs/ensemble-dogfood/live-dogfood-order.md",
@@ -3021,7 +4375,8 @@ fn live_dogfood_post_restart_evidence_is_ordered_and_redacted() {
         marker: "live-dogfood-restart-order".to_string(),
         root: PathBuf::from("/tmp/private-run-root"),
     };
-    let mut evidence = LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#39");
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#39", LiveDogfoodMode::Routine);
     evidence
         .append_pre_publication(
             "docs/ensemble-dogfood/live-dogfood-restart-order.md",
@@ -3133,6 +4488,22 @@ fn live_dogfood_restart_rejects_ambiguous_public_agent_capacity() {
 }
 
 #[test]
+fn live_dogfood_completed_history_snapshot_counts_as_released() {
+    assert!(live_public_issue_released(&serde_json::json!({
+        "running": null,
+        "status": "completed_succeeded",
+    })));
+    assert!(!live_public_issue_released(&serde_json::json!({
+        "running": {"step": "implement"},
+        "status": "completed_succeeded",
+    })));
+    assert!(!live_public_issue_released(&serde_json::json!({
+        "running": null,
+        "status": "In review",
+    })));
+}
+
+#[test]
 fn live_dogfood_pre_publication_rejects_agent_publication() {
     assert!(ensure_no_live_dogfood_publication("", "[]").is_ok());
     assert!(ensure_no_live_dogfood_publication(
@@ -3161,6 +4532,32 @@ fn live_dogfood_failure_evidence_keeps_the_safe_failure_phase() {
         live_dogfood_failure_observation("unrecognized raw command output"),
         "dispatch-and-later verification"
     );
+}
+
+#[test]
+fn live_dogfood_pre_delivery_failure_conservatively_reports_remote_residue() {
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-pre-delivery-failure".to_string(),
+        root: PathBuf::from("/tmp/ensemble-live-dogfood/live-dogfood-pre-delivery-failure"),
+    };
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Routine);
+    evidence
+        .append_pre_publication(
+            "docs/ensemble-dogfood/live-dogfood-pre-delivery-failure.md",
+            "ensemble-live-dogfood-pre-delivery-failure",
+            "local-sha",
+        )
+        .unwrap();
+
+    evidence.preserve_discovered_artifacts();
+
+    let retained = serde_json::to_value(evidence).unwrap()["final_state"]["retained"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert!(retained.contains(&serde_json::json!("generated_ref")));
+    assert!(retained.contains(&serde_json::json!("pull_request")));
 }
 
 #[test]
@@ -3199,10 +4596,18 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "ENSEMBLE_DOGFOOD_PROJECT_NUMBER",
         "ENSEMBLE_DOGFOOD_BAMBOON_PATH",
         "ENSEMBLE_DOGFOOD_AGENT",
+        "ENSEMBLE_LIVE_DOGFOOD_PRESERVE=1",
         "gh auth token",
         "Ensemble alone pushes",
         "`In review`",
         "never part of CI",
+        "default routine mode",
+        "network and model cost",
+        "close the exact pull request",
+        "while the second host remains running",
+        "deliberate cleanup procedure",
+        "revalidate each stored identity",
+        "does not close the MVP release gate",
         "evidence-v1.json",
         "pre-publication",
         "post-delivery",
@@ -3213,6 +4618,9 @@ fn live_dogfood_operator_contract_is_documented_without_fixture_values() {
         "host-2.stderr.log",
         "two configured polling intervals",
         "unchanged config",
+        "not exist before dispatch",
+        "conservatively lists the generated ref",
+        "pull request until fresh observations",
     ] {
         assert!(
             contributing.contains(required),
@@ -3306,6 +4714,14 @@ fn live_dogfood_config_parses_with_multiline_artifact_content() {
         .as_str()
         .expect("live prompt must be a scalar");
     assert!(prompt.contains("# Ensemble live dogfood\n\nMarker:"));
+    assert_eq!(
+        config["agents"]["builder"]["permission_mode"],
+        "approve_reads"
+    );
+    assert_eq!(
+        config["agent"]["permission_request_policy"]["mode"],
+        "reject_all"
+    );
 }
 
 #[test]
@@ -3319,4 +4735,541 @@ fn live_dogfood_worktree_discovery_includes_the_issue_key_directory() {
     fs::create_dir_all(&expected).unwrap();
 
     assert_eq!(live_dogfood_worktree(&workspaces).unwrap(), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn live_dogfood_worktree_registration_canonicalizes_symlinked_prefixes() {
+    use std::os::unix::fs::symlink;
+
+    let temporary = tempfile::tempdir().unwrap();
+    let canonical_root = temporary.path().join("canonical");
+    let canonical_worktree = canonical_root.join("run-root").join("issue-worktree");
+    let aliased_root = temporary.path().join("alias");
+    let aliased_worktree = aliased_root.join("run-root").join("issue-worktree");
+    fs::create_dir_all(&canonical_worktree).unwrap();
+    symlink(&canonical_root, &aliased_root).unwrap();
+    let listing = format!("worktree {}\n", canonical_worktree.display());
+
+    assert!(worktree_is_registered(&listing, &aliased_worktree));
+    fs::remove_dir_all(canonical_root.join("run-root")).unwrap();
+    assert!(worktree_is_registered(&listing, &aliased_worktree));
+}
+
+#[test]
+fn live_dogfood_preserve_input_is_exact_and_defaults_to_routine_cleanup() {
+    assert_eq!(
+        LiveDogfoodMode::from_input(None).unwrap(),
+        LiveDogfoodMode::Routine
+    );
+    assert_eq!(
+        LiveDogfoodMode::from_input(Some("")).unwrap(),
+        LiveDogfoodMode::Routine
+    );
+    assert_eq!(
+        LiveDogfoodMode::from_input(Some("1")).unwrap(),
+        LiveDogfoodMode::Preserve
+    );
+    assert!(LiveDogfoodMode::from_input(Some("true")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn live_dogfood_preserve_input_rejects_non_utf8_values() {
+    use std::os::unix::ffi::OsStrExt;
+
+    assert!(LiveDogfoodMode::from_os_input(Some(std::ffi::OsStr::from_bytes(&[0xff]))).is_err());
+}
+
+#[test]
+fn live_dogfood_evidence_records_the_selected_cleanup_mode() {
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-mode".to_string(),
+        root: PathBuf::from("/tmp/ensemble-live-dogfood/live-dogfood-mode"),
+    };
+    let evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Preserve);
+
+    let value = serde_json::to_value(evidence).unwrap();
+    assert_eq!(value["mode"], "preserve");
+}
+
+#[test]
+fn live_dogfood_preserve_completion_only_reaps_and_records_preservation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-preserve-execution".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Preserve);
+    let mut child = Command::new("sh").args(["-c", "sleep 30"]).spawn().unwrap();
+
+    run_live_preserve_completion(&mut child, &mut evidence, &run).unwrap();
+
+    assert!(child.try_wait().unwrap().is_some());
+    let value: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.path().join("evidence-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["outcome"], "preserved_certification");
+    assert_eq!(
+        value["transitions"],
+        serde_json::json!([{"phase": "preserve_stop_and_reap_host", "result": "succeeded"}])
+    );
+    assert_eq!(
+        value["final_state"]["absent"],
+        serde_json::json!(["active_child"])
+    );
+}
+
+#[test]
+fn live_dogfood_partial_cleanup_evidence_distinguishes_absent_and_retained_state() {
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-partial".to_string(),
+        root: PathBuf::from("/tmp/ensemble-live-dogfood/live-dogfood-partial"),
+    };
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Routine);
+    evidence.append_transition("close_pull_request", "succeeded");
+    evidence.append_transition("project_done", "preserved_failure");
+    evidence.preserve_after_transitions();
+
+    let value = serde_json::to_value(evidence).unwrap();
+    assert_eq!(value["outcome"], "preserved_failure");
+    assert_eq!(
+        value["final_state"]["absent"],
+        serde_json::json!(["open_pull_request"])
+    );
+    assert!(value["final_state"]["retained"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("project_item")));
+}
+
+#[test]
+fn live_dogfood_cleanup_plan_requires_exact_consistent_run_owned_identities() {
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    assert!(plan.validate().is_ok());
+    assert!(plan
+        .clone()
+        .with_pull_request_sha("other")
+        .validate()
+        .is_err());
+    assert!(plan
+        .clone()
+        .with_pull_request_base("release")
+        .validate()
+        .is_err());
+    assert!(plan.clone().with_issue_id("").validate().is_err());
+    assert!(plan
+        .clone()
+        .with_worktree("/tmp/not-run-owned")
+        .validate()
+        .is_err());
+}
+
+#[test]
+fn live_dogfood_pull_request_revalidation_requires_the_stored_identity() {
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    let identity = LiveDogfoodPullRequestIdentity {
+        id: plan.pull_request.id.clone(),
+        number: plan.pull_request.number,
+        url: plan.pull_request.url.clone(),
+        state: "OPEN".to_string(),
+        head: plan.branch.clone(),
+        sha: plan.expected_sha.clone(),
+        base: "main".to_string(),
+    };
+
+    assert!(identity.validate_against(&plan, "OPEN").is_ok());
+    assert!(identity.validate_against(&plan, "CLOSED").is_err());
+    assert!(LiveDogfoodPullRequestIdentity {
+        sha: "replacement-sha".to_string(),
+        ..identity
+    }
+    .validate_against(&plan, "OPEN")
+    .is_err());
+}
+
+#[test]
+fn live_dogfood_remote_ref_deletion_rejects_a_replacement_sha() {
+    let temporary = tempfile::tempdir().unwrap();
+    let remote = temporary.path().join("remote.git");
+    let source = temporary.path().join("source");
+    init_git_repo(&source).unwrap();
+    let inputs =
+        LiveDogfoodInputs::from_values(Some("1"), Some("12"), source.to_str(), None).unwrap();
+    let git = |phase: &str, arguments: &[&str]| {
+        live_git(
+            phase,
+            &source,
+            arguments.iter().map(|argument| (*argument).to_string()),
+            &inputs,
+        )
+        .unwrap()
+    };
+    git(
+        "test initialize bare remote",
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    git(
+        "test add remote",
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(
+        "test publish expected ref",
+        &["push", "-u", "origin", "main"],
+    );
+    let expected_sha = git("test read expected SHA", &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    fs::write(source.join("README.md"), "replacement\n").unwrap();
+    git(
+        "test commit replacement",
+        &[
+            "-c",
+            "user.name=Ensemble E2E",
+            "-c",
+            "user.email=ensemble-e2e@example.invalid",
+            "commit",
+            "-am",
+            "replacement",
+        ],
+    );
+    git("test publish replacement ref", &["push", "origin", "main"]);
+    let replacement_sha = git("test read replacement SHA", &["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+
+    assert!(delete_live_remote_ref_at_sha(
+        &inputs,
+        &source,
+        remote.to_str().unwrap(),
+        "main",
+        &expected_sha,
+    )
+    .is_err());
+    assert_eq!(
+        git(
+            "test observe replacement ref",
+            &["ls-remote", "--heads", "origin", "refs/heads/main"],
+        ),
+        format!("{replacement_sha}\trefs/heads/main\n")
+    );
+}
+
+#[test]
+fn live_dogfood_remote_ref_cleanup_rejects_a_replacement_origin() {
+    let temporary = tempfile::tempdir().unwrap();
+    let source = temporary.path().join("source");
+    let replacement = temporary.path().join("replacement.git");
+    init_git_repo(&source).unwrap();
+    let inputs =
+        LiveDogfoodInputs::from_values(Some("1"), Some("12"), source.to_str(), None).unwrap();
+    live_git(
+        "test initialize replacement remote",
+        &source,
+        [
+            "init".to_string(),
+            "--bare".to_string(),
+            replacement.display().to_string(),
+        ],
+        &inputs,
+    )
+    .unwrap();
+    live_git(
+        "test install replacement origin",
+        &source,
+        [
+            "remote".to_string(),
+            "add".to_string(),
+            "origin".to_string(),
+            replacement.display().to_string(),
+        ],
+        &inputs,
+    )
+    .unwrap();
+
+    assert!(validated_live_bamboon_remote(
+        &inputs,
+        &source,
+        "cleanup generated ref origin revalidation",
+    )
+    .unwrap_err()
+    .contains("origin must identify chrisbanes/bamboon"));
+}
+
+#[test]
+fn live_dogfood_cleanup_stops_after_a_failed_revalidation() {
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan).unwrap();
+    cleanup
+        .attempt(LiveDogfoodCleanupStep::ClosePullRequest, Ok(()))
+        .unwrap();
+    assert!(cleanup
+        .attempt(
+            LiveDogfoodCleanupStep::ProjectDone,
+            Err("stored Project item no longer matched"),
+        )
+        .is_err());
+    assert!(cleanup
+        .attempt(LiveDogfoodCleanupStep::WaitForHostRelease, Ok(()))
+        .is_err());
+    assert_eq!(
+        cleanup.transitions(),
+        [
+            ("close_pull_request", "succeeded"),
+            ("project_done", "preserved_failure"),
+        ]
+    );
+}
+
+struct FailingLiveDogfoodCleanupActions {
+    attempted: Vec<LiveDogfoodCleanupStep>,
+    fail_at: LiveDogfoodCleanupStep,
+}
+
+impl LiveDogfoodCleanupActions for FailingLiveDogfoodCleanupActions {
+    async fn execute(&mut self, step: LiveDogfoodCleanupStep) -> Result<(), String> {
+        self.attempted.push(step);
+        if step == self.fail_at {
+            Err(format!("{} helper failed", step.name()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn live_dogfood_cleanup_execution_stops_after_a_helper_failure() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-execution-stop".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan).unwrap();
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Routine);
+    let mut actions = FailingLiveDogfoodCleanupActions {
+        attempted: Vec::new(),
+        fail_at: LiveDogfoodCleanupStep::ProjectDone,
+    };
+
+    assert!(
+        execute_live_cleanup_sequence(&mut actions, &mut cleanup, &mut evidence, &run,)
+            .await
+            .is_err()
+    );
+
+    assert_eq!(
+        actions.attempted,
+        [
+            LiveDogfoodCleanupStep::ClosePullRequest,
+            LiveDogfoodCleanupStep::ProjectDone,
+        ]
+    );
+    let persisted: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.path().join("evidence-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        persisted["transitions"],
+        serde_json::json!([
+            {"phase": "close_pull_request", "result": "attempting"},
+            {"phase": "close_pull_request", "result": "succeeded"},
+            {"phase": "project_done", "result": "attempting"},
+            {"phase": "project_done", "result": "preserved_failure"}
+        ])
+    );
+}
+
+#[tokio::test]
+async fn live_dogfood_cleanup_retains_intent_when_result_persistence_fails() {
+    let temporary = tempfile::tempdir().unwrap();
+    let run = LiveDogfoodRun {
+        marker: "live-dogfood-evidence-write-failure".to_string(),
+        root: temporary.path().to_path_buf(),
+    };
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan).unwrap();
+    let mut evidence =
+        LiveDogfoodEvidenceV1::new(&run, "chrisbanes/bamboon#47", LiveDogfoodMode::Routine);
+    let mut actions = FailingLiveDogfoodCleanupActions {
+        attempted: Vec::new(),
+        fail_at: LiveDogfoodCleanupStep::VerifyFinalAbsence,
+    };
+    let mut writes = 0;
+
+    let error = execute_live_cleanup_sequence_with_writer(
+        &mut actions,
+        &mut cleanup,
+        &mut evidence,
+        &run,
+        |root, evidence| {
+            writes += 1;
+            if writes == 2 {
+                Err("injected evidence write failure".to_string())
+            } else {
+                write_live_dogfood_evidence_v1(root, evidence)
+            }
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, "injected evidence write failure");
+    assert_eq!(
+        actions.attempted,
+        [LiveDogfoodCleanupStep::ClosePullRequest]
+    );
+    let persisted: Value = serde_json::from_str(
+        &fs::read_to_string(temporary.path().join("evidence-v1.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        persisted["transitions"],
+        serde_json::json!([
+            {"phase": "close_pull_request", "result": "attempting"}
+        ])
+    );
+}
+
+#[test]
+fn live_dogfood_cleanup_order_keeps_the_host_alive_until_public_release() {
+    let plan = LiveDogfoodCleanupPlan::for_test();
+    let mut cleanup = LiveDogfoodCleanupRecorder::new(&plan).unwrap();
+    for step in LIVE_DOGFOOD_CLEANUP_ORDER {
+        cleanup.attempt(step, Ok(())).unwrap();
+    }
+    assert!(cleanup.is_complete());
+}
+
+#[test]
+fn live_dogfood_final_absence_requires_every_run_owned_artifact() {
+    assert!(validate_live_final_absence([true; 6]).is_ok());
+
+    for missing in 0..6 {
+        let mut observations = [true; 6];
+        observations[missing] = false;
+        assert!(validate_live_final_absence(observations).is_err());
+    }
+}
+
+#[test]
+fn live_dogfood_pre_dispatch_rollback_requires_exact_issue_and_item_ownership() {
+    let resources = PreDispatchResources {
+        issue_id: "issue-node".to_string(),
+        issue_number: 47,
+        project_id: "project-node".to_string(),
+        project_item_id: "item-node".to_string(),
+    };
+    let issue = serde_json::json!({
+        "node_id": "issue-node",
+        "number": 47,
+        "state": "open",
+    });
+    let project = serde_json::json!({
+        "data": {"repository": {"projectV2": {
+            "id": "project-node",
+            "items": {"nodes": [{
+                "id": "item-node",
+                "content": {"id": "issue-node", "number": 47}
+            }]}
+        }}}
+    });
+
+    assert!(validate_live_issue_identity(
+        &issue,
+        &resources.issue_id,
+        resources.issue_number,
+        "open",
+        "pre-dispatch rollback issue",
+    )
+    .is_ok());
+    assert!(validate_pre_dispatch_project_item_identity(&project, &resources).is_ok());
+    assert!(validate_live_project_item_absence(
+        &serde_json::json!({
+            "data": {"repository": {"projectV2": {
+                "id": "project-node",
+                "items": {"nodes": []}
+            }}}
+        }),
+        "project-node",
+        "item-node",
+    )
+    .is_ok());
+    assert!(validate_live_project_item_absence(
+        &serde_json::json!({
+            "data": {"repository": {"projectV2": {
+                "id": "project-node",
+                "items": null
+            }}}
+        }),
+        "project-node",
+        "item-node",
+    )
+    .is_err());
+    assert!(validate_pre_dispatch_project_item_identity(
+        &serde_json::json!({
+            "data": {"repository": {"projectV2": {
+                "id": "project-node",
+                "items": {"nodes": [{
+                    "id": "item-node",
+                    "content": {"id": "other-issue", "number": 47}
+                }]}
+            }}}
+        }),
+        &resources,
+    )
+    .is_err());
+}
+
+#[test]
+fn live_dogfood_host_setup_failures_run_pre_dispatch_rollback() {
+    use std::cell::RefCell;
+
+    let resources = PreDispatchResources {
+        issue_id: "issue-node".to_string(),
+        issue_number: 47,
+        project_id: "project-node".to_string(),
+        project_item_id: "item-node".to_string(),
+    };
+    let actions = RefCell::new(Vec::new());
+    let reservation_error = start_live_pre_dispatch_host(
+        &resources,
+        || Err("reserve host port: unavailable".to_string()),
+        |_| {
+            actions.borrow_mut().push("spawn");
+            Ok(())
+        },
+        |_, error| {
+            actions.borrow_mut().push("rollback");
+            format!("{error}; rolled back")
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        reservation_error,
+        "reserve host port: unavailable; rolled back"
+    );
+    assert_eq!(*actions.borrow(), ["rollback"]);
+
+    actions.borrow_mut().clear();
+    let spawn_error = start_live_pre_dispatch_host(
+        &resources,
+        || Ok(42),
+        |_| {
+            actions.borrow_mut().push("spawn");
+            Err::<(), _>("start first host: unavailable".to_string())
+        },
+        |_, error| {
+            actions.borrow_mut().push("rollback");
+            format!("{error}; rolled back")
+        },
+    )
+    .unwrap_err();
+    assert_eq!(spawn_error, "start first host: unavailable; rolled back");
+    assert_eq!(*actions.borrow(), ["spawn", "rollback"]);
 }

@@ -63,16 +63,32 @@ require GitHub, Notion, real ACP credentials, or non-localhost network access.
 ### Ignored live dogfood tracer bullet
 
 `live_bamboon_issue_publishes_pull_request` is a deliberately expensive, explicitly opted-in
-tracer bullet. It is ignored, is never part of CI, and creates a real synthetic issue in the
-private, operator-provisioned **Ensemble Dogfood** Project. It launches a real ACPX agent against
-an issue-owned Bamboon worktree, so it can consume network access and model time.
+tracer bullet. It is local-only, ignored by default, never part of CI, and creates a real synthetic
+issue in the private, operator-provisioned **Ensemble Dogfood** Project. It launches a real ACPX
+agent against an issue-owned Bamboon worktree, so expect a runtime of several minutes; it incurs
+network and model cost. The harness does not automate interactive first-run setup.
+It does not close the MVP release gate: passing this test alone is not sufficient to release
+Ensemble.
 
 Run it only when you have the dedicated fixture and a clean Bamboon clone. The project number and
 clone path are private local setup values: do not put either in shell history, documentation,
 issues, or logs.
 
 ```sh
+# Default routine mode
 ENSEMBLE_LIVE_DOGFOOD=1 \
+  ENSEMBLE_DOGFOOD_PROJECT_NUMBER=<local-project-number> \
+  ENSEMBLE_DOGFOOD_BAMBOON_PATH=<absolute-clean-bamboon-clone> \
+  SKIP_UI_BUILD=1 \
+  cargo test -p ensemble-cli --features web-ui --test product_e2e \
+  live_bamboon_issue_publishes_pull_request -- --ignored --nocapture
+```
+
+For a certification run, use the same invocation with the explicit preservation input:
+
+```sh
+ENSEMBLE_LIVE_DOGFOOD=1 \
+  ENSEMBLE_LIVE_DOGFOOD_PRESERVE=1 \
   ENSEMBLE_DOGFOOD_PROJECT_NUMBER=<local-project-number> \
   ENSEMBLE_DOGFOOD_BAMBOON_PATH=<absolute-clean-bamboon-clone> \
   SKIP_UI_BUILD=1 \
@@ -86,15 +102,30 @@ and clone cleanliness before creating an issue; it never repairs fixture drift. 
 the `codex` named agent; set a non-empty `ENSEMBLE_DOGFOOD_AGENT` only for an explicit local
 override. The GitHub credential comes from `gh auth token` only after the opt-in gate, is passed to
 the child host in memory as `GITHUB_TOKEN`, and is not written into generated YAML or diagnostics.
+Agent subprocesses remove `GITHUB_TOKEN` from their environment. The generated dogfood agent uses
+read-approved launch permissions and rejects permission escalation, leaving GitHub publication to
+the orchestrator host.
 
 The tracer bullet creates one marker-owned Markdown artifact and commit. The agent may not publish:
 after capturing that local commit, Ensemble alone pushes the generated branch and creates exactly
 one open pull request at the captured SHA. It projects the Project issue to `In review` only after
-the delivery record persists its remote branch and pull-request identity. From that point it
-preserves the run directory, host stdout/stderr, issue, Project item, workspace, branch, and pull
-request for diagnosis. The test prints the redacted, run-scoped preservation location on success
-or failure. Do not perform routine cleanup or fixture repair from the harness; merge/close,
-and cleanup remain outside this slice.
+the delivery record persists its remote branch and pull-request identity. The test prints the
+redacted, run-scoped evidence location on success or failure.
+
+After the complete two-host restart proof, default routine mode performs one fixed, fail-closed
+sequence. It must revalidate and close the exact pull request. It then revalidates the exact Project
+item and moves it to `Done` while the second host remains running. It waits for public terminal state,
+zero claimed agent capacity, and removal of the captured worktree before stopping and reaping the
+host. Only then does it revalidate and close the exact issue, remove its exact Project item, and
+delete the exact generated remote ref if it is still at the stored SHA. Final checks require no
+open synthetic issue or pull request, no Project item, no generated ref, no registered worktree,
+and no active child process. The run directory, generated config, host logs, and evidence remain
+for inspection, so a succeeding routine run can be repeated without external residue.
+
+Preserve mode performs no GitHub or Git cleanup mutation. After the restart proof it only stops
+and reaps the second host, then records `preserved_certification`. The synthetic issue, Project
+item, generated branch, pull request, generated config, workspace/worktree, logs, and evidence stay
+available as the human-reviewable certification bundle.
 
 Once dispatch begins, the run retains one cumulative `<run-root>/evidence-v1.json` inspection
 document with format `ensemble.live-dogfood-evidence` and schema version 1. It records a
@@ -108,13 +139,42 @@ the marker-scoped GitHub pull request, Git ref, and persisted worktree/transcrip
 does not inspect private orchestrator state. Its preserved failure snapshot records a redacted last
 phase and assertions not reached. The document refers only to stable run identities and
 repository-relative artifacts: it excludes the private Project value, credentials, absolute paths,
-generated YAML, and raw command output.
+generated YAML, and raw command output. It also records the selected routine or preserve mode,
+each ordered cleanup or preservation transition, the final absent state, and resources retained
+intentionally. Routine cleanup persists an `attempting` transition before each action, then appends
+a success or preserved-failure transition after observing the result. If the
+result cannot be persisted, recovery treats the attempted action as ambiguous and revalidates it.
 
 Each host lifetime has separate relative log names: `host-1.stdout.log`, `host-1.stderr.log`,
-`host-2.stdout.log`, and `host-2.stderr.log`. On a restart mismatch, timeout, or ambiguous
-observation, the harness stops without another remote mutation and preserves the evidence,
-both host log pairs, run, worktree, branch, and pull request for diagnosis. Do not clean or repair
-those retained artifacts from the harness.
+`host-2.stdout.log`, and `host-2.stderr.log`. On a restart mismatch, timeout, ambiguous observation,
+or partial cleanup failure, the harness stops the child, makes every later destructive transition
+unreachable, and preserves the evidence plus every resource not already changed. A failed setup
+before dispatch rolls back only the freshly created issue and Project item after revalidating their
+stored node IDs and ownership. Any ambiguity stops that rollback too.
+
+For failure recovery, use the `run_directory` printed by the test as the scope for the
+deliberate cleanup procedure:
+
+1. For dispatch-and-later failures, read `evidence-v1.json`, the retained generated config, and both
+   host log pairs to find the last successful transition. Evidence supplies the issue number, pull
+   request, ref/SHA, and worktree; the local config supplies the private Project number. Evidence may
+   not exist before dispatch: for those setup failures, use the exact synthetic issue number printed
+   with the rollback result and the same configured Project value. Do not copy the config into
+   diagnostics or infer a target from a title, marker search, or broad branch pattern. Once the
+   pre-publication snapshot exists, preserved-failure evidence conservatively lists the generated ref
+   and pull request until fresh observations prove they are absent.
+2. Before any mutation, revalidate each stored identity against fresh GitHub and Git observations: issue and Project
+   item node ownership, pull-request number/URL/head/base/head SHA, generated full ref and SHA, and
+   the worktree path beneath that run's workspace root. Stop if any read is missing, duplicated, or
+   different.
+3. Continue only the uncompleted suffix of the routine order: close the exact pull request; set the
+   exact item to `Done`; confirm no live Ensemble claim; remove only the captured registered
+   worktree; close the exact issue; remove the exact Project item; then delete the exact ref only if
+   it still resolves to the captured SHA.
+4. Re-query every surface and retain the run directory, logs, and evidence as the cleanup record.
+
+This procedure is deliberately manual: preservation is safer than unattended mutation after a
+partial or ambiguous run.
 
 The harness writes `evidence-v1.json` by flushing a same-directory temporary file and atomically
 replacing the prior document. If a replacement fails, the prior document and temporary diagnostic

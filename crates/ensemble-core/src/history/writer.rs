@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 
 use super::model::HistoryRecord;
 
@@ -18,23 +18,99 @@ impl HistoryWriter {
         &self.path
     }
 
+    async fn sync_parent(&self) -> Result<(), std::io::Error> {
+        if let Some(parent) = self
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            File::open(parent).await?.sync_all().await?;
+        }
+        Ok(())
+    }
+
+    async fn repair_trailing_record(&self) -> Result<(), std::io::Error> {
+        let mut file = match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&self.path)
+            .await
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let len = file.metadata().await?.len();
+        if len == 0 {
+            return Ok(());
+        }
+
+        const TAIL_SCAN_CHUNK_BYTES: u64 = 8 * 1024;
+        let mut cursor = len;
+        let mut tail_start = 0;
+        while cursor > 0 {
+            let chunk_start = cursor.saturating_sub(TAIL_SCAN_CHUNK_BYTES);
+            let mut chunk = vec![0; (cursor - chunk_start) as usize];
+            file.seek(std::io::SeekFrom::Start(chunk_start)).await?;
+            file.read_exact(&mut chunk).await?;
+            if let Some(position) = chunk.iter().rposition(|byte| *byte == b'\n') {
+                tail_start = chunk_start + position as u64 + 1;
+                break;
+            }
+            cursor = chunk_start;
+        }
+        if tail_start == len {
+            return Ok(());
+        }
+
+        let mut tail = vec![0; (len - tail_start) as usize];
+        file.seek(std::io::SeekFrom::Start(tail_start)).await?;
+        file.read_exact(&mut tail).await?;
+        if serde_json::from_slice::<HistoryRecord>(&tail).is_ok() {
+            file.seek(std::io::SeekFrom::End(0)).await?;
+            file.write_all(b"\n").await?;
+        } else {
+            file.set_len(tail_start).await?;
+        }
+        file.flush().await?;
+        file.sync_data().await
+    }
+
     pub async fn append(&self, record: &HistoryRecord) -> Result<(), std::io::Error> {
+        self.repair_trailing_record().await?;
+        self.append_repaired(record).await
+    }
+
+    async fn append_repaired(&self, record: &HistoryRecord) -> Result<(), std::io::Error> {
         let mut line = serde_json::to_string(record)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
 
-        let mut file = OpenOptions::new()
-            .create(true)
+        let (mut file, created) = match OpenOptions::new()
+            .create_new(true)
             .append(true)
             .open(&self.path)
-            .await?;
+            .await
+        {
+            Ok(file) => (file, true),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (
+                OpenOptions::new().append(true).open(&self.path).await?,
+                false,
+            ),
+            Err(error) => return Err(error),
+        };
 
         file.write_all(line.as_bytes()).await?;
         file.flush().await?;
+        file.sync_data().await?;
+        if created {
+            self.sync_parent().await?;
+        }
         Ok(())
     }
 
     pub async fn append_if_absent(&self, record: &HistoryRecord) -> Result<(), std::io::Error> {
+        self.repair_trailing_record().await?;
         let file = match File::open(&self.path).await {
             Ok(file) => Some(file),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -46,12 +122,19 @@ impl HistoryWriter {
                 if serde_json::from_str::<HistoryRecord>(&line)
                     .is_ok_and(|existing| existing == *record)
                 {
+                    OpenOptions::new()
+                        .read(true)
+                        .open(&self.path)
+                        .await?
+                        .sync_data()
+                        .await?;
+                    self.sync_parent().await?;
                     return Ok(());
                 }
             }
         }
 
-        self.append(record).await
+        self.append_repaired(record).await
     }
 }
 
@@ -126,6 +209,30 @@ mod tests {
 
         let contents = tokio::fs::read_to_string(&path).await.unwrap();
         assert_eq!(contents.lines().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn append_if_absent_repairs_a_torn_trailing_record() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let first = sample_record();
+        let mut second = sample_record();
+        second.issue_identifier = "MT-649".into();
+        let contents = format!(
+            "{}\n{{\"issue_identifier\":",
+            serde_json::to_string(&first).unwrap()
+        );
+        tokio::fs::write(&path, contents).await.unwrap();
+        let writer = HistoryWriter::new(path.clone());
+
+        writer.append_if_absent(&second).await.unwrap();
+
+        let contents = tokio::fs::read_to_string(&path).await.unwrap();
+        let records = contents
+            .lines()
+            .map(|line| serde_json::from_str::<HistoryRecord>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(records, [first, second]);
     }
 
     #[tokio::test]

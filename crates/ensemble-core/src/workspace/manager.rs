@@ -6,7 +6,7 @@ use crate::observability::events_contract::{
 use crate::workspace::coordinator::{WorktreeCoordinator, WorktreeInfo};
 use crate::workspace::hooks::run_hook_best_effort;
 use crate::workspace::key::issue_workspace_key;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -22,6 +22,15 @@ struct WorkspaceMetadata {
     issue_id: String,
     issue_identifier: String,
     branch_date: String,
+    #[serde(default)]
+    repositories: BTreeMap<String, String>,
+    #[serde(default)]
+    before_remove_started: bool,
+}
+
+enum MetadataCreation {
+    Created(WorkspaceMetadata),
+    AlreadyExists,
 }
 
 /// Manage per-issue workspace directories.
@@ -33,6 +42,8 @@ pub struct WorkspaceManager {
     preparation_test_barriers: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
     #[cfg(test)]
     removal_test_barriers: Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>,
+    #[cfg(test)]
+    fail_metadata_directory_sync: bool,
 }
 
 /// Result of preparing a workspace for an issue.
@@ -81,8 +92,11 @@ impl WorkspaceManager {
             .filter(|r| !r.is_empty())
             .map(|repo_list| {
                 let mut repos_map = HashMap::new();
-                for (index, repo) in repo_list.into_iter().enumerate() {
+                for (index, mut repo) in repo_list.into_iter().enumerate() {
                     let name = repository_key(&repo, index);
+                    repo.path = super::canonicalize_allow_missing(Path::new(&repo.path))
+                        .to_string_lossy()
+                        .into_owned();
                     repos_map.insert(name, repo);
                 }
                 repos_map
@@ -97,6 +111,8 @@ impl WorkspaceManager {
             preparation_test_barriers: None,
             #[cfg(test)]
             removal_test_barriers: None,
+            #[cfg(test)]
+            fail_metadata_directory_sync: false,
         })
     }
 
@@ -120,8 +136,10 @@ impl WorkspaceManager {
         &self,
         issue_id: &str,
     ) -> Result<HashMap<String, PathBuf>, WorkspaceError> {
+        let metadata_path = self.metadata_path(issue_id);
         let metadata = self.load_metadata(issue_id)?;
-        Self::verify_ownership(&self.metadata_path(issue_id), &metadata, issue_id)?;
+        Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+        self.verify_repository_configuration(&metadata_path, &metadata)?;
         let coordinator = WorktreeCoordinator::new(
             self.repos.clone(),
             metadata.branch_date,
@@ -139,8 +157,13 @@ impl WorkspaceManager {
             .join(format!("{}.json", issue_workspace_key(issue_id)))
     }
 
+    #[cfg(test)]
+    pub(crate) fn metadata_path_for_test(&self, issue_id: &str) -> PathBuf {
+        self.metadata_path(issue_id)
+    }
+
     fn lifecycle_lock(&self, workspace_key: &str) -> Arc<WorkspaceLifecycleLock> {
-        let canonical_root = Self::canonicalize_allow_missing(&self.root);
+        let canonical_root = super::canonicalize_allow_missing(&self.root);
         let path = canonical_root.join(workspace_key);
         let mut locks = WORKSPACE_LIFECYCLE_LOCKS
             .get_or_init(|| Mutex::new(HashMap::new()))
@@ -188,17 +211,8 @@ impl WorkspaceManager {
         })
     }
 
-    fn serialize_metadata(
-        issue_id: &str,
-        identifier: &str,
-        date: &str,
-    ) -> Result<Vec<u8>, WorkspaceError> {
-        serde_json::to_vec(&WorkspaceMetadata {
-            issue_id: issue_id.to_string(),
-            issue_identifier: identifier.to_string(),
-            branch_date: date.to_string(),
-        })
-        .map_err(|error| WorkspaceError::CreationFailed {
+    fn serialize_metadata(metadata: &WorkspaceMetadata) -> Result<Vec<u8>, WorkspaceError> {
+        serde_json::to_vec(metadata).map_err(|error| WorkspaceError::CreationFailed {
             reason: format!("failed to serialize workspace metadata: {error}"),
         })
     }
@@ -221,40 +235,77 @@ impl WorkspaceManager {
         Ok(file)
     }
 
+    #[cfg(unix)]
+    fn sync_metadata_directory(&self) -> Result<(), WorkspaceError> {
+        #[cfg(test)]
+        if self.fail_metadata_directory_sync {
+            return Err(WorkspaceError::CreationFailed {
+                reason: "injected workspace metadata directory sync failure".to_string(),
+            });
+        }
+        std::fs::File::open(self.metadata_dir())
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| WorkspaceError::CreationFailed {
+                reason: format!("failed to flush workspace metadata directory: {error}"),
+            })
+    }
+
+    #[cfg(not(unix))]
+    fn sync_metadata_directory(&self) -> Result<(), WorkspaceError> {
+        #[cfg(test)]
+        if self.fail_metadata_directory_sync {
+            return Err(WorkspaceError::CreationFailed {
+                reason: "injected workspace metadata directory sync failure".to_string(),
+            });
+        }
+        Ok(())
+    }
+
     fn create_metadata(
         &self,
         issue_id: &str,
         identifier: &str,
         date: &str,
-    ) -> Result<(), WorkspaceError> {
+    ) -> Result<MetadataCreation, WorkspaceError> {
         let metadata_dir = self.metadata_dir();
         std::fs::create_dir_all(&metadata_dir).map_err(|error| WorkspaceError::CreationFailed {
             reason: format!("failed to create workspace metadata directory: {error}"),
         })?;
         self.validate_path_inside_root(&metadata_dir)?;
 
-        let content = Self::serialize_metadata(issue_id, identifier, date)?;
-        self.write_metadata_temp(&content)?
+        let metadata = WorkspaceMetadata {
+            issue_id: issue_id.to_string(),
+            issue_identifier: identifier.to_string(),
+            branch_date: date.to_string(),
+            repositories: self.repository_identities(),
+            before_remove_started: false,
+        };
+        let content = Self::serialize_metadata(&metadata)?;
+        match self
+            .write_metadata_temp(&content)?
             .persist_noclobber(self.metadata_path(issue_id))
-            .map_err(|error| WorkspaceError::CreationFailed {
+        {
+            Ok(_) => {
+                self.sync_metadata_directory()?;
+                Ok(MetadataCreation::Created(metadata))
+            }
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Ok(MetadataCreation::AlreadyExists)
+            }
+            Err(error) => Err(WorkspaceError::CreationFailed {
                 reason: format!("failed to create workspace metadata: {}", error.error),
-            })?;
-        Ok(())
+            }),
+        }
     }
 
-    fn refresh_metadata(
-        &self,
-        issue_id: &str,
-        identifier: &str,
-        date: &str,
-    ) -> Result<(), WorkspaceError> {
-        let content = Self::serialize_metadata(issue_id, identifier, date)?;
+    fn refresh_metadata(&self, metadata: &WorkspaceMetadata) -> Result<(), WorkspaceError> {
+        let content = Self::serialize_metadata(metadata)?;
         self.write_metadata_temp(&content)?
-            .persist(self.metadata_path(issue_id))
+            .persist(self.metadata_path(&metadata.issue_id))
             .map_err(|error| WorkspaceError::CreationFailed {
                 reason: format!("failed to refresh workspace metadata: {}", error.error),
             })?;
-        Ok(())
+        self.sync_metadata_directory()
     }
 
     fn verify_ownership(
@@ -270,6 +321,47 @@ impl WorkspaceManager {
             expected_issue_id: issue_id.to_string(),
             actual_issue_id: metadata.issue_id.clone(),
         })
+    }
+
+    fn repository_identities(&self) -> BTreeMap<String, String> {
+        self.repos
+            .iter()
+            .map(|(key, repo)| (key.clone(), repo.path.clone()))
+            .collect()
+    }
+
+    fn verify_repository_configuration(
+        &self,
+        metadata_path: &Path,
+        metadata: &WorkspaceMetadata,
+    ) -> Result<(), WorkspaceError> {
+        let expected_repositories = Self::canonical_repository_identities(&metadata.repositories);
+        let actual_repositories =
+            Self::canonical_repository_identities(&self.repository_identities());
+        if expected_repositories == actual_repositories {
+            return Ok(());
+        }
+        Err(WorkspaceError::RepositoryConfigurationMismatch {
+            path: metadata_path.display().to_string(),
+            expected_repositories,
+            actual_repositories,
+        })
+    }
+
+    fn canonical_repository_identities(
+        repositories: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
+        repositories
+            .iter()
+            .map(|(key, path)| {
+                (
+                    key.clone(),
+                    super::canonicalize_allow_missing(Path::new(path))
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect()
     }
 
     /// Prepare (create or reuse) a workspace for the given immutable issue identity.
@@ -306,10 +398,12 @@ impl WorkspaceManager {
                 });
             }
             let mut metadata = self.load_metadata(issue_id)?;
-            Self::verify_ownership(&self.metadata_path(issue_id), &metadata, issue_id)?;
+            let metadata_path = self.metadata_path(issue_id);
+            Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+            self.verify_repository_configuration(&metadata_path, &metadata)?;
             if metadata.issue_identifier != identifier {
-                self.refresh_metadata(issue_id, identifier, &metadata.branch_date)?;
                 metadata.issue_identifier = identifier.to_string();
+                self.refresh_metadata(&metadata)?;
             }
             (false, metadata)
         } else {
@@ -321,12 +415,8 @@ impl WorkspaceManager {
             })?;
             let branch_date = chrono::Local::now().format("%Y-%m-%d").to_string();
             let metadata = match self.create_metadata(issue_id, identifier, &branch_date) {
-                Ok(()) => WorkspaceMetadata {
-                    issue_id: issue_id.to_string(),
-                    issue_identifier: identifier.to_string(),
-                    branch_date,
-                },
-                Err(create_error) => match self.load_metadata(issue_id) {
+                Ok(MetadataCreation::Created(metadata)) => metadata,
+                Ok(MetadataCreation::AlreadyExists) => match self.load_metadata(issue_id) {
                     Ok(mut existing) => {
                         if let Err(error) = Self::verify_ownership(
                             &self.metadata_path(issue_id),
@@ -336,27 +426,31 @@ impl WorkspaceManager {
                             let _ = std::fs::remove_dir(&base_path);
                             return Err(error);
                         }
+                        if let Err(error) = self.verify_repository_configuration(
+                            &self.metadata_path(issue_id),
+                            &existing,
+                        ) {
+                            let _ = std::fs::remove_dir(&base_path);
+                            return Err(error);
+                        }
                         if existing.issue_identifier != identifier {
-                            if let Err(error) =
-                                self.refresh_metadata(issue_id, identifier, &existing.branch_date)
-                            {
+                            existing.issue_identifier = identifier.to_string();
+                            if let Err(error) = self.refresh_metadata(&existing) {
                                 let _ = std::fs::remove_dir(&base_path);
                                 return Err(error);
                             }
-                            existing.issue_identifier = identifier.to_string();
                         }
                         existing
                     }
                     Err(load_error) => {
-                        let metadata_exists = self.metadata_path(issue_id).exists();
                         let _ = std::fs::remove_dir(&base_path);
-                        return Err(if metadata_exists {
-                            load_error
-                        } else {
-                            create_error
-                        });
+                        return Err(load_error);
                     }
                 },
+                Err(create_error) => {
+                    let _ = std::fs::remove_dir(&base_path);
+                    return Err(create_error);
+                }
             };
             if !base_path.is_dir() {
                 if let Err(cleanup_error) = std::fs::remove_dir_all(&base_path) {
@@ -434,6 +528,17 @@ impl WorkspaceManager {
             }
             let metadata = self.load_metadata(issue_id)?;
             Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+            self.verify_repository_configuration(&metadata_path, &metadata)?;
+            if !self.repos.is_empty() {
+                let coordinator =
+                    WorktreeCoordinator::new(self.repos.clone(), metadata.branch_date, base_path);
+                coordinator
+                    .cleanup_worktrees(issue_id)
+                    .await
+                    .map_err(|error| WorkspaceError::CreationFailed {
+                        reason: format!("worktree cleanup failed: {error}"),
+                    })?;
+            }
             std::fs::remove_file(&metadata_path).map_err(|error| {
                 WorkspaceError::CreationFailed {
                     reason: format!("failed to remove workspace metadata: {error}"),
@@ -442,15 +547,23 @@ impl WorkspaceManager {
             return Ok(());
         }
         let metadata_path = self.metadata_path(issue_id);
-        let metadata = self.load_metadata(issue_id)?;
+        let mut metadata = self.load_metadata(issue_id)?;
         Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
+        self.verify_repository_configuration(&metadata_path, &metadata)?;
         #[cfg(test)]
         if let Some((after_verification, resume_removal)) = &self.removal_test_barriers {
             after_verification.wait().await;
             resume_removal.wait().await;
         }
 
-        if let Some(script) = &self.hooks.before_remove {
+        if let Some(script) = self
+            .hooks
+            .before_remove
+            .as_ref()
+            .filter(|_| !metadata.before_remove_started)
+        {
+            metadata.before_remove_started = true;
+            self.refresh_metadata(&metadata)?;
             run_hook_best_effort("before_remove", script, &base_path, self.hooks.timeout_ms).await;
         }
 
@@ -490,8 +603,8 @@ impl WorkspaceManager {
     /// When `path` does not yet exist (pre-creation), its nearest existing ancestor
     /// is canonicalized and the missing components are re-appended.
     fn validate_path_inside_root(&self, path: &Path) -> Result<(), WorkspaceError> {
-        let canonical_root = Self::canonicalize_allow_missing(&self.root);
-        let canonical_path = Self::canonicalize_allow_missing(path);
+        let canonical_root = super::canonicalize_allow_missing(&self.root);
+        let canonical_path = super::canonicalize_allow_missing(path);
 
         if !canonical_path.starts_with(&canonical_root) {
             return Err(WorkspaceError::PathOutsideRoot {
@@ -499,26 +612,6 @@ impl WorkspaceManager {
             });
         }
         Ok(())
-    }
-
-    fn canonicalize_allow_missing(path: &Path) -> PathBuf {
-        let mut existing = path;
-        let mut missing = Vec::new();
-        while !existing.exists() {
-            let (Some(parent), Some(file_name)) = (existing.parent(), existing.file_name()) else {
-                return path.to_path_buf();
-            };
-            missing.push(file_name.to_os_string());
-            existing = parent;
-        }
-
-        let mut canonical = existing
-            .canonicalize()
-            .unwrap_or_else(|_| existing.to_path_buf());
-        for component in missing.into_iter().rev() {
-            canonical.push(component);
-        }
-        canonical
     }
 }
 
@@ -619,6 +712,25 @@ mod tests {
                 .into_iter()
                 .map(|(name, worktree)| (name, worktree.path))
                 .collect()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_key_uses_the_configured_symlink_name() {
+        let root = TempDir::new().unwrap();
+        let aliases = TempDir::new().unwrap();
+        let (repo, mut config) = setup_repo("actual");
+        let alias = aliases.path().join("configured-alias");
+        std::os::unix::fs::symlink(repo.path(), &alias).unwrap();
+        config.path = alias.to_string_lossy().into_owned();
+
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![config])).unwrap();
+
+        let configured = mgr.repos().get("configured-alias").unwrap();
+        assert_eq!(
+            Path::new(&configured.path),
+            repo.path().canonicalize().unwrap()
         );
     }
 
@@ -825,6 +937,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_ownership_directory_sync_failure_does_not_adopt_visible_sidecar() {
+        let (_dir, mut mgr) = setup();
+        mgr.fail_metadata_directory_sync = true;
+
+        let error = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, WorkspaceError::CreationFailed { .. }));
+        assert!(mgr.metadata_path("NODE_42").exists());
+        assert!(!mgr.workspace_path("NODE_42").exists());
+    }
+
+    #[tokio::test]
     async fn workspace_ownership_corrupt_leftover_sidecar_fails_closed() {
         let (_dir, mgr) = setup();
         let metadata_path = mgr.metadata_path("NODE_42");
@@ -870,6 +997,77 @@ mod tests {
         mgr.remove_workspace("NODE_42").await.unwrap();
 
         assert!(!metadata_path.exists());
+    }
+
+    #[tokio::test]
+    async fn workspace_ownership_absent_workspace_cleans_git_registration_and_branch() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let repo_path = repo.path.clone();
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+        let workspace = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let worktree = workspace.worktrees.values().next().unwrap();
+        let worktree_path = worktree.path.to_string_lossy().into_owned();
+        let branch = worktree.branch.clone();
+        std::fs::remove_dir_all(&workspace.base_path).unwrap();
+
+        assert!(
+            crate::workspace::worktree::worktree_exists(&repo_path, &worktree_path)
+                .await
+                .unwrap()
+        );
+        mgr.remove_workspace("NODE_42").await.unwrap();
+
+        assert!(
+            !crate::workspace::worktree::worktree_exists(&repo_path, &worktree_path)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !crate::workspace::worktree::branch_exists(&repo_path, &branch)
+                .await
+                .unwrap()
+        );
+        assert!(!mgr.metadata_path("NODE_42").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn workspace_ownership_fails_closed_when_an_equivalent_path_changes_the_key() {
+        use std::os::unix::fs::symlink;
+
+        let root = TempDir::new().unwrap();
+        let (repo_dir, repo) = setup_repo("repo1");
+        let alias_parent = TempDir::new().unwrap();
+        let alias = alias_parent.path().join("repository-alias");
+        symlink(repo_dir.path(), &alias).unwrap();
+
+        let first_mgr = WorkspaceManager::new(root.path(), Some(vec![repo.clone()])).unwrap();
+        let first = first_mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        let alias_repo = RepoConfig {
+            path: alias.to_string_lossy().into_owned(),
+            ..repo
+        };
+        let alias_mgr = WorkspaceManager::new(root.path(), Some(vec![alias_repo])).unwrap();
+
+        let error = alias_mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            WorkspaceError::RepositoryConfigurationMismatch { .. }
+        ));
+        assert!(first.base_path.exists());
+        first_mgr.remove_workspace("NODE_42").await.unwrap();
+        assert!(!first.base_path.exists());
     }
 
     #[cfg(unix)]
@@ -1255,16 +1453,22 @@ mod tests {
         assert!(test_path.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn test_remove_workspace_blocks_on_cleanup_failure() {
         let dir = TempDir::new().unwrap();
+        let marker = dir.path().join("before-remove-runs");
         let repos = vec![RepoConfig {
             path: "/nonexistent/path".to_string(),
             branch: "main".to_string(),
             git_remote: "origin".to_string(),
             finalize: Default::default(),
         }];
-        let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
+        let hooks = HooksConfig {
+            before_remove: Some("echo ran >> ../before-remove-runs".to_string()),
+            ..Default::default()
+        };
+        let mgr = WorkspaceManager::new_with_hooks(dir.path(), Some(repos), hooks).unwrap();
 
         let ws_path = mgr.workspace_path("NODE_CLEANUP");
         std::fs::create_dir_all(&ws_path).unwrap();
@@ -1273,11 +1477,41 @@ mod tests {
 
         let remove_result = mgr.remove_workspace("NODE_CLEANUP").await;
         assert!(remove_result.is_err());
+        let retry_result = mgr.remove_workspace("NODE_CLEANUP").await;
+        assert!(retry_result.is_err());
 
         assert!(
             ws_path.exists(),
             "workspace should not be deleted when cleanup fails"
         );
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "ran\n");
+        assert!(
+            mgr.load_metadata("NODE_CLEANUP")
+                .unwrap()
+                .before_remove_started
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_fails_closed_when_repository_configuration_changes() {
+        let root = TempDir::new().unwrap();
+        let (_repo_dir, repo) = setup_repo("repo1");
+        let original_manager = WorkspaceManager::new(root.path(), Some(vec![repo])).unwrap();
+        let workspace = original_manager
+            .prepare_workspace("NODE_CONFIG_DRIFT", "repo#42")
+            .await
+            .unwrap();
+        let metadata_path = original_manager.metadata_path("NODE_CONFIG_DRIFT");
+
+        let changed_manager = WorkspaceManager::new(root.path(), None).unwrap();
+        let result = changed_manager.remove_workspace("NODE_CONFIG_DRIFT").await;
+
+        assert!(matches!(
+            result,
+            Err(WorkspaceError::RepositoryConfigurationMismatch { .. })
+        ));
+        assert!(workspace.base_path.exists());
+        assert!(metadata_path.exists());
     }
 
     #[tokio::test]

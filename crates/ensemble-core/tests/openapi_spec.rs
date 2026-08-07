@@ -76,6 +76,26 @@ fn openapi_documents_every_supported_ui_http_operation() {
 }
 
 #[test]
+fn openapi_documents_finalize_operational_errors() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+    for path in [
+        "/api/v1/{identifier}/finalize/approve",
+        "/api/v1/{identifier}/finalize/retry",
+    ] {
+        for status in ["500", "503"] {
+            assert_eq!(
+                spec["paths"][path]["post"]["responses"][status]["content"]["application/json"]
+                    ["schema"]["$ref"],
+                "#/components/schemas/ApiError",
+                "OpenAPI must document {status} ApiError for POST {path}",
+            );
+        }
+    }
+}
+
+#[test]
 fn openapi_keeps_editor_step_dependencies_optional() {
     let spec: serde_json::Value =
         serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();

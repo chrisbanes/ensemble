@@ -6,8 +6,10 @@ pub mod scheduler;
 pub mod state;
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
+use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -87,9 +89,9 @@ use reconciler::{
     startup_terminal_cleanup, ReconcileAction,
 };
 use retry::{
-    current_time_ms, defer_retry, get_due_retries, next_attempt, queue_manual_step_retry,
-    queue_manual_whole_issue_retry, schedule_failure_retry, FailureRetryDisposition,
-    FailureRetryRequest, ManualStepRetryError, ManualStepRetryRequest,
+    calculate_backoff, current_time_ms, defer_retry, get_due_retries, next_attempt,
+    queue_manual_step_retry, queue_manual_whole_issue_retry, schedule_failure_retry,
+    FailureRetryDisposition, FailureRetryRequest, ManualStepRetryError, ManualStepRetryRequest,
     ManualWholeIssueRetryRequest,
 };
 use scheduler::{
@@ -171,6 +173,22 @@ impl Drop for PendingWorkerReservation {
 
 const INTERACTION_RESUME_REASON_PREFIX: &str = "interaction_resume:";
 
+fn terminal_transition_retry_due(
+    transition: &PendingTerminalTransition,
+    max_backoff_ms: u64,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    let Some(last_attempted_at) = transition.last_attempted_at else {
+        return true;
+    };
+    let elapsed_ms = now
+        .signed_duration_since(last_attempted_at)
+        .num_milliseconds();
+    let delay_ms =
+        i64::try_from(calculate_backoff(transition.attempt, max_backoff_ms)).unwrap_or(i64::MAX);
+    elapsed_ms >= delay_ms
+}
+
 fn interaction_id_from_resume_reason(reason: Option<&str>) -> Option<&str> {
     reason?.strip_prefix(INTERACTION_RESUME_REASON_PREFIX)
 }
@@ -221,6 +239,32 @@ pub(crate) struct ManualWholeIssueRetryCommand {
     pub identifier: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizeApprovalCommand {
+    pub issue_id: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FinalizeApprovalError {
+    RuntimeUnavailable,
+    NotAwaitingApproval,
+    Persistence(String),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizeRetryCommand {
+    pub issue_id: String,
+    pub identifier: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FinalizeRetryError {
+    RuntimeUnavailable,
+    NotFailed,
+    Persistence(String),
+}
+
 pub(crate) enum OrchestratorCommand {
     QueueManualStepRetry {
         command: ManualStepRetryCommand,
@@ -229,6 +273,14 @@ pub(crate) enum OrchestratorCommand {
     QueueManualWholeIssueRetry {
         command: ManualWholeIssueRetryCommand,
         response: tokio::sync::oneshot::Sender<Result<(), ManualStepRetryError>>,
+    },
+    ApproveFinalize {
+        command: FinalizeApprovalCommand,
+        response: tokio::sync::oneshot::Sender<Result<bool, FinalizeApprovalError>>,
+    },
+    RetryFinalize {
+        command: FinalizeRetryCommand,
+        response: tokio::sync::oneshot::Sender<Result<(), FinalizeRetryError>>,
     },
 }
 
@@ -689,6 +741,26 @@ impl Orchestrator {
                 .await;
                 let _ = response.send(result);
             }
+            OrchestratorCommand::ApproveFinalize { command, response } => {
+                if self.quiescing.is_requested() {
+                    let _ = response.send(Err(FinalizeApprovalError::RuntimeUnavailable));
+                    return;
+                }
+                let result = self
+                    .approve_finalize_delivery(&command.issue_id, &command.identifier)
+                    .await;
+                let _ = response.send(result);
+            }
+            OrchestratorCommand::RetryFinalize { command, response } => {
+                if self.quiescing.is_requested() {
+                    let _ = response.send(Err(FinalizeRetryError::RuntimeUnavailable));
+                    return;
+                }
+                let result = self
+                    .retry_finalize_delivery(&command.issue_id, &command.identifier)
+                    .await;
+                let _ = response.send(result);
+            }
         }
     }
 
@@ -743,7 +815,8 @@ impl Orchestrator {
 
         // Immediate first tick
         if !self.quiescing.is_requested() {
-            self.handle_tick().await;
+            // Keep the large tick state machine out of the long-lived orchestrator future.
+            Box::pin(self.handle_tick()).await;
         }
 
         // Main event loop
@@ -784,7 +857,7 @@ impl Orchestrator {
                 _ = sleep(poll_interval) => {
                     if !self.quiescing.is_requested() {
                         debug!("poll tick");
-                        self.handle_tick().await;
+                        Box::pin(self.handle_tick()).await;
                     }
                 }
 
@@ -792,7 +865,7 @@ impl Orchestrator {
                 _ = self.refresh_requested.notified() => {
                     if !self.quiescing.is_requested() {
                         debug!("manual refresh tick");
-                        self.handle_tick().await;
+                        Box::pin(self.handle_tick()).await;
                     }
                 }
 
@@ -868,7 +941,10 @@ impl Orchestrator {
         self.reconcile_pending_terminal_transitions().await;
         self.hydrate_waiting_on_human_from_store().await;
         self.process_interaction_thread_commands().await;
-        self.process_delivery_recovery().await;
+        let has_delivery = !self.state.read().await.delivery.is_empty();
+        if has_delivery {
+            Box::pin(self.reconcile_and_recover_deliveries()).await;
+        }
         self.process_finalize_retries().await;
 
         // Pre-compute lowercase state lists once per tick
@@ -5873,13 +5949,14 @@ impl Orchestrator {
         .await;
     }
 
-    async fn persist_terminal_transition_intent(
+    async fn persist_terminal_transition(
         &self,
         issue_id: &str,
         identifier: &str,
         outcome: TerminalOutcome,
         target_state: String,
         history_record: Option<HistoryRecord>,
+        tracker_write_confirmed: bool,
     ) -> Option<PendingTerminalTransition> {
         let existing_record = self
             .pipeline_journal
@@ -5940,8 +6017,15 @@ impl Orchestrator {
         if history_record.is_some() {
             transition.history_record = history_record;
         }
+        if tracker_write_confirmed {
+            transition.confirm_tracker_write();
+        }
         let input = PipelineTransitionInput {
-            kind: PipelineTransitionKind::PendingTerminalTransition,
+            kind: if transition.tracker_write_confirmed {
+                PipelineTransitionKind::TerminalTransitionApplied
+            } else {
+                PipelineTransitionKind::PendingTerminalTransition
+            },
             issue_id: issue_id.to_string(),
             identifier: identifier.to_string(),
             run_id,
@@ -5960,7 +6044,7 @@ impl Orchestrator {
                 error = %error,
                 "failed to persist terminal transition intent"
             );
-            return Some(transition);
+            return (!tracker_write_confirmed).then_some(transition);
         }
         Some(transition)
     }
@@ -5975,18 +6059,57 @@ impl Orchestrator {
         history_record: Option<HistoryRecord>,
     ) {
         let Some(transition) = self
-            .persist_terminal_transition_intent(
+            .persist_terminal_transition(
                 issue_id,
                 identifier,
                 outcome,
                 target_state,
                 history_record,
+                false,
             )
             .await
         else {
             return;
         };
 
+        self.begin_persisted_terminal_transition(issue_id, identifier, issue, transition)
+            .await;
+    }
+
+    async fn begin_confirmed_terminal_transition_for_identity(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        issue: Option<Issue>,
+        outcome: TerminalOutcome,
+        target_state: String,
+        history_record: Option<HistoryRecord>,
+    ) {
+        let Some(transition) = self
+            .persist_terminal_transition(
+                issue_id,
+                identifier,
+                outcome,
+                target_state,
+                history_record,
+                true,
+            )
+            .await
+        else {
+            return;
+        };
+
+        self.begin_persisted_terminal_transition(issue_id, identifier, issue, transition)
+            .await;
+    }
+
+    async fn begin_persisted_terminal_transition(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        issue: Option<Issue>,
+        transition: PendingTerminalTransition,
+    ) {
         let issue = Some(issue.unwrap_or_else(|| {
             Self::terminal_issue_placeholder(issue_id, identifier, &transition.target_state)
         }));
@@ -6087,6 +6210,10 @@ impl Orchestrator {
         };
 
         if pending.transition.tracker_write_confirmed {
+            let max_backoff_ms = self.config.read().await.agent.max_retry_backoff_ms;
+            if !terminal_transition_retry_due(&pending.transition, max_backoff_ms, Utc::now()) {
+                return;
+            }
             self.complete_pending_terminal_transition(issue_id, pending.run_id)
                 .await;
             return;
@@ -6117,38 +6244,12 @@ impl Orchestrator {
                     .await;
             }
             Err(error) => {
-                let refreshed_input = {
-                    let mut state = self.state.write().await;
-                    let Some(current) = state.pending_terminal_transitions.get_mut(issue_id) else {
-                        return;
-                    };
-                    if current.run_id != pending.run_id
-                        || current.transition.target_state != pending.transition.target_state
-                        || current.transition.outcome != pending.transition.outcome
-                    {
-                        return;
-                    }
-                    current.transition.attempt = current.transition.attempt.saturating_add(1);
-                    current.transition.last_error = Some(error.to_string());
-                    current.transition.last_attempted_at = Some(Utc::now());
-                    let current = current.clone();
-                    Self::pending_terminal_transition_input(
-                        &state,
-                        issue_id,
-                        &current,
-                        PipelineTransitionKind::PendingTerminalTransition,
-                    )
-                };
-
-                if let Some(input) = refreshed_input {
-                    if let Err(journal_error) = self.pipeline_journal.append(input).await {
-                        warn!(
-                            issue_id = %issue_id,
-                            error = %journal_error,
-                            "failed to refresh pending terminal transition retry metadata"
-                        );
-                    }
-                }
+                self.record_pending_terminal_transition_failure(
+                    issue_id,
+                    &pending,
+                    error.to_string(),
+                )
+                .await;
                 warn!(
                     issue_id = %issue_id,
                     target_state = %pending.transition.target_state,
@@ -6177,7 +6278,7 @@ impl Orchestrator {
             }
 
             let mut confirmed = current.clone();
-            confirmed.transition.tracker_write_confirmed = true;
+            confirmed.transition.confirm_tracker_write();
             let Some(input) = Self::pending_terminal_transition_input(
                 &state,
                 issue_id,
@@ -6209,100 +6310,173 @@ impl Orchestrator {
             {
                 return;
             }
-            current.transition.tracker_write_confirmed = true;
+            current.transition.confirm_tracker_write();
         }
 
         self.complete_pending_terminal_transition(issue_id, expected.run_id.clone())
             .await;
     }
 
-    async fn complete_pending_terminal_transition(
-        &self,
-        issue_id: &str,
+    // Box this lifecycle boundary so the already-large tick future does not embed workspace
+    // cleanup's state machine and overflow Tokio's worker stack on terminal failure paths.
+    fn complete_pending_terminal_transition<'a>(
+        &'a self,
+        issue_id: &'a str,
         expected_run_id: Option<String>,
-    ) {
-        let pending = {
-            let state = self.state.read().await;
-            let Some(pending) = state.pending_terminal_transitions.get(issue_id).cloned() else {
-                return;
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let pending = {
+                let state = self.state.read().await;
+                let Some(pending) = state.pending_terminal_transitions.get(issue_id).cloned()
+                else {
+                    return;
+                };
+                if pending.run_id != expected_run_id {
+                    return;
+                }
+                if !pending.transition.tracker_write_confirmed {
+                    return;
+                }
+                pending
             };
-            if pending.run_id != expected_run_id {
-                return;
-            }
-            if !pending.transition.tracker_write_confirmed {
-                return;
-            }
-            pending
-        };
 
-        if let Err(error) = self
-            .clear_terminal_interaction_waiting_state(issue_id)
-            .await
-        {
-            warn!(
-                issue_id = %issue_id,
-                error = %error,
-                "failed to clear terminal interaction waiting state"
-            );
-            return;
-        }
-
-        if let Some(record) = pending.transition.history_record.as_ref() {
             if let Err(error) = self
-                .persist_history_record(pending.run_id.as_deref(), record)
+                .clear_terminal_interaction_waiting_state(issue_id)
+                .await
+            {
+                self.record_pending_terminal_transition_failure(
+                    issue_id,
+                    &pending,
+                    error.to_string(),
+                )
+                .await;
+                warn!(
+                    issue_id = %issue_id,
+                    error = %error,
+                    "failed to clear terminal interaction waiting state"
+                );
+                return;
+            }
+
+            if let Some(record) = pending.transition.history_record.as_ref() {
+                if let Err(error) = self
+                    .persist_history_record(pending.run_id.as_deref(), record)
+                    .await
+                {
+                    self.record_pending_terminal_transition_failure(
+                        issue_id,
+                        &pending,
+                        error.to_string(),
+                    )
+                    .await;
+                    warn!(
+                        issue_id = %issue_id,
+                        error = %error,
+                        "failed to persist terminal run history before release"
+                    );
+                    return;
+                }
+            }
+
+            if let Err(error) = self.workspace_mgr.remove_workspace(issue_id).await {
+                self.record_pending_terminal_transition_failure(
+                    issue_id,
+                    &pending,
+                    error.to_string(),
+                )
+                .await;
+                warn!(
+                    issue_id = %issue_id,
+                    identifier = %pending.identifier,
+                    error = %error,
+                    "failed to clean terminal workspace before release"
+                );
+                return;
+            }
+
+            if let Err(error) = self
+                .pipeline_journal
+                .append_released(
+                    issue_id,
+                    &pending.identifier,
+                    pending.run_id.clone(),
+                    "terminal tracker transition reconciled",
+                )
                 .await
             {
                 warn!(
                     issue_id = %issue_id,
                     error = %error,
-                    "failed to persist terminal run history before release"
+                    "failed to persist pipeline release after terminal tracker transition"
                 );
                 return;
             }
-        }
 
-        if let Err(error) = self
-            .pipeline_journal
-            .append_released(
-                issue_id,
-                &pending.identifier,
-                pending.run_id.clone(),
-                "terminal tracker transition reconciled",
-            )
-            .await
-        {
-            warn!(
-                issue_id = %issue_id,
-                error = %error,
-                "failed to persist pipeline release after terminal tracker transition"
-            );
-            return;
-        }
+            {
+                let mut state = self.state.write().await;
+                let Some(current) = state.pending_terminal_transitions.get(issue_id) else {
+                    return;
+                };
+                if current.run_id != pending.run_id
+                    || current.transition.target_state != pending.transition.target_state
+                    || current.transition.outcome != pending.transition.outcome
+                {
+                    return;
+                }
 
-        {
+                let status = match pending.transition.outcome {
+                    TerminalOutcome::Succeeded => "completed_succeeded",
+                    TerminalOutcome::Failed => "completed_failed",
+                };
+                state.add_completed(
+                    issue_id.to_string(),
+                    pending.identifier.clone(),
+                    status.to_string(),
+                );
+                state.release_claim(issue_id);
+                state.remove_pipeline_run(issue_id);
+                state.clear_finalize_state(issue_id);
+            }
+        })
+    }
+
+    async fn record_pending_terminal_transition_failure(
+        &self,
+        issue_id: &str,
+        expected: &PendingTerminalEntry,
+        error: String,
+    ) {
+        let refreshed_input = {
             let mut state = self.state.write().await;
-            let Some(current) = state.pending_terminal_transitions.get(issue_id) else {
+            let Some(current) = state.pending_terminal_transitions.get_mut(issue_id) else {
                 return;
             };
-            if current.run_id != pending.run_id
-                || current.transition.target_state != pending.transition.target_state
-                || current.transition.outcome != pending.transition.outcome
+            if current.run_id != expected.run_id
+                || current.transition.target_state != expected.transition.target_state
+                || current.transition.outcome != expected.transition.outcome
             {
                 return;
             }
+            current.transition.attempt = current.transition.attempt.saturating_add(1);
+            current.transition.last_error = Some(error);
+            current.transition.last_attempted_at = Some(Utc::now());
+            let current = current.clone();
+            Self::pending_terminal_transition_input(
+                &state,
+                issue_id,
+                &current,
+                PipelineTransitionKind::PendingTerminalTransition,
+            )
+        };
 
-            let status = match pending.transition.outcome {
-                TerminalOutcome::Succeeded => "completed_succeeded",
-                TerminalOutcome::Failed => "completed_failed",
-            };
-            state.add_completed(
-                issue_id.to_string(),
-                pending.identifier.clone(),
-                status.to_string(),
-            );
-            state.release_claim(issue_id);
-            state.remove_pipeline_run(issue_id);
-            state.clear_finalize_state(issue_id);
+        if let Some(input) = refreshed_input {
+            if let Err(journal_error) = self.pipeline_journal.append(input).await {
+                warn!(
+                    issue_id = %issue_id,
+                    error = %journal_error,
+                    "failed to refresh pending terminal transition retry metadata"
+                );
+            }
         }
     }
 
@@ -6494,48 +6668,26 @@ impl Orchestrator {
 
         let history_record = {
             let state = self.state.read().await;
-            state.get_pipeline_run(issue_id).and_then(|run| {
-                state
-                    .running
-                    .get(issue_id)
-                    .map(|entry| {
-                        self.build_history_record(RunningHistoryRecordInput {
-                            outcome: match outcome {
-                                TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
-                                TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
-                            },
-                            last_error: last_error.clone(),
-                            running_entry: entry,
-                            run,
-                            completed_at,
-                            artifacts: state.artifacts.get(issue_id).cloned(),
-                        })
-                    })
-                    .or_else(|| {
-                        state.waiting_on_human.get(issue_id).map(|entry| {
-                            self.build_history_record_from_waiting(WaitingHistoryRecordInput {
-                                outcome: match outcome {
-                                    TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
-                                    TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
-                                },
-                                last_error: last_error.clone(),
-                                waiting_entry: entry,
-                                run,
-                                completed_at,
-                                artifacts: state.artifacts.get(issue_id).cloned(),
-                            })
-                        })
-                    })
-            })
+            self.build_owned_history_record(
+                &state,
+                issue_id,
+                match outcome {
+                    TerminalOutcome::Succeeded => HISTORY_OUTCOME_SUCCEEDED,
+                    TerminalOutcome::Failed => HISTORY_OUTCOME_FAILED,
+                },
+                last_error,
+                completed_at,
+            )
         };
 
         let _ = self
-            .persist_terminal_transition_intent(
+            .persist_terminal_transition(
                 issue_id,
                 issue_identifier,
                 outcome,
                 target_state,
                 history_record,
+                false,
             )
             .await;
     }
@@ -6592,12 +6744,8 @@ impl Orchestrator {
 
             let mode_name = finalize_mode_name(&repo_config.finalize.mode).to_string();
 
-            if repo_config.finalize.approval_required {
-                let status = if headless {
-                    FinalizeStatus::SkippedHeadless
-                } else {
-                    FinalizeStatus::PendingApproval
-                };
+            if repo_config.finalize.approval_required && headless {
+                let status = FinalizeStatus::SkippedHeadless;
                 repos.push(RepoFinalizeState {
                     repo: repo_name.clone(),
                     mode: mode_name,
@@ -6609,6 +6757,15 @@ impl Orchestrator {
                     .await;
                 continue;
             }
+            if repo_config.finalize.approval_required {
+                self.update_repo_artifact_finalize_status(
+                    issue_id,
+                    repo_name,
+                    FinalizeStatus::PendingApproval,
+                    None,
+                )
+                .await;
+            }
             delivery_repo_names.push(repo_name.clone());
         }
 
@@ -6616,6 +6773,20 @@ impl Orchestrator {
             let Some(workspace) = prepared_workspace.as_ref() else {
                 unreachable!("publication repositories require a prepared workspace");
             };
+            {
+                let mut state = self.state.write().await;
+                if let Some(history) = self.build_owned_history_record(
+                    &state,
+                    issue_id,
+                    HISTORY_OUTCOME_SUCCEEDED,
+                    None,
+                    Utc::now(),
+                ) {
+                    state
+                        .finalize_terminal_history
+                        .insert(issue_id.to_string(), history);
+                }
+            }
             let prepared = self
                 .prepare_delivery_record(
                     issue_id,
@@ -6625,10 +6796,24 @@ impl Orchestrator {
                 )
                 .await;
             let persisted = match prepared {
-                Ok((delivery, snapshot)) => self
-                    .persist_delivery_record(&delivery, snapshot.as_ref())
-                    .await
-                    .map(|()| (delivery, snapshot)),
+                Ok((delivery, snapshot)) => {
+                    match self
+                        .persist_delivery_record(&delivery, snapshot.as_ref())
+                        .await
+                    {
+                        Ok(()) => Ok((delivery, snapshot)),
+                        Err(error) => {
+                            if let Some(history) = delivery.terminal_history.as_deref().cloned() {
+                                self.state
+                                    .write()
+                                    .await
+                                    .finalize_terminal_history
+                                    .insert(issue_id.to_string(), history);
+                            }
+                            Err(error)
+                        }
+                    }
+                }
                 Err(error) => Err(error),
             };
             match persisted {
@@ -6646,7 +6831,7 @@ impl Orchestrator {
                         repos.push(RepoFinalizeState {
                             repo: repo_name.clone(),
                             mode: finalize_mode_name(&repo_config.finalize.mode).to_string(),
-                            approval_required: false,
+                            approval_required: repo_config.finalize.approval_required,
                             status: FinalizeStatus::Failed,
                             last_error: Some(error.clone()),
                         });
@@ -6705,7 +6890,11 @@ impl Orchestrator {
                                     .repositories
                                     .get(&repo.repo)
                                     .is_none_or(|repository| {
-                                        repository.phase == DeliveryPhase::Blocked
+                                        matches!(
+                                            repository.phase,
+                                            DeliveryPhase::AwaitingApproval
+                                                | DeliveryPhase::Blocked
+                                        )
                                     })
                             })
                     })
@@ -6778,6 +6967,7 @@ impl Orchestrator {
             })
             .cloned()
             .collect::<Vec<_>>();
+        let newly_prepared_repo_names = missing_repo_names.iter().cloned().collect::<HashSet<_>>();
         let (mut delivery, snapshot) = if missing_repo_names.is_empty() {
             let Some(existing) = existing else {
                 return;
@@ -6841,7 +7031,13 @@ impl Orchestrator {
             let Some(repository) = delivery.repositories.get_mut(repo_name) else {
                 continue;
             };
-            if repository.phase == DeliveryPhase::Blocked {
+            if repository.phase == DeliveryPhase::AwaitingApproval {
+                if newly_prepared_repo_names.contains(repo_name) {
+                    continue;
+                }
+                repository.phase = DeliveryPhase::Prepared;
+                repository.last_error = None;
+            } else if repository.phase == DeliveryPhase::Blocked {
                 let retry_from = repository.retry_from.unwrap_or(DeliveryPhase::Prepared);
                 repository.phase = retry_from;
                 if retry_from != DeliveryPhase::Waiting {
@@ -6871,6 +7067,9 @@ impl Orchestrator {
             .await;
         let delivery = self.advance_review_projection(delivery).await;
         self.project_delivery_artifacts(issue_id, &delivery).await;
+        let terminal_history = self
+            .projected_terminal_history(&delivery, HISTORY_OUTCOME_SUCCEEDED)
+            .await;
 
         let (final_status, should_complete, last_error) = {
             let mut state = self.state.write().await;
@@ -6882,11 +7081,7 @@ impl Orchestrator {
                     let Some(repository) = delivery.repositories.get(&repo.repo) else {
                         continue;
                     };
-                    repo.status = match repository.phase {
-                        DeliveryPhase::Published => FinalizeStatus::Succeeded,
-                        DeliveryPhase::Blocked => FinalizeStatus::Failed,
-                        _ => FinalizeStatus::InProgress,
-                    };
+                    repo.status = Self::finalize_status_from_delivery(repository);
                     repo.last_error = repository.last_error.clone();
                 }
 
@@ -6968,7 +7163,7 @@ impl Orchestrator {
                 issue,
                 outcome,
                 target_state,
-                None,
+                terminal_history,
             )
             .await;
         } else if let Some(error) = last_error {
@@ -7058,6 +7253,43 @@ impl Orchestrator {
         }
     }
 
+    pub(super) fn build_owned_history_record(
+        &self,
+        state: &OrchestratorState,
+        issue_id: &str,
+        outcome: &str,
+        last_error: Option<String>,
+        completed_at: chrono::DateTime<Utc>,
+    ) -> Option<HistoryRecord> {
+        state.get_pipeline_run(issue_id).and_then(|run| {
+            state
+                .running
+                .get(issue_id)
+                .map(|entry| {
+                    self.build_history_record(RunningHistoryRecordInput {
+                        outcome,
+                        last_error: last_error.clone(),
+                        running_entry: entry,
+                        run,
+                        completed_at,
+                        artifacts: state.artifacts.get(issue_id).cloned(),
+                    })
+                })
+                .or_else(|| {
+                    state.waiting_on_human.get(issue_id).map(|entry| {
+                        self.build_history_record_from_waiting(WaitingHistoryRecordInput {
+                            outcome,
+                            last_error,
+                            waiting_entry: entry,
+                            run,
+                            completed_at,
+                            artifacts: state.artifacts.get(issue_id).cloned(),
+                        })
+                    })
+                })
+        })
+    }
+
     fn build_history_record_from_waiting(
         &self,
         input: WaitingHistoryRecordInput<'_>,
@@ -7133,21 +7365,17 @@ impl Orchestrator {
         run_id: Option<&str>,
         record: &HistoryRecord,
     ) -> Result<(), std::io::Error> {
-        if let (Some(run_id), Some(store)) = (run_id, &self.history_store) {
-            if let Err(error) = store.append_history_record(run_id, record).await {
-                warn!(
-                    run_id = %run_id,
-                    issue_id = %record.issue_id,
-                    error = %error,
-                    "failed to append history record to sqlite"
-                );
-            }
-        }
+        let sqlite_result = if let (Some(run_id), Some(store)) = (run_id, &self.history_store) {
+            store.append_history_record(run_id, record).await
+        } else {
+            Ok(())
+        };
 
         let history_path = self.workspace_mgr.root().join("ensemble_history.jsonl");
         let _guard = self.history_write_lock.lock().await;
         let writer = HistoryWriter::new(history_path);
-        writer.append_if_absent(record).await
+        let jsonl_result = writer.append_if_absent(record).await;
+        sqlite_result.and(jsonl_result)
     }
 
     async fn append_history_record(&self, run_id: Option<&str>, record: HistoryRecord) {
@@ -9721,6 +9949,8 @@ mod tests {
             )
             .await;
 
+        orchestrator.reconcile_and_recover_deliveries().await;
+
         let state = orchestrator.state.read().await;
         let delivery = state.delivery.get(&issue.id).expect("delivery owner");
         assert_eq!(
@@ -9728,6 +9958,7 @@ mod tests {
             crate::orchestrator::delivery::DeliveryPhase::Waiting
         );
         assert_eq!(delivery.repositories["source-repo"].pr_number, Some(420));
+        assert!(delivery.terminal_history.is_some());
         assert_eq!(
             delivery.review_projection.as_ref().unwrap().phase,
             crate::orchestrator::delivery::ReviewProjectionPhase::Applied
@@ -9778,11 +10009,240 @@ mod tests {
         drop(repo_temp);
     }
 
+    #[tokio::test]
+    async fn approval_required_delivery_preserves_terminal_history_before_approval() {
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = true;
+        let config = Arc::new(RwLock::new(make_config()));
+        let issue = test_issue("1", "Todo");
+        let tracker_issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::clone(&tracker_issues),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: Arc::new(AtomicUsize::new(0)),
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        let remote = Arc::new(SuccessfulDeliveryRemote {
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: issue.id.clone(),
+            remote_sha: std::sync::Mutex::new(None),
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            mutation_phases: std::sync::Mutex::new(Vec::new()),
+        });
+        orchestrator.delivery_remote = remote.clone();
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, None);
+            state.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "build",
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let delivery = state.delivery.get(&issue.id).expect("delivery owner");
+        assert!(delivery.terminal_history.is_some());
+        assert_eq!(
+            delivery.repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        assert!(delivery.repositories["source-repo"].approval_required);
+        assert_eq!(
+            state.finalize[&issue.id].status,
+            FinalizeStatus::PendingApproval
+        );
+        assert!(remote.mutation_phases.lock().unwrap().is_empty());
+        drop(state);
+        let durable = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(durable.snapshot.is_some());
+        assert!(durable
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.terminal_history.is_some()));
+
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::ApproveFinalize {
+                command: FinalizeApprovalCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                },
+                response,
+            })
+            .await;
+        assert!(matches!(
+            result.await.unwrap(),
+            Err(FinalizeApprovalError::Persistence(_))
+        ));
+        assert_eq!(
+            orchestrator.state.read().await.delivery[&issue.id].repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = None;
+        let mut blocked = orchestrator.state.read().await.delivery[&issue.id].clone();
+        let repository = blocked.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Blocked;
+        repository.retry_from = Some(DeliveryPhase::Prepared);
+        repository.last_error = Some("push failed".to_string());
+        orchestrator
+            .persist_delivery_record(&blocked, None)
+            .await
+            .unwrap();
+
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::ApproveFinalize {
+                command: FinalizeApprovalCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                },
+                response,
+            })
+            .await;
+        assert_eq!(
+            result.await.unwrap(),
+            Err(FinalizeApprovalError::NotAwaitingApproval)
+        );
+
+        let (response, result) = tokio::sync::oneshot::channel();
+        orchestrator
+            .handle_command(OrchestratorCommand::RetryFinalize {
+                command: FinalizeRetryCommand {
+                    issue_id: issue.id.clone(),
+                    identifier: issue.identifier.clone(),
+                },
+                response,
+            })
+            .await;
+        assert_eq!(result.await.unwrap(), Ok(()));
+        assert_eq!(
+            orchestrator.state.read().await.delivery[&issue.id].repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        assert_eq!(
+            orchestrator.state.read().await.delivery[&issue.id].repositories["source-repo"]
+                .retry_from,
+            Some(DeliveryPhase::Prepared)
+        );
+
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        for newly_approved in [true, false] {
+            let (response, result) = tokio::sync::oneshot::channel();
+            orchestrator
+                .handle_command(OrchestratorCommand::ApproveFinalize {
+                    command: FinalizeApprovalCommand {
+                        issue_id: issue.id.clone(),
+                        identifier: issue.identifier.clone(),
+                    },
+                    response,
+                })
+                .await;
+            assert_eq!(result.await.unwrap(), Ok(newly_approved));
+        }
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.delivery[&issue.id].repositories["source-repo"].phase,
+            DeliveryPhase::Prepared
+        );
+        assert_eq!(state.finalize[&issue.id].status, FinalizeStatus::InProgress);
+        assert!(remote.mutation_phases.lock().unwrap().is_empty());
+        drop(state);
+        let durable = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            durable.delivery.unwrap().repositories["source-repo"].phase,
+            DeliveryPhase::Prepared
+        );
+
+        orchestrator.reconcile_and_recover_deliveries().await;
+
+        let state = orchestrator.state.read().await;
+        let delivery = state.delivery.get(&issue.id).expect("delivery owner");
+        assert!(delivery.terminal_history.is_some());
+        assert_eq!(
+            delivery.repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+        drop(state);
+        assert_eq!(
+            *remote.mutation_phases.lock().unwrap(),
+            vec![DeliveryPhase::PushInFlight, DeliveryPhase::PrCreateInFlight,]
+        );
+
+        tracker_issues.write().await[0].state = "Done".to_string();
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.delivery.contains_key(&issue.id));
+        assert!(!state.is_claimed(&issue.id));
+        assert!(state.completed.contains_key(&issue.id));
+        drop(state);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
+
+        drop(repo_temp);
+    }
+
     struct RecoveryDeliveryRemote {
         pull_requests: std::sync::Mutex<Vec<crate::orchestrator::delivery::RemotePullRequest>>,
         pushes: AtomicUsize,
         creates: AtomicUsize,
         lists: AtomicUsize,
+    }
+
+    struct FailOnceIdentityRemote {
+        inner: RecoveryDeliveryRemote,
+        identity_failures: AtomicUsize,
     }
 
     struct ReviewProjectionTracker {
@@ -9926,6 +10386,70 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl crate::orchestrator::delivery::DeliveryRemote for FailOnceIdentityRemote {
+        async fn local_identity(
+            &self,
+            repository_path: &Path,
+        ) -> Result<crate::orchestrator::delivery::LocalRepositoryIdentity, String> {
+            if self
+                .identity_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err("simulated local identity failure".to_string());
+            }
+            self.inner.local_identity(repository_path).await
+        }
+
+        async fn remote_head(
+            &self,
+            repository_path: &Path,
+            remote: &str,
+            head_branch: &str,
+        ) -> Result<Option<String>, String> {
+            self.inner
+                .remote_head(repository_path, remote, head_branch)
+                .await
+        }
+
+        async fn push(
+            &self,
+            repository_path: &Path,
+            remote: &str,
+            head_branch: &str,
+            local_sha: &str,
+        ) -> Result<(), String> {
+            self.inner
+                .push(repository_path, remote, head_branch, local_sha)
+                .await
+        }
+
+        async fn list_pull_requests(
+            &self,
+            repository_path: &Path,
+            repository_key: &str,
+        ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
+            self.inner
+                .list_pull_requests(repository_path, repository_key)
+                .await
+        }
+
+        async fn create_pull_request(
+            &self,
+            repository_path: &Path,
+            base_branch: &str,
+            head_branch: &str,
+            marker: &str,
+        ) -> Result<(), String> {
+            self.inner
+                .create_pull_request(repository_path, base_branch, head_branch, marker)
+                .await
+        }
+    }
+
     async fn recovery_test_orchestrator(
         remote: Arc<RecoveryDeliveryRemote>,
     ) -> (
@@ -9967,6 +10491,7 @@ mod tests {
                 DeliveryRepository {
                     mode: DeliveryMode::PushAndPr,
                     phase: DeliveryPhase::PrCreateInFlight,
+                    approval_required: false,
                     remote: "origin".to_string(),
                     base_branch: "main".to_string(),
                     head_branch: "ensemble/repo-1".to_string(),
@@ -9981,6 +10506,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
         };
         orchestrator
@@ -9988,6 +10514,49 @@ mod tests {
             .await
             .unwrap();
         (orchestrator, workspace_temp, repo_temp, delivery)
+    }
+
+    async fn two_delivery_recovery_test_orchestrator(
+        remote: Arc<RecoveryDeliveryRemote>,
+    ) -> (
+        Orchestrator,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        DeliveryRecord,
+    ) {
+        let (orchestrator, workspace, repo, missing_delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let mut observed_delivery = missing_delivery.clone();
+        observed_delivery.issue_id = "2".to_string();
+        observed_delivery.identifier = "repo#2".to_string();
+        observed_delivery.run_id = "run-2".to_string();
+        if let Some(history) = observed_delivery.terminal_history.as_deref_mut() {
+            history.issue_id = "2".to_string();
+            history.issue_identifier = "repo#2".to_string();
+        }
+        observed_delivery
+            .repositories
+            .get_mut("source-repo")
+            .unwrap()
+            .marker = canonical_marker("run-2", "2", "source-repo");
+        remote.pull_requests.lock().unwrap().push(
+            crate::orchestrator::delivery::RemotePullRequest {
+                repository_key: "source-repo".to_string(),
+                head_branch: observed_delivery.repositories["source-repo"]
+                    .head_branch
+                    .clone(),
+                base_branch: "main".to_string(),
+                head_sha: "0123456789abcdef".to_string(),
+                body: observed_delivery.repositories["source-repo"].marker.clone(),
+                number: 421,
+                url: "https://github.com/example/project/pull/421".to_string(),
+            },
+        );
+        orchestrator
+            .persist_delivery_record(&observed_delivery, None)
+            .await
+            .unwrap();
+        (orchestrator, workspace, repo, missing_delivery)
     }
 
     fn review_projection_history() -> HistoryRecord {
@@ -10187,6 +10756,144 @@ mod tests {
             assert_eq!(tracker.writes.load(Ordering::SeqCst), 0);
             assert_eq!(orchestrator.state.read().await.delivery["1"], blocked);
         }
+    }
+
+    #[tokio::test]
+    async fn finalize_retry_requeues_a_blocked_review_projection() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, delivery) =
+            recovery_test_orchestrator(remote).await;
+        orchestrator.tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "In Progress")])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: true,
+        });
+        let delivery = review_ready_delivery(delivery);
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        let blocked = orchestrator.advance_review_projection(delivery).await;
+        assert_eq!(
+            blocked.review_projection.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Blocked
+        );
+
+        assert_eq!(
+            orchestrator
+                .retry_finalize_delivery("1", &blocked.identifier)
+                .await,
+            Ok(())
+        );
+
+        let state = orchestrator.state.read().await;
+        let projection = state.delivery["1"].review_projection.as_ref().unwrap();
+        assert_eq!(
+            projection.phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Pending
+        );
+        assert!(projection.diagnostic.is_none());
+        assert_eq!(state.finalize["1"].status, FinalizeStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn finalize_retry_reconstructs_pre_delivery_approval_failure() {
+        let remote = Arc::new(FailOnceIdentityRemote {
+            inner: RecoveryDeliveryRemote {
+                pull_requests: std::sync::Mutex::new(Vec::new()),
+                pushes: AtomicUsize::new(0),
+                creates: AtomicUsize::new(0),
+                lists: AtomicUsize::new(0),
+            },
+            identity_failures: AtomicUsize::new(1),
+        });
+        let (repo_temp, mut repo_config) = create_finalize_repo().await;
+        repo_config.finalize.mode = FinalizeMode::PushAndPr;
+        repo_config.finalize.approval_required = true;
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: Arc::new(AtomicUsize::new(0)),
+        });
+        let workspace_temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr =
+            WorkspaceManager::new(workspace_temp.path(), Some(vec![repo_config])).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            workspace_temp.path(),
+            shutdown_rx,
+        );
+        orchestrator.delivery_remote = remote.clone();
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            run.step_completed("build", succeeded_step_output(), false);
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), None);
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+        }
+        let config_snapshot = config.read().await.clone();
+        let finalize = orchestrator
+            .run_finalize_phase("1", "repo#1", &config_snapshot)
+            .await;
+        assert_eq!(finalize.status, FinalizeStatus::Failed);
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .finalize_terminal_history
+            .contains_key("1"));
+        {
+            let mut state = orchestrator.state.write().await;
+            state.remove_running("1");
+            state.remove_pipeline_run("1");
+            state.set_finalize_state("1", finalize);
+        }
+
+        orchestrator
+            .retry_finalize_delivery("1", "repo#1")
+            .await
+            .unwrap();
+        assert_eq!(
+            orchestrator.state.read().await.finalize["1"].status,
+            FinalizeStatus::InProgress
+        );
+
+        orchestrator.process_finalize_retries().await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.finalize["1"].status, FinalizeStatus::PendingApproval);
+        assert_eq!(
+            state.delivery["1"].repositories["source-repo"].phase,
+            DeliveryPhase::AwaitingApproval
+        );
+        assert!(state.delivery["1"].terminal_history.is_some());
+        assert!(!state.finalize_terminal_history.contains_key("1"));
+        drop(state);
+        assert_eq!(
+            orchestrator.approve_finalize_delivery("1", "repo#1").await,
+            Ok(true)
+        );
+        assert_eq!(remote.inner.pushes.load(Ordering::SeqCst), 0);
+
+        drop(repo_temp);
     }
 
     fn post_finalize_acceptance_snapshot(
@@ -10407,7 +11114,7 @@ mod tests {
             .unwrap_err();
         assert!(error.contains("missing durable delivery owner"));
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         assert_eq!(state.delivery.get("1"), Some(&delivery));
@@ -10439,7 +11146,7 @@ mod tests {
             },
         );
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         assert_eq!(
@@ -10471,7 +11178,7 @@ mod tests {
         };
         *remote.pull_requests.lock().unwrap() = vec![exact.clone(), exact];
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         let repository = &state.delivery["1"].repositories["source-repo"];
@@ -10541,7 +11248,97 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn push_only_published_recovery_continues_terminal_transition() {
+    async fn operator_retry_carries_delivery_history_into_terminal_cleanup() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.mode = DeliveryMode::Push;
+        repository.phase = DeliveryPhase::Blocked;
+        repository.retry_from = Some(DeliveryPhase::ReconcilingPush);
+        repository.last_error = Some("remote observation failed".to_string());
+        repository.pr_number = None;
+        repository.pr_url = None;
+        delivery.terminal_history.as_deref_mut().unwrap().outcome =
+            HISTORY_OUTCOME_SUCCEEDED.to_string();
+        let run_id = delivery.run_id.clone();
+        delivery.terminal_history.as_deref_mut().unwrap().artifacts =
+            Some(crate::history::artifacts::RunArtifacts {
+                run_id,
+                workspace_path: "/tmp/ensemble-test".to_string(),
+                repos: vec![crate::history::artifacts::RepoArtifact {
+                    repo: "source-repo".to_string(),
+                    finalize_status: "pending".to_string(),
+                    ..Default::default()
+                }],
+                transcripts: Vec::new(),
+            });
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+        {
+            let mut state = orchestrator.state.write().await;
+            state.set_finalize_state(
+                "1",
+                IssueFinalizeState {
+                    issue_identifier: "repo#1".to_string(),
+                    status: FinalizeStatus::InProgress,
+                    repos: vec![RepoFinalizeState {
+                        repo: "source-repo".to_string(),
+                        mode: "push".to_string(),
+                        approval_required: false,
+                        status: FinalizeStatus::InProgress,
+                        last_error: None,
+                    }],
+                },
+            );
+        }
+
+        orchestrator.process_finalize_retries().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.delivery.contains_key("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.completed.contains_key("1"));
+        drop(state);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].issue_id, delivery.issue_id);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
+        let artifact = &history.records[0].artifacts.as_ref().unwrap().repos[0];
+        assert_eq!(artifact.finalize_status, "succeeded");
+        assert_eq!(
+            artifact.pushed_ref.as_deref(),
+            Some("origin/ensemble/repo-1")
+        );
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn push_only_published_recovery_persists_history_before_release() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
@@ -10568,7 +11365,7 @@ mod tests {
             .await
             .unwrap();
 
-        orchestrator.process_delivery_recovery().await;
+        orchestrator.process_delivery_recovery(None).await;
 
         let state = orchestrator.state.read().await;
         assert!(!state.delivery.contains_key("1"));
@@ -10577,6 +11374,555 @@ mod tests {
         drop(state);
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].issue_id, delivery.issue_id);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_SUCCEEDED);
+    }
+
+    #[tokio::test]
+    async fn waiting_delivery_releases_when_tracker_becomes_terminal() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        delivery.terminal_history.as_deref_mut().unwrap().artifacts = Some(RunArtifacts {
+            run_id: delivery.run_id.clone(),
+            workspace_path: "/tmp/ensemble-test".to_string(),
+            repos: vec![crate::history::artifacts::RepoArtifact {
+                repo: "source-repo".to_string(),
+                finalize_status: "pending".to_string(),
+                ..Default::default()
+            }],
+            transcripts: Vec::new(),
+        });
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        let workspace = orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        assert!(workspace.base_path.exists());
+        let tracker_writes = Arc::new(RwLock::new(Vec::new()));
+        orchestrator.tracker = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+            state_writes: Arc::clone(&tracker_writes),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.delivery.contains_key("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.completed.contains_key("1"));
+        drop(state);
+        assert!(!workspace.base_path.exists());
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::Released)
+        );
+        assert!(records.iter().any(|record| {
+            record.kind == PipelineTransitionKind::TerminalTransitionApplied
+                && record
+                    .terminal_transition
+                    .as_ref()
+                    .is_some_and(|transition| transition.tracker_write_confirmed)
+        }));
+        assert!(!records
+            .iter()
+            .any(|record| { record.kind == PipelineTransitionKind::PendingTerminalTransition }));
+        assert!(tracker_writes.read().await.is_empty());
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        let artifact = &history.records[0].artifacts.as_ref().unwrap().repos[0];
+        assert_eq!(artifact.finalize_status, "waiting");
+        assert_eq!(
+            artifact.pushed_ref.as_deref(),
+            Some("origin/ensemble/repo-1")
+        );
+        assert_eq!(artifact.pr_number, Some(420));
+        assert_eq!(
+            artifact.pr_url.as_deref(),
+            Some("https://github.com/example/project/pull/420")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_history_store_failure_preserves_delivery_workspace() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        let workspace = orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+        let history_path = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .db_path()
+            .clone();
+        std::fs::remove_file(&history_path).unwrap();
+        std::fs::create_dir(&history_path).unwrap();
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.completed.contains_key("1"));
+        let pending = &state.pending_terminal_transitions["1"];
+        assert_eq!(pending.transition.attempt, 1);
+        assert!(pending.transition.last_error.is_some());
+        assert!(pending.transition.last_attempted_at.is_some());
+        drop(state);
+        assert!(workspace.base_path.exists());
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::PendingTerminalTransition)
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn terminal_interaction_cleanup_failure_uses_persisted_retry_backoff() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+        orchestrator
+            .interaction_store
+            .create(test_question_interaction(
+                &test_issue("1", "Done"),
+                1,
+                "terminal-interaction",
+            ))
+            .await
+            .unwrap();
+        orchestrator.interaction_store.fail_next_writes(1);
+
+        Box::pin(orchestrator.handle_tick()).await;
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        let pending = &state.pending_terminal_transitions["1"];
+        assert_eq!(pending.transition.attempt, 1);
+        assert!(pending
+            .transition
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("injected interaction write failure")));
+        assert!(pending.transition.last_attempted_at.is_some());
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.completed.contains_key("1"));
+    }
+
+    #[tokio::test]
+    async fn confirmed_terminal_transition_append_failure_preserves_delivery_workspace() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        let workspace = orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        let tracker_writes = Arc::new(RwLock::new(Vec::new()));
+        orchestrator.tracker = Arc::new(RecordingTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+            state_writes: Arc::clone(&tracker_writes),
+        });
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.completed.contains_key("1"));
+        assert!(!state.pending_terminal_transitions.contains_key("1"));
+        drop(state);
+        assert!(workspace.base_path.exists());
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::DeliveryOwned)
+        );
+        assert!(tracker_writes.read().await.is_empty());
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_delivery_preserves_blocked_diagnostic_without_reporting_success() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        delivery.review_projection = Some(crate::orchestrator::delivery::ReviewProjection {
+            target: "In review".to_string(),
+            repositories: vec!["source-repo".to_string()],
+            phase: crate::orchestrator::delivery::ReviewProjectionPhase::Blocked,
+            diagnostic: Some("review state could not be confirmed".to_string()),
+            last_observed_state: Some("In progress".to_string()),
+            history_record: None,
+            history_persisted: false,
+        });
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        orchestrator
+            .config
+            .write()
+            .await
+            .tracker
+            .terminal_states
+            .push("Cancelled".to_string());
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Cancelled")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.completed["1"].status, "completed_failed");
+        drop(state);
+        let history = orchestrator
+            .history_store
+            .as_ref()
+            .unwrap()
+            .read_history(&crate::history::reader::HistoryQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(history.total, 1);
+        assert_eq!(history.records[0].outcome, HISTORY_OUTCOME_STOPPED);
+        assert_eq!(
+            history.records[0].last_error.as_deref(),
+            Some("review state could not be confirmed")
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_tracker_issue_does_not_block_other_delivery_recovery() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, missing_delivery) =
+            two_delivery_recovery_test_orchestrator(Arc::clone(&remote)).await;
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("2", "Todo")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.delivery.get("1"), Some(&missing_delivery));
+        assert_eq!(
+            state.delivery["2"].repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tracker_refresh_failure_does_not_block_other_delivery_recovery() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, missing_delivery) =
+            two_delivery_recovery_test_orchestrator(Arc::clone(&remote)).await;
+        orchestrator.tracker = Arc::new(FailingWorkflowStateTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("2", "Todo")])),
+            id_fetch_failures_remaining: AtomicUsize::new(2),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(state.delivery.get("1"), Some(&missing_delivery));
+        assert_eq!(
+            state.delivery["2"].repositories["source-repo"].phase,
+            DeliveryPhase::Waiting
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_cleanup_blocks_delivery_recovery_and_finalize_commands() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let snapshot = {
+            let config = orchestrator.config.read().await;
+            let dag = build_dag(&config.steps).unwrap();
+            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            run.start();
+            run.to_snapshot()
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        std::fs::write(
+            orchestrator
+                .workspace_mgr
+                .metadata_path_for_test(&delivery.issue_id),
+            "{not-json",
+        )
+        .unwrap();
+        orchestrator.tracker = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "Done")])),
+        });
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.pending_terminal_transitions.contains_key("1"));
+        assert_eq!(
+            state.delivery["1"].repositories["source-repo"].phase,
+            DeliveryPhase::PrCreateInFlight
+        );
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            latest.kind,
+            PipelineTransitionKind::PendingTerminalTransition
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        let first_transition = latest.terminal_transition.unwrap();
+
+        Box::pin(orchestrator.handle_tick()).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state.pending_terminal_transitions["1"].transition,
+            first_transition
+        );
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        drop(state);
+
+        {
+            let mut state = orchestrator.state.write().await;
+            let repository = state
+                .delivery
+                .get_mut("1")
+                .unwrap()
+                .repositories
+                .get_mut("source-repo")
+                .unwrap();
+            repository.approval_required = true;
+            repository.phase = DeliveryPhase::AwaitingApproval;
+        }
+        assert_eq!(
+            orchestrator
+                .approve_finalize_delivery("1", &delivery.identifier)
+                .await,
+            Err(FinalizeApprovalError::NotAwaitingApproval)
+        );
+        {
+            let mut state = orchestrator.state.write().await;
+            let repository = state
+                .delivery
+                .get_mut("1")
+                .unwrap()
+                .repositories
+                .get_mut("source-repo")
+                .unwrap();
+            repository.phase = DeliveryPhase::Blocked;
+            repository.retry_from = Some(DeliveryPhase::Prepared);
+        }
+        assert_eq!(
+            orchestrator
+                .retry_finalize_delivery("1", &delivery.identifier)
+                .await,
+            Err(FinalizeRetryError::NotFailed)
+        );
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue("1")
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::PendingTerminalTransition
+        );
     }
 
     fn delivery_restart_orchestrator(
@@ -10615,6 +11961,7 @@ mod tests {
                 DeliveryRepository {
                     mode: DeliveryMode::PushAndPr,
                     phase: DeliveryPhase::PrCreateInFlight,
+                    approval_required: false,
                     remote: "origin".to_string(),
                     base_branch: "main".to_string(),
                     head_branch: "ensemble/repo-1".to_string(),
@@ -10629,6 +11976,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
         }
     }
@@ -17517,6 +18865,7 @@ agent:
         let original_agent = original_config.steps[0].agent.clone();
         let mut current_config = original_config.clone();
         current_config.steps[0].agent = "replacement-agent".to_string();
+        let max_retry_backoff_ms = current_config.agent.max_retry_backoff_ms;
         let config = Arc::new(RwLock::new(current_config));
         let issue = test_issue("1", "Todo");
         let failures_remaining = Arc::new(RwLock::new(1));
@@ -17531,11 +18880,18 @@ agent:
             runs: Arc::clone(&agent_runs),
         });
         let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path(&issue.id);
+        let metadata_path = workspace_mgr.metadata_path_for_test(&issue.id);
+        let original_metadata = std::fs::read_to_string(&metadata_path).unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let orchestrator = Orchestrator::new(
             Arc::clone(&config),
-            tracker,
-            runner,
+            Arc::clone(&tracker),
+            Arc::clone(&runner),
             workspace_mgr,
             config_dir.path(),
             shutdown_rx,
@@ -17592,10 +18948,85 @@ agent:
             assert!(!state.completed.contains_key("1"));
         }
         assert_eq!(agent_runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(workspace_path.exists());
 
+        std::fs::write(&metadata_path, "{not-json").unwrap();
         orchestrator.handle_tick().await;
 
-        let state = orchestrator.state.read().await;
+        {
+            let state = orchestrator.state.read().await;
+            assert!(state.is_claimed("1"));
+            assert!(state.get_pipeline_run("1").is_some());
+            let pending = state.pending_terminal_transitions.get("1").unwrap();
+            assert!(pending.transition.tracker_write_confirmed);
+            assert_eq!(pending.transition.attempt, 1);
+            assert!(pending.transition.last_attempted_at.is_some());
+            assert!(pending.transition.last_error.is_some());
+            assert!(!state.completed.contains_key("1"));
+        }
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::Released));
+        assert!(workspace_path.exists());
+
+        std::fs::write(&metadata_path, original_metadata).unwrap();
+        drop(orchestrator);
+
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let recovered = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        recovered.restore_pipeline_runs_from_journal().await;
+        let restored_pending = {
+            let mut state = recovered.state.write().await;
+            let pending = state.pending_terminal_transitions.get_mut("1").unwrap();
+            let restored = pending.transition.clone();
+            pending.transition.last_attempted_at = Some(Utc::now() + chrono::Duration::minutes(1));
+            restored
+        };
+        assert!(restored_pending.tracker_write_confirmed);
+        assert_eq!(restored_pending.attempt, 1);
+        assert!(restored_pending.last_attempted_at.is_some());
+        assert!(restored_pending.last_error.is_some());
+
+        recovered.handle_tick().await;
+        assert!(workspace_path.exists());
+        let restored_records = recovered
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(!restored_records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::Released));
+
+        let elapsed_backoff_ms =
+            calculate_backoff(restored_pending.attempt, max_retry_backoff_ms) + 1;
+        let retry_due_at =
+            Utc::now() - chrono::Duration::milliseconds(i64::try_from(elapsed_backoff_ms).unwrap());
+        recovered
+            .state
+            .write()
+            .await
+            .pending_terminal_transitions
+            .get_mut("1")
+            .unwrap()
+            .transition
+            .last_attempted_at = Some(retry_due_at);
+        recovered.handle_tick().await;
+
+        let state = recovered.state.read().await;
         assert!(!state.is_claimed("1"));
         assert!(state.pending_terminal_transitions.get("1").is_none());
         assert!(state.get_pipeline_run("1").is_none());
@@ -17611,8 +19042,9 @@ agent:
             ]
         );
         assert_eq!(agent_runs.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(!workspace_path.exists());
 
-        let records = orchestrator
+        let records = recovered
             .pipeline_journal
             .read_records_for_issue("1")
             .await

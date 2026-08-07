@@ -668,6 +668,10 @@ Use `mode: off` to suppress auto-injection for a specific agent or step.
 
 `agent.permission_request_policy` only applies to direct ACP runtime paths. If all configured agents resolve to the `acpx` runtime, leave this at its default. In mixed configurations, it still applies only to agents using the direct runtime.
 
+Agent subprocesses do not inherit the orchestrator host's `GITHUB_TOKEN`. GitHub tracker and
+delivery credentials stay at the host boundary; configure an explicit future credential mechanism
+instead of depending on ambient token inheritance.
+
 `select_option` is client-specific. It selects an offered ACP `PermissionOption.option_id` exactly and cancels the permission request if that option is not offered. Known option IDs for ACP clients should be documented as verified examples, not protocol guarantees.
 
 ## Prompt templates

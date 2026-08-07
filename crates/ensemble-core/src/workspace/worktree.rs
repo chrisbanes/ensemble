@@ -219,16 +219,12 @@ pub async fn worktree_exists(repo_path: &str, worktree_path: &str) -> Result<boo
     )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let worktree_path_normalized = Path::new(worktree_path)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(worktree_path).to_path_buf());
+    let worktree_path_normalized = super::canonicalize_allow_missing(Path::new(worktree_path));
 
     for line in stdout.lines() {
         if line.starts_with("worktree ") {
             let listed_path = line.strip_prefix("worktree ").unwrap_or(line);
-            let listed_path_normalized = Path::new(listed_path)
-                .canonicalize()
-                .unwrap_or_else(|_| Path::new(listed_path).to_path_buf());
+            let listed_path_normalized = super::canonicalize_allow_missing(Path::new(listed_path));
 
             if listed_path_normalized == worktree_path_normalized {
                 debug!(worktree_path = %worktree_path, "Worktree found in list");
@@ -310,21 +306,28 @@ pub async fn remove_worktree(
     worktree_path: &str,
     branch: &str,
 ) -> Result<(), WorktreeError> {
+    let normalized_worktree_path = super::canonicalize_allow_missing(Path::new(worktree_path));
+    let normalized_worktree_path = normalized_worktree_path.to_string_lossy();
     info!(
         repo_path = %repo_path,
-        worktree_path = %worktree_path,
+        worktree_path = %normalized_worktree_path,
         branch = %branch,
         "Removing worktree"
     );
 
-    if !worktree_exists(repo_path, worktree_path).await? {
+    if !worktree_exists(repo_path, &normalized_worktree_path).await? {
         warn!(worktree_path = %worktree_path, "Worktree does not exist");
         return Err(WorktreeError::NotFound {
             path: worktree_path.to_string(),
         });
     }
 
-    let args = ["worktree", "remove", "--force", worktree_path];
+    let args = [
+        "worktree",
+        "remove",
+        "--force",
+        normalized_worktree_path.as_ref(),
+    ];
     let command = git_command_label(&args);
     let error_command = command.clone();
     ensure_git_success(
@@ -341,9 +344,7 @@ pub async fn remove_worktree(
 
     debug!(worktree_path = %worktree_path, "Worktree removed successfully");
 
-    if let Err(e) = delete_branch_if_exists(repo_path, branch).await {
-        warn!(error = %e, branch = %branch, "Failed to delete branch");
-    }
+    delete_branch_if_exists(repo_path, branch).await?;
 
     Ok(())
 }
@@ -583,7 +584,39 @@ mod tests {
             .await
             .expect_err("removing the main worktree should fail");
 
-        assert_git_command_failed(error, &format!("git worktree remove --force {repo_path}"));
+        let repo_path = crate::workspace::canonicalize_allow_missing(Path::new(&repo_path));
+        assert_git_command_failed(
+            error,
+            &format!("git worktree remove --force {}", repo_path.display()),
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_remove_worktree_propagates_branch_deletion_failure() {
+        let repo = init_test_repo().await;
+        let repo_path = repo.path().to_string_lossy().into_owned();
+        let worktree_parent = TempDir::new().expect("worktree parent");
+        let worktree_path = worktree_parent.path().join("feature");
+        let worktree_path = worktree_path.to_string_lossy().into_owned();
+        create_worktree(&repo_path, &worktree_path, "feature", Some("main"))
+            .await
+            .expect("create feature worktree");
+        run_git(
+            &repo_path,
+            &["checkout", "--ignore-other-worktrees", "feature"],
+            "git checkout --ignore-other-worktrees feature",
+        )
+        .await
+        .expect("check out feature in the main worktree");
+
+        let error = remove_worktree(&repo_path, &worktree_path, "feature")
+            .await
+            .expect_err("deleting a branch checked out elsewhere should fail");
+
+        assert_git_command_failed(error, "git branch -D feature");
+        assert!(!Path::new(&worktree_path).exists());
+        assert!(branch_exists(&repo_path, "feature").await.unwrap());
     }
 
     #[cfg(unix)]

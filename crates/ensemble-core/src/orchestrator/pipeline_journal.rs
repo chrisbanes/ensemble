@@ -19,6 +19,16 @@ type IssueAppendLock = tokio::sync::Mutex<()>;
 type IssueAppendLockRegistry = Mutex<HashMap<PathBuf, Weak<IssueAppendLock>>>;
 static ISSUE_APPEND_LOCKS: OnceLock<IssueAppendLockRegistry> = OnceLock::new();
 
+fn requires_durable_sync(kind: PipelineTransitionKind, created: bool) -> bool {
+    created
+        || matches!(
+            kind,
+            PipelineTransitionKind::DeliveryOwned
+                | PipelineTransitionKind::PendingTerminalTransition
+                | PipelineTransitionKind::TerminalTransitionApplied
+        )
+}
+
 pub(crate) struct PipelineIssueJournalTransaction<'a> {
     journal: &'a PipelineRunJournal,
     issue_id: String,
@@ -130,6 +140,15 @@ pub struct PendingTerminalTransition {
     pub tracker_write_confirmed: bool,
     #[serde(default)]
     pub history_record: Option<HistoryRecord>,
+}
+
+impl PendingTerminalTransition {
+    pub(crate) fn confirm_tracker_write(&mut self) {
+        self.tracker_write_confirmed = true;
+        self.attempt = 0;
+        self.last_error = None;
+        self.last_attempted_at = None;
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +273,11 @@ impl PipelineRunJournal {
         tokio::fs::create_dir_all(&self.root).await?;
         let path = self.path_for_issue(&input.issue_id);
         self.repair_trailing_record(&path).await?;
+        let created = match tokio::fs::metadata(&path).await {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+        };
         let seq = self
             .read_last_valid_record(&path)
             .await?
@@ -296,8 +320,11 @@ impl PipelineRunJournal {
             return Err(write_error);
         }
         file.flush().await?;
-        if record.kind == PipelineTransitionKind::DeliveryOwned {
+        if requires_durable_sync(record.kind, created) {
             file.sync_data().await?;
+        }
+        if created {
+            tokio::fs::File::open(&self.root).await?.sync_all().await?;
         }
         Ok(record)
     }
@@ -582,6 +609,22 @@ mod tests {
     use tempfile::tempdir;
     use tokio::io::AsyncWriteExt;
 
+    #[test]
+    fn pending_terminal_intent_requires_durable_sync() {
+        assert!(requires_durable_sync(
+            PipelineTransitionKind::PendingTerminalTransition,
+            false,
+        ));
+    }
+
+    #[test]
+    fn newly_created_journal_requires_durable_sync() {
+        assert!(requires_durable_sync(
+            PipelineTransitionKind::RunStarted,
+            true,
+        ));
+    }
+
     fn step(name: &str, depends: Option<Vec<String>>) -> StepConfig {
         StepConfig {
             name: name.to_string(),
@@ -617,6 +660,7 @@ mod tests {
                 DeliveryRepository {
                     mode: DeliveryMode::PushAndPr,
                     phase: DeliveryPhase::Prepared,
+                    approval_required: false,
                     remote: "origin".to_string(),
                     base_branch: "main".to_string(),
                     head_branch: "ensemble/repo-1".to_string(),
@@ -631,6 +675,7 @@ mod tests {
             )]
             .into_iter()
             .collect(),
+            terminal_history: None,
             review_projection: None,
         };
 
