@@ -974,6 +974,7 @@ mod tests {
             tracker: SetupTracker::GitHub {
                 repository: "owner/repo".to_string(),
                 project_number: Some(1),
+                status_field: Some("Status".to_string()),
                 api_key: SecretDisplay::Unset,
                 api_key_edit: SecretEdit::SetEnvironment {
                     variable: "GITHUB_TOKEN".to_string(),

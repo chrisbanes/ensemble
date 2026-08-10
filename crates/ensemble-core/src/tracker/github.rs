@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use super::model::{InteractionThreadRoot, Issue, TrackerComment};
 use super::{IssueTracker, TrackerError};
+use crate::config::ensemble::GithubTrackerConfig;
 
 mod graphql;
 
@@ -20,12 +21,30 @@ pub struct GithubTracker {
     terminal_states: Vec<String>,
     labels_filter: Vec<String>,
     client: reqwest::Client,
-    /// Cached project node ID (resolved at first use when project_number is set).
-    project_node_id: tokio::sync::RwLock<Option<String>>,
-    /// Cached Status field ID.
-    status_field_id: tokio::sync::RwLock<Option<String>>,
-    /// Cached Status option name -> option ID map.
-    status_option_ids: tokio::sync::RwLock<HashMap<String, String>>,
+    project_fields: Option<GithubTrackerConfig>,
+    project_metadata: tokio::sync::RwLock<Option<ProjectMetadata>>,
+}
+
+#[derive(Clone)]
+struct ProjectMetadata {
+    project_id: String,
+    status: ResolvedProjectField,
+    priority: Option<ResolvedProjectField>,
+}
+
+#[derive(Clone)]
+struct ResolvedProjectField {
+    id: String,
+    option_ids: HashMap<String, String>,
+    option_ranks: HashMap<String, i32>,
+}
+
+pub(crate) struct GithubTrackerSettings {
+    pub project_number: Option<i64>,
+    pub project_fields: Option<GithubTrackerConfig>,
+    pub active_states: Vec<String>,
+    pub terminal_states: Vec<String>,
+    pub labels_filter: Vec<String>,
 }
 
 impl GithubTracker {
@@ -33,14 +52,11 @@ impl GithubTracker {
     ///
     /// Parses `owner/repo` from the repository string.
     /// The reqwest client is created with a 30-second timeout.
-    pub fn new(
+    pub(crate) fn new(
         endpoint: String,
         token: String,
         repository: String,
-        project_number: Option<i64>,
-        active_states: Vec<String>,
-        terminal_states: Vec<String>,
-        labels_filter: Vec<String>,
+        settings: GithubTrackerSettings,
     ) -> Result<Self, TrackerError> {
         let (owner, repo) = parse_owner_repo(&repository)?;
         let client = reqwest::Client::builder()
@@ -55,14 +71,13 @@ impl GithubTracker {
             token,
             owner,
             repo,
-            project_number,
-            active_states,
-            terminal_states,
-            labels_filter,
+            project_number: settings.project_number,
+            project_fields: settings.project_fields,
+            active_states: settings.active_states,
+            terminal_states: settings.terminal_states,
+            labels_filter: settings.labels_filter,
             client,
-            project_node_id: tokio::sync::RwLock::new(None),
-            status_field_id: tokio::sync::RwLock::new(None),
-            status_option_ids: tokio::sync::RwLock::new(HashMap::new()),
+            project_metadata: tokio::sync::RwLock::new(None),
         })
     }
 
@@ -125,22 +140,26 @@ impl GithubTracker {
         graphql::decode_response::<O>(&bytes, &self.token)
     }
 
-    /// Discover the project node ID and status field ID via GraphQL.
-    /// Caches results for subsequent calls.
-    async fn ensure_project_metadata(&self) -> Result<(String, String), TrackerError> {
-        // Check cache first
-        {
-            let node_id = self.project_node_id.read().await;
-            let field_id = self.status_field_id.read().await;
-            if let (Some(nid), Some(fid)) = (node_id.as_ref(), field_id.as_ref()) {
-                return Ok((nid.clone(), fid.clone()));
-            }
+    async fn ensure_project_metadata(&self) -> Result<ProjectMetadata, TrackerError> {
+        if let Some(metadata) = self.project_metadata.read().await.clone() {
+            return Ok(metadata);
         }
+        self.refresh_project_metadata().await
+    }
 
+    /// Resolve the configured readable Project field identities to stable IDs.
+    async fn refresh_project_metadata(&self) -> Result<ProjectMetadata, TrackerError> {
         let project_number =
             self.project_number
                 .ok_or_else(|| TrackerError::UnexpectedPayload {
                     reason: "project_number is required for project board mode".to_string(),
+                })?;
+        let configured_fields =
+            self.project_fields
+                .as_ref()
+                .ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: "GitHub Project field configuration is required in project board mode"
+                        .to_string(),
                 })?;
 
         info!(
@@ -152,7 +171,8 @@ impl GithubTracker {
 
         let mut cursor: Option<String> = None;
         let mut project_id = None;
-        let (status_field_id, option_ids) = loop {
+        let mut fields = Vec::new();
+        loop {
             let variables = json!({
                 "owner": self.owner,
                 "repo": self.repo,
@@ -168,63 +188,64 @@ impl GithubTracker {
                 })?;
             project_id.get_or_insert_with(|| project.id.clone());
 
-            if let Some(status_field) = project
-                .fields
-                .nodes
-                .iter()
-                .flatten()
-                .find(|field| field.name.as_deref() == Some("Status"))
-            {
-                let status_field_id = status_field.id.clone().ok_or_else(|| {
-                    graphql::unexpected_payload::<graphql::ProjectDiscovery>(
-                        "Status field ID not found",
-                    )
-                })?;
-                let option_ids: HashMap<String, String> = status_field
-                    .options
-                    .as_deref()
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|option| Some((option.name.clone()?, option.id.clone()?)))
-                    .collect();
-                break (status_field_id, option_ids);
-            }
-
+            fields.extend(project.fields.nodes.into_iter().flatten());
             match project.fields.page_info.next_cursor()? {
                 Some(next_cursor) => cursor = Some(next_cursor),
-                None => {
-                    return Err(graphql::unexpected_payload::<graphql::ProjectDiscovery>(
-                        "Status field not found in project",
-                    ));
-                }
+                None => break,
             }
-        };
+        }
         let project_id = project_id.ok_or_else(|| {
             graphql::unexpected_payload::<graphql::ProjectDiscovery>("project ID not found")
         })?;
+        let status = resolve_project_field(&fields, &configured_fields.status_field)?;
+        let mut priority = configured_fields
+            .priority
+            .as_ref()
+            .map(|priority| resolve_project_field(&fields, &priority.field))
+            .transpose()?;
+
+        if let (Some(priority), Some(resolved_priority)) =
+            (configured_fields.priority.as_ref(), priority.as_mut())
+        {
+            for (index, option_name) in priority.options.iter().enumerate() {
+                let option_id = resolved_priority
+                    .option_ids
+                    .get(option_name)
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: format!(
+                            "configured GitHub Project priority option '{option_name}' in field '{}' matched 0 live options",
+                            priority.field
+                        ),
+                    })?;
+                if resolved_priority
+                    .option_ranks
+                    .insert(option_id.clone(), index as i32 + 1)
+                    .is_some()
+                {
+                    return Err(TrackerError::UnexpectedPayload {
+                        reason: format!(
+                            "configured GitHub Project priority option '{option_name}' in field '{}' is listed more than once",
+                            priority.field
+                        ),
+                    });
+                }
+            }
+        }
+
+        let metadata = ProjectMetadata {
+            project_id,
+            status,
+            priority,
+        };
 
         info!(
-            project_id = %project_id,
-            status_field_id = %status_field_id,
-            option_count = option_ids.len(),
+            project_id = %metadata.project_id,
+            status_field_id = %metadata.status.id,
+            option_count = metadata.status.option_ids.len(),
             "project metadata discovered"
         );
-
-        // Cache results
-        {
-            let mut node_id_lock = self.project_node_id.write().await;
-            *node_id_lock = Some(project_id.clone());
-        }
-        {
-            let mut field_id_lock = self.status_field_id.write().await;
-            *field_id_lock = Some(status_field_id.clone());
-        }
-        {
-            let mut option_ids_lock = self.status_option_ids.write().await;
-            *option_ids_lock = option_ids;
-        }
-
-        Ok((project_id, status_field_id))
+        *self.project_metadata.write().await = Some(metadata.clone());
+        Ok(metadata)
     }
 
     /// Fetch all project items with pagination, filtering by active states.
@@ -232,14 +253,14 @@ impl GithubTracker {
         &self,
         filter_states: &[String],
     ) -> Result<Vec<Issue>, TrackerError> {
-        let (project_id, _status_field_id) = self.ensure_project_metadata().await?;
+        let metadata = self.ensure_project_metadata().await?;
 
         let mut all_issues = Vec::new();
         let mut cursor: Option<String> = None;
 
         loop {
             let variables = json!({
-                "projectId": project_id,
+                "projectId": metadata.project_id,
                 "cursor": cursor,
             });
 
@@ -252,7 +273,7 @@ impl GithubTracker {
                 .items;
 
             for node in items.nodes.iter().flatten() {
-                if let Some(issue) = self.normalize_project_item(node, filter_states) {
+                if let Some(issue) = self.normalize_project_item(node, filter_states, &metadata) {
                     all_issues.push(issue);
                 }
             }
@@ -273,9 +294,10 @@ impl GithubTracker {
         &self,
         node: &graphql::ProjectItem,
         filter_states: &[String],
+        metadata: &ProjectMetadata,
     ) -> Option<Issue> {
         let content = node.content.as_ref()?;
-        let status = self.extract_status_from_field_values(node);
+        let status = extract_field_value(node, &metadata.status);
 
         // Filter by status if filter_states is provided
         if !filter_states.is_empty() {
@@ -303,7 +325,8 @@ impl GithubTracker {
         self.normalize_issue_node(
             content,
             status.unwrap_or_else(|| "unknown".to_string()),
-            extract_priority_from_field_values(node),
+            priority_rank(node, metadata),
+            node.position.clone(),
         )
     }
 
@@ -330,19 +353,6 @@ impl GithubTracker {
             }
         }
         fallback
-    }
-
-    /// Extract the Status field value from a project item's fieldValues.
-    fn extract_status_from_field_values(&self, node: &graphql::ProjectItem) -> Option<String> {
-        node.field_values
-            .as_ref()?
-            .nodes
-            .iter()
-            .flatten()
-            .find(|value| {
-                value.field.as_ref().and_then(|field| field.name.as_deref()) == Some("Status")
-            })
-            .and_then(|value| value.name.clone())
     }
 
     /// Fetch repository issues without a project board.
@@ -411,7 +421,7 @@ impl GithubTracker {
             return None;
         }
 
-        self.normalize_issue_node(node, state, None)
+        self.normalize_issue_node(node, state, None, None)
     }
 
     fn normalize_issue_node(
@@ -419,6 +429,7 @@ impl GithubTracker {
         node: &graphql::IssueNode,
         state: String,
         priority: Option<i32>,
+        tracker_position: Option<String>,
     ) -> Option<Issue> {
         let id = node.id.clone()?;
         let number = node.number?;
@@ -429,6 +440,7 @@ impl GithubTracker {
             title,
             description: node.body.clone().filter(|body| !body.is_empty()),
             priority,
+            tracker_position,
             state,
             branch_name: None,
             url: node.url.clone(),
@@ -451,8 +463,8 @@ impl GithubTracker {
             return Ok(vec![]);
         }
 
-        let configured_project_id = if self.project_number.is_some() {
-            Some(self.ensure_project_metadata().await?.0)
+        let project_metadata = if self.project_number.is_some() {
+            Some(self.ensure_project_metadata().await?)
         } else {
             None
         };
@@ -465,9 +477,7 @@ impl GithubTracker {
 
         let mut issues = Vec::new();
         for node in data.nodes.iter().flatten() {
-            if let Some(issue) =
-                self.normalize_state_node(node, configured_project_id.as_deref())?
-            {
+            if let Some(issue) = self.normalize_state_node(node, project_metadata.as_ref())? {
                 issues.push(issue);
             }
         }
@@ -566,13 +576,7 @@ impl GithubTracker {
         let variables = json!({ "nodeId": issue_node_id });
         let data = self.graphql::<graphql::FindProjectItem>(variables).await?;
 
-        let project_id = {
-            let lock = self.project_node_id.read().await;
-            lock.clone()
-                .ok_or_else(|| TrackerError::UnexpectedPayload {
-                    reason: "project node ID not set".to_string(),
-                })?
-        };
+        let project_id = self.ensure_project_metadata().await?.project_id;
 
         let items = data
             .node
@@ -592,7 +596,7 @@ impl GithubTracker {
     fn normalize_state_node(
         &self,
         node: &graphql::IssueNode,
-        configured_project_id: Option<&str>,
+        project_metadata: Option<&ProjectMetadata>,
     ) -> Result<Option<Issue>, TrackerError> {
         let Some(id) = node.id.as_deref() else {
             return Ok(None);
@@ -603,7 +607,7 @@ impl GithubTracker {
 
         let labels = extract_labels(node);
 
-        let state = if let Some(configured_project_id) = configured_project_id {
+        let (state, priority, tracker_position) = if let Some(metadata) = project_metadata {
             let items = node
                 .project_items
                 .as_ref()
@@ -612,23 +616,29 @@ impl GithubTracker {
                 })?
                 .nodes
                 .as_slice();
-            let (item_id, item) = select_configured_project_item(id, configured_project_id, items)?;
-            self.extract_status_from_field_values(item).ok_or_else(|| {
+            let (item_id, item) = select_configured_project_item(id, &metadata.project_id, items)?;
+            let state = extract_field_value(item, &metadata.status).ok_or_else(|| {
                 TrackerError::UnexpectedPayload {
                     reason: format!(
-                        "issue {id} project item {item_id} in configured project {configured_project_id} is missing Status"
+                        "issue {id} project item {item_id} in configured project {} is missing configured status",
+                        metadata.project_id
                     ),
                 }
-            })?
+            })?;
+            (state, priority_rank(item, metadata), item.position.clone())
         } else {
             let raw_state = node.state.as_deref().unwrap_or("open").to_lowercase();
 
             // In repo-mode, derive canonical state from labels to stay consistent
             // with normalize_repo_issue.
-            self.canonical_state_from_labels(&labels, raw_state)
+            (
+                self.canonical_state_from_labels(&labels, raw_state),
+                None,
+                None,
+            )
         };
 
-        Ok(self.normalize_issue_node(node, state, None))
+        Ok(self.normalize_issue_node(node, state, priority, tracker_position))
     }
 }
 
@@ -728,30 +738,97 @@ fn select_configured_project_item<'a>(
     }
 }
 
-/// Extract priority from project item field values.
-///
-/// Looks for a "Priority" single-select field and maps known values:
-/// Urgent=1, High=2, Medium=3, Low=4.
-fn extract_priority_from_field_values(node: &graphql::ProjectItem) -> Option<i32> {
-    for value in node.field_values.as_ref()?.nodes.iter().flatten() {
-        let field_name = value.field.as_ref().and_then(|field| field.name.as_deref());
-        if field_name == Some("Priority") {
-            if let Some(name) = value.name.as_deref() {
-                return match name.to_lowercase().as_str() {
-                    "urgent" => Some(1),
-                    "high" => Some(2),
-                    "medium" => Some(3),
-                    "low" => Some(4),
-                    _ => None,
-                };
-            }
+fn resolve_project_field(
+    fields: &[graphql::ProjectField],
+    name: &str,
+) -> Result<ResolvedProjectField, TrackerError> {
+    let matches: Vec<&graphql::ProjectField> = fields
+        .iter()
+        .filter(|field| field.name.as_deref() == Some(name))
+        .collect();
+    let [field] = matches.as_slice() else {
+        return Err(TrackerError::UnexpectedPayload {
+            reason: format!(
+                "configured GitHub Project field '{name}' matched {} live single-select fields",
+                matches.len()
+            ),
+        });
+    };
+    let id = field
+        .id
+        .clone()
+        .ok_or_else(|| TrackerError::UnexpectedPayload {
+            reason: format!("configured GitHub Project field '{name}' has no ID"),
+        })?;
+    let mut option_ids = HashMap::new();
+    for option in field.options.as_deref().unwrap_or_default() {
+        let option_name = option
+            .name
+            .clone()
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!("configured GitHub Project field '{name}' has an unnamed option"),
+            })?;
+        let option_id = option
+            .id
+            .clone()
+            .ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "configured GitHub Project field '{name}' has an option without an ID"
+                ),
+            })?;
+        if option_ids.insert(option_name.clone(), option_id).is_some() {
+            return Err(TrackerError::UnexpectedPayload {
+                reason: format!(
+                    "configured GitHub Project field '{name}' has duplicate readable option name '{option_name}'"
+                ),
+            });
         }
     }
-    None
+    Ok(ResolvedProjectField {
+        id,
+        option_ids,
+        option_ranks: HashMap::new(),
+    })
+}
+
+fn extract_field_value(
+    node: &graphql::ProjectItem,
+    field: &ResolvedProjectField,
+) -> Option<String> {
+    node.field_values
+        .as_ref()?
+        .nodes
+        .iter()
+        .flatten()
+        .find(|value| value.field.as_ref().and_then(|value| value.id.as_deref()) == Some(&field.id))
+        .and_then(|value| value.name.clone())
+}
+
+fn priority_rank(node: &graphql::ProjectItem, metadata: &ProjectMetadata) -> Option<i32> {
+    let priority = metadata.priority.as_ref()?;
+    let option_id = node
+        .field_values
+        .as_ref()?
+        .nodes
+        .iter()
+        .flatten()
+        .find(|value| {
+            value.field.as_ref().and_then(|field| field.id.as_deref()) == Some(&priority.id)
+        })?
+        .option_id
+        .as_deref()?;
+    priority.option_ranks.get(option_id).copied()
 }
 
 #[async_trait]
 impl IssueTracker for GithubTracker {
+    async fn validate_configuration(&self) -> Result<(), TrackerError> {
+        if self.project_number.is_some() {
+            self.refresh_project_metadata().await?;
+        }
+        Ok(())
+    }
+
     /// Fetch candidate issues in active states for dispatch.
     ///
     /// When project_number is set: queries project board items.
@@ -883,32 +960,17 @@ impl IssueTracker for GithubTracker {
 
     async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
         if self.project_number.is_some() {
-            // Ensure project metadata is discovered (populates project_node_id,
-            // status_field_id, and status_option_ids).
-            self.ensure_project_metadata().await?;
-
-            let project_id = {
-                let lock = self.project_node_id.read().await;
-                lock.clone()
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "project node ID not discovered".to_string(),
-                    })?
-            };
-            let field_id = {
-                let lock = self.status_field_id.read().await;
-                lock.clone()
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: "status field ID not discovered".to_string(),
-                    })?
-            };
-            let option_id = {
-                let lock = self.status_option_ids.read().await;
-                lock.get(state)
-                    .cloned()
-                    .ok_or_else(|| TrackerError::UnexpectedPayload {
-                        reason: format!("unknown status option: {}", state),
-                    })?
-            };
+            let metadata = self.ensure_project_metadata().await?;
+            let project_id = metadata.project_id;
+            let field_id = metadata.status.id;
+            let option_id = metadata
+                .status
+                .option_ids
+                .get(state)
+                .cloned()
+                .ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: format!("unknown configured status option: {state}"),
+                })?;
 
             let item_id = self.find_project_item_id(id).await?;
 
@@ -939,20 +1001,49 @@ mod tests {
             format!("{}/graphql", server_url),
             "ghp_test_token".to_string(),
             "acme/my-repo".to_string(),
-            project_number,
-            vec!["Todo".to_string(), "In Progress".to_string()],
-            vec!["Done".to_string(), "Closed".to_string()],
-            vec![],
+            GithubTrackerSettings {
+                project_number,
+                project_fields: project_number.map(|_| GithubTrackerConfig {
+                    status_field: "Status".to_string(),
+                    priority: None,
+                }),
+                active_states: vec!["Todo".to_string(), "In Progress".to_string()],
+                terminal_states: vec!["Done".to_string(), "Closed".to_string()],
+                labels_filter: vec![],
+            },
         )
         .unwrap()
     }
 
     /// Build a GraphQL response body wrapping the given data.
-    fn graphql_response(data: Value) -> Value {
+    fn graphql_response(mut data: Value) -> Value {
+        add_project_field_ids(&mut data);
         json!({ "data": data })
     }
 
-    fn issue_node(value: Value) -> graphql::IssueNode {
+    fn add_project_field_ids(value: &mut Value) {
+        match value {
+            Value::Array(values) => values.iter_mut().for_each(add_project_field_ids),
+            Value::Object(values) => {
+                if let Some(Value::Object(field)) = values.get_mut("field") {
+                    if let Some(name) = field
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                    {
+                        field.entry("id").or_insert_with(|| {
+                            Value::String(format!("F_{}", name.to_lowercase().replace(' ', "_")))
+                        });
+                    }
+                }
+                values.values_mut().for_each(add_project_field_ids);
+            }
+            _ => {}
+        }
+    }
+
+    fn issue_node(mut value: Value) -> graphql::IssueNode {
+        add_project_field_ids(&mut value);
         serde_json::from_value(value).unwrap()
     }
 
@@ -1053,12 +1144,10 @@ mod tests {
         let tracker = create_test_tracker(&server.uri(), Some(1));
         let metadata = tracker.ensure_project_metadata().await.unwrap();
 
+        assert_eq!(metadata.project_id, "PVT_test123");
+        assert_eq!(metadata.status.id, "F_status");
         assert_eq!(
-            metadata,
-            ("PVT_test123".to_string(), "F_status".to_string())
-        );
-        assert_eq!(
-            tracker.status_option_ids.read().await.get("Todo"),
+            metadata.status.option_ids.get("Todo"),
             Some(&"O_todo".to_string())
         );
     }
@@ -1119,91 +1208,45 @@ mod tests {
         assert!(labels.is_empty());
     }
 
-    // --- extract_priority tests ---
-
     #[test]
-    fn test_extract_priority_urgent() {
-        let node = project_item(json!({
+    fn priority_rank_uses_resolved_option_ids() {
+        let metadata = ProjectMetadata {
+            project_id: "P_1".to_string(),
+            status: ResolvedProjectField {
+                id: "F_status".to_string(),
+                option_ids: HashMap::new(),
+                option_ranks: HashMap::new(),
+            },
+            priority: Some(ResolvedProjectField {
+                id: "F_impact".to_string(),
+                option_ids: HashMap::new(),
+                option_ranks: HashMap::from([
+                    ("O_critical".to_string(), 1),
+                    ("O_normal".to_string(), 2),
+                ]),
+            }),
+        };
+        let ranked = project_item(json!({
             "fieldValues": {
-                "nodes": [
-                    {
-                        "name": "Urgent",
-                        "field": { "name": "Priority" }
-                    }
-                ]
+                "nodes": [{
+                    "name": "Normal",
+                    "optionId": "O_normal",
+                    "field": { "id": "F_impact", "name": "Customer impact" }
+                }]
             }
         }));
-        assert_eq!(extract_priority_from_field_values(&node), Some(1));
-    }
-
-    #[test]
-    fn test_extract_priority_high() {
-        let node = project_item(json!({
+        let unranked = project_item(json!({
             "fieldValues": {
-                "nodes": [
-                    {
-                        "name": "High",
-                        "field": { "name": "Priority" }
-                    }
-                ]
+                "nodes": [{
+                    "name": "Deferred",
+                    "optionId": "O_deferred",
+                    "field": { "id": "F_impact", "name": "Customer impact" }
+                }]
             }
         }));
-        assert_eq!(extract_priority_from_field_values(&node), Some(2));
-    }
 
-    #[test]
-    fn test_extract_priority_medium() {
-        let node = project_item(json!({
-            "fieldValues": {
-                "nodes": [
-                    {
-                        "name": "Medium",
-                        "field": { "name": "Priority" }
-                    }
-                ]
-            }
-        }));
-        assert_eq!(extract_priority_from_field_values(&node), Some(3));
-    }
-
-    #[test]
-    fn test_extract_priority_low() {
-        let node = project_item(json!({
-            "fieldValues": {
-                "nodes": [
-                    {
-                        "name": "Low",
-                        "field": { "name": "Priority" }
-                    }
-                ]
-            }
-        }));
-        assert_eq!(extract_priority_from_field_values(&node), Some(4));
-    }
-
-    #[test]
-    fn test_extract_priority_none() {
-        let node = project_item(json!({
-            "fieldValues": {
-                "nodes": []
-            }
-        }));
-        assert_eq!(extract_priority_from_field_values(&node), None);
-    }
-
-    #[test]
-    fn test_extract_priority_skips_non_priority_fields() {
-        let node = project_item(json!({
-            "fieldValues": {
-                "nodes": [
-                    {
-                        "name": "Todo",
-                        "field": { "name": "Status" }
-                    }
-                ]
-            }
-        }));
-        assert_eq!(extract_priority_from_field_values(&node), None);
+        assert_eq!(priority_rank(&ranked, &metadata), Some(2));
+        assert_eq!(priority_rank(&unranked, &metadata), None);
     }
 
     // --- project-mode state reconciliation tests ---
@@ -1273,12 +1316,21 @@ mod tests {
             }
         }));
 
-        let result = tracker.normalize_state_node(&node, Some("P_configured"));
+        let metadata = ProjectMetadata {
+            project_id: "P_configured".to_string(),
+            status: ResolvedProjectField {
+                id: "F_status".to_string(),
+                option_ids: HashMap::new(),
+                option_ranks: HashMap::new(),
+            },
+            priority: None,
+        };
+        let result = tracker.normalize_state_node(&node, Some(&metadata));
 
         match result {
             Err(TrackerError::UnexpectedPayload { reason }) => assert_eq!(
                 reason,
-                "issue I_node1 project item PVTI_configured in configured project P_configured is missing Status"
+                "issue I_node1 project item PVTI_configured in configured project P_configured is missing configured status"
             ),
             other => panic!("expected UnexpectedPayload error, got: {other:?}"),
         }
@@ -1299,7 +1351,7 @@ mod tests {
                         "pageInfo": { "hasNextPage": false, "endCursor": null },
                         "nodes": [
                             {
-                                "id": "FIELD_status_1",
+                                "id": "F_status",
                                 "name": "Status",
                                 "options": [
                                     { "id": "OPT_1", "name": "Todo" },
@@ -1604,7 +1656,7 @@ mod tests {
 
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].identifier, "my-repo#2");
-        assert_eq!(issues[0].priority, Some(1));
+        assert_eq!(issues[0].priority, None);
         assert_eq!(issues[0].labels, vec!["bug"]);
         assert!(issues[0].created_at.is_some());
         assert!(issues[0].updated_at.is_some());
@@ -1964,10 +2016,13 @@ mod tests {
             "https://api.github.com/graphql".to_string(),
             "token".to_string(),
             "acme/repo".to_string(),
-            None,
-            vec![],
-            vec![],
-            vec![],
+            GithubTrackerSettings {
+                project_number: None,
+                project_fields: None,
+                active_states: vec![],
+                terminal_states: vec![],
+                labels_filter: vec![],
+            },
         )
         .unwrap();
 
@@ -2134,10 +2189,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_normalization_priority_mapping_from_project() {
+    async fn configured_priority_options_normalize_by_resolved_ids() {
         let server = MockServer::start().await;
 
-        // Discovery
         let discovery = graphql_response(json!({
             "repository": {
                 "projectV2": {
@@ -2146,9 +2200,18 @@ mod tests {
                         "pageInfo": { "hasNextPage": false, "endCursor": null },
                         "nodes": [
                             {
-                                "id": "F_status",
-                                "name": "Status",
-                                "options": []
+                                "id": "F_delivery",
+                                "name": "Delivery state",
+                                "options": [{ "id": "O_queued", "name": "Queued" }]
+                            },
+                            {
+                                "id": "F_impact",
+                                "name": "Customer impact",
+                                "options": [
+                                    { "id": "O_critical", "name": "Critical" },
+                                    { "id": "O_normal", "name": "Normal" },
+                                    { "id": "O_deferred", "name": "Deferred" }
+                                ]
                             }
                         ]
                     }
@@ -2156,7 +2219,6 @@ mod tests {
             }
         }));
 
-        // Items with priority field
         let items = graphql_response(json!({
             "node": {
                 "items": {
@@ -2166,23 +2228,51 @@ mod tests {
                             "fieldValues": {
                                 "nodes": [
                                     {
-                                        "name": "Todo",
-                                        "field": { "name": "Status" }
+                                        "name": "Queued",
+                                        "optionId": "O_queued",
+                                        "field": { "id": "F_delivery", "name": "Delivery state" }
                                     },
                                     {
-                                        "name": "High",
-                                        "field": { "name": "Priority" }
+                                        "name": "Normal",
+                                        "optionId": "O_normal",
+                                        "field": { "id": "F_impact", "name": "Customer impact" }
                                     }
                                 ]
                             },
                             "content": {
                                 "id": "I_1",
                                 "number": 1,
-                                "title": "High priority",
+                                "title": "Configured priority",
                                 "body": "",
                                 "createdAt": "2025-01-01T00:00:00Z",
                                 "updatedAt": "2025-01-01T00:00:00Z",
                                 "url": "https://github.com/acme/my-repo/issues/1",
+                                "labels": { "nodes": [] }
+                            }
+                        },
+                        {
+                            "fieldValues": {
+                                "nodes": [
+                                    {
+                                        "name": "Queued",
+                                        "optionId": "O_queued",
+                                        "field": { "id": "F_delivery", "name": "Delivery state" }
+                                    },
+                                    {
+                                        "name": "Deferred",
+                                        "optionId": "O_deferred",
+                                        "field": { "id": "F_impact", "name": "Customer impact" }
+                                    }
+                                ]
+                            },
+                            "content": {
+                                "id": "I_2",
+                                "number": 2,
+                                "title": "Unlisted priority",
+                                "body": "",
+                                "createdAt": "2025-01-01T00:00:00Z",
+                                "updatedAt": "2025-01-01T00:00:00Z",
+                                "url": "https://github.com/acme/my-repo/issues/2",
                                 "labels": { "nodes": [] }
                             }
                         }
@@ -2207,11 +2297,30 @@ mod tests {
             .mount(&server)
             .await;
 
-        let tracker = create_test_tracker(&server.uri(), Some(1));
+        let tracker = GithubTracker::new(
+            format!("{}/graphql", server.uri()),
+            "ghp_test_token".to_string(),
+            "acme/my-repo".to_string(),
+            GithubTrackerSettings {
+                project_number: Some(1),
+                project_fields: Some(GithubTrackerConfig {
+                    status_field: "Delivery state".to_string(),
+                    priority: Some(crate::config::ensemble::GithubPriorityConfig {
+                        field: "Customer impact".to_string(),
+                        options: vec!["Critical".to_string(), "Normal".to_string()],
+                    }),
+                }),
+                active_states: vec!["Queued".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec![],
+            },
+        )
+        .unwrap();
         let issues = tracker.fetch_candidate_issues().await.unwrap();
 
-        assert_eq!(issues.len(), 1);
-        assert_eq!(issues[0].priority, Some(2)); // High = 2
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].priority, Some(2));
+        assert_eq!(issues[1].priority, None);
     }
 
     #[tokio::test]
@@ -2281,10 +2390,16 @@ mod tests {
             format!("{}/graphql", server.uri()),
             "ghp_test_token".to_string(),
             "acme/my-repo".to_string(),
-            Some(1),
-            vec!["Todo".to_string()],
-            vec!["Done".to_string()],
-            vec!["bug".to_string()],
+            GithubTrackerSettings {
+                project_number: Some(1),
+                project_fields: Some(GithubTrackerConfig {
+                    status_field: "Status".to_string(),
+                    priority: None,
+                }),
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec!["bug".to_string()],
+            },
         )
         .unwrap();
 
@@ -2695,7 +2810,19 @@ mod tests {
             .join(" ");
 
         assert!(compact_query
-            .contains("projectItems(first: 100) { nodes { id project { id } fieldValues"));
+            .contains("projectItems(first: 100) { nodes { id position project { id } fieldValues"));
+        assert!(compact_query.contains("fieldValues(first: 100)"));
+        assert!(compact_query.contains("name optionId"));
+    }
+
+    #[test]
+    fn project_items_query_requests_all_configured_field_values() {
+        let compact_query = graphql::PROJECT_ITEMS_QUERY
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(compact_query.contains("fieldValues(first: 100)"));
     }
 
     #[tokio::test]

@@ -6527,6 +6527,7 @@ impl Orchestrator {
             title: identifier.to_string(),
             description: None,
             priority: None,
+            tracker_position: None,
             state: state.to_string(),
             branch_name: None,
             url: None,

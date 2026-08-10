@@ -13,6 +13,7 @@ fn sample_issue() -> Issue {
         title: "Add feature X".to_string(),
         description: Some("Implement feature X".to_string()),
         priority: Some(1),
+        tracker_position: None,
         state: "Todo".to_string(),
         branch_name: None,
         url: None,

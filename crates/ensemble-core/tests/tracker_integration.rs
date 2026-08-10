@@ -17,6 +17,7 @@ fn todo_file_tracker_config(path: std::path::PathBuf) -> TrackerConfig {
         project_number: None,
         labels_filter: vec![],
         notion: None,
+        github: None,
     }
 }
 
@@ -177,6 +178,7 @@ async fn test_factory_rejects_unsupported_kind() {
         project_number: None,
         labels_filter: vec![],
         notion: None,
+        github: None,
     };
 
     let result = create_tracker(&config);

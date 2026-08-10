@@ -72,6 +72,7 @@ mod tests {
         let tracker = TrackerChoice::GitHub {
             repository: "acme/frontend".to_string(),
             project_number: Some(42),
+            status_field: Some("Delivery state".to_string()),
             api_key_env: "GITHUB_TOKEN".to_string(),
             api_token: Some("secret".to_string()),
             active_states: vec!["Todo".to_string()],
@@ -121,6 +122,7 @@ mod tests {
             SetupTracker::GitHub {
                 repository,
                 project_number,
+                status_field,
                 api_key,
                 api_key_edit,
                 api_token,
@@ -129,6 +131,7 @@ mod tests {
             } => {
                 assert_eq!(repository, "acme/frontend");
                 assert_eq!(project_number, Some(42));
+                assert_eq!(status_field.as_deref(), Some("Delivery state"));
                 assert_eq!(
                     api_key,
                     SecretDisplay::Environment {

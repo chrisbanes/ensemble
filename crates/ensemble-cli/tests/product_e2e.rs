@@ -1863,6 +1863,8 @@ fn live_dogfood_config(inputs: &LiveDogfoodInputs, run: &LiveDogfoodRun) -> Stri
   kind: github
   repository: chrisbanes/bamboon
   project_number: {}
+  github:
+    status_field: Status
   active_states:
     - Ready to implement
     - In progress
@@ -4708,8 +4710,19 @@ fn live_dogfood_config_parses_with_multiline_artifact_content() {
         root: PathBuf::from("/tmp/ensemble-live-dogfood/live-dogfood-2a-7-1"),
     };
 
+    let raw_config = live_dogfood_config(&inputs, &run);
+    let parsed = ensemble_core::config::ensemble::parse_config(&raw_config)
+        .expect("live config must satisfy the runtime configuration contract");
+    assert_eq!(
+        parsed
+            .tracker
+            .github
+            .as_ref()
+            .map(|github| github.status_field.as_str()),
+        Some("Status")
+    );
     let config: serde_yaml::Value =
-        serde_yaml::from_str(&live_dogfood_config(&inputs, &run)).expect("live config must parse");
+        serde_yaml::from_str(&raw_config).expect("live config must parse");
     let prompt = config["agents"]["builder"]["prompt"]
         .as_str()
         .expect("live prompt must be a scalar");

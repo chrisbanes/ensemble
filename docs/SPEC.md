@@ -751,15 +751,21 @@ Fields:
   - Format: `owner/repo` (for example `acme/my-project`).
 - `project_number` (integer, optional)
   - GitHub Projects v2 board number.
-  - When set, the service uses the project board's Status single-select field for state filtering.
+  - When set, `github.status_field` is required and selects the Project single-select field for
+    normalized state filtering.
   - When omitted, the service fetches issues from the repository directly using label or milestone
     filtering.
 - `labels_filter` (list of strings, optional)
   - When set, only issues with at least one of these labels are considered candidates.
   - Useful when not using a project board for state management.
 - `active_states` / `terminal_states`
-  - When `project_number` is set, these match the project board's Status field values.
+  - When `project_number` is set, these match the configured Project status-field values.
   - When `project_number` is omitted, these are matched against issue labels.
+- `github` (object, required when `project_number` is set)
+  - `status_field` (string): readable name of the Project single-select field normalized to state.
+  - `priority` (object, optional): `field` is the readable single-select field name and `options`
+    is the ordered list of readable option names normalized to ascending generic priority ranks.
+    Omit it to disable priority normalization; missing or unlisted selections normalize to no rank.
 
 GitHub auth host resolution (for `gh auth token` fallback):
 1. `tracker.gh_hostname` (if set)
@@ -2135,8 +2141,12 @@ GitHub-specific requirements for `tracker.kind == "github"`:
 When `tracker.project_number` is set (GitHub Projects v2 mode):
 
 - Query the project's items using the GitHub Projects v2 GraphQL API.
-- Filter project items by the Status single-select field matching `active_states`.
-- The implementation must discover the Status field ID at startup or cache it.
+- Resolve the configured status field and optional priority field/options by exact readable name to
+  unique live field and option IDs before a runtime activates; missing or ambiguous identities
+  reject the candidate generation and retain the last-known-good runtime.
+- Match Project item values by the resolved IDs, not readable names. Normalize state, optional
+  priority rank, and opaque optional tracker position without adding GitHub vocabulary to the
+  generic Issue contract.
 - Project items are linked to GitHub Issues; extract the issue content from each item.
 - GraphQL query pattern:
   `query { node(id: "<project-node-id>") { ... on ProjectV2 { items(first: $pageSize, after: $cursor) { ... } } } }`
@@ -2172,8 +2182,8 @@ Additional normalization details:
 - `identifier` -> `<repo-short-name>#<issue-number>` (for example `my-project#42`)
 - `state` -> For project-board mode: the project Status field value (for example `Todo`,
   `In Progress`). For repository mode: classify from labels or use `open`/`closed`.
-- `priority` -> Derived from GitHub Projects "Priority" single-select field if present, mapped to
-  integers (for example Urgent=1, High=2, Medium=3, Low=4). Otherwise `null`.
+- `priority` -> Derived from the optional configured GitHub Project single-select field, with its
+  configured option order mapped to ascending integers. Otherwise `null`.
 - `labels` -> lowercase strings from GitHub Issue labels
 - `blocked_by` -> GitHub Issues have no native blocking relations. Implementations may populate this
   by scanning issue body/comments for `blocked by #N` patterns, using a label convention, or leave

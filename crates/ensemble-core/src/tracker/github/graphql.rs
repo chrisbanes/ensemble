@@ -122,6 +122,7 @@ pub(super) struct IssueNode {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProjectItem {
     pub(super) id: Option<String>,
+    pub(super) position: Option<String>,
     pub(super) project: Option<ProjectRef>,
     pub(super) field_values: Option<Nodes<FieldValue>>,
     pub(super) content: Option<IssueNode>,
@@ -133,13 +134,17 @@ pub(super) struct ProjectRef {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct FieldValue {
     pub(super) name: Option<String>,
+    pub(super) option_id: Option<String>,
     pub(super) field: Option<FieldRef>,
 }
 
 #[derive(Debug, Deserialize)]
 pub(super) struct FieldRef {
+    pub(super) id: Option<String>,
+    #[allow(dead_code)]
     pub(super) name: Option<String>,
 }
 
@@ -216,11 +221,12 @@ query($projectId: ID!, $cursor: String) {
       items(first: 50, after: $cursor) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          fieldValues(first: 20) {
+          position
+          fieldValues(first: 100) {
             nodes {
               ... on ProjectV2ItemFieldSingleSelectValue {
-                name
-                field { ... on ProjectV2SingleSelectField { name } }
+                name optionId
+                field { ... on ProjectV2SingleSelectField { id name } }
               }
             }
           }
@@ -295,13 +301,13 @@ query($ids: [ID!]!) {
       labels(first: 20) { nodes { name } }
       projectItems(first: 100) {
         nodes {
-          id
+          id position
           project { id }
-          fieldValues(first: 20) {
+          fieldValues(first: 100) {
             nodes {
               ... on ProjectV2ItemFieldSingleSelectValue {
-                name
-                field { ... on ProjectV2SingleSelectField { name } }
+                name optionId
+                field { ... on ProjectV2SingleSelectField { id name } }
               }
             }
           }

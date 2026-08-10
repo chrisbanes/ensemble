@@ -722,6 +722,7 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
             "kind": "github",
             "repository": config.tracker.repository,
             "project_number": config.tracker.project_number,
+            "status_field": config.tracker.github.as_ref().map(|github| github.status_field.clone()),
             "api_key": SecretDisplay::from_config_value(config.tracker.api_key.as_deref()),
             "active_states": config.tracker.active_states,
             "terminal_states": config.tracker.terminal_states,
@@ -1187,6 +1188,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 9
+  github:
+    status_field: Delivery state
   api_key: ghp_secret123
   active_states:
     - Todo
@@ -1465,6 +1468,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 9
+  github:
+    status_field: Delivery state
   api_key: $GITHUB_TOKEN
   active_states:
     - Todo
@@ -1498,6 +1503,10 @@ on_failure: Failed
         assert!(response.has_existing_config);
         assert_eq!(response.defaults["tracker"]["kind"], "github");
         assert_eq!(response.defaults["tracker"]["repository"], "acme/repo");
+        assert_eq!(
+            response.defaults["tracker"]["status_field"],
+            "Delivery state"
+        );
         assert_eq!(response.defaults["repos"][0]["branch"], "develop");
         assert_eq!(response.defaults["agents"][0]["role"], "builder");
         assert_eq!(response.defaults["steps"][0]["name"], "build");
@@ -1518,6 +1527,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 17
+  github:
+    status_field: Status
   api_key: $GITHUB_TOKEN
   active_states:
     - Todo
@@ -1551,6 +1562,7 @@ on_failure: Failed
         assert!(response.has_existing_config);
         assert_eq!(response.defaults["tracker"]["kind"], "github");
         assert_eq!(response.defaults["tracker"]["repository"], "acme/repo");
+        assert_eq!(response.defaults["tracker"]["status_field"], "Status");
         assert_eq!(response.defaults["repos"][0]["branch"], "develop");
         assert_eq!(response.defaults["agents"][0]["role"], "builder");
         assert_eq!(response.defaults["agents"][0]["acpx_agent"], "codex");
@@ -1963,6 +1975,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 9
+  github:
+    status_field: Status
   api_key: ghp_secret123
   active_states:
     - Todo
@@ -2101,6 +2115,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 9
+  github:
+    status_field: Status
   api_key: ghp_secret123
   active_states:
     - Todo
@@ -2122,6 +2138,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 9
+  github:
+    status_field: Status
   api_key: ghp_secret123
   active_states:
     - Todo
@@ -2282,7 +2300,8 @@ on_failure: Failed
             setup: crate::config::setup::SetupRequest {
                 tracker: crate::config::setup::SetupTracker::GitHub {
                     repository: "acme/repo".to_string(),
-                    project_number: Some(9),
+                    project_number: None,
+                    status_field: None,
                     api_key: SecretDisplay::Environment {
                         variable: "GITHUB_TOKEN".to_string(),
                     },
@@ -2334,7 +2353,8 @@ on_failure: Failed
         let persisted_state = state.config_runtime.document_state.read().await;
         let tracker = &persisted_state.active_config.as_ref().unwrap().tracker;
         assert_eq!(tracker.repository.as_deref(), Some("acme/repo"));
-        assert_eq!(tracker.project_number, Some(9));
+        assert_eq!(tracker.project_number, None);
+        assert!(tracker.github.is_none());
         assert_eq!(tracker.api_key.as_deref(), Some("ghp_secret123"));
 
         let disk_yaml = std::fs::read_to_string(&state.config_runtime.config_path).unwrap();
@@ -2745,7 +2765,7 @@ on_failure: Failed
         let (state, _temp_dir) = test_app_state();
         let config_yaml = |secret: &str| {
             format!(
-                "tracker:\n  kind: github\n  repository: acme/repo\n  project_number: 9\n  api_key: {secret}\n  active_states:\n    - Todo\n    - In Progress\n  terminal_states:\n    - Done\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n"
+                "tracker:\n  kind: github\n  repository: acme/repo\n  project_number: 9\n  github:\n    status_field: Status\n  api_key: {secret}\n  active_states:\n    - Todo\n    - In Progress\n  terminal_states:\n    - Done\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n"
             )
         };
         let old_yaml = config_yaml("old-literal-secret");
@@ -2762,7 +2782,8 @@ on_failure: Failed
             setup: crate::config::setup::SetupRequest {
                 tracker: crate::config::setup::SetupTracker::GitHub {
                     repository: "acme/repo".to_string(),
-                    project_number: Some(9),
+                    project_number: None,
+                    status_field: None,
                     api_key: SecretDisplay::Redacted,
                     api_key_edit: SecretEdit::Preserve,
                     api_token: None,
@@ -2853,7 +2874,8 @@ on_failure: Failed
             setup: crate::config::setup::SetupRequest {
                 tracker: crate::config::setup::SetupTracker::GitHub {
                     repository: "acme/repo".to_string(),
-                    project_number: Some(9),
+                    project_number: None,
+                    status_field: None,
                     api_key: SecretDisplay::Environment {
                         variable: "ENSEMBLE_SETUP_RETRY_TOKEN".to_string(),
                     },

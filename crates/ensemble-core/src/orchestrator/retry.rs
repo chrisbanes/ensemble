@@ -822,6 +822,7 @@ mod tests {
             title: "Retry me".to_string(),
             description: None,
             priority: None,
+            tracker_position: None,
             state: "In Progress".to_string(),
             branch_name: None,
             url: None,

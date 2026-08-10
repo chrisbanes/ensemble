@@ -14,6 +14,7 @@ pub enum TrackerChoice {
     GitHub {
         repository: String,
         project_number: Option<i64>,
+        status_field: Option<String>,
         api_key_env: String,
         api_token: Option<String>,
         active_states: Vec<String>,
@@ -100,6 +101,33 @@ async fn ask_github_tracker(
         }
     };
 
+    let status_field = match project_number {
+        Some(_) => {
+            let default_status_field = existing
+                .and_then(|config| config.tracker.github.as_ref())
+                .map(|github| github.status_field.as_str())
+                .unwrap_or("");
+            Some(
+                Text::new("GitHub Project status field name:")
+                    .with_help_message(
+                        "The exact readable name of the single-select field used for state",
+                    )
+                    .with_default(default_status_field)
+                    .with_validator(|value: &str| {
+                        Ok(if value.trim().is_empty() {
+                            inquire::validator::Validation::Invalid(
+                                "A Project status field name is required".into(),
+                            )
+                        } else {
+                            inquire::validator::Validation::Valid
+                        })
+                    })
+                    .prompt()?,
+            )
+        }
+        None => None,
+    };
+
     // Check for $GITHUB_TOKEN in env.
     // `api_token` is only Some when the user enters the token interactively.
     // When loaded from env, api_token is None and the token is not written to .env.
@@ -126,7 +154,16 @@ async fn ask_github_tracker(
     let available_statuses: Vec<String> = if let Some(proj_num) = project_number {
         let owner = repository.split('/').next().unwrap_or("").to_string();
         println!("Fetching board statuses...");
-        match fetch_board_statuses(&owner, proj_num, &token).await {
+        match fetch_board_statuses(
+            &owner,
+            proj_num,
+            status_field
+                .as_deref()
+                .expect("Project status field is required"),
+            &token,
+        )
+        .await
+        {
             Ok(statuses) if !statuses.is_empty() => {
                 println!("  Found: {}", statuses.join(", "));
                 statuses
@@ -156,6 +193,7 @@ async fn ask_github_tracker(
     Ok(TrackerChoice::GitHub {
         repository,
         project_number,
+        status_field,
         api_key_env,
         api_token,
         active_states,
@@ -260,14 +298,15 @@ pub fn ask_status_mapping(
 pub async fn fetch_board_statuses(
     owner: &str,
     project_number: i64,
+    status_field: &str,
     token: &str,
 ) -> Result<Vec<String>, String> {
     // Try user first, then organization
-    match fetch_board_statuses_as_user(owner, project_number, token).await {
+    match fetch_board_statuses_as_user(owner, project_number, status_field, token).await {
         Ok(statuses) => Ok(statuses),
         Err(e) => {
             eprintln!("  User query failed (trying organization): {}", e);
-            fetch_board_statuses_as_org(owner, project_number, token).await
+            fetch_board_statuses_as_org(owner, project_number, status_field, token).await
         }
     }
 }
@@ -276,13 +315,14 @@ pub async fn fetch_board_statuses(
 async fn fetch_board_statuses_as_user(
     owner: &str,
     project_number: i64,
+    status_field: &str,
     token: &str,
 ) -> Result<Vec<String>, String> {
     let query = r#"
-query($owner: String!, $projectNumber: Int!) {
+query($owner: String!, $projectNumber: Int!, $statusField: String!) {
   user(login: $owner) {
     projectV2(number: $projectNumber) {
-      field(name: "Status") {
+      field(name: $statusField) {
         ... on ProjectV2SingleSelectField {
           options {
             name
@@ -296,6 +336,7 @@ query($owner: String!, $projectNumber: Int!) {
     let variables = serde_json::json!({
         "owner": owner,
         "projectNumber": project_number,
+        "statusField": status_field,
     });
 
     let response = execute_graphql(query, variables, token).await?;
@@ -309,13 +350,14 @@ query($owner: String!, $projectNumber: Int!) {
 async fn fetch_board_statuses_as_org(
     owner: &str,
     project_number: i64,
+    status_field: &str,
     token: &str,
 ) -> Result<Vec<String>, String> {
     let query = r#"
-query($owner: String!, $projectNumber: Int!) {
+query($owner: String!, $projectNumber: Int!, $statusField: String!) {
   organization(login: $owner) {
     projectV2(number: $projectNumber) {
-      field(name: "Status") {
+      field(name: $statusField) {
         ... on ProjectV2SingleSelectField {
           options {
             name
@@ -329,6 +371,7 @@ query($owner: String!, $projectNumber: Int!) {
     let variables = serde_json::json!({
         "owner": owner,
         "projectNumber": project_number,
+        "statusField": status_field,
     });
 
     let response = execute_graphql(query, variables, token).await?;
@@ -475,6 +518,7 @@ mod tests {
         let choice = TrackerChoice::GitHub {
             repository: "acme/frontend".to_string(),
             project_number: Some(42),
+            status_field: Some("Delivery state".to_string()),
             api_key_env: "GITHUB_TOKEN".to_string(),
             api_token: None,
             active_states: vec!["Todo".to_string()],
@@ -486,10 +530,12 @@ mod tests {
             TrackerChoice::GitHub {
                 repository,
                 project_number,
+                status_field,
                 ..
             } => {
                 assert_eq!(repository, "acme/frontend");
                 assert_eq!(project_number, Some(42));
+                assert_eq!(status_field.as_deref(), Some("Delivery state"));
             }
             _ => panic!("expected GitHub variant"),
         }

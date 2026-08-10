@@ -980,6 +980,7 @@ mod tests {
             title: "Fix the bug".to_string(),
             description: None,
             priority: Some(2),
+            tracker_position: None,
             state: "In Progress".to_string(),
             branch_name: None,
             url: None,

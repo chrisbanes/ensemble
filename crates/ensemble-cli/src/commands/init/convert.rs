@@ -17,6 +17,7 @@ impl From<&TrackerChoice> for SetupTracker {
             TrackerChoice::GitHub {
                 repository,
                 project_number,
+                status_field,
                 api_key_env,
                 api_token,
                 active_states,
@@ -25,6 +26,7 @@ impl From<&TrackerChoice> for SetupTracker {
             } => SetupTracker::GitHub {
                 repository: repository.clone(),
                 project_number: *project_number,
+                status_field: status_field.clone(),
                 api_key: SecretDisplay::Environment {
                     variable: api_key_env.clone(),
                 },

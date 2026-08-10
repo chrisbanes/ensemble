@@ -570,6 +570,7 @@ mod tests {
             title: "Fix the bug".to_string(),
             description: Some("It is broken".to_string()),
             priority: Some(2),
+            tracker_position: None,
             state: "In Progress".to_string(),
             branch_name: None,
             url: Some("https://github.com/acme/repo/issues/42".to_string()),

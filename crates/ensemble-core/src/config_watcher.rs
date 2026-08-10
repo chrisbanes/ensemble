@@ -575,7 +575,8 @@ mod tests {
         let request = crate::config::setup::SetupRequest {
             tracker: crate::config::setup::SetupTracker::GitHub {
                 repository: "owner/repo".to_string(),
-                project_number: Some(1),
+                project_number: None,
+                status_field: None,
                 api_key: SecretDisplay::Unset,
                 api_key_edit: SecretEdit::SetEnvironment {
                     variable: "NEW_GITHUB_TOKEN".to_string(),
