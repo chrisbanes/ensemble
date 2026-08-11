@@ -104,6 +104,8 @@ pub struct RepoFinalizeState {
     pub approval_required: bool,
     pub status: FinalizeStatus,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::orchestrator::delivery_observation::DeliveryObservation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

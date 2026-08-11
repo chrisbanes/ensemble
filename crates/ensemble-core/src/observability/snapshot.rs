@@ -149,6 +149,8 @@ pub struct RepoFinalizeSnapshot {
     pub approval_required: bool,
     pub status: String,
     pub last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::orchestrator::delivery_observation::DeliveryObservation>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -616,6 +618,7 @@ pub async fn build_issue_snapshot(
                     approval_required: repo.approval_required,
                     status: finalize_status_str(&repo.status).to_string(),
                     last_error: repo.last_error.clone(),
+                    observation: repo.observation.clone(),
                 })
                 .collect(),
         }

@@ -1,4 +1,5 @@
 pub(crate) mod delivery;
+pub mod delivery_observation;
 pub mod pipeline_journal;
 pub mod reconciler;
 pub mod retry;
@@ -7363,6 +7364,7 @@ impl Orchestrator {
                             approval_required: false,
                             status: FinalizeStatus::Failed,
                             last_error: Some(error.to_string()),
+                            observation: None,
                         }],
                     };
                 }
@@ -7389,6 +7391,7 @@ impl Orchestrator {
                     approval_required: true,
                     status: status.clone(),
                     last_error: None,
+                    observation: None,
                 });
                 self.update_repo_artifact_finalize_status(issue_id, repo_name, status, None)
                     .await;
@@ -7471,6 +7474,7 @@ impl Orchestrator {
                             approval_required: repo_config.finalize.approval_required,
                             status: FinalizeStatus::Failed,
                             last_error: Some(error.clone()),
+                            observation: None,
                         });
                     }
                 }
@@ -11320,6 +11324,7 @@ mod tests {
                     marker,
                     pr_number: None,
                     pr_url: None,
+                    observation: None,
                     ownership_conflict: None,
                     last_error: Some("create response was ambiguous".to_string()),
                     retry_from: None,
@@ -12141,6 +12146,7 @@ mod tests {
                         approval_required: false,
                         status: FinalizeStatus::InProgress,
                         last_error: None,
+                        observation: None,
                     }],
                 },
             );
@@ -12214,6 +12220,7 @@ mod tests {
                         approval_required: false,
                         status: FinalizeStatus::InProgress,
                         last_error: None,
+                        observation: None,
                     }],
                 },
             );
@@ -12922,6 +12929,7 @@ mod tests {
                     marker,
                     pr_number: None,
                     pr_url: None,
+                    observation: None,
                     ownership_conflict: None,
                     last_error: Some("process stopped after create".to_string()),
                     retry_from: None,

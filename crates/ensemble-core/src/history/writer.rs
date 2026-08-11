@@ -260,6 +260,7 @@ mod tests {
                 review_state: None,
                 review_projection: None,
                 last_error: None,
+                observation: None,
             }],
             transcripts: vec![crate::history::artifacts::StepTranscriptArtifact {
                 step_name: "build".into(),

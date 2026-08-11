@@ -964,6 +964,7 @@ mod tests {
                     approval_required: false,
                     status: FinalizeStatus::Failed,
                     last_error: Some("push failed".to_string()),
+                    observation: None,
                 }],
             },
         );
@@ -1074,6 +1075,7 @@ mod tests {
                     approval_required: true,
                     status: FinalizeStatus::PendingApproval,
                     last_error: None,
+                    observation: None,
                 }],
             },
         );
@@ -1267,6 +1269,7 @@ mod tests {
                     approval_required: false,
                     status: FinalizeStatus::Failed,
                     last_error: Some("push failed".to_string()),
+                    observation: None,
                 }],
             },
         );

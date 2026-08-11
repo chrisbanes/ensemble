@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { WsPipelineEvent } from "./ws-events";
 import { isCompletionEvent, normalizePipelineEvent, transcriptRecordKey } from "./ws-events";
 
 describe("normalizePipelineEvent", () => {
@@ -50,5 +51,24 @@ describe("normalizePipelineEvent", () => {
         payload: { text: "hello" },
       }),
     ).toBe("run-1:build:7");
+  });
+
+  it("accepts the generated delivery observation map on live events", () => {
+    const event: WsPipelineEvent = {
+      event_type: "delivery_observation_updated",
+      timestamp: "2026-08-11T17:00:00Z",
+      observations: {
+        primary: {
+          schema_version: 1,
+          freshness: "fresh",
+          last_attempt_at: "2026-08-11T17:00:00Z",
+          facts: null,
+          failure: null,
+          retry: null,
+        },
+      },
+    };
+
+    expect(event.observations?.primary?.freshness).toBe("fresh");
   });
 });

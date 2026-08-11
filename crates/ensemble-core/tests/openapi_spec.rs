@@ -184,6 +184,32 @@ fn openapi_documents_issue_detail_acceptance_attempts() {
 }
 
 #[test]
+fn openapi_documents_versioned_delivery_observations() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+    let observation = &spec["components"]["schemas"]["DeliveryObservation"];
+
+    assert_eq!(
+        observation["properties"]["schema_version"]["type"],
+        "integer"
+    );
+    assert_eq!(
+        spec["components"]["schemas"]["RepoFinalizeSnapshot"]["properties"]["observation"]["oneOf"]
+            [1]["$ref"],
+        "#/components/schemas/DeliveryObservation"
+    );
+    for schema in [
+        "PullRequestTerminalState",
+        "Mergeability",
+        "BaseFreshness",
+        "ReviewDecision",
+        "CheckSummary",
+    ] {
+        assert!(spec["components"]["schemas"].get(schema).is_some());
+    }
+}
+
+#[test]
 #[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();

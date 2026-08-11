@@ -30,6 +30,8 @@ pub struct RepoArtifact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_projection: Option<String>,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::orchestrator::delivery_observation::DeliveryObservation>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -77,6 +79,7 @@ pub async fn collect_repo_artifact(
         review_state: None,
         review_projection: None,
         last_error: None,
+        observation: None,
     }
 }
 

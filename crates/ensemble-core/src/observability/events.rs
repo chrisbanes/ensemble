@@ -1,6 +1,8 @@
+use crate::orchestrator::delivery_observation::DeliveryObservation;
 use crate::timeline::model::TimelineEventRecord;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::BTreeMap;
 use tokio::sync::broadcast;
 
 /// A lightweight event emitted by the orchestrator at pipeline boundaries.
@@ -99,6 +101,11 @@ pub enum PipelineEvent {
         attempt: u32,
         detail: String,
     },
+    DeliveryObservationUpdated {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        observations: BTreeMap<String, DeliveryObservation>,
+    },
     Complete {
         issue_identifier: String,
         timestamp: DateTime<Utc>,
@@ -157,6 +164,9 @@ impl PipelineEvent {
             | Self::RetryScheduled {
                 issue_identifier, ..
             }
+            | Self::DeliveryObservationUpdated {
+                issue_identifier, ..
+            }
             | Self::Complete {
                 issue_identifier, ..
             } => issue_identifier,
@@ -179,6 +189,7 @@ impl PipelineEvent {
             | Self::StepResumedFromHumanReply { timestamp, .. }
             | Self::Error { timestamp, .. }
             | Self::RetryScheduled { timestamp, .. }
+            | Self::DeliveryObservationUpdated { timestamp, .. }
             | Self::Complete { timestamp, .. } => *timestamp,
         }
     }
@@ -432,6 +443,25 @@ impl PipelineEvent {
                 step_name: None,
                 attempt: *attempt,
                 detail: detail.clone(),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::DeliveryObservationUpdated {
+                issue_identifier,
+                timestamp,
+                observations,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "delivery_observation_updated".to_string(),
+                step_name: None,
+                attempt,
+                detail: format!(
+                    "updated delivery observations for {} repositories",
+                    observations.len()
+                ),
                 verdict: None,
                 tool_name: None,
             },
