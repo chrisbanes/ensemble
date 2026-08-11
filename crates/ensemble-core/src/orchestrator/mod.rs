@@ -76,7 +76,7 @@ use crate::pipeline::engine::{
 use crate::pipeline::verdict::StepResult;
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
-use crate::tracker::IssueTracker;
+use crate::tracker::{IssueTracker, OwnershipClaim, OwnershipLease};
 use crate::transcript::events::TranscriptEventBus;
 use crate::transcript::model::TranscriptRecordKind;
 use crate::transcript::persistence::{TranscriptPersistRequest, TranscriptPersistence};
@@ -225,6 +225,13 @@ struct PendingAcceptanceTransition {
     candidate: PipelineRunSnapshot,
     owner: AcceptanceOwnerIdentity,
     baseline: PipelineRunSnapshot,
+}
+
+#[derive(Clone)]
+struct PendingRunStartedTransition {
+    expected: PipelineTransitionInput,
+    issue: Issue,
+    attempt: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -445,7 +452,11 @@ pub struct Orchestrator {
     history_store: Option<HistoryStore>,
     pipeline_journal: PipelineRunJournal,
     pipeline_journal_restored: AtomicBool,
+    pending_run_started_transitions:
+        Box<std::sync::Mutex<HashMap<String, PendingRunStartedTransition>>>,
     pending_acceptance_transitions: std::sync::Mutex<HashMap<String, PendingAcceptanceTransition>>,
+    /// Remote claims held only until their first synchronous `RunStarted` journal append.
+    pending_ownership_leases: std::sync::Mutex<HashMap<String, OwnershipLease>>,
     event_bus: EventBus,
     timeline_persistence: Option<TimelinePersistence>,
     transcript_persistence: Option<TranscriptPersistence>,
@@ -623,7 +634,9 @@ impl Orchestrator {
             history_store,
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             pipeline_journal_restored: AtomicBool::new(false),
+            pending_run_started_transitions: Box::new(std::sync::Mutex::new(HashMap::new())),
             pending_acceptance_transitions: std::sync::Mutex::new(HashMap::new()),
+            pending_ownership_leases: std::sync::Mutex::new(HashMap::new()),
             event_bus: parts.event_bus,
             timeline_persistence,
             transcript_persistence: Some(TranscriptPersistence::new_with_event_bus(
@@ -905,7 +918,11 @@ impl Orchestrator {
     }
 
     /// Handle a poll tick: reconcile, validate, fetch, dispatch.
-    async fn handle_tick(&self) {
+    fn handle_tick(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(self.handle_tick_inner())
+    }
+
+    async fn handle_tick_inner(&self) {
         if self.quiescing.is_requested() {
             return;
         }
@@ -936,6 +953,7 @@ impl Orchestrator {
             state.last_tick_at = Some(Utc::now());
         }
 
+        Box::pin(self.reconcile_pending_run_started_transitions()).await;
         self.reconcile_pending_acceptance_transitions().await;
         self.restore_pipeline_runs_from_journal().await;
         self.reconcile_pending_terminal_transitions().await;
@@ -1070,8 +1088,12 @@ impl Orchestrator {
         // Give already-claimed pipelines the first opportunity to consume
         // newly available worker capacity before admitting new issues.
         if let Some(permit) = self.quiescing.begin_dispatch() {
-            self.dispatch_ready_active_pipelines(&permit).await;
+            Box::pin(self.dispatch_ready_active_pipelines(&permit)).await;
         }
+
+        // Durable journal owners always win. Only after they have had an
+        // opportunity to resume may an adapter supply a remotely-owned orphan.
+        Box::pin(self.dispatch_recovered_claims_before_fresh_work()).await;
 
         // 3. Fetch candidate issues
         let mut candidates = match self.tracker.fetch_candidate_issues().await {
@@ -1106,60 +1128,8 @@ impl Orchestrator {
                 }
             }
 
-            let eligible = {
-                let state = self.state.read().await;
-                is_dispatch_eligible(issue, &state, &active_lower, &terminal_lower)
-            };
-
-            let restored_pipeline_ready = {
-                let state = self.state.read().await;
-                Self::restored_pipeline_ready_for_dispatch(&state, &issue.id)
-            };
-
-            if restored_pipeline_ready {
-                self.dispatch_issue(issue, None).await;
-                continue;
-            }
-
-            {
-                let config = self.config.read().await;
-                if !self.state_worker_capacity_available(issue, &config).await {
-                    continue;
-                }
-            }
-
-            if eligible.is_some() {
-                continue;
-            }
-
-            match self.restore_pipeline_run_for_candidate(issue).await {
-                Ok(
-                    CandidateRestoreOutcome::NotRestored
-                    | CandidateRestoreOutcome::ReadyForDispatch,
-                ) => {
-                    self.dispatch_issue(issue, None).await;
-                }
-                Ok(CandidateRestoreOutcome::Parked) => {}
-                Err(
-                    error @ EnsembleError::Agent(AgentError::DurableSequenceUnavailable { .. }),
-                ) => {
-                    warn!(
-                        issue_id = %issue.id,
-                        identifier = %issue.identifier,
-                        error = %error,
-                        "failed to restore live pipeline journal before dispatch, leaving issue undispatched"
-                    );
-                }
-                Err(error) => {
-                    warn!(
-                        issue_id = %issue.id,
-                        identifier = %issue.identifier,
-                        error = %error,
-                        "failed to restore live pipeline journal before dispatch, falling back to fresh dispatch"
-                    );
-                    self.dispatch_issue(issue, None).await;
-                }
-            }
+            Box::pin(self.consider_candidate_for_dispatch(issue, &active_lower, &terminal_lower))
+                .await;
         }
 
         info!(
@@ -1167,6 +1137,157 @@ impl Orchestrator {
             duration_ms = elapsed_ms(tick_started_at),
             "orchestrator tick finished"
         );
+    }
+
+    async fn consider_candidate_for_dispatch(
+        &self,
+        issue: &Issue,
+        active_lower: &[String],
+        terminal_lower: &[String],
+    ) {
+        let eligible = {
+            let state = self.state.read().await;
+            is_dispatch_eligible(issue, &state, active_lower, terminal_lower)
+        };
+
+        let restored_pipeline_ready = {
+            let state = self.state.read().await;
+            Self::restored_pipeline_ready_for_dispatch(&state, &issue.id)
+        };
+
+        if restored_pipeline_ready {
+            Box::pin(self.dispatch_issue(issue, None)).await;
+            return;
+        }
+
+        {
+            let config = self.config.read().await;
+            if !self.state_worker_capacity_available(issue, &config).await {
+                return;
+            }
+        }
+
+        if eligible.is_some() {
+            return;
+        }
+
+        match self.restore_pipeline_run_for_candidate(issue).await {
+            Ok(CandidateRestoreOutcome::ReadyForDispatch) => {
+                Box::pin(self.dispatch_issue(issue, None)).await;
+            }
+            Ok(CandidateRestoreOutcome::NotRestored) => {
+                if let Some(owned_issue) = Box::pin(self.claim_candidate_for_dispatch(issue)).await
+                {
+                    Box::pin(self.dispatch_issue(&owned_issue, None)).await;
+                }
+            }
+            Ok(CandidateRestoreOutcome::Parked) => {}
+            Err(error @ EnsembleError::Agent(AgentError::DurableSequenceUnavailable { .. })) => {
+                warn!(
+                    issue_id = %issue.id,
+                    identifier = %issue.identifier,
+                    error = %error,
+                    "failed to restore live pipeline journal before dispatch, leaving issue undispatched"
+                );
+            }
+            Err(error) => {
+                if self.tracker.has_remote_ownership_policy() {
+                    warn!(
+                        issue_id = %issue.id,
+                        identifier = %issue.identifier,
+                        error = %error,
+                        "failed to restore live pipeline journal before remote-owned dispatch; leaving issue undispatched"
+                    );
+                } else {
+                    warn!(
+                        issue_id = %issue.id,
+                        identifier = %issue.identifier,
+                        error = %error,
+                        "failed to restore live pipeline journal before dispatch, falling back to fresh dispatch"
+                    );
+                    Box::pin(self.dispatch_issue(issue, None)).await;
+                }
+            }
+        }
+    }
+
+    async fn dispatch_recovered_claims_before_fresh_work(&self) {
+        let recovered = match self.tracker.recover_owned_claims().await {
+            Ok(recovered) => recovered,
+            Err(error) => {
+                warn!(error = %error, "failed to recover remote-owned claims before fresh dispatch");
+                return;
+            }
+        };
+
+        for (issue, lease) in recovered {
+            let already_owned = {
+                let state = self.state.read().await;
+                state.get_pipeline_run(&issue.id).is_some()
+                    || state.is_running(&issue.id)
+                    || state.is_claimed(&issue.id)
+                    || state.delivery.contains_key(&issue.id)
+            };
+            if already_owned {
+                continue;
+            }
+
+            let config = self.config.read().await;
+            if !self.state_worker_capacity_available(&issue, &config).await {
+                return;
+            }
+            drop(config);
+
+            let mut owned_issue = issue;
+            owned_issue.branch_name = lease.branch_name.clone();
+            self.pending_ownership_leases
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(owned_issue.id.clone(), lease);
+            Box::pin(self.dispatch_issue(&owned_issue, None)).await;
+        }
+    }
+
+    /// Requests adapter-owned remote ownership only after the existing journal
+    /// has proved there is no local run to restore. Tracker-specific evidence
+    /// stays at the adapter boundary; dispatch receives at most an opaque
+    /// workspace branch identity.
+    async fn claim_candidate_for_dispatch(&self, issue: &Issue) -> Option<Issue> {
+        match self.tracker.claim_issue(issue).await {
+            Ok(OwnershipClaim::Unavailable) => {
+                let mut issue = issue.clone();
+                issue.branch_name = self.tracker.workspace_branch_name(&issue);
+                Some(issue)
+            }
+            Ok(OwnershipClaim::Acquired(lease) | OwnershipClaim::Recovered(lease)) => {
+                let mut owned = issue.clone();
+                owned.branch_name = lease.branch_name.clone();
+                self.pending_ownership_leases
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(issue.id.clone(), lease);
+                Some(owned)
+            }
+            Ok(OwnershipClaim::NotEligible) => None,
+            Ok(OwnershipClaim::Conflict(conflict)) => {
+                warn!(
+                    issue_id = %issue.id,
+                    identifier = %issue.identifier,
+                    ?conflict,
+                    "remote ownership conflict left candidate undispatched"
+                );
+                None
+            }
+            Err(error) => {
+                warn!(
+                    issue_id = %issue.id,
+                    identifier = %issue.identifier,
+                    error = %error,
+                    "remote ownership claim failed; leaving candidate undispatched"
+                );
+                None
+            }
+        }
     }
 
     async fn restore_pipeline_run_for_candidate(
@@ -1592,7 +1713,19 @@ impl Orchestrator {
             }
         };
 
+        let ownership_lease = self
+            .pending_ownership_leases
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&issue.id)
+            .cloned();
         let mut pipeline_run = PipelineRun::new(issue.id.clone(), cycle, dag);
+        if let Some(lease) = ownership_lease.clone() {
+            pipeline_run.set_ownership_lease(lease);
+        }
+        if let Some(branch_name) = issue.branch_name.clone() {
+            pipeline_run.set_workspace_branch_name(branch_name);
+        }
         let acceptance_plan = match ResolvedAcceptancePlan::from_config(&config_snapshot) {
             Ok(plan) => plan,
             Err(error) => {
@@ -1631,7 +1764,58 @@ impl Orchestrator {
             )
         };
         if let Some(input) = run_started_transition {
-            self.append_pipeline_transition(input).await;
+            if ownership_lease.is_some() {
+                let transaction = self
+                    .pipeline_journal
+                    .begin_issue_transition(&issue.id)
+                    .await;
+                if let Err(error) = transaction.append(input.clone()).await {
+                    match transaction.latest_record_matches(&input).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            warn!(
+                                issue_id = %issue.id,
+                                identifier = %issue.identifier,
+                                error = %error,
+                                "remote ownership transition was not journaled"
+                            );
+                            let mut state = self.state.write().await;
+                            state.release_claim(&issue.id);
+                            state.remove_pipeline_run(&issue.id);
+                            return;
+                        }
+                        Err(reconciliation_error) => {
+                            warn!(
+                                issue_id = %issue.id,
+                                identifier = %issue.identifier,
+                                append_error = %error,
+                                reconciliation_error = %reconciliation_error,
+                                "remote ownership transition remains ambiguous; retaining the owner"
+                            );
+                            self.pending_run_started_transitions
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .insert(
+                                    issue.id.clone(),
+                                    PendingRunStartedTransition {
+                                        expected: input,
+                                        issue: issue.clone(),
+                                        attempt,
+                                    },
+                                );
+                            self.refresh_requested.notify_one();
+                            return;
+                        }
+                    }
+                }
+                drop(transaction);
+                self.pending_ownership_leases
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&issue.id);
+            } else {
+                self.append_pipeline_transition(input).await;
+            }
         }
 
         // Process initial dispatch requests
@@ -1718,6 +1902,61 @@ impl Orchestrator {
         );
     }
 
+    async fn reconcile_pending_run_started_transitions(&self) {
+        let pending = self
+            .pending_run_started_transitions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for pending in pending {
+            let issue_id = pending.issue.id.clone();
+            let transaction = self
+                .pipeline_journal
+                .begin_issue_transition(&issue_id)
+                .await;
+            let visibility = transaction.latest_record_matches(&pending.expected).await;
+            drop(transaction);
+            match visibility {
+                Ok(is_exact) => {
+                    let owner_is_current = {
+                        let state = self.state.read().await;
+                        state
+                            .get_running(&issue_id)
+                            .is_some_and(|running| running.run_id == pending.expected.run_id)
+                            && state.get_pipeline_run(&issue_id).is_some_and(|run| {
+                                pending.expected.snapshot.as_ref() == Some(&run.to_snapshot())
+                            })
+                    };
+                    self.pending_run_started_transitions
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&issue_id);
+                    if !owner_is_current {
+                        continue;
+                    }
+                    if is_exact {
+                        self.pending_ownership_leases
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .remove(&issue_id);
+                    } else {
+                        let mut state = self.state.write().await;
+                        state.release_claim(&issue_id);
+                        state.remove_pipeline_run(&issue_id);
+                    }
+                    Box::pin(self.dispatch_issue(&pending.issue, pending.attempt)).await;
+                }
+                Err(error) => warn!(
+                    issue_id,
+                    error = %error,
+                    "remote ownership transition remains ambiguous; retaining the owner"
+                ),
+            }
+        }
+    }
+
     async fn dispatch_ready_active_pipelines(&self, permit: &DispatchPermit) {
         let mut active_issue_ids = {
             let state = self.state.read().await;
@@ -1730,6 +1969,14 @@ impl Orchestrator {
         active_issue_ids.sort();
 
         for (_, issue_id) in active_issue_ids {
+            if self
+                .pending_run_started_transitions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key(&issue_id)
+            {
+                continue;
+            }
             let max_workers = self.config.read().await.concurrency.max_concurrent_agents;
             if !has_available_worker_slots(
                 live_worker_count(&self.cancellation_registry),
@@ -1983,9 +2230,17 @@ impl Orchestrator {
         issue: &Issue,
         config_snapshot: &Arc<EnsembleConfig>,
     ) -> Result<std::path::PathBuf, EnsembleError> {
+        let branch_name = {
+            let state = self.state.read().await;
+            state
+                .get_pipeline_run(&issue.id)
+                .and_then(PipelineRun::workspace_branch_name)
+                .map(str::to_owned)
+                .or_else(|| issue.branch_name.clone())
+        };
         let workspace = self
             .workspace_mgr
-            .prepare_workspace(&issue.id, &issue.identifier)
+            .prepare_workspace_with_branch(&issue.id, &issue.identifier, branch_name.as_deref())
             .await?;
 
         if workspace.created_now {
@@ -4361,9 +4616,23 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .map(|run| run.acceptance_attempts.clone())
             .unwrap_or_default();
+        let ownership_lease = state
+            .get_pipeline_run(issue_id)
+            .and_then(PipelineRun::ownership_lease)
+            .cloned();
+        let workspace_branch_name = state
+            .get_pipeline_run(issue_id)
+            .and_then(PipelineRun::workspace_branch_name)
+            .map(str::to_owned);
         let mut next_run = PipelineRun::new(issue_id.to_string(), retry_entry.attempt, dag);
         next_run.acceptance_attempts = acceptance_attempts;
         next_run.resolved_acceptance_plan = Some(ResolvedAcceptancePlan::from_config(config).ok()?);
+        if let Some(ownership_lease) = ownership_lease {
+            next_run.set_ownership_lease(ownership_lease);
+        }
+        if let Some(workspace_branch_name) = workspace_branch_name {
+            next_run.set_workspace_branch_name(workspace_branch_name);
+        }
         state.insert_pipeline_run(issue_id, next_run, Arc::new(config.clone()));
         Self::transition_input_for_run(
             state,
@@ -8153,10 +8422,44 @@ impl Orchestrator {
             }
         };
 
-        // Find the issue in candidates
-        let issue = candidates.iter().find(|i| i.id == *issue_id);
+        // Claimed tracker states may intentionally sit outside the ordinary candidate
+        // states. Revalidate remote ownership before treating a missing candidate as a
+        // release signal.
+        let mut issue = candidates.into_iter().find(|issue| issue.id == *issue_id);
+        if issue.is_none() && self.tracker.has_remote_ownership_policy() {
+            match self.tracker.recover_owned_claims().await {
+                Ok(recovered) => {
+                    if let Some((recovered_issue, lease)) = recovered
+                        .into_iter()
+                        .find(|(recovered_issue, _)| recovered_issue.id == *issue_id)
+                    {
+                        {
+                            let mut state = self.state.write().await;
+                            if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                                run.set_ownership_lease(lease.clone());
+                            }
+                        }
+                        self.pending_ownership_leases
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(issue_id.clone(), lease);
+                        issue = Some(recovered_issue);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        issue_id = %issue_id,
+                        error = %error,
+                        "retry ownership revalidation failed, rescheduling"
+                    );
+                    self.defer_single_retry(retry_entry, "retry ownership revalidation failed")
+                        .await;
+                    return;
+                }
+            }
+        }
 
-        match issue {
+        match issue.as_ref() {
             None => {
                 // Issue not found in candidates — release claim
                 info!(
@@ -8837,7 +9140,7 @@ mod tests {
     use crate::orchestrator::retry::current_time_ms;
     use crate::pipeline::verdict::{StepOutput, StepResult};
     use crate::tracker::model::RetryEntry;
-    use crate::tracker::TrackerError;
+    use crate::tracker::{OwnershipConflict, TrackerError};
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
@@ -8942,6 +9245,11 @@ mod tests {
     }
 
     struct FailingCandidateTracker;
+
+    struct OwnedRetryTracker {
+        issue: Issue,
+        lease: OwnershipLease,
+    }
 
     struct CommandMockTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
@@ -9099,6 +9407,39 @@ mod tests {
             _ids: &[String],
         ) -> Result<Vec<Issue>, TrackerError> {
             Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for OwnedRetryTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            _states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(ids
+                .contains(&self.issue.id)
+                .then(|| self.issue.clone())
+                .into_iter()
+                .collect())
+        }
+
+        async fn recover_owned_claims(&self) -> Result<Vec<(Issue, OwnershipLease)>, TrackerError> {
+            Ok(vec![(self.issue.clone(), self.lease.clone())])
+        }
+
+        fn has_remote_ownership_policy(&self) -> bool {
+            true
         }
     }
 
@@ -9856,6 +10197,7 @@ mod tests {
             &self,
             _repository_path: &Path,
             _repository_key: &str,
+            _adoption_policy: Option<&crate::orchestrator::delivery::PullRequestAdoptionPolicy>,
         ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
             Ok(self.pull_requests.lock().unwrap().clone())
         }
@@ -9872,6 +10214,10 @@ mod tests {
             self.pull_requests.lock().unwrap().push(
                 crate::orchestrator::delivery::RemotePullRequest {
                     repository_key: "source-repo".to_string(),
+                    repository: None,
+                    head_repository: None,
+                    author: None,
+                    authored_by_authenticated_viewer: false,
                     head_branch: head_branch.to_string(),
                     base_branch: base_branch.to_string(),
                     head_sha: "0123456789abcdef".to_string(),
@@ -10335,6 +10681,14 @@ mod tests {
 
     #[async_trait]
     impl crate::orchestrator::delivery::DeliveryRemote for RecoveryDeliveryRemote {
+        fn pull_request_adoption_policy(
+            &self,
+            config: &EnsembleConfig,
+            issue_id: &str,
+        ) -> Option<crate::orchestrator::delivery::PullRequestAdoptionPolicy> {
+            CliDeliveryRemote.pull_request_adoption_policy(config, issue_id)
+        }
+
         async fn local_identity(
             &self,
             _repository_path: &Path,
@@ -10370,6 +10724,7 @@ mod tests {
             &self,
             _repository_path: &Path,
             _repository_key: &str,
+            _adoption_policy: Option<&crate::orchestrator::delivery::PullRequestAdoptionPolicy>,
         ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
             self.lists.fetch_add(1, Ordering::SeqCst);
             Ok(self.pull_requests.lock().unwrap().clone())
@@ -10432,9 +10787,10 @@ mod tests {
             &self,
             repository_path: &Path,
             repository_key: &str,
+            adoption_policy: Option<&crate::orchestrator::delivery::PullRequestAdoptionPolicy>,
         ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
             self.inner
-                .list_pull_requests(repository_path, repository_key)
+                .list_pull_requests(repository_path, repository_key, adoption_policy)
                 .await
         }
 
@@ -10501,6 +10857,7 @@ mod tests {
                     marker,
                     pr_number: None,
                     pr_url: None,
+                    ownership_conflict: None,
                     last_error: Some("create response was ambiguous".to_string()),
                     retry_from: None,
                 },
@@ -10543,6 +10900,10 @@ mod tests {
         remote.pull_requests.lock().unwrap().push(
             crate::orchestrator::delivery::RemotePullRequest {
                 repository_key: "source-repo".to_string(),
+                repository: None,
+                head_repository: None,
+                author: None,
+                authored_by_authenticated_viewer: false,
                 head_branch: observed_delivery.repositories["source-repo"]
                     .head_branch
                     .clone(),
@@ -11138,6 +11499,10 @@ mod tests {
         remote.pull_requests.lock().unwrap().push(
             crate::orchestrator::delivery::RemotePullRequest {
                 repository_key: "source-repo".to_string(),
+                repository: None,
+                head_repository: None,
+                author: None,
+                authored_by_authenticated_viewer: false,
                 head_branch: "ensemble/repo-1".to_string(),
                 base_branch: "main".to_string(),
                 head_sha: "0123456789abcdef".to_string(),
@@ -11159,6 +11524,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exact_unpersisted_pr_adoption_is_journaled_once() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let workspace_key = crate::workspace::key::issue_workspace_key("1");
+        let branch_template = "configured/{issue_workspace_key}".to_string();
+        let head_branch = branch_template.replace("{issue_workspace_key}", &workspace_key);
+        {
+            let mut config = orchestrator.config.write().await;
+            config.tracker.kind = "github".to_string();
+            config.tracker.github = Some(crate::config::ensemble::GithubTrackerConfig {
+                status_field: "Delivery state".to_string(),
+                priority: None,
+                ownership: Some(crate::config::ensemble::GithubOwnershipConfig {
+                    claim: None,
+                    delivery_adoption: Some(
+                        crate::config::ensemble::GithubDeliveryAdoptionConfig {
+                            repository: "example/project".to_string(),
+                            base_branch: "main".to_string(),
+                            branch_template,
+                            require_authenticated_author: true,
+                        },
+                    ),
+                }),
+            });
+        }
+        delivery
+            .repositories
+            .get_mut("source-repo")
+            .unwrap()
+            .head_branch = head_branch.clone();
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        remote.pull_requests.lock().unwrap().push(
+            crate::orchestrator::delivery::RemotePullRequest {
+                repository_key: "source-repo".to_string(),
+                repository: Some("example/project".to_string()),
+                head_repository: Some("example/project".to_string()),
+                author: Some("octocat".to_string()),
+                authored_by_authenticated_viewer: true,
+                head_branch,
+                base_branch: "main".to_string(),
+                head_sha: "0123456789abcdef".to_string(),
+                body: String::new(),
+                number: 511,
+                url: "https://github.com/example/project/pull/511".to_string(),
+            },
+        );
+
+        orchestrator.process_delivery_recovery(None).await;
+        orchestrator.process_delivery_recovery(None).await;
+
+        let state = orchestrator.state.read().await;
+        let repository = &state.delivery["1"].repositories["source-repo"];
+        assert_eq!(repository.phase, DeliveryPhase::Waiting);
+        assert_eq!(repository.pr_number, Some(511));
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
     async fn ambiguous_publication_conflict_enters_blocked_without_mutation() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
@@ -11170,6 +11603,10 @@ mod tests {
             recovery_test_orchestrator(Arc::clone(&remote)).await;
         let exact = crate::orchestrator::delivery::RemotePullRequest {
             repository_key: "source-repo".to_string(),
+            repository: None,
+            head_repository: None,
+            author: None,
+            authored_by_authenticated_viewer: false,
             head_branch: "ensemble/repo-1".to_string(),
             base_branch: "main".to_string(),
             head_sha: "0123456789abcdef".to_string(),
@@ -11184,6 +11621,10 @@ mod tests {
         let state = orchestrator.state.read().await;
         let repository = &state.delivery["1"].repositories["source-repo"];
         assert_eq!(repository.phase, DeliveryPhase::Blocked);
+        assert_eq!(
+            repository.ownership_conflict,
+            Some(OwnershipConflict::Ambiguous)
+        );
         assert_eq!(repository.retry_from, Some(DeliveryPhase::ReconcilingPr));
         assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
         assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
@@ -11208,6 +11649,10 @@ mod tests {
         remote.pull_requests.lock().unwrap().push(
             crate::orchestrator::delivery::RemotePullRequest {
                 repository_key: "source-repo".to_string(),
+                repository: None,
+                head_repository: None,
+                author: None,
+                authored_by_authenticated_viewer: false,
                 head_branch: repository.head_branch.clone(),
                 base_branch: repository.base_branch.clone(),
                 head_sha: repository.local_sha.clone(),
@@ -11971,6 +12416,7 @@ mod tests {
                     marker,
                     pr_number: None,
                     pr_url: None,
+                    ownership_conflict: None,
                     last_error: Some("process stopped after create".to_string()),
                     retry_from: None,
                 },
@@ -11994,6 +12440,10 @@ mod tests {
             pull_requests: std::sync::Mutex::new(vec![
                 crate::orchestrator::delivery::RemotePullRequest {
                     repository_key: "source-repo".to_string(),
+                    repository: None,
+                    head_repository: None,
+                    author: None,
+                    authored_by_authenticated_viewer: false,
                     head_branch: "ensemble/repo-1".to_string(),
                     base_branch: "main".to_string(),
                     head_sha: "0123456789abcdef".to_string(),
@@ -12067,6 +12517,10 @@ mod tests {
             pull_requests: std::sync::Mutex::new(vec![
                 crate::orchestrator::delivery::RemotePullRequest {
                     repository_key: "source-repo".to_string(),
+                    repository: None,
+                    head_repository: None,
+                    author: None,
+                    authored_by_authenticated_viewer: false,
                     head_branch: "ensemble/repo-1".to_string(),
                     base_branch: "main".to_string(),
                     head_sha: "0123456789abcdef".to_string(),
@@ -13213,6 +13667,16 @@ agent:
         let (orchestrator, state) =
             make_acceptance_test_orchestrator(&temp, &config, &issue, runner);
         install_succeeded_run(&state, &issue, &config).await;
+        let ownership_lease = OwnershipLease {
+            id: issue.id.clone(),
+            branch_name: Some("agent/acceptance-retry".into()),
+        };
+        state
+            .write()
+            .await
+            .get_pipeline_run_mut(&issue.id)
+            .unwrap()
+            .set_ownership_lease(ownership_lease.clone());
         assert!(matches!(
             orchestrator.run_acceptance_phase(&issue, &config).await,
             AcceptancePhaseOutcome::Failed { .. }
@@ -13243,6 +13707,7 @@ agent:
         assert_eq!(snapshot.cycle, 2);
         assert_eq!(snapshot.acceptance_attempts.len(), 1);
         assert_eq!(snapshot.acceptance_attempts[0].cycle, 1);
+        assert_eq!(snapshot.ownership_lease, Some(ownership_lease));
         assert_eq!(
             snapshot.acceptance_attempts[0].results[0].status,
             AcceptanceStatus::Failed
@@ -20162,6 +20627,182 @@ agent:
     }
 
     #[tokio::test]
+    async fn claimed_dispatch_journals_opaque_lease_before_agent_work() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("1", "Todo");
+        let lease = OwnershipLease {
+            id: "remote-lease-1".to_string(),
+            branch_name: Some("ensemble/issue-1".to_string()),
+        };
+        orchestrator
+            .pending_ownership_leases
+            .lock()
+            .unwrap()
+            .insert(issue.id.clone(), lease.clone());
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        let run_started = records
+            .iter()
+            .find(|record| record.kind == PipelineTransitionKind::RunStarted)
+            .unwrap();
+        assert_eq!(
+            run_started
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.ownership_lease.clone()),
+            Some(lease)
+        );
+        let metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(orchestrator.workspace_mgr.metadata_path_for_test(&issue.id))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["branch_name"], "ensemble/issue-1");
+        assert!(!observed_commands.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn claimed_dispatch_append_failure_starts_no_agent_or_workspace() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+        let issue = test_issue("1", "Todo");
+        orchestrator
+            .pending_ownership_leases
+            .lock()
+            .unwrap()
+            .insert(
+                issue.id.clone(),
+                OwnershipLease {
+                    id: "remote-lease-1".to_string(),
+                    branch_name: None,
+                },
+            );
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        assert!(observed_commands.read().await.is_empty());
+        assert!(!orchestrator
+            .workspace_mgr
+            .workspace_path(&issue.id)
+            .exists());
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.get_pipeline_run(&issue.id).is_none());
+        assert!(!state.is_claimed(&issue.id));
+    }
+
+    #[tokio::test]
+    async fn claimed_dispatch_ambiguous_append_retains_owner_until_exact_reconciliation() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
+        let issue = test_issue("1", "Todo");
+        orchestrator
+            .pending_ownership_leases
+            .lock()
+            .unwrap()
+            .insert(
+                issue.id.clone(),
+                OwnershipLease {
+                    id: "remote-lease-1".into(),
+                    branch_name: Some("agent/issue-1".into()),
+                },
+            );
+
+        orchestrator.dispatch_issue(&issue, None).await;
+
+        assert!(observed_commands.read().await.is_empty());
+        assert!(orchestrator.state.read().await.is_running(&issue.id));
+        assert!(!orchestrator
+            .workspace_mgr
+            .workspace_path(&issue.id)
+            .exists());
+
+        orchestrator.pipeline_journal.transaction_append_late_error = false;
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator.handle_tick().await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(observed_commands.read().await.len(), 1);
+        assert!(orchestrator.state.read().await.is_running(&issue.id));
+    }
+
+    #[tokio::test]
     async fn restored_pipeline_dispatch_persistence_failure_schedules_recoverable_retry() {
         let config = Arc::new(RwLock::new(make_config()));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
@@ -24480,6 +25121,63 @@ agent:
         assert_eq!(deferred.retry_from_step, retry.retry_from_step);
         assert_eq!(deferred.with_fixup, retry.with_fixup);
         assert!(state.is_claimed("1"));
+    }
+
+    #[tokio::test]
+    async fn retry_fire_recovers_owned_issue_outside_candidate_states() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issue = test_issue("1", "Agent-owned");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(OwnedRetryTracker {
+            issue: issue.clone(),
+            lease: OwnershipLease {
+                id: issue.id.clone(),
+                branch_name: Some("agent/retry-1".into()),
+            },
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let retry = RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: 3,
+            due_at_ms: 0,
+            error: Some("agent crashed".into()),
+            retry_from_step: None,
+            with_fixup: false,
+        };
+        orchestrator.state.write().await.add_retry(retry.clone());
+
+        orchestrator.handle_single_retry(&retry).await;
+
+        let state = orchestrator.state.read().await;
+        assert_eq!(
+            state
+                .get_running(&issue.id)
+                .and_then(|entry| entry.retry_attempt),
+            Some(retry.attempt)
+        );
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .and_then(PipelineRun::workspace_branch_name),
+            Some("agent/retry-1")
+        );
+        assert!(!state.retry_attempts.contains_key(&issue.id));
     }
 
     #[tokio::test]

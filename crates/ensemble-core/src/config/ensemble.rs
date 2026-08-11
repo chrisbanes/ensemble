@@ -203,6 +203,9 @@ pub struct GithubTrackerConfig {
     pub status_field: String,
     #[serde(default)]
     pub priority: Option<GithubPriorityConfig>,
+    /// Optional adapter-owned policy for exclusive GitHub claims and delivery recovery.
+    #[serde(default)]
+    pub ownership: Option<GithubOwnershipConfig>,
 }
 
 /// The ordered single-select options that form GitHub Project priority ranks.
@@ -210,6 +213,42 @@ pub struct GithubTrackerConfig {
 pub struct GithubPriorityConfig {
     pub field: String,
     pub options: Vec<String>,
+}
+
+/// GitHub-specific ownership rules. Their values remain adapter data; the runtime
+/// receives only opaque leases and conflict outcomes.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct GithubOwnershipConfig {
+    #[serde(default)]
+    pub claim: Option<GithubClaimConfig>,
+    #[serde(default)]
+    pub delivery_adoption: Option<GithubDeliveryAdoptionConfig>,
+}
+
+/// An exclusive authenticated-assignee claim policy.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct GithubClaimConfig {
+    pub claimed_state: String,
+    pub resume_states: Vec<String>,
+}
+
+/// The exact identity required before an unpersisted pull request can be adopted.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct GithubDeliveryAdoptionConfig {
+    pub repository: String,
+    pub base_branch: String,
+    pub branch_template: String,
+    #[serde(default)]
+    pub require_authenticated_author: bool,
+}
+
+impl GithubDeliveryAdoptionConfig {
+    /// Render the sole supported immutable branch input. Callers pass the
+    /// workspace key rather than any tracker-specific identifier.
+    pub fn render_branch(&self, issue_workspace_key: &str) -> String {
+        self.branch_template
+            .replace("{issue_workspace_key}", issue_workspace_key)
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -969,21 +1008,25 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
 fn validate_github_project_config(
     config: &EnsembleConfig,
 ) -> Result<(), crate::error::ConfigError> {
-    if config.tracker.kind != "github" || config.tracker.project_number.is_none() {
+    if config.tracker.kind != "github" {
         return Ok(());
     }
 
-    let github = config.tracker.github.as_ref().ok_or_else(|| {
-        crate::error::ConfigError::ConfigParseError {
+    let github = config.tracker.github.as_ref();
+    if config.tracker.project_number.is_some() {
+        let github = github.ok_or_else(|| crate::error::ConfigError::ConfigParseError {
             reason: "tracker.github.status_field is required when tracker.project_number is set"
                 .to_string(),
+        })?;
+        if github.status_field.trim().is_empty() {
+            return Err(crate::error::ConfigError::ConfigParseError {
+                reason: "tracker.github.status_field must not be empty".to_string(),
+            });
         }
-    })?;
-    if github.status_field.trim().is_empty() {
-        return Err(crate::error::ConfigError::ConfigParseError {
-            reason: "tracker.github.status_field must not be empty".to_string(),
-        });
     }
+    let Some(github) = github else {
+        return Ok(());
+    };
     if let Some(priority) = &github.priority {
         if priority.field.trim().is_empty() {
             return Err(crate::error::ConfigError::ConfigParseError {
@@ -1000,7 +1043,74 @@ fn validate_github_project_config(
             });
         }
     }
+    if let Some(ownership) = &github.ownership {
+        if let Some(claim) = &ownership.claim {
+            if claim.claimed_state.trim().is_empty() || claim.resume_states.is_empty() {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason: "tracker.github.ownership.claim requires a non-blank claimed_state and non-empty resume_states".to_string(),
+                });
+            }
+            if claim
+                .resume_states
+                .iter()
+                .any(|state| state.trim().is_empty())
+            {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason:
+                        "tracker.github.ownership.claim.resume_states must not contain blank names"
+                            .to_string(),
+                });
+            }
+            if !claim
+                .resume_states
+                .iter()
+                .any(|state| state.eq_ignore_ascii_case(&claim.claimed_state))
+            {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason: "tracker.github.ownership.claim.resume_states must include claimed_state so pre-journal claims remain recoverable".to_string(),
+                });
+            }
+        }
+        if let Some(adoption) = &ownership.delivery_adoption {
+            if adoption.repository.trim().is_empty()
+                || adoption.base_branch.trim().is_empty()
+                || adoption.branch_template.trim().is_empty()
+            {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason: "tracker.github.ownership.delivery_adoption fields must not be blank"
+                        .to_string(),
+                });
+            }
+            if adoption
+                .branch_template
+                .matches("{issue_workspace_key}")
+                .count()
+                != 1
+                || !valid_rendered_branch(&adoption.render_branch("issue-key-0123456789abcdef"))
+            {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason: "tracker.github.ownership.delivery_adoption.branch_template must contain exactly one {issue_workspace_key} and render a valid Git branch".to_string(),
+                });
+            }
+        }
+    }
     Ok(())
+}
+
+fn valid_rendered_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch != "@"
+        && !branch.starts_with(['-', '/'])
+        && !branch.ends_with(['/', '.'])
+        && !branch.chars().any(|character| {
+            character.is_ascii_control()
+                || matches!(character, ' ' | '~' | '^' | ':' | '?' | '*' | '[' | '\\')
+        })
+        && !branch.contains("..")
+        && !branch.contains("@{")
+        && branch.split('/').all(|component| {
+            !component.is_empty() && !component.starts_with('.') && !component.ends_with(".lock")
+        })
 }
 
 pub(crate) fn reject_unsupported_agent_max_turns(
@@ -1921,6 +2031,84 @@ on_failure: Failed
         let priority = config.tracker.github.unwrap().priority.unwrap();
         assert_eq!(priority.field, "Customer impact");
         assert_eq!(priority.options, ["Critical", "Elevated", "Normal"]);
+    }
+
+    #[test]
+    fn parses_opt_in_github_ownership_with_arbitrary_vocabulary() {
+        let yaml = minimal_yaml().replacen(
+            "kind: todo_file\n  path: TODO.md",
+            "kind: github\n  repository: acme/repo\n  project_number: 7\n  github:\n    status_field: Delivery state\n    ownership:\n      claim:\n        claimed_state: Agent-owned\n        resume_states: [Agent-owned, Resuming]\n      delivery_adoption:\n        repository: acme/repo\n        base_branch: release/2026\n        branch_template: agent/{issue_workspace_key}\n        require_authenticated_author: true",
+            1,
+        );
+
+        let config = parse_config(&yaml).unwrap();
+        let ownership = config.tracker.github.unwrap().ownership.unwrap();
+        assert_eq!(ownership.claim.unwrap().claimed_state, "Agent-owned");
+        assert_eq!(
+            ownership.delivery_adoption.unwrap().branch_template,
+            "agent/{issue_workspace_key}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_github_ownership_policy_before_activation() {
+        let yaml = minimal_yaml().replacen(
+            "kind: todo_file\n  path: TODO.md",
+            "kind: github\n  repository: acme/repo\n  project_number: 7\n  github:\n    status_field: Delivery state\n    ownership:\n      claim:\n        claimed_state: ' '\n        resume_states: []\n      delivery_adoption:\n        repository: acme/repo\n        base_branch: main\n        branch_template: agent/no-key",
+            1,
+        );
+
+        let error = parse_config(&yaml).unwrap_err();
+        assert!(error.to_string().contains("tracker.github.ownership.claim"));
+    }
+
+    #[test]
+    fn claimed_state_must_be_recoverable_before_the_first_journal_append() {
+        let yaml = minimal_yaml().replacen(
+            "kind: todo_file\n  path: TODO.md",
+            "kind: github\n  repository: acme/repo\n  github:\n    status_field: Status\n    ownership:\n      claim:\n        claimed_state: Agent-owned\n        resume_states: [Recovering]",
+            1,
+        );
+
+        let error = parse_config(&yaml).unwrap_err();
+        assert!(error.to_string().contains("must include claimed_state"));
+    }
+
+    #[test]
+    fn rejects_blank_or_invalid_github_delivery_adoption_fields() {
+        for policy in [
+            "repository: ' '\n        base_branch: main\n        branch_template: agent/{issue_workspace_key}",
+            "repository: acme/repo\n        base_branch: ' '\n        branch_template: agent/{issue_workspace_key}",
+            "repository: acme/repo\n        base_branch: main\n        branch_template: agent/no-key",
+            "repository: acme/repo\n        base_branch: main\n        branch_template: agent/{issue_workspace_key}..lock",
+        ] {
+            let yaml = minimal_yaml().replacen(
+                "kind: todo_file\n  path: TODO.md",
+                &format!(
+                    "kind: github\n  repository: acme/repo\n  github:\n    status_field: Delivery state\n    ownership:\n      delivery_adoption:\n        {policy}"
+                ),
+                1,
+            );
+
+            let error = parse_config(&yaml).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("tracker.github.ownership.delivery_adoption"));
+        }
+    }
+
+    #[test]
+    fn git_branch_validation_rejects_invalid_components_and_controls() {
+        for invalid in [
+            "@",
+            "agent//issue",
+            "agent/.hidden",
+            "agent/topic.lock/child",
+            "agent/issue\u{7f}",
+        ] {
+            assert!(!valid_rendered_branch(invalid), "accepted {invalid:?}");
+        }
+        assert!(valid_rendered_branch("agent/release-2026.08/issue_1"));
     }
 
     #[test]

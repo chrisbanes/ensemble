@@ -5,8 +5,9 @@ use std::collections::{HashMap, HashSet};
 use tracing::{debug, info, warn};
 
 use super::model::{InteractionThreadRoot, Issue, TrackerComment};
-use super::{IssueTracker, TrackerError};
-use crate::config::ensemble::GithubTrackerConfig;
+use super::{IssueTracker, OwnershipClaim, OwnershipConflict, OwnershipLease, TrackerError};
+use crate::config::ensemble::{GithubClaimConfig, GithubTrackerConfig};
+use crate::workspace::key::issue_workspace_key;
 
 mod graphql;
 
@@ -23,6 +24,24 @@ pub struct GithubTracker {
     client: reqwest::Client,
     project_fields: Option<GithubTrackerConfig>,
     project_metadata: tokio::sync::RwLock<Option<ProjectMetadata>>,
+    authenticated_viewer: tokio::sync::RwLock<Option<AuthenticatedViewer>>,
+}
+
+#[derive(Clone)]
+struct AuthenticatedViewer {
+    id: String,
+    login: String,
+}
+
+#[derive(Clone, Copy)]
+enum AssigneeEvidence {
+    Unassigned,
+    Owned,
+}
+
+enum OwnershipConflictOrTrackerError {
+    Conflict(OwnershipConflict),
+    Tracker(TrackerError),
 }
 
 #[derive(Clone)]
@@ -78,7 +97,27 @@ impl GithubTracker {
             labels_filter: settings.labels_filter,
             client,
             project_metadata: tokio::sync::RwLock::new(None),
+            authenticated_viewer: tokio::sync::RwLock::new(None),
         })
+    }
+
+    fn claim_config(&self) -> Option<GithubClaimConfig> {
+        self.project_fields
+            .as_ref()?
+            .ownership
+            .as_ref()?
+            .claim
+            .clone()
+    }
+
+    fn configured_branch_name(&self, issue: &Issue) -> Option<String> {
+        self.project_fields
+            .as_ref()?
+            .ownership
+            .as_ref()?
+            .delivery_adoption
+            .as_ref()
+            .map(|policy| policy.render_branch(&issue_workspace_key(&issue.id)))
     }
 
     /// Execute a GraphQL query against the configured endpoint.
@@ -145,6 +184,200 @@ impl GithubTracker {
             return Ok(metadata);
         }
         self.refresh_project_metadata().await
+    }
+
+    async fn refresh_authenticated_viewer(&self) -> Result<AuthenticatedViewer, TrackerError> {
+        let data = self.graphql::<graphql::Viewer>(json!({})).await?;
+        let viewer = data.viewer.ok_or_else(|| {
+            graphql::unexpected_payload::<graphql::Viewer>("authenticated viewer is missing")
+        })?;
+        let id = viewer.id.ok_or_else(|| {
+            graphql::unexpected_payload::<graphql::Viewer>("authenticated viewer is missing ID")
+        })?;
+        let login = viewer.login.ok_or_else(|| {
+            graphql::unexpected_payload::<graphql::Viewer>("authenticated viewer is missing login")
+        })?;
+        let viewer = AuthenticatedViewer { id, login };
+        debug!(viewer = %viewer.login, "authenticated GitHub viewer refreshed");
+        *self.authenticated_viewer.write().await = Some(viewer.clone());
+        Ok(viewer)
+    }
+
+    async fn authenticated_viewer(&self) -> Result<AuthenticatedViewer, TrackerError> {
+        if let Some(viewer) = self.authenticated_viewer.read().await.clone() {
+            return Ok(viewer);
+        }
+        self.refresh_authenticated_viewer().await
+    }
+
+    async fn issue_assignees(
+        &self,
+        issue_id: &str,
+    ) -> Result<(Option<u64>, Vec<graphql::User>), TrackerError> {
+        let data = self
+            .graphql::<graphql::IssueAssignees>(json!({ "issueId": issue_id }))
+            .await?;
+        let assignees = data.node.and_then(|issue| issue.assignees).ok_or_else(|| {
+            graphql::unexpected_payload::<graphql::IssueAssignees>(
+                "issue assignees payload is missing",
+            )
+        })?;
+        Ok((
+            assignees.total_count,
+            assignees.nodes.into_iter().flatten().collect(),
+        ))
+    }
+
+    async fn fresh_issue(&self, issue_id: &str) -> Result<Option<Issue>, TrackerError> {
+        Ok(self
+            .fetch_states_by_node_ids(&[issue_id.to_string()])
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    fn is_active_state(&self, state: &str) -> bool {
+        self.active_states
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(state))
+    }
+
+    fn is_resumable_state(claim: &GithubClaimConfig, state: &str) -> bool {
+        claim
+            .resume_states
+            .iter()
+            .any(|configured| configured.eq_ignore_ascii_case(state))
+    }
+
+    fn classify_assignees(
+        total_count: Option<u64>,
+        assignees: &[graphql::User],
+        viewer: &AuthenticatedViewer,
+    ) -> Result<AssigneeEvidence, OwnershipConflict> {
+        if total_count.is_some_and(|count| count != assignees.len() as u64) || assignees.len() > 1 {
+            return Err(OwnershipConflict::Ambiguous);
+        }
+        let Some(assignee) = assignees.first() else {
+            return Ok(AssigneeEvidence::Unassigned);
+        };
+        let Some(id) = assignee.id.as_deref() else {
+            return Err(OwnershipConflict::Ambiguous);
+        };
+        if id == viewer.id {
+            Ok(AssigneeEvidence::Owned)
+        } else {
+            Err(OwnershipConflict::Foreign)
+        }
+    }
+
+    async fn revalidated_assignee_evidence(
+        &self,
+        issue_id: &str,
+        viewer: &AuthenticatedViewer,
+    ) -> Result<AssigneeEvidence, OwnershipConflictOrTrackerError> {
+        let (total_count, assignees) = self
+            .issue_assignees(issue_id)
+            .await
+            .map_err(OwnershipConflictOrTrackerError::Tracker)?;
+        Self::classify_assignees(total_count, &assignees, viewer)
+            .map_err(OwnershipConflictOrTrackerError::Conflict)
+    }
+
+    fn lease_for(&self, issue: &Issue) -> OwnershipLease {
+        OwnershipLease {
+            id: issue.id.clone(),
+            branch_name: self.configured_branch_name(issue),
+        }
+    }
+
+    async fn claim_fresh_issue(&self, issue: &Issue) -> Result<OwnershipClaim, TrackerError> {
+        let Some(claim) = self.claim_config() else {
+            return Ok(OwnershipClaim::Unavailable);
+        };
+        let viewer = self.refresh_authenticated_viewer().await?;
+        let Some(fresh) = self.fresh_issue(&issue.id).await? else {
+            return Ok(OwnershipClaim::NotEligible);
+        };
+        if !self.is_active_state(&fresh.state) {
+            return Ok(OwnershipClaim::NotEligible);
+        }
+
+        let assignment_error = match self.revalidated_assignee_evidence(&fresh.id, &viewer).await {
+            Ok(AssigneeEvidence::Unassigned) => self
+                .graphql::<graphql::AddAssignees>(json!({
+                    "issueId": fresh.id,
+                    "assigneeId": viewer.id,
+                }))
+                .await
+                .err(),
+            Ok(AssigneeEvidence::Owned) if Self::is_resumable_state(&claim, &fresh.state) => {
+                return Ok(OwnershipClaim::Recovered(self.lease_for(&fresh)));
+            }
+            Ok(AssigneeEvidence::Owned) => None,
+            Err(OwnershipConflictOrTrackerError::Conflict(conflict)) => {
+                return Ok(OwnershipClaim::Conflict(conflict));
+            }
+            Err(OwnershipConflictOrTrackerError::Tracker(error)) => return Err(error),
+        };
+
+        let Some(revalidated) = self.fresh_issue(&issue.id).await? else {
+            return Ok(OwnershipClaim::NotEligible);
+        };
+        if !self.is_active_state(&revalidated.state) {
+            return Ok(OwnershipClaim::NotEligible);
+        }
+        match self
+            .revalidated_assignee_evidence(&revalidated.id, &viewer)
+            .await
+        {
+            Ok(AssigneeEvidence::Owned) => {}
+            Ok(AssigneeEvidence::Unassigned) => {
+                if let Some(error) = assignment_error {
+                    return Err(error);
+                }
+                return Ok(OwnershipClaim::Conflict(OwnershipConflict::Ambiguous));
+            }
+            Err(OwnershipConflictOrTrackerError::Conflict(conflict)) => {
+                return Ok(OwnershipClaim::Conflict(conflict));
+            }
+            Err(OwnershipConflictOrTrackerError::Tracker(error)) => return Err(error),
+        }
+
+        if !revalidated.state.eq_ignore_ascii_case(&claim.claimed_state) {
+            let mutation_error = self
+                .set_issue_state(&revalidated.id, &claim.claimed_state)
+                .await
+                .err();
+            let Some(after_state_mutation) = self.fresh_issue(&issue.id).await? else {
+                return Ok(OwnershipClaim::NotEligible);
+            };
+            if !after_state_mutation
+                .state
+                .eq_ignore_ascii_case(&claim.claimed_state)
+            {
+                if let Some(error) = mutation_error {
+                    return Err(error);
+                }
+                return Ok(OwnershipClaim::NotEligible);
+            }
+            match self
+                .revalidated_assignee_evidence(&after_state_mutation.id, &viewer)
+                .await
+            {
+                Ok(AssigneeEvidence::Owned) => {}
+                Ok(AssigneeEvidence::Unassigned) => {
+                    return Ok(OwnershipClaim::Conflict(OwnershipConflict::Ambiguous));
+                }
+                Err(OwnershipConflictOrTrackerError::Conflict(conflict)) => {
+                    return Ok(OwnershipClaim::Conflict(conflict));
+                }
+                Err(OwnershipConflictOrTrackerError::Tracker(error)) => return Err(error),
+            }
+            return Ok(OwnershipClaim::Acquired(
+                self.lease_for(&after_state_mutation),
+            ));
+        }
+        Ok(OwnershipClaim::Acquired(self.lease_for(&revalidated)))
     }
 
     /// Resolve the configured readable Project field identities to stable IDs.
@@ -380,6 +613,18 @@ impl GithubTracker {
                 .find(|s| s.eq_ignore_ascii_case(label))
             {
                 return s.clone();
+            }
+            if let Some(claim) = self.claim_config() {
+                if claim.claimed_state.eq_ignore_ascii_case(label) {
+                    return claim.claimed_state;
+                }
+                if let Some(resume_state) = claim
+                    .resume_states
+                    .iter()
+                    .find(|state| state.eq_ignore_ascii_case(label))
+                {
+                    return resume_state.clone();
+                }
             }
         }
         fallback
@@ -834,6 +1079,16 @@ impl IssueTracker for GithubTracker {
         if self.project_number.is_some() {
             self.refresh_project_metadata().await?;
         }
+        if self.claim_config().is_some()
+            || self
+                .project_fields
+                .as_ref()
+                .and_then(|fields| fields.ownership.as_ref())
+                .and_then(|ownership| ownership.delivery_adoption.as_ref())
+                .is_some_and(|adoption| adoption.require_authenticated_author)
+        {
+            self.refresh_authenticated_viewer().await?;
+        }
         Ok(())
     }
 
@@ -861,6 +1116,43 @@ impl IssueTracker for GithubTracker {
     /// Fetch current states for specific issue IDs (used for reconciliation).
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
         self.fetch_states_by_node_ids(ids).await
+    }
+
+    async fn claim_issue(&self, issue: &Issue) -> Result<OwnershipClaim, TrackerError> {
+        self.claim_fresh_issue(issue).await
+    }
+
+    async fn recover_owned_claims(&self) -> Result<Vec<(Issue, OwnershipLease)>, TrackerError> {
+        let Some(claim) = self.claim_config() else {
+            return Ok(Vec::new());
+        };
+        let viewer = self.authenticated_viewer().await?;
+        let candidates = self.fetch_issues_by_states(&claim.resume_states).await?;
+        let mut recovered = Vec::new();
+        for issue in candidates {
+            match self.revalidated_assignee_evidence(&issue.id, &viewer).await {
+                Ok(AssigneeEvidence::Owned) => {
+                    let Some(fresh) = self.fresh_issue(&issue.id).await? else {
+                        continue;
+                    };
+                    if Self::is_resumable_state(&claim, &fresh.state) {
+                        recovered.push((fresh.clone(), self.lease_for(&fresh)));
+                    }
+                }
+                Ok(AssigneeEvidence::Unassigned)
+                | Err(OwnershipConflictOrTrackerError::Conflict(_)) => {}
+                Err(OwnershipConflictOrTrackerError::Tracker(error)) => return Err(error),
+            }
+        }
+        Ok(recovered)
+    }
+
+    fn has_remote_ownership_policy(&self) -> bool {
+        self.claim_config().is_some()
+    }
+
+    fn workspace_branch_name(&self, issue: &Issue) -> Option<String> {
+        self.configured_branch_name(issue)
     }
 
     fn supports_writes(&self) -> bool {
@@ -1000,8 +1292,61 @@ impl IssueTracker for GithubTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{body_string_contains, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+    struct AssigneeSequence {
+        calls: AtomicUsize,
+    }
+
+    impl Respond for AssigneeSequence {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let assignees = if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!({ "totalCount": 0, "nodes": [] })
+            } else {
+                json!({
+                    "totalCount": 1,
+                    "nodes": [{ "id": "U_viewer", "login": "viewer" }]
+                })
+            };
+            ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "node": { "id": "I_issue", "assignees": assignees }
+            })))
+        }
+    }
+
+    struct IssueStateSequence {
+        calls: AtomicUsize,
+    }
+
+    impl Respond for IssueStateSequence {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let labels = if self.calls.fetch_add(1, Ordering::SeqCst) < 3 {
+                json!({ "nodes": [] })
+            } else {
+                json!({ "nodes": [{ "name": "In Progress" }] })
+            };
+            ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "nodes": [{
+                    "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                    "url": "https://example.test/issues/1", "labels": labels
+                }]
+            })))
+        }
+    }
+
+    struct RepositoryLabelResponder;
+
+    impl Respond for RepositoryLabelResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let request: Value = serde_json::from_slice(&request.body).unwrap();
+            let name = request["variables"]["name"].as_str().unwrap();
+            ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "repository": { "label": { "id": format!("L_{name}"), "name": name } }
+            })))
+        }
+    }
 
     /// Helper to create a GithubTracker pointed at a wiremock server.
     fn create_test_tracker(server_url: &str, project_number: Option<i64>) -> GithubTracker {
@@ -1014,6 +1359,7 @@ mod tests {
                 project_fields: project_number.map(|_| GithubTrackerConfig {
                     status_field: "Status".to_string(),
                     priority: None,
+                    ownership: None,
                 }),
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string(), "Closed".to_string()],
@@ -1021,6 +1367,96 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn create_claim_test_tracker(server_url: &str) -> GithubTracker {
+        GithubTracker::new(
+            format!("{}/graphql", server_url),
+            "ghp_test_token".to_string(),
+            "acme/my-repo".to_string(),
+            GithubTrackerSettings {
+                project_number: None,
+                project_fields: Some(GithubTrackerConfig {
+                    status_field: "Status".to_string(),
+                    priority: None,
+                    ownership: Some(crate::config::ensemble::GithubOwnershipConfig {
+                        claim: Some(crate::config::ensemble::GithubClaimConfig {
+                            claimed_state: "Todo".to_string(),
+                            resume_states: vec!["Recovering".to_string()],
+                        }),
+                        delivery_adoption: None,
+                    }),
+                }),
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec![],
+            },
+        )
+        .unwrap()
+    }
+
+    fn create_claim_transition_test_tracker(server_url: &str) -> GithubTracker {
+        GithubTracker::new(
+            format!("{}/graphql", server_url),
+            "ghp_test_token".to_string(),
+            "acme/my-repo".to_string(),
+            GithubTrackerSettings {
+                project_number: None,
+                project_fields: Some(GithubTrackerConfig {
+                    status_field: "Status".to_string(),
+                    priority: None,
+                    ownership: Some(crate::config::ensemble::GithubOwnershipConfig {
+                        claim: Some(crate::config::ensemble::GithubClaimConfig {
+                            claimed_state: "In Progress".to_string(),
+                            resume_states: vec!["Recovering".to_string()],
+                        }),
+                        delivery_adoption: None,
+                    }),
+                }),
+                active_states: vec!["Open".to_string(), "In Progress".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: vec![],
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn adoption_only_policy_supplies_the_opaque_workspace_branch() {
+        let tracker = GithubTracker::new(
+            "https://example.invalid/graphql".to_string(),
+            "token".to_string(),
+            "acme/my-repo".to_string(),
+            GithubTrackerSettings {
+                project_number: None,
+                project_fields: Some(GithubTrackerConfig {
+                    status_field: "Status".to_string(),
+                    priority: None,
+                    ownership: Some(crate::config::ensemble::GithubOwnershipConfig {
+                        claim: None,
+                        delivery_adoption: Some(
+                            crate::config::ensemble::GithubDeliveryAdoptionConfig {
+                                repository: "acme/my-repo".to_string(),
+                                base_branch: "main".to_string(),
+                                branch_template: "agent/{issue_workspace_key}".to_string(),
+                                require_authenticated_author: false,
+                            },
+                        ),
+                    }),
+                }),
+                active_states: vec!["Todo".to_string()],
+                terminal_states: vec!["Done".to_string()],
+                labels_filter: Vec::new(),
+            },
+        )
+        .unwrap();
+        let issue = crate::tracker::model::test_helpers::test_issue("I_issue", "Todo");
+
+        assert_eq!(
+            tracker.workspace_branch_name(&issue),
+            Some(format!("agent/{}", issue_workspace_key("I_issue")))
+        );
+        assert!(tracker.claim_config().is_none());
     }
 
     /// Build a GraphQL response body wrapping the given data.
@@ -1516,6 +1952,396 @@ mod tests {
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].identifier, "my-repo#10");
         assert_eq!(issues[0].labels, vec!["todo"]);
+    }
+
+    #[tokio::test]
+    async fn claim_rejects_a_foreign_authenticated_assignee_without_mutating() {
+        let server = MockServer::start().await;
+        let issue = crate::tracker::model::test_helpers::test_issue("I_issue", "Todo");
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("viewer { id login }"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "viewer": { "id": "U_viewer", "login": "viewer" }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids: $ids)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "nodes": [{
+                        "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                        "url": "https://example.test/issues/1",
+                        "labels": { "nodes": [{ "name": "Todo" }] }
+                    }]
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "node": {
+                        "id": "I_issue",
+                        "assignees": {
+                            "totalCount": 1,
+                            "nodes": [{ "id": "U_foreign", "login": "foreign" }]
+                        }
+                    }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let outcome = create_claim_test_tracker(&server.uri())
+            .claim_issue(&issue)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            OwnershipClaim::Conflict(OwnershipConflict::Foreign)
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_revalidates_a_sole_authenticated_assignee_before_acquiring() {
+        let server = MockServer::start().await;
+        let issue = crate::tracker::model::test_helpers::test_issue("I_issue", "Todo");
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("viewer { id login }"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "viewer": { "id": "U_viewer", "login": "viewer" }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids: $ids)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "nodes": [{
+                        "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                        "url": "https://example.test/issues/1",
+                        "labels": { "nodes": [{ "name": "Todo" }] }
+                    }]
+                }))),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "node": {
+                        "id": "I_issue",
+                        "assignees": {
+                            "totalCount": 1,
+                            "nodes": [{ "id": "U_viewer", "login": "viewer" }]
+                        }
+                    }
+                }))),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let outcome = create_claim_test_tracker(&server.uri())
+            .claim_issue(&issue)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            OwnershipClaim::Acquired(OwnershipLease {
+                id: "I_issue".to_string(),
+                branch_name: None,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_reconciles_an_ambiguous_assignee_mutation_before_acquiring() {
+        let server = MockServer::start().await;
+        let issue = crate::tracker::model::test_helpers::test_issue("I_issue", "Todo");
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("viewer { id login }"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "viewer": { "id": "U_viewer", "login": "viewer" }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids: $ids)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "nodes": [{
+                        "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                        "url": "https://example.test/issues/1",
+                        "labels": { "nodes": [{ "name": "Todo" }] }
+                    }]
+                }))),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(AssigneeSequence {
+                calls: AtomicUsize::new(0),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addAssigneesToAssignable"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let outcome = create_claim_test_tracker(&server.uri())
+            .claim_issue(&issue)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, OwnershipClaim::Acquired(_)));
+    }
+
+    #[tokio::test]
+    async fn claim_reconciles_an_ambiguous_state_mutation_before_acquiring() {
+        let server = MockServer::start().await;
+        let issue = crate::tracker::model::test_helpers::test_issue("I_issue", "Open");
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("viewer { id login }"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "viewer": { "id": "U_viewer", "login": "viewer" }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids: $ids)"))
+            .respond_with(IssueStateSequence {
+                calls: AtomicUsize::new(0),
+            })
+            .expect(4)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "node": {
+                        "id": "I_issue",
+                        "assignees": {
+                            "totalCount": 1,
+                            "nodes": [{ "id": "U_viewer", "login": "viewer" }]
+                        }
+                    }
+                }))),
+            )
+            .expect(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("repository(owner: $owner"))
+            .respond_with(RepositoryLabelResponder)
+            .expect(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addLabelsToLabelable"))
+            .respond_with(ResponseTemplate::new(500))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let outcome = create_claim_transition_test_tracker(&server.uri())
+            .claim_issue(&issue)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, OwnershipClaim::Acquired(_)));
+    }
+
+    #[tokio::test]
+    async fn recovery_returns_only_a_sole_authenticated_resumable_claim() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("viewer { id login }"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "viewer": { "id": "U_viewer", "login": "viewer" }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("issues(first: 50"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "repository": { "issues": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [{
+                            "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                            "url": "https://example.test/issues/1",
+                            "labels": { "nodes": [{ "name": "Recovering" }] }
+                        }]
+                    }}
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "node": {
+                        "id": "I_issue",
+                        "assignees": {
+                            "totalCount": 1,
+                            "nodes": [{ "id": "U_viewer", "login": "viewer" }]
+                        }
+                    }
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids: $ids)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "nodes": [{
+                        "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                        "url": "https://example.test/issues/1",
+                        "labels": { "nodes": [{ "name": "Recovering" }] }
+                    }]
+                }))),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let recovered = create_claim_test_tracker(&server.uri())
+            .recover_owned_claims()
+            .await
+            .unwrap();
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].0.id, "I_issue");
+        assert_eq!(recovered[0].1.id, "I_issue");
+    }
+
+    #[tokio::test]
+    async fn recovery_rejects_an_owned_issue_that_left_its_resumable_state() {
+        let server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("viewer { id login }"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "viewer": { "id": "U_viewer", "login": "viewer" }
+                }))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("issues(first: 50"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "repository": { "issues": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": [{
+                            "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                            "url": "https://example.test/issues/1",
+                            "labels": { "nodes": [{ "name": "Recovering" }] }
+                        }]
+                    }}
+                }))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("query($issueId: ID!)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "node": {
+                        "id": "I_issue",
+                        "assignees": {
+                            "totalCount": 1,
+                            "nodes": [{ "id": "U_viewer", "login": "viewer" }]
+                        }
+                    }
+                }))),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids: $ids)"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "nodes": [{
+                        "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
+                        "url": "https://example.test/issues/1",
+                        "labels": { "nodes": [{ "name": "Done" }] }
+                    }]
+                }))),
+            )
+            .mount(&server)
+            .await;
+
+        let recovered = create_claim_test_tracker(&server.uri())
+            .recover_owned_claims()
+            .await
+            .unwrap();
+
+        assert!(recovered.is_empty());
     }
 
     #[tokio::test]
@@ -2316,6 +3142,7 @@ mod tests {
                         field: "Customer impact".to_string(),
                         options: vec!["Critical".to_string(), "Normal".to_string()],
                     }),
+                    ownership: None,
                 }),
                 active_states: vec!["Queued".to_string()],
                 terminal_states: vec!["Done".to_string()],
@@ -2402,6 +3229,7 @@ mod tests {
                 project_fields: Some(GithubTrackerConfig {
                     status_field: "Status".to_string(),
                     priority: None,
+                    ownership: None,
                 }),
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],

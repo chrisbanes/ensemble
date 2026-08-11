@@ -7,6 +7,7 @@ pub mod todo_file;
 use crate::config::ensemble::TrackerConfig;
 use async_trait::async_trait;
 use model::{InteractionThreadRoot, Issue, TrackerComment};
+use serde::{Deserialize, Serialize};
 
 /// Error type for tracker operations.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +42,35 @@ pub enum TrackerError {
     WritesNotSupported,
 }
 
+/// Opaque conflict evidence returned by an adapter when ownership cannot be
+/// safely determined. The orchestrator records the bounded outcome but never
+/// interprets tracker-specific identities.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipConflict {
+    Foreign,
+    Ambiguous,
+}
+
+/// An adapter-issued ownership lease. `branch_name` is optional so adapters
+/// without a configured delivery convention do not change workspace behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipLease {
+    pub id: String,
+    pub branch_name: Option<String>,
+}
+
+/// The generic result of either taking or recovering a tracker claim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OwnershipClaim {
+    Unavailable,
+    NotEligible,
+    Acquired(OwnershipLease),
+    Recovered(OwnershipLease),
+    Conflict(OwnershipConflict),
+}
+
 /// Trait for issue tracker adapters.
 ///
 /// Trackers are integration adapters: they fetch ticket metadata from external sources and
@@ -62,6 +92,29 @@ pub trait IssueTracker: Send + Sync {
 
     /// Fetch current states for specific issue IDs (used for reconciliation).
     async fn fetch_issue_states_by_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError>;
+
+    /// Request exclusive remote ownership immediately before first dispatch.
+    /// Adapters must revalidate their own authority before returning a lease.
+    async fn claim_issue(&self, _issue: &Issue) -> Result<OwnershipClaim, TrackerError> {
+        Ok(OwnershipClaim::Unavailable)
+    }
+
+    /// Discover adapter-owned claims that have no local journal owner yet.
+    /// The default preserves existing non-GitHub behavior.
+    async fn recover_owned_claims(&self) -> Result<Vec<(Issue, OwnershipLease)>, TrackerError> {
+        Ok(Vec::new())
+    }
+
+    /// Whether claim/recovery failures must block fresh dispatch. The default
+    /// preserves trackers that do not opt into remote ownership.
+    fn has_remote_ownership_policy(&self) -> bool {
+        false
+    }
+
+    /// Return an adapter-configured opaque workspace branch, if any.
+    fn workspace_branch_name(&self, _issue: &Issue) -> Option<String> {
+        None
+    }
 
     /// Whether this tracker supports state-transition writes (`set_issue_state`).
     ///
@@ -207,6 +260,45 @@ mod tests {
     use crate::test_support::env::ENV_LOCK;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    struct ReadOnlyTracker;
+
+    #[async_trait]
+    impl IssueTracker for ReadOnlyTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            _states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            _ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_claim_capability_leaves_existing_trackers_available_for_dispatch() {
+        let tracker = ReadOnlyTracker;
+        let issue = crate::tracker::model::test_helpers::test_issue("issue-1", "Todo");
+
+        assert_eq!(
+            tracker.claim_issue(&issue).await.unwrap(),
+            OwnershipClaim::Unavailable
+        );
+        assert!(tracker.recover_owned_claims().await.unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_string(&OwnershipConflict::Ambiguous).unwrap(),
+            "\"ambiguous\""
+        );
+    }
 
     struct EnvVarGuard {
         key: &'static str,

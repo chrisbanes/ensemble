@@ -669,6 +669,7 @@ mod tests {
                     marker: "<!-- ensemble:delivery:v1 -->".to_string(),
                     pr_number: None,
                     pr_url: None,
+                    ownership_conflict: None,
                     last_error: None,
                     retry_from: None,
                 },

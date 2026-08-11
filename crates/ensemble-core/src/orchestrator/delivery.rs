@@ -16,7 +16,9 @@ use super::{
 };
 use crate::history::model::HistoryRecord;
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
+use crate::tracker::OwnershipConflict;
 use crate::workspace::finalize::FinalizeMode;
+use crate::workspace::key::issue_workspace_key;
 
 const DELIVERY_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_REQUEST_DISCOVERY_LIMIT: usize = 1_000;
@@ -56,6 +58,8 @@ pub(crate) struct DeliveryRepository {
     pub marker: String,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub ownership_conflict: Option<OwnershipConflict>,
     pub last_error: Option<String>,
     pub retry_from: Option<DeliveryPhase>,
 }
@@ -202,12 +206,24 @@ pub(crate) fn canonical_marker(run_id: &str, issue_id: &str, repository_key: &st
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemotePullRequest {
     pub repository_key: String,
+    pub repository: Option<String>,
+    pub head_repository: Option<String>,
+    pub author: Option<String>,
+    pub authored_by_authenticated_viewer: bool,
     pub head_branch: String,
     pub base_branch: String,
     pub head_sha: String,
     pub body: String,
     pub number: u64,
     pub url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PullRequestAdoptionPolicy {
+    pub repository: String,
+    pub base_branch: String,
+    pub head_branch: String,
+    pub require_authenticated_author: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -218,6 +234,14 @@ pub(crate) struct LocalRepositoryIdentity {
 
 #[async_trait]
 pub(crate) trait DeliveryRemote: Send + Sync {
+    fn pull_request_adoption_policy(
+        &self,
+        _config: &crate::config::ensemble::EnsembleConfig,
+        _issue_id: &str,
+    ) -> Option<PullRequestAdoptionPolicy> {
+        None
+    }
+
     async fn local_identity(
         &self,
         repository_path: &Path,
@@ -242,6 +266,7 @@ pub(crate) trait DeliveryRemote: Send + Sync {
         &self,
         repository_path: &Path,
         repository_key: &str,
+        adoption_policy: Option<&PullRequestAdoptionPolicy>,
     ) -> Result<Vec<RemotePullRequest>, String>;
 
     async fn create_pull_request(
@@ -264,10 +289,47 @@ struct GhPullRequest {
     head_ref_name: String,
     base_ref_name: String,
     head_ref_oid: String,
+    author: Option<GhActor>,
+    head_repository: Option<GhRepository>,
+}
+
+#[derive(Deserialize)]
+struct GhActor {
+    login: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhRepository {
+    name_with_owner: String,
 }
 
 #[async_trait]
 impl DeliveryRemote for CliDeliveryRemote {
+    fn pull_request_adoption_policy(
+        &self,
+        config: &crate::config::ensemble::EnsembleConfig,
+        issue_id: &str,
+    ) -> Option<PullRequestAdoptionPolicy> {
+        if config.tracker.kind != "github" {
+            return None;
+        }
+        let configured = config
+            .tracker
+            .github
+            .as_ref()?
+            .ownership
+            .as_ref()?
+            .delivery_adoption
+            .as_ref()?;
+        Some(PullRequestAdoptionPolicy {
+            repository: configured.repository.clone(),
+            base_branch: configured.base_branch.clone(),
+            head_branch: configured.render_branch(&issue_workspace_key(issue_id)),
+            require_authenticated_author: configured.require_authenticated_author,
+        })
+    }
+
     async fn local_identity(
         &self,
         repository_path: &Path,
@@ -335,7 +397,31 @@ impl DeliveryRemote for CliDeliveryRemote {
         &self,
         repository_path: &Path,
         repository_key: &str,
+        adoption_policy: Option<&PullRequestAdoptionPolicy>,
     ) -> Result<Vec<RemotePullRequest>, String> {
+        let (repository, authenticated_viewer) = if let Some(policy) = adoption_policy {
+            let repository_json = command_stdout(
+                repository_path,
+                "gh",
+                &["repo", "view", "--json", "nameWithOwner"],
+            )
+            .await?;
+            let repository: GhRepository = serde_json::from_str(&repository_json)
+                .map_err(|error| format!("invalid gh repo view output: {error}"))?;
+            let viewer = if policy.require_authenticated_author {
+                let viewer_json = command_stdout(repository_path, "gh", &["api", "user"]).await?;
+                Some(
+                    serde_json::from_str::<GhActor>(&viewer_json)
+                        .map_err(|error| format!("invalid authenticated GitHub user: {error}"))?
+                        .login,
+                )
+            } else {
+                None
+            };
+            (Some(repository.name_with_owner), viewer)
+        } else {
+            (None, None)
+        };
         let stdout = command_stdout(
             repository_path,
             "gh",
@@ -347,7 +433,7 @@ impl DeliveryRemote for CliDeliveryRemote {
                 "--limit",
                 "1000",
                 "--json",
-                "number,url,body,headRefName,baseRefName,headRefOid",
+                "number,url,body,headRefName,baseRefName,headRefOid,author,headRepository",
             ],
         )
         .await?;
@@ -362,6 +448,19 @@ impl DeliveryRemote for CliDeliveryRemote {
             .into_iter()
             .map(|pull_request| RemotePullRequest {
                 repository_key: repository_key.to_string(),
+                repository: repository.clone(),
+                head_repository: pull_request
+                    .head_repository
+                    .map(|repository| repository.name_with_owner),
+                authored_by_authenticated_viewer: authenticated_viewer.as_deref().is_some_and(
+                    |viewer| {
+                        pull_request
+                            .author
+                            .as_ref()
+                            .is_some_and(|author| author.login.eq_ignore_ascii_case(viewer))
+                    },
+                ),
+                author: pull_request.author.map(|author| author.login),
                 head_branch: pull_request.head_ref_name,
                 base_branch: pull_request.base_ref_name,
                 head_sha: pull_request.head_ref_oid,
@@ -454,14 +553,24 @@ pub(crate) fn reconcile_push(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PullRequestReconciliation {
     Create,
-    Adopted { number: u64, url: String },
-    Blocked { error: String },
+    Adopted {
+        number: u64,
+        url: String,
+    },
+    Blocked {
+        error: String,
+    },
+    Conflict {
+        conflict: OwnershipConflict,
+        error: String,
+    },
 }
 
 pub(crate) fn reconcile_pull_requests(
     repository_key: &str,
     repository: &DeliveryRepository,
     pull_requests: &[RemotePullRequest],
+    adoption_policy: Option<&PullRequestAdoptionPolicy>,
 ) -> PullRequestReconciliation {
     if repository.observed_remote_sha.as_deref() != Some(repository.local_sha.as_str()) {
         return PullRequestReconciliation::Blocked {
@@ -469,7 +578,7 @@ pub(crate) fn reconcile_pull_requests(
         };
     }
 
-    let same_identity = |pull_request: &&RemotePullRequest| {
+    let same_delivery_identity = |pull_request: &&RemotePullRequest| {
         pull_request.repository_key == repository_key
             && pull_request.head_branch == repository.head_branch
             && pull_request.base_branch == repository.base_branch
@@ -477,46 +586,112 @@ pub(crate) fn reconcile_pull_requests(
     let marker_matches =
         |pull_request: &&RemotePullRequest| pull_request.body.contains(repository.marker.as_str());
 
-    if pull_requests
-        .iter()
-        .filter(same_identity)
-        .any(|pull_request| !marker_matches(&pull_request))
-    {
-        return PullRequestReconciliation::Blocked {
-            error: "pull request identity matched but its delivery marker did not".to_string(),
-        };
-    }
-    if pull_requests
+    let marked = pull_requests
         .iter()
         .filter(marker_matches)
-        .any(|pull_request| !same_identity(&pull_request))
+        .collect::<Vec<_>>();
+    if marked
+        .iter()
+        .any(|pull_request| !same_delivery_identity(pull_request))
     {
-        return PullRequestReconciliation::Blocked {
+        return PullRequestReconciliation::Conflict {
+            conflict: OwnershipConflict::Foreign,
             error: "delivery marker matched a different repository or branch identity".to_string(),
         };
     }
-
-    let matches: Vec<&RemotePullRequest> = pull_requests
-        .iter()
-        .filter(same_identity)
-        .filter(marker_matches)
-        .collect();
-    match matches.as_slice() {
-        [] => PullRequestReconciliation::Create,
+    match marked.as_slice() {
+        [] => {}
         [pull_request] if pull_request.head_sha == repository.local_sha => {
-            PullRequestReconciliation::Adopted {
+            return PullRequestReconciliation::Adopted {
                 number: pull_request.number,
                 url: pull_request.url.clone(),
-            }
+            };
         }
-        [pull_request] => PullRequestReconciliation::Blocked {
+        [pull_request] => {
+            return PullRequestReconciliation::Conflict {
+                conflict: OwnershipConflict::Foreign,
+                error: format!(
+                    "pull request head is {}, expected {}",
+                    pull_request.head_sha, repository.local_sha
+                ),
+            };
+        }
+        _ => {
+            return PullRequestReconciliation::Conflict {
+                conflict: OwnershipConflict::Ambiguous,
+                error: "multiple pull requests match the delivery marker".to_string(),
+            };
+        }
+    }
+
+    let same_unpersisted_identity = pull_requests
+        .iter()
+        .filter(same_delivery_identity)
+        .collect::<Vec<_>>();
+    let Some(policy) = adoption_policy else {
+        return if same_unpersisted_identity.is_empty() {
+            PullRequestReconciliation::Create
+        } else {
+            PullRequestReconciliation::Conflict {
+                conflict: if same_unpersisted_identity.len() == 1 {
+                    OwnershipConflict::Foreign
+                } else {
+                    OwnershipConflict::Ambiguous
+                },
+                error: "pull request identity matched but its delivery marker did not".to_string(),
+            }
+        };
+    };
+
+    if repository.head_branch != policy.head_branch || repository.base_branch != policy.base_branch
+    {
+        return PullRequestReconciliation::Blocked {
+            error: "delivery identity does not match the configured adoption policy".to_string(),
+        };
+    }
+
+    let branch_candidates = pull_requests
+        .iter()
+        .filter(|pull_request| pull_request.head_branch == policy.head_branch)
+        .collect::<Vec<_>>();
+    if branch_candidates.is_empty() {
+        return PullRequestReconciliation::Create;
+    }
+    let exact = branch_candidates
+        .iter()
+        .copied()
+        .filter(|pull_request| {
+            pull_request.repository_key == repository_key
+                && pull_request
+                    .repository
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&policy.repository))
+                && pull_request
+                    .head_repository
+                    .as_deref()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(&policy.repository))
+                && pull_request.base_branch == policy.base_branch
+                && pull_request.head_sha == repository.local_sha
+                && (!policy.require_authenticated_author
+                    || pull_request.authored_by_authenticated_viewer)
+        })
+        .collect::<Vec<_>>();
+    match (branch_candidates.as_slice(), exact.as_slice()) {
+        ([_], [pull_request]) => PullRequestReconciliation::Adopted {
+            number: pull_request.number,
+            url: pull_request.url.clone(),
+        },
+        ([candidate], []) => PullRequestReconciliation::Conflict {
+            conflict: OwnershipConflict::Foreign,
             error: format!(
-                "pull request head is {}, expected {}",
-                pull_request.head_sha, repository.local_sha
+                "unpersisted pull request #{} by '{}' conflicts with the configured repository, author, head, base, or SHA",
+                candidate.number,
+                candidate.author.as_deref().unwrap_or("unknown")
             ),
         },
-        _ => PullRequestReconciliation::Blocked {
-            error: "multiple pull requests match the delivery identity".to_string(),
+        _ => PullRequestReconciliation::Conflict {
+            conflict: OwnershipConflict::Ambiguous,
+            error: "multiple pull requests contend for the configured adoption identity".to_string(),
         },
     }
 }
@@ -634,6 +809,7 @@ impl Orchestrator {
                 if retry_from != DeliveryPhase::Waiting {
                     repository.retry_from = None;
                 }
+                repository.ownership_conflict = None;
                 repository.last_error = None;
                 changed = true;
             }
@@ -709,6 +885,7 @@ impl Orchestrator {
                     repository.retry_from = None;
                 }
             }
+            repository.ownership_conflict = None;
             repository.last_error = None;
             changed = true;
         }
@@ -1468,6 +1645,7 @@ impl Orchestrator {
                         &repository_key,
                         DeliveryPhase::Prepared,
                         "delivery worktree is missing".to_string(),
+                        None,
                         snapshot,
                     )
                     .await;
@@ -1631,6 +1809,7 @@ impl Orchestrator {
                 if repository.retry_from == Some(DeliveryPhase::Waiting) {
                     repository.phase = DeliveryPhase::Waiting;
                     repository.retry_from = None;
+                    repository.ownership_conflict = None;
                     repository.last_error = None;
                 }
             } else {
@@ -1658,6 +1837,7 @@ impl Orchestrator {
             let mut reconciling = delivery.clone();
             let entry = reconciling.repositories.get_mut(repository_key).unwrap();
             entry.phase = DeliveryPhase::ReconcilingPr;
+            entry.ownership_conflict = None;
             entry.last_error = None;
             delivery = match self
                 .persist_delivery_candidate(&delivery, reconciling, snapshot)
@@ -1671,9 +1851,14 @@ impl Orchestrator {
         if repository.phase != DeliveryPhase::ReconcilingPr {
             return (delivery, false);
         }
+        let adoption_policy = {
+            let config = self.config.read().await;
+            self.delivery_remote
+                .pull_request_adoption_policy(&config, &delivery.issue_id)
+        };
         let pull_requests = match self
             .delivery_remote
-            .list_pull_requests(repository_path, repository_key)
+            .list_pull_requests(repository_path, repository_key, adoption_policy.as_ref())
             .await
         {
             Ok(pull_requests) => pull_requests,
@@ -1684,6 +1869,7 @@ impl Orchestrator {
                         repository_key,
                         DeliveryPhase::ReconcilingPr,
                         error,
+                        None,
                         snapshot,
                     )
                     .await,
@@ -1691,13 +1877,19 @@ impl Orchestrator {
                 )
             }
         };
-        match reconcile_pull_requests(repository_key, &repository, &pull_requests) {
+        match reconcile_pull_requests(
+            repository_key,
+            &repository,
+            &pull_requests,
+            adoption_policy.as_ref(),
+        ) {
             PullRequestReconciliation::Adopted { number, url } => {
                 let mut waiting = delivery.clone();
                 let entry = waiting.repositories.get_mut(repository_key).unwrap();
                 entry.phase = DeliveryPhase::Waiting;
                 entry.pr_number = Some(number);
                 entry.pr_url = Some(url);
+                entry.ownership_conflict = None;
                 entry.last_error = None;
                 entry.retry_from = None;
                 (
@@ -1712,6 +1904,7 @@ impl Orchestrator {
                 let mut in_flight = delivery.clone();
                 let entry = in_flight.repositories.get_mut(repository_key).unwrap();
                 entry.phase = DeliveryPhase::PrCreateInFlight;
+                entry.ownership_conflict = None;
                 entry.last_error = None;
                 delivery = match self
                     .persist_delivery_candidate(&delivery, in_flight, snapshot)
@@ -1734,6 +1927,7 @@ impl Orchestrator {
                 match result {
                     Ok(_) => {
                         entry.phase = DeliveryPhase::ReconcilingPr;
+                        entry.ownership_conflict = None;
                         entry.last_error = None;
                     }
                     Err(error) => entry.last_error = Some(error),
@@ -1752,6 +1946,19 @@ impl Orchestrator {
                     repository_key,
                     DeliveryPhase::ReconcilingPr,
                     error,
+                    None,
+                    snapshot,
+                )
+                .await,
+                false,
+            ),
+            PullRequestReconciliation::Conflict { conflict, error } => (
+                self.block_delivery_repository(
+                    &delivery,
+                    repository_key,
+                    DeliveryPhase::ReconcilingPr,
+                    error,
+                    Some(conflict),
                     snapshot,
                 )
                 .await,
@@ -1759,6 +1966,7 @@ impl Orchestrator {
             ),
         }
     }
+
     async fn advance_delivery_push(
         &self,
         mut delivery: DeliveryRecord,
@@ -1771,6 +1979,7 @@ impl Orchestrator {
             let mut reconciling = delivery.clone();
             let entry = reconciling.repositories.get_mut(repository_key).unwrap();
             entry.phase = DeliveryPhase::ReconcilingPush;
+            entry.ownership_conflict = None;
             entry.last_error = None;
             entry.retry_from = None;
             delivery = match self
@@ -1798,6 +2007,7 @@ impl Orchestrator {
                         repository_key,
                         DeliveryPhase::ReconcilingPush,
                         error,
+                        None,
                         snapshot,
                     )
                     .await
@@ -1808,6 +2018,7 @@ impl Orchestrator {
                 let mut in_flight = delivery.clone();
                 let entry = in_flight.repositories.get_mut(repository_key).unwrap();
                 entry.phase = DeliveryPhase::PushInFlight;
+                entry.ownership_conflict = None;
                 entry.last_error = None;
                 delivery = match self
                     .persist_delivery_candidate(&delivery, in_flight, snapshot)
@@ -1830,6 +2041,7 @@ impl Orchestrator {
                 match result {
                     Ok(_) => {
                         entry.phase = DeliveryPhase::ReconcilingPush;
+                        entry.ownership_conflict = None;
                         entry.last_error = None;
                     }
                     Err(error) => entry.last_error = Some(error),
@@ -1842,6 +2054,7 @@ impl Orchestrator {
                 let mut advanced = delivery.clone();
                 let entry = advanced.repositories.get_mut(repository_key).unwrap();
                 entry.observed_remote_sha = observed;
+                entry.ownership_conflict = None;
                 entry.last_error = None;
                 entry.retry_from = None;
                 entry.phase = match entry.mode {
@@ -1858,6 +2071,7 @@ impl Orchestrator {
                     repository_key,
                     DeliveryPhase::ReconcilingPush,
                     error,
+                    None,
                     snapshot,
                 )
                 .await
@@ -1870,12 +2084,14 @@ impl Orchestrator {
         repository_key: &str,
         retry_from: DeliveryPhase,
         error: String,
+        ownership_conflict: Option<OwnershipConflict>,
         snapshot: Option<&PipelineRunSnapshot>,
     ) -> DeliveryRecord {
         let mut blocked = current.clone();
         if let Some(repository) = blocked.repositories.get_mut(repository_key) {
             repository.phase = DeliveryPhase::Blocked;
             repository.last_error = Some(error);
+            repository.ownership_conflict = ownership_conflict;
             repository.retry_from = Some(retry_from);
         }
         self.persist_delivery_candidate(current, blocked, snapshot)
@@ -2031,6 +2247,7 @@ impl Orchestrator {
                     marker: canonical_marker(&run_id, issue_id, repository_key),
                     pr_number: None,
                     pr_url: None,
+                    ownership_conflict: None,
                     last_error: None,
                     retry_from: None,
                 },
@@ -2095,6 +2312,7 @@ mod tests {
             marker: "<!-- ensemble:delivery:v1 -->".to_string(),
             pr_number: None,
             pr_url: None,
+            ownership_conflict: None,
             last_error: None,
             retry_from: None,
         }
@@ -2103,6 +2321,10 @@ mod tests {
     fn pull_request(marker: &str, head_sha: &str) -> RemotePullRequest {
         RemotePullRequest {
             repository_key: "primary".to_string(),
+            repository: Some("example/project".to_string()),
+            head_repository: Some("example/project".to_string()),
+            author: Some("octocat".to_string()),
+            authored_by_authenticated_viewer: true,
             head_branch: "ensemble/issue-420".to_string(),
             base_branch: "main".to_string(),
             head_sha: head_sha.to_string(),
@@ -2237,7 +2459,7 @@ mod tests {
         let exact = pull_request(&repo.marker, &repo.local_sha);
 
         assert_eq!(
-            reconcile_pull_requests("primary", &repo, std::slice::from_ref(&exact)),
+            reconcile_pull_requests("primary", &repo, std::slice::from_ref(&exact), None),
             PullRequestReconciliation::Adopted {
                 number: exact.number,
                 url: exact.url.clone(),
@@ -2246,12 +2468,18 @@ mod tests {
 
         let wrong_head = pull_request(&repo.marker, "aaaaaaaaaaaaaaaa");
         assert!(matches!(
-            reconcile_pull_requests("primary", &repo, &[wrong_head]),
-            PullRequestReconciliation::Blocked { .. }
+            reconcile_pull_requests("primary", &repo, &[wrong_head], None),
+            PullRequestReconciliation::Conflict {
+                conflict: OwnershipConflict::Foreign,
+                ..
+            }
         ));
         assert!(matches!(
-            reconcile_pull_requests("primary", &repo, &[exact.clone(), exact]),
-            PullRequestReconciliation::Blocked { .. }
+            reconcile_pull_requests("primary", &repo, &[exact.clone(), exact], None),
+            PullRequestReconciliation::Conflict {
+                conflict: OwnershipConflict::Ambiguous,
+                ..
+            }
         ));
     }
 
@@ -2261,9 +2489,94 @@ mod tests {
         repo.observed_remote_sha = Some(repo.local_sha.clone());
 
         assert_eq!(
-            reconcile_pull_requests("primary", &repo, &[]),
+            reconcile_pull_requests("primary", &repo, &[], None),
             PullRequestReconciliation::Create
         );
+    }
+
+    fn adoption_policy() -> PullRequestAdoptionPolicy {
+        PullRequestAdoptionPolicy {
+            repository: "example/project".to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "ensemble/issue-420".to_string(),
+            require_authenticated_author: true,
+        }
+    }
+
+    #[test]
+    fn marker_identity_precedes_an_exact_unpersisted_fallback() {
+        let mut repo = repository(DeliveryPhase::ReconcilingPr);
+        repo.observed_remote_sha = Some(repo.local_sha.clone());
+        let marked = pull_request(&repo.marker, &repo.local_sha);
+        let mut unmarked = pull_request("", &repo.local_sha);
+        unmarked.number = 421;
+        unmarked.url = "https://github.com/example/project/pull/421".to_string();
+
+        assert_eq!(
+            reconcile_pull_requests(
+                "primary",
+                &repo,
+                &[unmarked, marked.clone()],
+                Some(&adoption_policy()),
+            ),
+            PullRequestReconciliation::Adopted {
+                number: marked.number,
+                url: marked.url,
+            }
+        );
+    }
+
+    #[test]
+    fn one_exact_configured_unpersisted_pull_request_is_adopted() {
+        let mut repo = repository(DeliveryPhase::ReconcilingPr);
+        repo.observed_remote_sha = Some(repo.local_sha.clone());
+        let exact = pull_request("", &repo.local_sha);
+
+        assert_eq!(
+            reconcile_pull_requests(
+                "primary",
+                &repo,
+                std::slice::from_ref(&exact),
+                Some(&adoption_policy()),
+            ),
+            PullRequestReconciliation::Adopted {
+                number: exact.number,
+                url: exact.url.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn configured_fallback_blocks_foreign_or_ambiguous_pull_requests() {
+        let mut repo = repository(DeliveryPhase::ReconcilingPr);
+        repo.observed_remote_sha = Some(repo.local_sha.clone());
+        let exact = pull_request("", &repo.local_sha);
+        let mut foreign_author = exact.clone();
+        foreign_author.authored_by_authenticated_viewer = false;
+        let mut fork = exact.clone();
+        fork.head_repository = Some("contributor/fork".to_string());
+
+        for candidates in [vec![foreign_author], vec![fork]] {
+            assert!(matches!(
+                reconcile_pull_requests("primary", &repo, &candidates, Some(&adoption_policy()),),
+                PullRequestReconciliation::Conflict {
+                    conflict: OwnershipConflict::Foreign,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            reconcile_pull_requests(
+                "primary",
+                &repo,
+                &[exact.clone(), exact],
+                Some(&adoption_policy()),
+            ),
+            PullRequestReconciliation::Conflict {
+                conflict: OwnershipConflict::Ambiguous,
+                ..
+            }
+        ));
     }
 
     #[test]

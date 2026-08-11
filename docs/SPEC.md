@@ -769,6 +769,15 @@ Fields:
   - `priority` (object, optional): `field` is the readable single-select field name and `options`
     is the ordered list of readable option names normalized to ascending generic priority ranks.
     Omit it to disable priority normalization; missing or unlisted selections normalize to no rank.
+  - `ownership` (object, optional): adapter-scoped exclusive claim and delivery-adoption rules.
+    Its configured state names, repository, base branch, and branch template are never generic
+    scheduler predicates. Claims require fresh adapter revalidation; journal restoration remains
+    authoritative on restart: live journal and delivery owners are restored first, adapter-owned
+    resumable orphans second, and fresh candidates last. The opaque lease branch becomes the
+    workspace/worktree branch without exposing GitHub policy to the workspace layer. An unpersisted
+    pull request is adoptable only as one exact configured repository/head/base/SHA (and optionally
+    authenticated-author) match. Persisted delivery marker identity wins over this fallback;
+    foreign or ambiguous evidence blocks without replacement.
 
 GitHub auth host resolution (for `gh auth token` fallback):
 1. `tracker.gh_hostname` (if set)
