@@ -270,7 +270,10 @@ is required and names the Project single-select field used as the normalized iss
 `tracker.github.priority` is optional; when present, its `field` and ordered `options` name the
 single-select values that become generic priority ranks (first is rank 1). Omit `priority` to
 disable priority normalization. Missing or unlisted selected values normalize to no priority,
-and the Project item position is exposed only as an opaque optional tracker position.
+and the Project item position is exposed as an optional numeric `tracker_position`: its zero-based
+ordinal in a freshly fetched, complete `POSITION`-ordered Project-items snapshot. This ordinal is
+not a durable identity; pagination cursors stay inside the GraphQL traversal and are never exposed
+as `tracker_position`.
 
 Each runtime preparation resolves these readable names uniquely to live GitHub IDs. A missing or
 ambiguous field or option prevents the new configuration generation from replacing the

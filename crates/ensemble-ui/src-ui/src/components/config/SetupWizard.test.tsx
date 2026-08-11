@@ -463,7 +463,12 @@ describe("SetupWizard", () => {
         return jsonResponse({
           has_existing_config: true,
           defaults: {
-            tracker: { kind: "git_hub", repository: "existing-owner/existing-repo", project_number: 42 },
+            tracker: {
+              kind: "git_hub",
+              repository: "existing-owner/existing-repo",
+              project_number: 42,
+              status_field: "Delivery state",
+            },
             repos: [
               { path: "/existing/repo/path1", branch: "main" },
               { path: "/existing/repo/path2", branch: "develop" },

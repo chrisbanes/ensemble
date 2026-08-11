@@ -201,6 +201,9 @@ Fields:
 - `description` (string or null)
 - `priority` (integer or null)
   - Lower numbers are higher priority in dispatch sorting.
+- `tracker_position` (integer or null)
+  - Optional tracker-provided snapshot ordering data. It is not a durable identity and does not
+    prescribe generic dispatch policy.
 - `state` (string)
   - Current tracker state name.
 - `branch_name` (string or null)
@@ -2144,12 +2147,15 @@ When `tracker.project_number` is set (GitHub Projects v2 mode):
 - Resolve the configured status field and optional priority field/options by exact readable name to
   unique live field and option IDs before a runtime activates; missing or ambiguous identities
   reject the candidate generation and retain the last-known-good runtime.
-- Match Project item values by the resolved IDs, not readable names. Normalize state, optional
-  priority rank, and opaque optional tracker position without adding GitHub vocabulary to the
-  generic Issue contract.
+- Match Project item values by the resolved IDs, not readable names. Normalize state and optional
+  priority rank without adding GitHub vocabulary to the generic Issue contract.
 - Project items are linked to GitHub Issues; extract the issue content from each item.
+- Enumerate the complete Project-items connection with
+  `orderBy: { field: POSITION, direction: ASC }`. Assign each returned Issue the zero-based
+  ordinal of its edge in that complete traversal, before dropping null, non-Issue, or filtered
+  entries. This is a fresh `tracker_position` snapshot, not a durable identity.
 - GraphQL query pattern:
-  `query { node(id: "<project-node-id>") { ... on ProjectV2 { items(first: $pageSize, after: $cursor) { ... } } } }`
+  `query { node(id: "<project-node-id>") { ... on ProjectV2 { items(first: $pageSize, after: $cursor, orderBy: { field: POSITION, direction: ASC }) { pageInfo { hasNextPage endCursor } edges { cursor node { ... } } } } } }`
 
 When `tracker.project_number` is NOT set (repository issues mode):
 
@@ -2159,7 +2165,9 @@ When `tracker.project_number` is NOT set (repository issues mode):
 
 Common requirements:
 
-- Issue-state refresh query uses GitHub Issue node IDs (GraphQL global IDs)
+- In Project mode, issue-state refresh traverses the same complete ordered items connection and
+  selects requested Issue IDs from that fresh snapshot so its `tracker_position` is current.
+- In repository mode, issue-state refresh uses GitHub Issue node IDs (GraphQL global IDs).
 - Pagination: cursor-based using `pageInfo { hasNextPage endCursor }`
 - Page size default: `50`
 - Network timeout: `30000 ms`
@@ -2168,6 +2176,8 @@ Important:
 
 - GitHub GraphQL schema details can drift. Keep query construction isolated and test the exact query
   fields/types required by this specification.
+- Edge and page cursors are GraphQL pagination transport only. They must never be persisted or
+  exposed as `tracker_position`, and queries must not select a direct `ProjectV2Item.position`.
 
 A non-GitHub implementation may change transport details, but the normalized outputs must match the
 domain model in Section 4.
@@ -2180,10 +2190,12 @@ Additional normalization details:
 
 - `id` -> GitHub Issue node ID (GraphQL global ID)
 - `identifier` -> `<repo-short-name>#<issue-number>` (for example `my-project#42`)
-- `state` -> For project-board mode: the project Status field value (for example `Todo`,
-  `In Progress`). For repository mode: classify from labels or use `open`/`closed`.
+- `state` -> For project-board mode: the configured Project status-field value. For repository
+  mode: classify from labels or use `open`/`closed`.
 - `priority` -> Derived from the optional configured GitHub Project single-select field, with its
   configured option order mapped to ascending integers. Otherwise `null`.
+- `tracker_position` -> In project-board mode, the fresh numeric ordinal from the complete ordered
+  Project-items traversal. Otherwise `null` unless another adapter supplies its own snapshot data.
 - `labels` -> lowercase strings from GitHub Issue labels
 - `blocked_by` -> GitHub Issues have no native blocking relations. Implementations may populate this
   by scanning issue body/comments for `blocked by #N` patterns, using a label convention, or leave

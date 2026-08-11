@@ -94,6 +94,12 @@ pub(super) struct Connection<T> {
 }
 
 #[derive(Debug, Deserialize)]
+pub(super) struct Edge<T> {
+    pub(super) cursor: String,
+    pub(super) node: Option<T>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(super) struct Nodes<T> {
     pub(super) nodes: Vec<Option<T>>,
 }
@@ -122,7 +128,6 @@ pub(super) struct IssueNode {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ProjectItem {
     pub(super) id: Option<String>,
-    pub(super) position: Option<String>,
     pub(super) project: Option<ProjectRef>,
     pub(super) field_values: Option<Nodes<FieldValue>>,
     pub(super) content: Option<IssueNode>,
@@ -218,22 +223,24 @@ pub(super) const PROJECT_ITEMS_QUERY: &str = r#"
 query($projectId: ID!, $cursor: String) {
   node(id: $projectId) {
     ... on ProjectV2 {
-      items(first: 50, after: $cursor) {
+      items(first: 50, after: $cursor, orderBy: {field: POSITION, direction: ASC}) {
         pageInfo { hasNextPage endCursor }
-        nodes {
-          position
-          fieldValues(first: 100) {
-            nodes {
-              ... on ProjectV2ItemFieldSingleSelectValue {
-                name optionId
-                field { ... on ProjectV2SingleSelectField { id name } }
+        edges {
+          cursor
+          node {
+            fieldValues(first: 100) {
+              nodes {
+                ... on ProjectV2ItemFieldSingleSelectValue {
+                  name optionId
+                  field { ... on ProjectV2SingleSelectField { id name } }
+                }
               }
             }
-          }
-          content {
-            ... on Issue {
-              id number title body createdAt updatedAt url
-              labels(first: 20) { nodes { name } }
+            content {
+              ... on Issue {
+                id number title body createdAt updatedAt url
+                labels(first: 20) { nodes { name } }
+              }
             }
           }
         }
@@ -250,7 +257,14 @@ pub(super) struct ProjectItemsData {
 
 #[derive(Debug, Deserialize)]
 pub(super) struct ProjectItemsNode {
-    pub(super) items: Connection<ProjectItem>,
+    pub(super) items: ProjectItemConnection,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ProjectItemConnection {
+    #[serde(rename = "pageInfo")]
+    pub(super) page_info: PageInfo,
+    pub(super) edges: Vec<Option<Edge<ProjectItem>>>,
 }
 
 pub(super) struct RepositoryIssues;
@@ -299,20 +313,6 @@ query($ids: [ID!]!) {
     ... on Issue {
       id number title state url
       labels(first: 20) { nodes { name } }
-      projectItems(first: 100) {
-        nodes {
-          id position
-          project { id }
-          fieldValues(first: 100) {
-            nodes {
-              ... on ProjectV2ItemFieldSingleSelectValue {
-                name optionId
-                field { ... on ProjectV2SingleSelectField { id name } }
-              }
-            }
-          }
-        }
-      }
     }
   }
 }
@@ -583,7 +583,7 @@ mod tests {
     fn every_read_operation_decodes_its_selected_payload() {
         for result in [
             decode_response::<ProjectDiscovery>(br#"{"data":{"repository":{"projectV2":{"id":"P_1","fields":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}}"#, "").map(|_| ()),
-            decode_response::<ProjectItems>(br#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
+            decode_response::<ProjectItems>(br#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"edges":[]}}}}"#, "").map(|_| ()),
             decode_response::<RepositoryIssues>(br#"{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<IssueStates>(br#"{"data":{"nodes":[]}}"#, "").map(|_| ()),
             decode_response::<IssueComments>(br#"{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),

@@ -439,11 +439,11 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               value={draft.tracker.project_number ?? ""}
               onChange={(e) => setDraft(prev => ({
                 ...prev,
-                tracker: { 
+                tracker: prev.tracker.kind === "github" ? {
                   ...prev.tracker,
                   project_number: e.target.value ? parseInt(e.target.value, 10) : null,
                   status_field: e.target.value ? prev.tracker.status_field : null,
-                } as SetupTracker,
+                } : prev.tracker,
               }))}
             />
           </div>
