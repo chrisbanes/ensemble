@@ -14,6 +14,9 @@ use tempfile::TempDir;
 
 const ISSUE_ID: &str = "E2E-1";
 const ISSUE_TITLE: &str = "Exercise product workflow";
+// Exercise acceptance-failure lifecycle boundaries below Tokio's 2 MiB worker default so future
+// growth cannot silently reintroduce platform-dependent stack overflows.
+const ACCEPTANCE_FAILURE_WORKER_STACK_BYTES: usize = 15 * 128 * 1024;
 
 struct ChildGuard {
     child: Child,
@@ -156,6 +159,10 @@ async fn acceptance_failure_dominates_successful_agent_and_exhausts_the_issue() 
         .arg(port.to_string())
         .env("PATH", fixture.path_with_mock_bin())
         .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env(
+            "RUST_MIN_STACK",
+            ACCEPTANCE_FAILURE_WORKER_STACK_BYTES.to_string(),
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
     let child = command.spawn().expect("spawn ensemble web");
@@ -209,6 +216,10 @@ async fn missing_file_and_handoff_are_durable_acceptance_failures() {
         .arg(port.to_string())
         .env("PATH", fixture.path_with_mock_bin())
         .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env(
+            "RUST_MIN_STACK",
+            ACCEPTANCE_FAILURE_WORKER_STACK_BYTES.to_string(),
+        )
         .env("ENSEMBLE_E2E_SKIP_REQUIRED_FILE", "1")
         .env("ENSEMBLE_E2E_MISSING_HANDOFF", "1")
         .stdout(Stdio::null())

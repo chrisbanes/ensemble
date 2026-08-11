@@ -16,6 +16,10 @@ _Avoid_: Board, runtime
 The configured directed graph that defines which steps run and how their results control delivery.
 _Avoid_: Workflow when referring to the executable graph
 
+**Scheduler lane**:
+A named, configuration-defined live-worker capacity bucket shared by runs selected into that lane.
+_Avoid_: Tracker state, workflow role
+
 **Step**:
 A named unit of agent or synthesis work within a pipeline.
 _Avoid_: Stage, phase

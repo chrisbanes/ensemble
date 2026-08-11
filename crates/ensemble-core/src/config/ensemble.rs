@@ -18,9 +18,21 @@ pub struct EnsembleConfig {
     #[serde(default)]
     pub repos: Vec<RepoConfig>,
     pub agents: HashMap<String, AgentConfig>,
+    #[serde(default)]
     pub steps: Vec<StepConfig>,
+    #[serde(default)]
     pub on_success: String,
+    #[serde(default)]
     pub on_failure: String,
+    /// Neutral named pipelines used only when `workflow_selection` is non-empty.
+    #[serde(default)]
+    pub pipelines: BTreeMap<String, PipelineConfig>,
+    /// Capacity lanes referenced by workflow-selection rules.
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
+    /// Fixed-vocabulary rules that select a named pipeline and scheduler lane.
+    #[serde(default)]
+    pub workflow_selection: Vec<WorkflowSelectionRuleConfig>,
     #[serde(default)]
     pub concurrency: ConcurrencyConfig,
     #[serde(default = "default_max_cycles")]
@@ -37,6 +49,61 @@ pub struct EnsembleConfig {
     pub human_interaction: HumanInteractionConfig,
     #[serde(default)]
     pub acceptance: AcceptanceConfig,
+}
+
+/// One complete named pipeline selected by a workflow rule.
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineConfig {
+    pub steps: Vec<StepConfig>,
+    pub on_success: String,
+    pub on_failure: String,
+}
+
+/// Scheduler configuration for selected workflows.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerConfig {
+    #[serde(default)]
+    pub lanes: BTreeMap<String, SchedulerLaneConfig>,
+}
+
+/// A positive-capacity worker bucket shared by selected runs in one lane.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerLaneConfig {
+    pub capacity: u32,
+}
+
+/// A precedence-ordered rule over normalized tracker fields.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowSelectionRuleConfig {
+    pub name: String,
+    pub precedence: u32,
+    pub pipeline: String,
+    pub lane: String,
+    #[serde(default)]
+    pub states: Option<Vec<String>>,
+    #[serde(default)]
+    pub labels_all: Option<Vec<String>>,
+    #[serde(default)]
+    pub labels_any: Option<Vec<String>>,
+    #[serde(default)]
+    pub labels_none: Option<Vec<String>>,
+    #[serde(default)]
+    pub require_unblocked: bool,
+    pub order_by: Vec<WorkflowOrderKey>,
+}
+
+/// Stable ascending sort keys available to workflow-selection rules.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Hash, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowOrderKey {
+    Priority,
+    TrackerPosition,
+    CreatedAt,
+    Identifier,
 }
 
 /// Commands that must pass after the pipeline and its approval gates succeed.
@@ -880,6 +947,52 @@ pub(crate) fn read_dotenv(path: &Path) -> HashMap<String, String> {
 }
 
 impl EnsembleConfig {
+    pub fn uses_workflow_selection(&self) -> bool {
+        !self.workflow_selection.is_empty()
+    }
+
+    /// Resolve a durable selected-workflow identity into the whole immutable
+    /// configuration snapshot used by the existing pipeline runtime.
+    pub fn resolve_selected_workflow(
+        &self,
+        rule_name: &str,
+        pipeline_name: &str,
+        lane_name: &str,
+    ) -> Result<Self, PipelineError> {
+        let rule = self
+            .workflow_selection
+            .iter()
+            .find(|rule| rule.name == rule_name)
+            .ok_or_else(|| PipelineError::InvalidSnapshot {
+                reason: format!("selected workflow rule '{rule_name}' no longer exists"),
+            })?;
+        if rule.pipeline != pipeline_name || rule.lane != lane_name {
+            return Err(PipelineError::InvalidSnapshot {
+                reason: format!(
+                    "selected workflow rule '{rule_name}' no longer resolves to pipeline '{pipeline_name}' and lane '{lane_name}'"
+                ),
+            });
+        }
+        let pipeline =
+            self.pipelines
+                .get(pipeline_name)
+                .ok_or_else(|| PipelineError::InvalidSnapshot {
+                    reason: format!("selected pipeline '{pipeline_name}' no longer exists"),
+                })?;
+        self.scheduler
+            .lanes
+            .get(lane_name)
+            .ok_or_else(|| PipelineError::InvalidSnapshot {
+                reason: format!("selected scheduler lane '{lane_name}' no longer exists"),
+            })?;
+
+        let mut effective = self.clone();
+        effective.steps = pipeline.steps.clone();
+        effective.on_success.clone_from(&pipeline.on_success);
+        effective.on_failure.clone_from(&pipeline.on_failure);
+        Ok(effective)
+    }
+
     /// Resolve environment variables and path expansions in config values.
     ///
     /// Call this after `parse_config()` to process `$VAR` and `~` in:
@@ -1213,6 +1326,171 @@ fn reject_legacy_agent_permission_policy(
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
+    let selected_mode = !config.workflow_selection.is_empty();
+    if selected_mode {
+        if !config.steps.is_empty()
+            || !config.on_success.trim().is_empty()
+            || !config.on_failure.trim().is_empty()
+        {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: "<mode>".to_string(),
+                reason:
+                    "selected mode cannot be mixed with top-level steps, on_success, or on_failure"
+                        .to_string(),
+            });
+        }
+        if config.pipelines.is_empty() {
+            return Err(PipelineError::InvalidNamedPipeline {
+                pipeline: "<missing>".to_string(),
+                reason: "selected mode requires at least one named pipeline".to_string(),
+            });
+        }
+        if config.scheduler.lanes.is_empty() {
+            return Err(PipelineError::InvalidSchedulerLane {
+                lane: "<missing>".to_string(),
+                reason: "selected mode requires at least one scheduler lane".to_string(),
+            });
+        }
+    } else if !config.pipelines.is_empty() || !config.scheduler.lanes.is_empty() {
+        return Err(PipelineError::InvalidWorkflowSelection {
+            rule: "<mode>".to_string(),
+            reason: "named pipelines and scheduler lanes require non-empty workflow_selection"
+                .to_string(),
+        });
+    }
+
+    for (name, lane) in &config.scheduler.lanes {
+        if name.trim().is_empty() {
+            return Err(PipelineError::InvalidSchedulerLane {
+                lane: "<unnamed>".to_string(),
+                reason: "name must not be blank".to_string(),
+            });
+        }
+        if lane.capacity == 0 {
+            return Err(PipelineError::InvalidSchedulerLane {
+                lane: name.clone(),
+                reason: "capacity must be greater than 0".to_string(),
+            });
+        }
+    }
+
+    let mut rule_names = std::collections::HashSet::new();
+    let mut precedences = std::collections::HashSet::new();
+    for rule in &config.workflow_selection {
+        let normalized_name = rule.name.trim().to_lowercase();
+        let display_name = if normalized_name.is_empty() {
+            "<unnamed>"
+        } else {
+            rule.name.as_str()
+        };
+        if normalized_name.is_empty() || !rule_names.insert(normalized_name) {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: "name must be non-blank and unique after normalization".to_string(),
+            });
+        }
+        if rule.precedence == 0 || !precedences.insert(rule.precedence) {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: "precedence must be positive and globally unique".to_string(),
+            });
+        }
+        if !config.pipelines.contains_key(&rule.pipeline) {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: format!("unknown pipeline '{}'", rule.pipeline),
+            });
+        }
+        if !config.scheduler.lanes.contains_key(&rule.lane) {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: format!("unknown scheduler lane '{}'", rule.lane),
+            });
+        }
+        for (predicate, values) in [
+            ("states", rule.states.as_ref()),
+            ("labels_all", rule.labels_all.as_ref()),
+            ("labels_any", rule.labels_any.as_ref()),
+            ("labels_none", rule.labels_none.as_ref()),
+        ] {
+            if let Some(values) = values {
+                if values.is_empty() {
+                    return Err(PipelineError::InvalidWorkflowSelection {
+                        rule: display_name.to_string(),
+                        reason: format!("{predicate} must not be empty when supplied"),
+                    });
+                }
+                let mut normalized = std::collections::HashSet::new();
+                if values.iter().any(|value| {
+                    let value = value.trim().to_lowercase();
+                    value.is_empty() || !normalized.insert(value)
+                }) {
+                    return Err(PipelineError::InvalidWorkflowSelection {
+                        rule: display_name.to_string(),
+                        reason: format!(
+                            "{predicate} values must be non-blank and unique after normalization"
+                        ),
+                    });
+                }
+            }
+        }
+        if rule.order_by.is_empty() {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: "order_by must not be empty".to_string(),
+            });
+        }
+        let mut order_keys = std::collections::HashSet::new();
+        if rule.order_by.iter().any(|key| !order_keys.insert(*key)) {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: "order_by keys must be unique".to_string(),
+            });
+        }
+        if rule
+            .order_by
+            .iter()
+            .position(|key| *key == WorkflowOrderKey::Identifier)
+            .is_some_and(|index| index + 1 != rule.order_by.len())
+        {
+            return Err(PipelineError::InvalidWorkflowSelection {
+                rule: display_name.to_string(),
+                reason: "identifier may appear only as the final order_by key".to_string(),
+            });
+        }
+    }
+
+    let effective_pipelines: Vec<(&str, &[StepConfig], &str, &str)> = if selected_mode {
+        config
+            .pipelines
+            .iter()
+            .map(|(name, pipeline)| {
+                (
+                    name.as_str(),
+                    pipeline.steps.as_slice(),
+                    pipeline.on_success.as_str(),
+                    pipeline.on_failure.as_str(),
+                )
+            })
+            .collect()
+    } else {
+        vec![(
+            "<legacy>",
+            config.steps.as_slice(),
+            config.on_success.as_str(),
+            config.on_failure.as_str(),
+        )]
+    };
+
+    for (name, _, on_success, on_failure) in &effective_pipelines {
+        if name.trim().is_empty() || on_success.trim().is_empty() || on_failure.trim().is_empty() {
+            return Err(PipelineError::InvalidNamedPipeline {
+                pipeline: (*name).to_string(),
+                reason: "name, on_success, and on_failure must be non-blank".to_string(),
+            });
+        }
+    }
+
     let mut review_state: Option<&str> = None;
     for (index, repo) in config.repos.iter().enumerate() {
         let Some(target) = repo.finalize.review_state.as_deref() else {
@@ -1231,7 +1509,10 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 reason: "review_state is valid only with push_and_pr finalization".to_string(),
             });
         }
-        if target.eq_ignore_ascii_case(&config.on_success) {
+        if effective_pipelines
+            .iter()
+            .any(|(_, _, on_success, _)| target.eq_ignore_ascii_case(on_success))
+        {
             return Err(PipelineError::InvalidFinalizeConfig {
                 repo: repo_key,
                 reason: "review_state must not equal on_success".to_string(),
@@ -1371,7 +1652,10 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
 
     for rule in &config.acceptance.required_handoff_sections {
         validate_name(&mut acceptance_names, "handoff", &rule.name)?;
-        if !config.steps.iter().any(|step| step.name == rule.step) {
+        if effective_pipelines
+            .iter()
+            .any(|(_, steps, _, _)| !steps.iter().any(|step| step.name == rule.step))
+        {
             return Err(PipelineError::InvalidAcceptanceRequirement {
                 kind: "handoff".to_string(),
                 name: rule.name.clone(),
@@ -1535,49 +1819,54 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         });
     }
 
-    // Step names must be unique
-    let mut seen_names = std::collections::HashSet::new();
-    for step in &config.steps {
-        if !seen_names.insert(&step.name) {
-            return Err(PipelineError::DuplicateStepName {
-                name: step.name.clone(),
-            });
-        }
-    }
-    // Each step must reference a valid agent
-    for step in &config.steps {
-        if !config.agents.contains_key(&step.agent) {
-            return Err(PipelineError::UnknownAgent {
-                name: step.agent.clone(),
-            });
-        }
-        if step.timeout_ms == Some(0) {
-            return Err(PipelineError::InvalidStepConfig {
-                step: step.name.clone(),
-                reason: "timeout_ms must be greater than 0".to_string(),
-            });
-        }
-        if step.on_failure == OnFailure::Fixup {
-            let Some(fixup_agent) = step.fixup_agent.as_deref() else {
+    for (pipeline_name, steps, _, _) in effective_pipelines {
+        let mut seen_names = std::collections::HashSet::new();
+        for step in steps {
+            if !seen_names.insert(&step.name) {
+                return Err(PipelineError::DuplicateStepName {
+                    name: step.name.clone(),
+                });
+            }
+            if !config.agents.contains_key(&step.agent) {
+                return Err(PipelineError::UnknownAgent {
+                    name: step.agent.clone(),
+                });
+            }
+            if step.timeout_ms == Some(0) {
                 return Err(PipelineError::InvalidStepConfig {
                     step: step.name.clone(),
-                    reason: "on_failure: fixup requires fixup_agent".to_string(),
+                    reason: "timeout_ms must be greater than 0".to_string(),
                 });
-            };
-            if !config.agents.contains_key(fixup_agent) {
-                return Err(PipelineError::UnknownAgent {
-                    name: fixup_agent.to_string(),
+            }
+            if step.on_failure == OnFailure::Fixup {
+                let Some(fixup_agent) = step.fixup_agent.as_deref() else {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: "on_failure: fixup requires fixup_agent".to_string(),
+                    });
+                };
+                if !config.agents.contains_key(fixup_agent) {
+                    return Err(PipelineError::UnknownAgent {
+                        name: fixup_agent.to_string(),
+                    });
+                }
+            }
+            if step.kind == StepKind::Synthesis && step.depends.as_ref().is_none_or(Vec::is_empty) {
+                return Err(PipelineError::InvalidSynthesisStep {
+                    step: step.name.clone(),
+                    reason: "synthesis steps require explicit non-empty depends".to_string(),
                 });
             }
         }
-    }
-    // Synthesis steps must have explicit non-empty dependencies
-    for step in &config.steps {
-        if step.kind == StepKind::Synthesis && step.depends.as_ref().is_none_or(Vec::is_empty) {
-            return Err(PipelineError::InvalidSynthesisStep {
-                step: step.name.clone(),
-                reason: "synthesis steps require explicit non-empty depends".to_string(),
-            });
+        if selected_mode {
+            crate::pipeline::dag::build_dag(steps).map_err(|error| {
+                PipelineError::InvalidNamedPipeline {
+                    pipeline: pipeline_name.to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+        } else {
+            crate::pipeline::dag::build_dag(steps)?;
         }
     }
     Ok(())
@@ -1664,6 +1953,128 @@ on_failure: Failed
         assert!(config.acceptance.required_files.is_empty());
         assert!(config.acceptance.required_handoff_sections.is_empty());
         assert!(config.acceptance.required_pull_requests.is_empty());
+    }
+
+    #[test]
+    fn selected_mode_parses_named_pipeline_lane_and_rule() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: "Build the thing."
+pipelines:
+  delivery:
+    steps:
+      - name: build
+        agent: build
+    on_success: Done
+    on_failure: Failed
+scheduler:
+  lanes:
+    delivery:
+      capacity: 2
+workflow_selection:
+  - name: ready
+    precedence: 10
+    pipeline: delivery
+    lane: delivery
+    states: [Ready]
+    labels_all: [ready-for-agent]
+    labels_any: [backend, frontend]
+    labels_none: [hold]
+    require_unblocked: true
+    order_by: [priority, tracker_position, created_at]
+"#,
+        )
+        .unwrap();
+
+        assert!(config.steps.is_empty());
+        assert_eq!(config.pipelines["delivery"].steps[0].name, "build");
+        assert_eq!(config.scheduler.lanes["delivery"].capacity, 2);
+        assert_eq!(config.workflow_selection[0].name, "ready");
+        assert_eq!(
+            config.workflow_selection[0].order_by,
+            vec![
+                WorkflowOrderKey::Priority,
+                WorkflowOrderKey::TrackerPosition,
+                WorkflowOrderKey::CreatedAt,
+            ]
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn selected_mode_rejects_ambiguous_or_nondeterministic_rules() {
+        let selected = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: build
+pipelines:
+  main:
+    steps: [{ name: build, agent: build }]
+    on_success: Done
+    on_failure: Failed
+scheduler:
+  lanes:
+    main: { capacity: 1 }
+workflow_selection:
+  - name: first
+    precedence: 1
+    pipeline: main
+    lane: main
+    states: [Ready]
+    order_by: [priority]
+"#;
+
+        let mut config = parse_config(selected).unwrap();
+        config.steps = vec![config.pipelines["main"].steps[0].clone()];
+        config.on_success = "Done".to_string();
+        config.on_failure = "Failed".to_string();
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidWorkflowSelection { .. })
+        ));
+
+        let mut config = parse_config(selected).unwrap();
+        config
+            .workflow_selection
+            .push(config.workflow_selection[0].clone());
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidWorkflowSelection { .. })
+        ));
+
+        let mut config = parse_config(selected).unwrap();
+        config.workflow_selection[0].states = Some(Vec::new());
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidWorkflowSelection { .. })
+        ));
+
+        let mut config = parse_config(selected).unwrap();
+        config.workflow_selection[0].order_by =
+            vec![WorkflowOrderKey::Identifier, WorkflowOrderKey::CreatedAt];
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidWorkflowSelection { .. })
+        ));
+
+        let mut config = parse_config(selected).unwrap();
+        config.scheduler.lanes.get_mut("main").unwrap().capacity = 0;
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidSchedulerLane { .. })
+        ));
     }
 
     #[test]

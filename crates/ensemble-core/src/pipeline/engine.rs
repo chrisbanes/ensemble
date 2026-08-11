@@ -133,6 +133,15 @@ pub struct PipelineRun {
     ownership_lease: Option<OwnershipLease>,
     /// Opaque configured workspace branch, including policies that do not claim remotely.
     workspace_branch_name: Option<String>,
+    /// Configured workflow identity frozen before ownership is journaled.
+    selected_workflow: Option<SelectedWorkflowSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedWorkflowSnapshot {
+    pub rule: String,
+    pub pipeline: String,
+    pub lane: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -151,6 +160,8 @@ pub struct PipelineRunSnapshot {
     pub ownership_lease: Option<OwnershipLease>,
     #[serde(default)]
     pub workspace_branch_name: Option<String>,
+    #[serde(default)]
+    pub selected_workflow: Option<SelectedWorkflowSnapshot>,
 }
 
 impl PipelineRun {
@@ -173,6 +184,7 @@ impl PipelineRun {
             synthetic_fixup_steps: HashSet::new(),
             ownership_lease: None,
             workspace_branch_name: None,
+            selected_workflow: None,
         }
     }
 
@@ -188,6 +200,7 @@ impl PipelineRun {
             synthetic_fixup_steps: self.synthetic_fixup_steps.clone(),
             ownership_lease: self.ownership_lease.clone(),
             workspace_branch_name: self.workspace_branch_name.clone(),
+            selected_workflow: self.selected_workflow.clone(),
         }
     }
 
@@ -208,6 +221,7 @@ impl PipelineRun {
             synthetic_fixup_steps: snapshot.synthetic_fixup_steps,
             ownership_lease: snapshot.ownership_lease,
             workspace_branch_name: snapshot.workspace_branch_name,
+            selected_workflow: snapshot.selected_workflow,
         })
     }
 
@@ -230,6 +244,14 @@ impl PipelineRun {
 
     pub(crate) fn ownership_lease(&self) -> Option<&OwnershipLease> {
         self.ownership_lease.as_ref()
+    }
+
+    pub(crate) fn set_selected_workflow(&mut self, selected: SelectedWorkflowSnapshot) {
+        self.selected_workflow = Some(selected);
+    }
+
+    pub(crate) fn selected_workflow(&self) -> Option<&SelectedWorkflowSnapshot> {
+        self.selected_workflow.as_ref()
     }
 
     pub fn normalize_stale_running_steps(&mut self) {
@@ -668,6 +690,15 @@ impl PipelineRun {
 }
 
 fn validate_snapshot(snapshot: &PipelineRunSnapshot) -> Result<(), crate::error::PipelineError> {
+    if snapshot.selected_workflow.as_ref().is_some_and(|selected| {
+        selected.rule.trim().is_empty()
+            || selected.pipeline.trim().is_empty()
+            || selected.lane.trim().is_empty()
+    }) {
+        return Err(crate::error::PipelineError::InvalidSnapshot {
+            reason: "selected workflow rule, pipeline, and lane must be non-blank".to_string(),
+        });
+    }
     if snapshot.dag_steps.is_empty() {
         return Err(crate::error::PipelineError::InvalidSnapshot {
             reason: "runtime dag has no steps".to_string(),
@@ -870,6 +901,11 @@ mod tests {
             branch_name: Some("ensemble/issue-1".to_string()),
         });
         run.set_workspace_branch_name("configured/issue-1".to_string());
+        run.set_selected_workflow(SelectedWorkflowSnapshot {
+            rule: "ready".to_string(),
+            pipeline: "delivery".to_string(),
+            lane: "delivery".to_string(),
+        });
 
         let snapshot = run.to_snapshot();
         assert_eq!(
@@ -881,6 +917,14 @@ mod tests {
         );
         let restored = PipelineRun::from_snapshot(snapshot).unwrap();
         assert_eq!(restored.workspace_branch_name(), Some("configured/issue-1"));
+        assert_eq!(
+            restored.selected_workflow(),
+            Some(&SelectedWorkflowSnapshot {
+                rule: "ready".to_string(),
+                pipeline: "delivery".to_string(),
+                lane: "delivery".to_string(),
+            })
+        );
     }
 
     #[test]

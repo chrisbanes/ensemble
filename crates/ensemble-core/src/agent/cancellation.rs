@@ -13,7 +13,7 @@ use crate::config::ensemble::normalize_state_worker_cap_key;
 struct ActiveWorker {
     cancellation: CancellationToken,
     completion: watch::Receiver<bool>,
-    state_bucket: String,
+    capacity_bucket: String,
     reconciliation_owned: bool,
     launched: bool,
 }
@@ -31,25 +31,60 @@ pub(crate) enum WorkerReservationError {
     DuplicateIdentity,
     GlobalCapacityExhausted,
     IssueCapacityExhausted,
-    StateCapacityExhausted,
+    CapacityBucketExhausted,
 }
 
-pub(crate) struct StateWorkerCapacity<'a> {
-    issue_state: &'a str,
-    max_workers_by_state: &'a BTreeMap<String, u32>,
+pub(crate) struct WorkerCapacity<'a> {
+    source: CapacitySource<'a>,
 }
 
-impl<'a> StateWorkerCapacity<'a> {
+enum CapacitySource<'a> {
+    State {
+        issue_state: &'a str,
+        max_workers_by_state: &'a BTreeMap<String, u32>,
+    },
+    Lane {
+        lane: &'a str,
+        capacity: u32,
+    },
+}
+
+impl<'a> WorkerCapacity<'a> {
     pub(crate) fn new(
         issue_state: &'a str,
         max_workers_by_state: &'a BTreeMap<String, u32>,
     ) -> Self {
         Self {
-            issue_state,
-            max_workers_by_state,
+            source: CapacitySource::State {
+                issue_state,
+                max_workers_by_state,
+            },
+        }
+    }
+
+    pub(crate) fn lane(lane: &'a str, capacity: u32) -> Self {
+        Self {
+            source: CapacitySource::Lane { lane, capacity },
+        }
+    }
+
+    fn bucket_and_limit(&self) -> (String, Option<u32>) {
+        match self.source {
+            CapacitySource::State {
+                issue_state,
+                max_workers_by_state,
+            } => {
+                let bucket = normalize_state_worker_cap_key(issue_state);
+                let limit = max_workers_by_state.get(&bucket).copied();
+                (format!("state:{bucket}"), limit)
+            }
+            CapacitySource::Lane { lane, capacity } => (format!("lane:{lane}"), Some(capacity)),
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) type StateWorkerCapacity<'a> = WorkerCapacity<'a>;
 
 pub fn new_cancellation_registry() -> CancellationRegistry {
     CancellationRegistry::default()
@@ -67,7 +102,7 @@ pub fn register_worker(
         ActiveWorker {
             cancellation,
             completion,
-            state_bucket: String::new(),
+            capacity_bucket: String::new(),
             reconciliation_owned: false,
             launched: true,
         },
@@ -81,7 +116,7 @@ pub(crate) fn try_reserve_worker(
     completion: watch::Receiver<bool>,
     max_global_workers: u32,
     max_issue_workers: u32,
-    state_capacity: StateWorkerCapacity<'_>,
+    capacity: WorkerCapacity<'_>,
 ) -> Result<(), WorkerReservationError> {
     let mut workers = registry_guard(registry);
     if workers.contains_key(&identity) {
@@ -98,20 +133,16 @@ pub(crate) fn try_reserve_worker(
     {
         return Err(WorkerReservationError::IssueCapacityExhausted);
     }
-    let state_bucket = normalize_state_worker_cap_key(state_capacity.issue_state);
-    if !state_worker_capacity_available(
-        &workers,
-        &state_bucket,
-        state_capacity.max_workers_by_state,
-    ) {
-        return Err(WorkerReservationError::StateCapacityExhausted);
+    let (capacity_bucket, limit) = capacity.bucket_and_limit();
+    if !capacity_available(&workers, &capacity_bucket, limit) {
+        return Err(WorkerReservationError::CapacityBucketExhausted);
     }
     workers.insert(
         identity,
         ActiveWorker {
             cancellation,
             completion,
-            state_bucket,
+            capacity_bucket,
             reconciliation_owned: false,
             launched: false,
         },
@@ -128,20 +159,34 @@ pub(crate) fn has_available_state_worker_capacity(
         return true;
     }
     let state_bucket = normalize_state_worker_cap_key(issue_state);
-    state_worker_capacity_available(&registry_guard(registry), &state_bucket, max_state_workers)
+    let bucket = format!("state:{state_bucket}");
+    capacity_available(
+        &registry_guard(registry),
+        &bucket,
+        max_state_workers.get(&state_bucket).copied(),
+    )
 }
 
-fn state_worker_capacity_available(
-    workers: &HashMap<WorkerIdentity, ActiveWorker>,
-    state_bucket: &str,
-    max_state_workers: &BTreeMap<String, u32>,
+pub(crate) fn has_available_lane_worker_capacity(
+    registry: &CancellationRegistry,
+    lane: &str,
+    capacity: u32,
 ) -> bool {
-    max_state_workers.get(state_bucket).is_none_or(|limit| {
+    let bucket = format!("lane:{lane}");
+    capacity_available(&registry_guard(registry), &bucket, Some(capacity))
+}
+
+fn capacity_available(
+    workers: &HashMap<WorkerIdentity, ActiveWorker>,
+    capacity_bucket: &str,
+    limit: Option<u32>,
+) -> bool {
+    limit.is_none_or(|limit| {
         workers
             .values()
-            .filter(|worker| worker.state_bucket == state_bucket)
+            .filter(|worker| worker.capacity_bucket == capacity_bucket)
             .count()
-            < *limit as usize
+            < limit as usize
     })
 }
 
@@ -717,7 +762,7 @@ mod tests {
                 3,
                 2
             ),
-            Err(WorkerReservationError::StateCapacityExhausted)
+            Err(WorkerReservationError::CapacityBucketExhausted)
         );
         assert_eq!(
             reserve(
@@ -786,7 +831,7 @@ mod tests {
         assert!(outcomes
             .iter()
             .filter(|outcome| outcome.is_err())
-            .all(|outcome| { *outcome == Err(WorkerReservationError::StateCapacityExhausted) }));
+            .all(|outcome| { *outcome == Err(WorkerReservationError::CapacityBucketExhausted) }));
         assert_eq!(live_worker_count(&racing_registry), 1);
     }
 
@@ -853,7 +898,7 @@ mod tests {
                 2,
                 StateWorkerCapacity::new("todo", &caps),
             ),
-            Err(WorkerReservationError::StateCapacityExhausted)
+            Err(WorkerReservationError::CapacityBucketExhausted)
         );
 
         first_complete_tx.send(true).unwrap();
@@ -874,5 +919,61 @@ mod tests {
             ),
             Ok(())
         );
+    }
+
+    #[test]
+    fn selected_lane_capacity_is_namespaced_and_reserved_atomically() {
+        let registry = new_cancellation_registry();
+        let state_caps = BTreeMap::from([("delivery".to_string(), 1)]);
+        let (_, first_completion) = watch::channel(false);
+        try_reserve_worker(
+            &registry,
+            identity("state", 1),
+            CancellationToken::new(),
+            first_completion,
+            4,
+            1,
+            WorkerCapacity::new("delivery", &state_caps),
+        )
+        .unwrap();
+
+        let lane_identity = WorkerIdentity {
+            issue_id: "issue-2".to_string(),
+            ..identity("lane", 2)
+        };
+        let (_, lane_completion) = watch::channel(false);
+        try_reserve_worker(
+            &registry,
+            lane_identity.clone(),
+            CancellationToken::new(),
+            lane_completion,
+            4,
+            1,
+            WorkerCapacity::lane("delivery", 1),
+        )
+        .unwrap();
+        assert!(!has_available_lane_worker_capacity(
+            &registry, "delivery", 1
+        ));
+
+        let (_, blocked_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_worker(
+                &registry,
+                WorkerIdentity {
+                    issue_id: "issue-3".to_string(),
+                    ..identity("blocked", 3)
+                },
+                CancellationToken::new(),
+                blocked_completion,
+                4,
+                1,
+                WorkerCapacity::lane("delivery", 1),
+            ),
+            Err(WorkerReservationError::CapacityBucketExhausted)
+        );
+
+        assert!(rollback_worker_reservation(&registry, &lane_identity));
+        assert!(has_available_lane_worker_capacity(&registry, "delivery", 1));
     }
 }

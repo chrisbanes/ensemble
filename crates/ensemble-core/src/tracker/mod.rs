@@ -4,7 +4,7 @@ pub mod model;
 pub mod notion;
 pub mod todo_file;
 
-use crate::config::ensemble::TrackerConfig;
+use crate::config::ensemble::{EnsembleConfig, TrackerConfig};
 use async_trait::async_trait;
 use model::{InteractionThreadRoot, Issue, TrackerComment};
 use serde::{Deserialize, Serialize};
@@ -185,6 +185,19 @@ pub fn resolve_github_token_for_endpoint(
 /// Returns an error if the tracker kind is unsupported, or
 /// if required configuration is absent (e.g., missing API key for GitHub).
 pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, TrackerError> {
+    create_tracker_with_relationships(config, false)
+}
+
+pub(crate) fn create_tracker_for_runtime(
+    config: &EnsembleConfig,
+) -> Result<Box<dyn IssueTracker>, TrackerError> {
+    create_tracker_with_relationships(&config.tracker, config.uses_workflow_selection())
+}
+
+fn create_tracker_with_relationships(
+    config: &TrackerConfig,
+    hydrate_native_relationships: bool,
+) -> Result<Box<dyn IssueTracker>, TrackerError> {
     match config.kind.as_str() {
         "todo_file" => {
             let path = config
@@ -231,6 +244,7 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
                     active_states: config.active_states.clone(),
                     terminal_states: config.terminal_states.clone(),
                     labels_filter: config.labels_filter.clone(),
+                    hydrate_native_relationships,
                 },
             )?;
             Ok(Box::new(tracker))

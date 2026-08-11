@@ -3,6 +3,7 @@ pub mod pipeline_journal;
 pub mod reconciler;
 pub mod retry;
 pub mod scheduler;
+pub mod selection;
 pub mod state;
 
 use std::collections::{HashMap, HashSet};
@@ -26,13 +27,15 @@ use crate::acceptance::{
     evaluate_file_requirement, evaluate_handoff_requirement, AcceptanceCommandRunner,
     AcceptanceEvidence, AcceptanceStatus, ResolvedAcceptancePlan, ShellAcceptanceCommandRunner,
 };
+#[cfg(test)]
+use crate::agent::cancellation::StateWorkerCapacity;
 use crate::agent::cancellation::{
-    await_worker_drain, await_worker_quiescence, has_available_state_worker_capacity,
-    is_reconciliation_owned, live_worker_count, mark_all_for_drain, mark_issue_for_drain,
-    mark_worker_launched, new_cancellation_registry, pending_reconciliation_issue_ids,
-    remove_completed_worker, remove_drained_workers, rollback_worker_reservation,
-    try_reserve_worker, CancellationRegistry, StateWorkerCapacity, WorkerDrainHandle,
-    WorkerReservationError,
+    await_worker_drain, await_worker_quiescence, has_available_lane_worker_capacity,
+    has_available_state_worker_capacity, is_reconciliation_owned, live_worker_count,
+    mark_all_for_drain, mark_issue_for_drain, mark_worker_launched, new_cancellation_registry,
+    pending_reconciliation_issue_ids, remove_completed_worker, remove_drained_workers,
+    rollback_worker_reservation, try_reserve_worker, CancellationRegistry, WorkerCapacity,
+    WorkerDrainHandle, WorkerReservationError,
 };
 use crate::agent::events::{
     AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
@@ -70,8 +73,8 @@ use crate::orchestrator::pipeline_journal::{
 };
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
-    DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, StepOutputTemplateContext,
-    StepState,
+    DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, SelectedWorkflowSnapshot,
+    StepOutputTemplateContext, StepState,
 };
 use crate::pipeline::verdict::StepResult;
 use crate::timeline::persistence::TimelinePersistence;
@@ -95,9 +98,10 @@ use retry::{
     ManualWholeIssueRetryRequest,
 };
 use scheduler::{
-    has_available_worker_slots, is_dispatch_eligible, is_resume_dispatch_eligible,
-    sort_for_dispatch,
+    has_available_worker_slots, is_dispatch_eligible, is_dispatch_structurally_eligible,
+    is_resume_dispatch_eligible, sort_for_dispatch,
 };
+use selection::{sort_selected_candidates, SelectedWorkflow, WorkflowSelector};
 use state::{
     FinalizeStatus, IssueFinalizeState, OrchestratorState, PendingTerminalEntry, RepoFinalizeState,
     WaitingOnHumanEntry,
@@ -718,9 +722,19 @@ impl Orchestrator {
                     let _ = response.send(Err(ManualStepRetryError::RuntimeUnavailable));
                     return;
                 }
-                let (max_backoff_ms, max_cycles) = {
-                    let config = self.config.read().await;
-                    (config.agent.max_retry_backoff_ms, config.max_cycles)
+                let retry_limits = {
+                    let state = self.state.read().await;
+                    if state.get_pipeline_run(&command.issue_id).is_none() {
+                        let _ = response.send(Err(ManualStepRetryError::NoPipelineRun));
+                        return;
+                    }
+                    state
+                        .get_pipeline_config(&command.issue_id)
+                        .map(|config| (config.agent.max_retry_backoff_ms, config.max_cycles))
+                };
+                let Some((max_backoff_ms, max_cycles)) = retry_limits else {
+                    let _ = response.send(Err(ManualStepRetryError::RuntimeUnavailable));
+                    return;
                 };
                 let result = queue_manual_step_retry(
                     &self.state,
@@ -884,7 +898,7 @@ impl Orchestrator {
 
                 // Worker events
                 Some(event) = recv_worker_event(&self.worker_rx) => {
-                    self.handle_worker_event(event).await;
+                    Box::pin(self.handle_worker_event(event)).await;
                 }
 
                 // Retry timer (if any)
@@ -1109,11 +1123,45 @@ impl Orchestrator {
             }
         };
 
-        // 4. Sort by dispatch priority
-        sort_for_dispatch(&mut candidates);
+        let selected_candidates = {
+            let config = self.config.read().await;
+            if config.uses_workflow_selection() {
+                match WorkflowSelector::compile(&config.workflow_selection, &config.scheduler.lanes)
+                {
+                    Ok(selector) => {
+                        let mut selected = candidates
+                            .iter()
+                            .filter_map(|issue| {
+                                selector
+                                    .select(issue, &config.tracker.terminal_states)
+                                    .map(|workflow| (issue.clone(), workflow))
+                            })
+                            .collect::<Vec<_>>();
+                        sort_selected_candidates(&mut selected);
+                        Some(selected)
+                    }
+                    Err(error) => {
+                        warn!(error = %error, "failed to compile workflow selector");
+                        return;
+                    }
+                }
+            } else {
+                sort_for_dispatch(&mut candidates);
+                None
+            }
+        };
 
-        // 5. Dispatch eligible issues while slots remain
-        for issue in &candidates {
+        // 5. Dispatch eligible issues while slots remain.
+        let dispatch_candidates = selected_candidates
+            .as_ref()
+            .map(|selected| {
+                selected
+                    .iter()
+                    .map(|(issue, workflow)| (issue, Some(workflow.clone())))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| candidates.iter().map(|issue| (issue, None)).collect());
+        for (issue, selected) in dispatch_candidates {
             if self.quiescing.is_requested() {
                 break;
             }
@@ -1128,8 +1176,13 @@ impl Orchestrator {
                 }
             }
 
-            Box::pin(self.consider_candidate_for_dispatch(issue, &active_lower, &terminal_lower))
-                .await;
+            Box::pin(self.consider_candidate_for_dispatch(
+                issue,
+                &active_lower,
+                &terminal_lower,
+                selected,
+            ))
+            .await;
         }
 
         info!(
@@ -1144,10 +1197,15 @@ impl Orchestrator {
         issue: &Issue,
         active_lower: &[String],
         terminal_lower: &[String],
+        selected: Option<SelectedWorkflow>,
     ) {
         let eligible = {
             let state = self.state.read().await;
-            is_dispatch_eligible(issue, &state, active_lower, terminal_lower)
+            if selected.is_some() {
+                is_dispatch_structurally_eligible(issue, &state, terminal_lower)
+            } else {
+                is_dispatch_eligible(issue, &state, active_lower, terminal_lower)
+            }
         };
 
         let restored_pipeline_ready = {
@@ -1162,7 +1220,16 @@ impl Orchestrator {
 
         {
             let config = self.config.read().await;
-            if !self.state_worker_capacity_available(issue, &config).await {
+            let capacity_available = if let Some(selected) = selected.as_ref() {
+                has_available_lane_worker_capacity(
+                    &self.cancellation_registry,
+                    &selected.lane,
+                    selected.lane_capacity,
+                )
+            } else {
+                self.state_worker_capacity_available(issue, &config).await
+            };
+            if !capacity_available {
                 return;
             }
         }
@@ -1176,9 +1243,27 @@ impl Orchestrator {
                 Box::pin(self.dispatch_issue(issue, None)).await;
             }
             Ok(CandidateRestoreOutcome::NotRestored) => {
-                if let Some(owned_issue) = Box::pin(self.claim_candidate_for_dispatch(issue)).await
-                {
-                    Box::pin(self.dispatch_issue(&owned_issue, None)).await;
+                let refreshed = if let Some(expected) = selected.as_ref() {
+                    Box::pin(self.refresh_selected_candidate_for_claim(
+                        issue,
+                        expected,
+                        terminal_lower,
+                    ))
+                    .await
+                } else {
+                    Some((issue.clone(), None))
+                };
+                if let Some((fresh_issue, fresh_selected)) = refreshed {
+                    if let Some(owned_issue) =
+                        Box::pin(self.claim_candidate_for_dispatch(&fresh_issue)).await
+                    {
+                        if let Some(selected) = fresh_selected {
+                            Box::pin(self.dispatch_selected_issue(&owned_issue, None, selected))
+                                .await;
+                        } else {
+                            Box::pin(self.dispatch_issue(&owned_issue, None)).await;
+                        }
+                    }
                 }
             }
             Ok(CandidateRestoreOutcome::Parked) => {}
@@ -1211,6 +1296,61 @@ impl Orchestrator {
         }
     }
 
+    async fn refresh_selected_candidate_for_claim(
+        &self,
+        issue: &Issue,
+        expected: &SelectedWorkflow,
+        terminal_states: &[String],
+    ) -> Option<(Issue, Option<SelectedWorkflow>)> {
+        let mut refreshed = match self
+            .tracker
+            .fetch_issue_states_by_ids(std::slice::from_ref(&issue.id))
+            .await
+        {
+            Ok(refreshed) => refreshed,
+            Err(error) => {
+                warn!(issue_id = %issue.id, error = %error, "selected candidate refresh failed");
+                return None;
+            }
+        };
+        if refreshed.len() != 1 {
+            return None;
+        }
+        let fresh = refreshed.pop()?;
+        {
+            let state = self.state.read().await;
+            if is_dispatch_structurally_eligible(&fresh, &state, terminal_states).is_some() {
+                return None;
+            }
+        }
+        let config = self.config.read().await;
+        let selector = match WorkflowSelector::compile(
+            &config.workflow_selection,
+            &config.scheduler.lanes,
+        ) {
+            Ok(selector) => selector,
+            Err(error) => {
+                warn!(issue_id = %issue.id, error = %error, "selected candidate refresh could not compile workflow rules");
+                return None;
+            }
+        };
+        let selected = selector.select(&fresh, terminal_states)?;
+        if selected.rule != expected.rule
+            || selected.pipeline != expected.pipeline
+            || selected.lane != expected.lane
+        {
+            return None;
+        }
+        if !has_available_lane_worker_capacity(
+            &self.cancellation_registry,
+            &selected.lane,
+            selected.lane_capacity,
+        ) {
+            return None;
+        }
+        Some((fresh, Some(selected)))
+    }
+
     async fn dispatch_recovered_claims_before_fresh_work(&self) {
         let recovered = match self.tracker.recover_owned_claims().await {
             Ok(recovered) => recovered,
@@ -1232,11 +1372,41 @@ impl Orchestrator {
                 continue;
             }
 
-            let config = self.config.read().await;
-            if !self.state_worker_capacity_available(&issue, &config).await {
-                return;
-            }
-            drop(config);
+            let selected = {
+                let config = self.config.read().await;
+                if config.uses_workflow_selection() {
+                    let terminal_states = config.tracker.terminal_states.clone();
+                    let Ok(selector) = WorkflowSelector::compile(
+                        &config.workflow_selection,
+                        &config.scheduler.lanes,
+                    ) else {
+                        return;
+                    };
+                    drop(config);
+                    let state = self.state.read().await;
+                    if is_dispatch_structurally_eligible(&issue, &state, &terminal_states).is_some()
+                    {
+                        continue;
+                    }
+                    drop(state);
+                    let Some(selected) = selector.select(&issue, &terminal_states) else {
+                        continue;
+                    };
+                    if !has_available_lane_worker_capacity(
+                        &self.cancellation_registry,
+                        &selected.lane,
+                        selected.lane_capacity,
+                    ) {
+                        return;
+                    }
+                    Some(selected)
+                } else {
+                    if !self.state_worker_capacity_available(&issue, &config).await {
+                        return;
+                    }
+                    None
+                }
+            };
 
             let mut owned_issue = issue;
             owned_issue.branch_name = lease.branch_name.clone();
@@ -1244,7 +1414,11 @@ impl Orchestrator {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .insert(owned_issue.id.clone(), lease);
-            Box::pin(self.dispatch_issue(&owned_issue, None)).await;
+            if let Some(selected) = selected {
+                Box::pin(self.dispatch_selected_issue(&owned_issue, None, selected)).await;
+            } else {
+                Box::pin(self.dispatch_issue(&owned_issue, None)).await;
+            }
         }
     }
 
@@ -1380,13 +1554,26 @@ impl Orchestrator {
             .await;
     }
 
+    async fn dispatch_selected_issue(
+        &self,
+        issue: &Issue,
+        attempt: Option<u32>,
+        selected: SelectedWorkflow,
+    ) {
+        let Some(permit) = self.quiescing.begin_dispatch() else {
+            return;
+        };
+        self.dispatch_issue_with_owned_retry(issue, attempt, None, Some(&selected), &permit)
+            .await;
+    }
+
     async fn dispatch_issue_with_permit(
         &self,
         issue: &Issue,
         attempt: Option<u32>,
         permit: &DispatchPermit,
     ) {
-        self.dispatch_issue_with_owned_retry(issue, attempt, None, permit)
+        self.dispatch_issue_with_owned_retry(issue, attempt, None, None, permit)
             .await;
     }
 
@@ -1400,6 +1587,7 @@ impl Orchestrator {
             issue,
             Some(retry_entry.attempt),
             Some(retry_entry),
+            None,
             permit,
         )
         .await;
@@ -1410,6 +1598,7 @@ impl Orchestrator {
         issue: &Issue,
         attempt: Option<u32>,
         expected_retry: Option<&RetryEntry>,
+        selected: Option<&SelectedWorkflow>,
         permit: &DispatchPermit,
     ) {
         let cycle = attempt.unwrap_or(1);
@@ -1704,8 +1893,23 @@ impl Orchestrator {
 
         let (dag, config_snapshot) = {
             let config = self.config.read().await;
-            match build_dag(&config.steps) {
-                Ok(d) => (d, Arc::new(config.clone())),
+            let effective = if let Some(selected) = selected {
+                match config.resolve_selected_workflow(
+                    &selected.rule,
+                    &selected.pipeline,
+                    &selected.lane,
+                ) {
+                    Ok(effective) => effective,
+                    Err(error) => {
+                        warn!(issue_id = %issue.id, error = %error, "failed to resolve selected workflow");
+                        return;
+                    }
+                }
+            } else {
+                config.clone()
+            };
+            match build_dag(&effective.steps) {
+                Ok(d) => (d, Arc::new(effective)),
                 Err(e) => {
                     warn!(issue_id = %issue.id, error = %e, "failed to build step DAG, skipping dispatch");
                     return;
@@ -1720,6 +1924,13 @@ impl Orchestrator {
             .get(&issue.id)
             .cloned();
         let mut pipeline_run = PipelineRun::new(issue.id.clone(), cycle, dag);
+        if let Some(selected) = selected {
+            pipeline_run.set_selected_workflow(SelectedWorkflowSnapshot {
+                rule: selected.rule.clone(),
+                pipeline: selected.pipeline.clone(),
+                lane: selected.lane.clone(),
+            });
+        }
         if let Some(lease) = ownership_lease.clone() {
             pipeline_run.set_ownership_lease(lease);
         }
@@ -1993,13 +2204,32 @@ impl Orchestrator {
         issue: &Issue,
         config: &EnsembleConfig,
     ) -> bool {
-        let issue_state = {
+        let (issue_state, selected_lane) = {
             let state = self.state.read().await;
-            state
-                .get_running(&issue.id)
-                .map(|entry| entry.issue.state.clone())
-                .unwrap_or_else(|| issue.state.clone())
+            (
+                state
+                    .get_running(&issue.id)
+                    .map(|entry| entry.issue.state.clone())
+                    .unwrap_or_else(|| issue.state.clone()),
+                state
+                    .get_pipeline_run(&issue.id)
+                    .and_then(PipelineRun::selected_workflow)
+                    .map(|selected| selected.lane.clone()),
+            )
         };
+        if let Some(lane) = selected_lane {
+            return config
+                .scheduler
+                .lanes
+                .get(&lane)
+                .is_some_and(|lane_config| {
+                    has_available_lane_worker_capacity(
+                        &self.cancellation_registry,
+                        &lane,
+                        lane_config.capacity,
+                    )
+                });
+        }
         has_available_state_worker_capacity(
             &self.cancellation_registry,
             &issue_state,
@@ -2261,7 +2491,17 @@ impl Orchestrator {
         Ok(workspace.base_path)
     }
 
-    async fn run_acceptance_phase(
+    // Type-erase this lifecycle boundary so the acceptance state machine is not embedded in the
+    // already-large worker-exit future.
+    fn run_acceptance_phase<'a>(
+        &'a self,
+        issue: &'a Issue,
+        config: &'a EnsembleConfig,
+    ) -> Pin<Box<dyn Future<Output = AcceptancePhaseOutcome> + Send + 'a>> {
+        Box::pin(self.run_acceptance_phase_inner(issue, config))
+    }
+
+    async fn run_acceptance_phase_inner(
         &self,
         issue: &Issue,
         config: &EnsembleConfig,
@@ -2617,7 +2857,18 @@ impl Orchestrator {
         released
     }
 
-    async fn schedule_acceptance_failure(
+    // Keep terminal failure bookkeeping behind a separate poll boundary from acceptance checks.
+    fn schedule_acceptance_failure<'a>(
+        &'a self,
+        issue: &'a Issue,
+        config: &'a EnsembleConfig,
+        reason: &'a str,
+        owner: &'a AcceptanceOwnerIdentity,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.schedule_acceptance_failure_inner(issue, config, reason, owner))
+    }
+
+    async fn schedule_acceptance_failure_inner(
         &self,
         issue: &Issue,
         config: &EnsembleConfig,
@@ -2720,6 +2971,32 @@ impl Orchestrator {
         let issue = &issue_snapshot;
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let (completion_tx, completion_rx) = watch::channel(false);
+        let selected_lane = {
+            let state = self.state.read().await;
+            state
+                .get_pipeline_run(&issue.id)
+                .and_then(PipelineRun::selected_workflow)
+                .map(|selected| selected.lane.clone())
+        };
+        let worker_capacity = if let Some(lane) = selected_lane.as_deref() {
+            let Some(capacity) = config_snapshot
+                .scheduler
+                .lanes
+                .get(lane)
+                .map(|lane| lane.capacity)
+            else {
+                return Err(AgentError::PromptError {
+                    reason: format!("selected scheduler lane '{lane}' no longer exists"),
+                }
+                .into());
+            };
+            WorkerCapacity::lane(lane, capacity)
+        } else {
+            WorkerCapacity::new(
+                &issue.state,
+                &config_snapshot.agent.max_concurrent_agents_by_state,
+            )
+        };
         match try_reserve_worker(
             &self.cancellation_registry,
             worker_identity.clone(),
@@ -2727,16 +3004,13 @@ impl Orchestrator {
             completion_rx,
             config_snapshot.concurrency.max_concurrent_agents,
             config_snapshot.concurrency.max_step_parallelism,
-            StateWorkerCapacity::new(
-                &issue.state,
-                &config_snapshot.agent.max_concurrent_agents_by_state,
-            ),
+            worker_capacity,
         ) {
             Ok(()) => {}
             Err(
                 WorkerReservationError::GlobalCapacityExhausted
                 | WorkerReservationError::IssueCapacityExhausted
-                | WorkerReservationError::StateCapacityExhausted,
+                | WorkerReservationError::CapacityBucketExhausted,
             ) => {
                 debug!(
                     issue_id = %issue.id,
@@ -3515,10 +3789,6 @@ impl Orchestrator {
                 } else {
                     "worker cancelled during reconciliation"
                 };
-                let retry_config = {
-                    let config = self.config.read().await;
-                    config.clone()
-                };
                 let mut state = self.state.write().await;
                 if !drained.owner.is_current(&state, issue_id) {
                     warn!(
@@ -3527,6 +3797,13 @@ impl Orchestrator {
                     );
                     return;
                 }
+                let Some(retry_config) = state.get_pipeline_config(issue_id).cloned() else {
+                    warn!(
+                        issue_id = %issue_id,
+                        "retaining stalled run because its config snapshot is missing"
+                    );
+                    return;
+                };
                 let terminal = state.remove_running(issue_id).map(|entry| {
                     self.schedule_whole_issue_failure_retry(
                         &mut state,
@@ -3742,7 +4019,24 @@ impl Orchestrator {
             .await;
     }
 
-    async fn handle_worker_exit_with_permit(
+    // Type-erase worker-exit handling so its large pipeline transition state machine is not
+    // embedded in the long-lived orchestrator event future.
+    fn handle_worker_exit_with_permit<'a>(
+        &'a self,
+        issue_id: &'a str,
+        step_name: &'a str,
+        result: WorkerResult,
+        worker_exit_permit: &'a DispatchPermit,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.handle_worker_exit_with_permit_inner(
+            issue_id,
+            step_name,
+            result,
+            worker_exit_permit,
+        ))
+    }
+
+    async fn handle_worker_exit_with_permit_inner(
         &self,
         issue_id: &str,
         step_name: &str,
@@ -3760,7 +4054,6 @@ impl Orchestrator {
                 output,
                 approval_request,
             } => {
-                let config = self.config.read().await;
                 info!(
                     issue_id = %issue_id,
                     step = step_name,
@@ -3923,8 +4216,10 @@ impl Orchestrator {
                             let acceptance_issue = issue_snapshot.clone().or_else(|| {
                                 state.running.get(issue_id).map(|entry| entry.issue.clone())
                             });
-                            let config_snapshot = config.clone();
-                            drop(config);
+                            let Some(config_snapshot) = config_snapshot else {
+                                warn!(issue_id = %issue_id, "no config snapshot found for pipeline success");
+                                return;
+                            };
                             drop(state);
                             if let Some(input) = step_transition {
                                 self.append_pipeline_transition(input).await;
@@ -3939,12 +4234,12 @@ impl Orchestrator {
                             {
                                 AcceptancePhaseOutcome::Passed => {}
                                 AcceptancePhaseOutcome::Failed { reason, owner } => {
-                                    Box::pin(self.schedule_acceptance_failure(
+                                    self.schedule_acceptance_failure(
                                         &acceptance_issue,
                                         &config_snapshot,
                                         &reason,
                                         &owner,
-                                    ))
+                                    )
                                     .await;
                                     return;
                                 }
@@ -4035,6 +4330,10 @@ impl Orchestrator {
                             }
                         }
                         PipelineAction::Failed { step, reason } => {
+                            let Some(config_snapshot) = config_snapshot else {
+                                warn!(issue_id = %issue_id, "no config snapshot found for pipeline failure");
+                                return;
+                            };
                             warn!(
                                 issue_id = %issue_id,
                                 step = %step,
@@ -4054,7 +4353,7 @@ impl Orchestrator {
                                 .get_pipeline_run(issue_id)
                                 .and_then(|run| run.step(&step))
                                 .cloned();
-                            let step_config = config.steps.iter().find(|s| s.name == step);
+                            let step_config = config_snapshot.steps.iter().find(|s| s.name == step);
                             let on_failure = runtime_step
                                 .as_ref()
                                 .map(|s| s.on_failure)
@@ -4074,8 +4373,10 @@ impl Orchestrator {
                                                 issue_id,
                                                 identifier: &entry.identifier,
                                                 attempt,
-                                                max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                                max_cycles: config.max_cycles,
+                                                max_backoff_ms: config_snapshot
+                                                    .agent
+                                                    .max_retry_backoff_ms,
+                                                max_cycles: config_snapshot.max_cycles,
                                                 error: &reason,
                                                 retry_from_step: Some(step.clone()),
                                                 with_fixup: false,
@@ -4156,8 +4457,10 @@ impl Orchestrator {
                                                 issue_id,
                                                 identifier: &entry.identifier,
                                                 attempt,
-                                                max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                                max_cycles: config.max_cycles,
+                                                max_backoff_ms: config_snapshot
+                                                    .agent
+                                                    .max_retry_backoff_ms,
+                                                max_cycles: config_snapshot.max_cycles,
                                                 error: &reason,
                                                 retry_from_step: Some(step.clone()),
                                                 with_fixup: true,
@@ -4262,8 +4565,10 @@ impl Orchestrator {
                                                 issue_id,
                                                 identifier: &entry.identifier,
                                                 attempt,
-                                                max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                                max_cycles: config.max_cycles,
+                                                max_backoff_ms: config_snapshot
+                                                    .agent
+                                                    .max_retry_backoff_ms,
+                                                max_cycles: config_snapshot.max_cycles,
                                                 error: &reason,
                                                 retry_from_step: None,
                                                 with_fixup: false,
@@ -4295,7 +4600,7 @@ impl Orchestrator {
                                         if let Some(retry_entry) = retry_scheduled.scheduled() {
                                             if let Some(input) = Self::prepare_whole_issue_retry(
                                                 &mut state,
-                                                &config,
+                                                &config_snapshot,
                                                 issue_id,
                                                 &entry.identifier,
                                                 &reason,
@@ -4313,9 +4618,8 @@ impl Orchestrator {
                                 }
                             }
 
-                            let target_state = config.on_failure.clone();
+                            let target_state = config_snapshot.on_failure.clone();
                             drop(state);
-                            drop(config);
                             for input in post_failure_transitions {
                                 self.append_pipeline_transition(input).await;
                             }
@@ -4342,6 +4646,10 @@ impl Orchestrator {
                             step,
                             approval_state,
                         } => {
+                            let Some(config_snapshot) = config_snapshot else {
+                                warn!(issue_id = %issue_id, "no config snapshot found for pipeline approval");
+                                return;
+                            };
                             drop(state);
                             if let Some(input) = step_transition {
                                 self.append_pipeline_transition(input).await;
@@ -4370,7 +4678,7 @@ impl Orchestrator {
                                 let terminal = state.remove_running(issue_id).map(|entry| {
                                     self.schedule_whole_issue_failure_retry(
                                         &mut state,
-                                        &config,
+                                        &config_snapshot,
                                         entry,
                                         &error.to_string(),
                                         ScheduledRetryPipeline::Release,
@@ -4413,15 +4721,21 @@ impl Orchestrator {
                         "blocked-on-human handling failed"
                     );
 
-                    let config = self.config.read().await;
                     let mut state = self.state.write().await;
+                    let Some(config_snapshot) = state.get_pipeline_config(issue_id).cloned() else {
+                        warn!(
+                            issue_id = %issue_id,
+                            "retaining failed blocked interaction because its config snapshot is missing"
+                        );
+                        return;
+                    };
                     if let Some(run) = state.get_pipeline_run_mut(issue_id) {
                         run.step_failed(step_name, error.to_string());
                     }
                     let terminal = state.remove_running(issue_id).map(|entry| {
                         self.schedule_whole_issue_failure_retry(
                             &mut state,
-                            &config,
+                            &config_snapshot,
                             entry,
                             &error.to_string(),
                             ScheduledRetryPipeline::Release,
@@ -4444,8 +4758,14 @@ impl Orchestrator {
                     return;
                 }
 
-                let config = self.config.read().await;
                 let mut state = self.state.write().await;
+                let Some(config_snapshot) = state.get_pipeline_config(issue_id).cloned() else {
+                    warn!(
+                        issue_id = %issue_id,
+                        "retaining failed worker because its config snapshot is missing"
+                    );
+                    return;
+                };
                 warn!(
                     issue_id = %issue_id,
                     step = step_name,
@@ -4474,8 +4794,8 @@ impl Orchestrator {
                                 issue_id,
                                 identifier: &entry.identifier,
                                 attempt: next_attempt(entry.retry_attempt),
-                                max_backoff_ms: config.agent.max_retry_backoff_ms,
-                                max_cycles: config.max_cycles,
+                                max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
+                                max_cycles: config_snapshot.max_cycles,
                                 error: &error,
                                 retry_from_step: None,
                                 with_fixup: false,
@@ -4504,7 +4824,7 @@ impl Orchestrator {
                         }
                         retry_transition = Self::prepare_whole_issue_retry(
                             &mut state,
-                            &config,
+                            &config_snapshot,
                             issue_id,
                             &entry.identifier,
                             &error,
@@ -4513,9 +4833,8 @@ impl Orchestrator {
                     }
                 }
 
-                let target_state = config.on_failure.clone();
+                let target_state = config_snapshot.on_failure.clone();
                 drop(state);
-                drop(config);
                 if let Some(input) = retry_transition {
                     self.append_pipeline_transition(input).await;
                 }
@@ -4624,6 +4943,10 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .and_then(PipelineRun::workspace_branch_name)
             .map(str::to_owned);
+        let selected_workflow = state
+            .get_pipeline_run(issue_id)
+            .and_then(PipelineRun::selected_workflow)
+            .cloned();
         let mut next_run = PipelineRun::new(issue_id.to_string(), retry_entry.attempt, dag);
         next_run.acceptance_attempts = acceptance_attempts;
         next_run.resolved_acceptance_plan = Some(ResolvedAcceptancePlan::from_config(config).ok()?);
@@ -4632,6 +4955,9 @@ impl Orchestrator {
         }
         if let Some(workspace_branch_name) = workspace_branch_name {
             next_run.set_workspace_branch_name(workspace_branch_name);
+        }
+        if let Some(selected_workflow) = selected_workflow {
+            next_run.set_selected_workflow(selected_workflow);
         }
         state.insert_pipeline_run(issue_id, next_run, Arc::new(config.clone()));
         Self::transition_input_for_run(
@@ -4645,7 +4971,18 @@ impl Orchestrator {
         )
     }
 
-    async fn commit_whole_issue_failure_retry(&self, outcome: Option<WholeIssueFailureRetry>) {
+    // Keep terminal transition delivery out of the already-large failure scheduling future.
+    fn commit_whole_issue_failure_retry(
+        &self,
+        outcome: Option<WholeIssueFailureRetry>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(self.commit_whole_issue_failure_retry_inner(outcome))
+    }
+
+    async fn commit_whole_issue_failure_retry_inner(
+        &self,
+        outcome: Option<WholeIssueFailureRetry>,
+    ) {
         match outcome {
             Some(WholeIssueFailureRetry::Scheduled(Some(input))) => {
                 self.append_pipeline_transition(*input).await;
@@ -4665,8 +5002,14 @@ impl Orchestrator {
     }
 
     async fn handle_pipeline_step_failure(&self, issue_id: &str, step: &str, reason: String) {
-        let config = self.config.read().await;
         let mut state = self.state.write().await;
+        let Some(config_snapshot) = state.get_pipeline_config(issue_id).cloned() else {
+            warn!(
+                issue_id = %issue_id,
+                "retaining timed-out worker because its config snapshot is missing"
+            );
+            return;
+        };
 
         if let Some(run) = state.get_pipeline_run_mut(issue_id) {
             run.step_failed(step, reason.clone());
@@ -4699,7 +5042,7 @@ impl Orchestrator {
             .get_pipeline_run(issue_id)
             .and_then(|run| run.step(step))
             .cloned();
-        let step_config = config.steps.iter().find(|s| s.name == step);
+        let step_config = config_snapshot.steps.iter().find(|s| s.name == step);
         let on_failure = runtime_step
             .as_ref()
             .map(|s| s.on_failure)
@@ -4720,8 +5063,8 @@ impl Orchestrator {
                             issue_id,
                             identifier: &entry.identifier,
                             attempt,
-                            max_backoff_ms: config.agent.max_retry_backoff_ms,
-                            max_cycles: config.max_cycles,
+                            max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
+                            max_cycles: config_snapshot.max_cycles,
                             error: &reason,
                             retry_from_step: Some(step_name.clone()),
                             with_fixup: false,
@@ -4791,8 +5134,8 @@ impl Orchestrator {
                             issue_id,
                             identifier: &entry.identifier,
                             attempt,
-                            max_backoff_ms: config.agent.max_retry_backoff_ms,
-                            max_cycles: config.max_cycles,
+                            max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
+                            max_cycles: config_snapshot.max_cycles,
                             error: &reason,
                             retry_from_step: Some(step_name.clone()),
                             with_fixup: true,
@@ -4886,8 +5229,8 @@ impl Orchestrator {
                             issue_id,
                             identifier: &entry.identifier,
                             attempt,
-                            max_backoff_ms: config.agent.max_retry_backoff_ms,
-                            max_cycles: config.max_cycles,
+                            max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
+                            max_cycles: config_snapshot.max_cycles,
                             error: &reason,
                             retry_from_step: None,
                             with_fixup: false,
@@ -4910,7 +5253,7 @@ impl Orchestrator {
                     if let Some(retry_entry) = retry_scheduled.scheduled() {
                         if let Some(input) = Self::prepare_whole_issue_retry(
                             &mut state,
-                            &config,
+                            &config_snapshot,
                             issue_id,
                             &entry.identifier,
                             &reason,
@@ -4928,9 +5271,8 @@ impl Orchestrator {
             }
         }
 
-        let target_state = config.on_failure.clone();
+        let target_state = config_snapshot.on_failure.clone();
         drop(state);
-        drop(config);
         for input in post_failure_transitions {
             self.append_pipeline_transition(input).await;
         }
@@ -6074,6 +6416,17 @@ impl Orchestrator {
                 ),
             })?;
 
+        let config_snapshot = if let Some(selected) = snapshot.selected_workflow.as_ref() {
+            let effective = config_snapshot.resolve_selected_workflow(
+                &selected.rule,
+                &selected.pipeline,
+                &selected.lane,
+            )?;
+            Arc::new(effective)
+        } else {
+            config_snapshot
+        };
+
         let is_pending_terminal = record.terminal_transition.is_some();
         if !is_pending_terminal {
             validate_restored_snapshot_against_config(&snapshot, &config_snapshot)?;
@@ -6189,6 +6542,20 @@ impl Orchestrator {
         }
 
         Ok(())
+    }
+
+    async fn current_config_for_snapshot(
+        &self,
+        snapshot: Option<&PipelineRunSnapshot>,
+    ) -> Result<Arc<EnsembleConfig>, EnsembleError> {
+        let config = self.config.read().await;
+        let Some(selected) = snapshot.and_then(|snapshot| snapshot.selected_workflow.as_ref())
+        else {
+            return Ok(Arc::new(config.clone()));
+        };
+        let effective =
+            config.resolve_selected_workflow(&selected.rule, &selected.pipeline, &selected.lane)?;
+        Ok(Arc::new(effective))
     }
 
     async fn append_pipeline_transition(&self, input: PipelineTransitionInput) {
@@ -7401,9 +7768,16 @@ impl Orchestrator {
 
         if should_complete {
             let outcome = TerminalOutcome::Succeeded;
-            let config_snapshot = {
-                let config = self.config.read().await;
-                config.clone()
+            let config_snapshot = match self.current_config_for_snapshot(snapshot.as_ref()).await {
+                Ok(config) => config,
+                Err(error) => {
+                    warn!(
+                        issue_id = %issue_id,
+                        error = %error,
+                        "finalize retry could not resolve its selected workflow"
+                    );
+                    return;
+                }
             };
             let target_state = config_snapshot.on_success.clone();
             if let Some(finalize_state) = self
@@ -7416,7 +7790,7 @@ impl Orchestrator {
                 self.stage_finalization_terminal_transition(
                     issue_id,
                     issue_identifier,
-                    &config_snapshot,
+                    config_snapshot.as_ref(),
                     &finalize_state,
                 )
                 .await;
@@ -7674,9 +8048,24 @@ impl Orchestrator {
     }
 
     pub async fn resume_blocked_issue(&self, issue: &Issue) -> Result<(), EnsembleError> {
+        let selected = {
+            let state = self.state.read().await;
+            state
+                .get_pipeline_run(&issue.id)
+                .and_then(PipelineRun::selected_workflow)
+                .cloned()
+        };
         let current_config = {
             let config = self.config.read().await;
-            Arc::new(config.clone())
+            if let Some(selected) = selected.as_ref() {
+                Arc::new(config.resolve_selected_workflow(
+                    &selected.rule,
+                    &selected.pipeline,
+                    &selected.lane,
+                )?)
+            } else {
+                Arc::new(config.clone())
+            }
         };
 
         self.hydrate_waiting_on_human_from_store().await;
@@ -8515,12 +8904,21 @@ impl Orchestrator {
                 }
             }
             Some(issue) => {
-                let max_backoff_ms = self.config.read().await.agent.max_retry_backoff_ms;
                 let (ready_for_dispatch, transition) = {
                     let mut state = self.state.write().await;
                     if state.retry_attempts.get(issue_id) != Some(retry_entry) {
                         return;
                     }
+                    let Some(max_backoff_ms) = state
+                        .get_pipeline_config(issue_id)
+                        .map(|config| config.agent.max_retry_backoff_ms)
+                    else {
+                        warn!(
+                            issue_id = %issue_id,
+                            "retaining retry because its config snapshot is missing"
+                        );
+                        return;
+                    };
                     let max_workers = state.max_concurrent_agents;
                     if has_available_worker_slots(
                         live_worker_count(&self.cancellation_registry),
@@ -8589,9 +8987,18 @@ impl Orchestrator {
     }
 
     async fn defer_single_retry(&self, retry_entry: &RetryEntry, reason: &str) {
-        let max_backoff_ms = self.config.read().await.agent.max_retry_backoff_ms;
         let transition = {
             let mut state = self.state.write().await;
+            let Some(max_backoff_ms) = state
+                .get_pipeline_config(&retry_entry.issue_id)
+                .map(|config| config.agent.max_retry_backoff_ms)
+            else {
+                warn!(
+                    issue_id = %retry_entry.issue_id,
+                    "retaining retry because its config snapshot is missing"
+                );
+                return;
+            };
             Self::defer_owned_retry(&mut state, retry_entry, max_backoff_ms, reason)
         };
         if let Some(input) = transition {
@@ -8802,7 +9209,12 @@ fn build_reconcile_active_states_lower(config: &EnsembleConfig) -> Vec<String> {
         }
     }
 
-    for step in &config.steps {
+    for step in config.steps.iter().chain(
+        config
+            .pipelines
+            .values()
+            .flat_map(|pipeline| &pipeline.steps),
+    ) {
         if let Some(state) = step.tracker_state.as_deref() {
             let state = state.to_lowercase();
             if !terminal.contains(&state) {
@@ -9130,7 +9542,10 @@ mod tests {
         AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
         WorkerEvent, WorkerIdentity, WorkerResult,
     };
-    use crate::config::ensemble::{parse_config, ConcurrencyConfig, StepConfig};
+    use crate::config::ensemble::{
+        parse_config, ConcurrencyConfig, PipelineConfig, SchedulerConfig, SchedulerLaneConfig,
+        StepConfig, WorkflowOrderKey, WorkflowSelectionRuleConfig,
+    };
     use crate::error::AgentError;
     use crate::interaction::{
         InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
@@ -9144,6 +9559,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use std::collections::BTreeMap;
     use tokio::sync::watch;
     use tower::ServiceExt;
 
@@ -9255,6 +9671,12 @@ mod tests {
         issues: Arc<RwLock<Vec<Issue>>>,
         comments: Arc<RwLock<Vec<crate::tracker::model::TrackerComment>>>,
         list_barrier: Option<Arc<tokio::sync::Barrier>>,
+    }
+
+    struct SelectedClaimTracker {
+        candidates: Vec<Issue>,
+        fresh: Arc<RwLock<Vec<Issue>>>,
+        claim_calls: Arc<AtomicUsize>,
     }
 
     async fn worker_identity_test_orchestrator() -> (Orchestrator, tempfile::TempDir, WorkerIdentity)
@@ -9407,6 +9829,46 @@ mod tests {
             _ids: &[String],
         ) -> Result<Vec<Issue>, TrackerError> {
             Ok(Vec::new())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for SelectedClaimTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self.candidates.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            _states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(Vec::new())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self
+                .fresh
+                .read()
+                .await
+                .iter()
+                .filter(|issue| ids.contains(&issue.id))
+                .cloned()
+                .collect())
+        }
+
+        async fn claim_issue(&self, issue: &Issue) -> Result<OwnershipClaim, TrackerError> {
+            self.claim_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(OwnershipClaim::Acquired(OwnershipLease {
+                id: format!("lease-{}", issue.id),
+                branch_name: Some(format!("selected/{}", issue.id)),
+            }))
+        }
+
+        fn has_remote_ownership_policy(&self) -> bool {
+            true
         }
     }
 
@@ -10058,6 +10520,7 @@ mod tests {
             with_fixup: false,
         };
         let original_due_at_ms = retry.due_at_ms;
+        install_retry_pipeline_config(&orchestrator, &retry.issue_id).await;
         orchestrator.state.write().await.add_retry(retry.clone());
         let quiescing = orchestrator.quiescing_latch_owner();
 
@@ -11833,6 +12296,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_published_delivery_recovery_uses_frozen_pipeline_transition() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(Arc::clone(&remote)).await;
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.mode = DeliveryMode::Push;
+        repository.phase = DeliveryPhase::Published;
+        repository.pr_number = None;
+        repository.pr_url = None;
+
+        let config = selected_test_config();
+        let pipeline = config.pipelines["delivery"].clone();
+        *orchestrator.config.write().await = config;
+        let mut run = PipelineRun::new(
+            delivery.issue_id.clone(),
+            1,
+            build_dag(&pipeline.steps).unwrap(),
+        );
+        run.set_selected_workflow(SelectedWorkflowSnapshot {
+            rule: "ready".to_string(),
+            pipeline: "delivery".to_string(),
+            lane: "delivery".to_string(),
+        });
+        let snapshot = run.to_snapshot();
+        orchestrator
+            .persist_delivery_record(&delivery, Some(&snapshot))
+            .await
+            .unwrap();
+
+        orchestrator.process_delivery_recovery(None).await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.delivery.contains_key("1"));
+        assert!(!state.is_claimed("1"));
+        assert!(state.completed.contains_key("1"));
+    }
+
+    #[tokio::test]
     async fn waiting_delivery_releases_when_tracker_becomes_terminal() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
@@ -12609,6 +13115,16 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    async fn install_retry_pipeline_config(orchestrator: &Orchestrator, issue_id: &str) {
+        let config = orchestrator.config.read().await.clone();
+        let run = PipelineRun::new(issue_id.to_string(), 1, build_dag(&config.steps).unwrap());
+        orchestrator
+            .state
+            .write()
+            .await
+            .insert_pipeline_run(issue_id, run, Arc::new(config));
     }
 
     fn test_question_interaction(
@@ -13671,12 +14187,17 @@ agent:
             id: issue.id.clone(),
             branch_name: Some("agent/acceptance-retry".into()),
         };
-        state
-            .write()
-            .await
-            .get_pipeline_run_mut(&issue.id)
-            .unwrap()
-            .set_ownership_lease(ownership_lease.clone());
+        let selected_workflow = SelectedWorkflowSnapshot {
+            rule: "ready".to_string(),
+            pipeline: "delivery".to_string(),
+            lane: "delivery".to_string(),
+        };
+        {
+            let mut state = state.write().await;
+            let run = state.get_pipeline_run_mut(&issue.id).unwrap();
+            run.set_ownership_lease(ownership_lease.clone());
+            run.set_selected_workflow(selected_workflow.clone());
+        }
         assert!(matches!(
             orchestrator.run_acceptance_phase(&issue, &config).await,
             AcceptancePhaseOutcome::Failed { .. }
@@ -13708,6 +14229,7 @@ agent:
         assert_eq!(snapshot.acceptance_attempts.len(), 1);
         assert_eq!(snapshot.acceptance_attempts[0].cycle, 1);
         assert_eq!(snapshot.ownership_lease, Some(ownership_lease));
+        assert_eq!(snapshot.selected_workflow, Some(selected_workflow));
         assert_eq!(
             snapshot.acceptance_attempts[0].results[0].status,
             AcceptanceStatus::Failed
@@ -15051,7 +15573,7 @@ agent:
         let orchestrator = Orchestrator::new_with_state(
             OrchestratorRuntimeParts {
                 state: Arc::clone(&state),
-                config,
+                config: Arc::clone(&config),
                 tracker,
                 agent_runner: runner,
                 acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
@@ -15131,6 +15653,8 @@ agent:
             assert!(state.is_waiting_on_human(&issue.id));
             assert!(state.get_pipeline_run(&issue.id).is_some());
         }
+
+        config.write().await.max_cycles = 1;
 
         let (response, result) = tokio::sync::oneshot::channel();
         orchestrator
@@ -16731,6 +17255,8 @@ agent:
             state.insert_pipeline_run(&issue.id, pipeline_run, Arc::new(cfg.clone()));
         }
 
+        config.write().await.steps[0].on_failure = OnFailure::Halt;
+
         orchestrator
             .handle_worker_exit(
                 &issue.id,
@@ -17378,6 +17904,65 @@ agent:
             state.get_pipeline_run("1").map(|run| run.cycle),
             Some(3),
             "whole-issue retry should install the fresh pipeline cycle"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_failure_uses_frozen_pipeline_config_after_reload() {
+        let mut frozen_config = make_config();
+        frozen_config.max_cycles = 1;
+        let config = Arc::new(RwLock::new(frozen_config.clone()));
+        let issues = Arc::new(RwLock::new(vec![]));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let dag = build_dag(&frozen_config.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-1".to_string());
+            run.set_selected_workflow(SelectedWorkflowSnapshot {
+                rule: "ready".to_string(),
+                pipeline: "delivery".to_string(),
+                lane: "delivery".to_string(),
+            });
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&test_issue("1", "Todo"), Some(1));
+            state.insert_pipeline_run("1", run, Arc::new(frozen_config.clone()));
+        }
+
+        config.write().await.max_cycles = 10;
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Failed {
+                    error: "agent crashed".to_string(),
+                    kind: WorkerFailureKind::Runtime,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(
+            !state.retry_attempts.contains_key("1"),
+            "the selected run's frozen max_cycles must govern failure exhaustion"
         );
     }
 
@@ -20686,6 +21271,132 @@ agent:
         .unwrap();
         assert_eq!(metadata["branch_name"], "ensemble/issue-1");
         assert!(!observed_commands.read().await.is_empty());
+    }
+
+    fn selected_test_config() -> EnsembleConfig {
+        let mut config = make_config();
+        config.tracker.terminal_states = vec!["Done".to_string()];
+        config.pipelines.insert(
+            "delivery".to_string(),
+            PipelineConfig {
+                steps: config.steps.clone(),
+                on_success: config.on_success.clone(),
+                on_failure: config.on_failure.clone(),
+            },
+        );
+        config.scheduler = SchedulerConfig {
+            lanes: BTreeMap::from([("delivery".to_string(), SchedulerLaneConfig { capacity: 1 })]),
+        };
+        config.workflow_selection = vec![WorkflowSelectionRuleConfig {
+            name: "ready".to_string(),
+            precedence: 1,
+            pipeline: "delivery".to_string(),
+            lane: "delivery".to_string(),
+            states: Some(vec!["ready".to_string()]),
+            labels_all: Some(vec!["ready-for-agent".to_string()]),
+            labels_any: None,
+            labels_none: None,
+            require_unblocked: true,
+            order_by: vec![WorkflowOrderKey::TrackerPosition],
+        }];
+        config.steps.clear();
+        config.on_success.clear();
+        config.on_failure.clear();
+        config
+    }
+
+    async fn selected_claim_test_orchestrator(
+        fresh: Vec<Issue>,
+    ) -> (
+        Orchestrator,
+        tempfile::TempDir,
+        Arc<AtomicUsize>,
+        Issue,
+        SelectedWorkflow,
+    ) {
+        let config = selected_test_config();
+        let mut issue = test_issue("1", "Ready");
+        issue.labels = vec!["ready-for-agent".to_string()];
+        issue.tracker_position = Some(4);
+        let claim_calls = Arc::new(AtomicUsize::new(0));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(SelectedClaimTracker {
+            candidates: vec![issue.clone()],
+            fresh: Arc::new(RwLock::new(fresh)),
+            claim_calls: Arc::clone(&claim_calls),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let selected =
+            WorkflowSelector::compile(&config.workflow_selection, &config.scheduler.lanes)
+                .unwrap()
+                .select(&issue, &config.tracker.terminal_states)
+                .unwrap();
+        let orchestrator = Orchestrator::new(
+            Arc::new(RwLock::new(config)),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        (orchestrator, dir, claim_calls, issue, selected)
+    }
+
+    #[tokio::test]
+    async fn selected_dispatch_refreshes_before_one_claim_and_journals_workflow_with_lease() {
+        let mut fresh = test_issue("1", "Ready");
+        fresh.labels = vec!["ready-for-agent".to_string()];
+        fresh.tracker_position = Some(4);
+        let (orchestrator, _dir, claim_calls, issue, selected) =
+            selected_claim_test_orchestrator(vec![fresh]).await;
+
+        orchestrator
+            .consider_candidate_for_dispatch(&issue, &[], &["done".to_string()], Some(selected))
+            .await;
+
+        assert_eq!(claim_calls.load(Ordering::SeqCst), 1);
+        let record = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let snapshot = record.snapshot.unwrap();
+        assert_eq!(
+            snapshot.selected_workflow,
+            Some(SelectedWorkflowSnapshot {
+                rule: "ready".to_string(),
+                pipeline: "delivery".to_string(),
+                lane: "delivery".to_string(),
+            })
+        );
+        assert_eq!(snapshot.ownership_lease.unwrap().id, "lease-1");
+    }
+
+    #[tokio::test]
+    async fn selected_dispatch_lost_match_during_refresh_never_claims() {
+        let fresh = test_issue("1", "Ready");
+        let (orchestrator, _dir, claim_calls, issue, selected) =
+            selected_claim_test_orchestrator(vec![fresh]).await;
+
+        orchestrator
+            .consider_candidate_for_dispatch(&issue, &[], &["done".to_string()], Some(selected))
+            .await;
+
+        assert_eq!(claim_calls.load(Ordering::SeqCst), 0);
+        assert!(orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -24858,10 +25569,15 @@ agent:
         {
             let mut config = orchestrator.config.write().await;
             config.agent.stall_timeout_ms = 1;
-            config.max_cycles = 1;
+            config.max_cycles = 10;
         }
         {
             let mut state = orchestrator.state.write().await;
+            let mut frozen_config = state.get_pipeline_config("1").unwrap().as_ref().clone();
+            frozen_config.max_cycles = 1;
+            state
+                .pipeline_configs
+                .insert("1".to_string(), Arc::new(frozen_config));
             state.running.get_mut("1").unwrap().last_agent_timestamp =
                 Some(Utc::now() - chrono::Duration::seconds(1));
         }
@@ -25110,6 +25826,7 @@ agent:
             retry_from_step: Some("review".to_string()),
             with_fixup: true,
         };
+        install_retry_pipeline_config(&orchestrator, &retry.issue_id).await;
         orchestrator.state.write().await.add_retry(retry.clone());
 
         orchestrator.handle_single_retry(&retry).await;
@@ -25160,6 +25877,7 @@ agent:
             retry_from_step: None,
             with_fixup: false,
         };
+        install_retry_pipeline_config(&orchestrator, &retry.issue_id).await;
         orchestrator.state.write().await.add_retry(retry.clone());
 
         orchestrator.handle_single_retry(&retry).await;
@@ -25281,6 +25999,7 @@ agent:
             retry_from_step: Some("review".to_string()),
             with_fixup: true,
         };
+        install_retry_pipeline_config(&orchestrator, &retry.issue_id).await;
         orchestrator.state.write().await.add_retry(retry.clone());
 
         let retry_fire = tokio::spawn({
@@ -25310,7 +26029,7 @@ agent:
     async fn retry_fire_capacity_deferral_does_not_consume_a_pipeline_cycle() {
         let mut raw_config = make_config();
         raw_config.concurrency.max_concurrent_agents = 1;
-        let config = Arc::new(RwLock::new(raw_config));
+        let config = Arc::new(RwLock::new(raw_config.clone()));
         let issues = Arc::new(RwLock::new(vec![test_issue("1", "Todo")]));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker { issues });
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
@@ -25341,6 +26060,14 @@ agent:
         };
         {
             let mut state = orchestrator.state.write().await;
+            let mut frozen_config = raw_config.clone();
+            frozen_config.agent.max_retry_backoff_ms = 0;
+            let run = PipelineRun::new(
+                "1".to_string(),
+                retry.attempt,
+                build_dag(&frozen_config.steps).unwrap(),
+            );
+            state.insert_pipeline_run("1", run, Arc::new(frozen_config));
             state.add_running(&test_issue("2", "Todo"), None);
             state.add_retry(retry.clone());
         }
@@ -25364,6 +26091,10 @@ agent:
         assert_eq!(
             state.retry_attempts.get("1").map(|entry| entry.attempt),
             Some(retry.attempt)
+        );
+        assert!(
+            state.retry_attempts["1"].due_at_ms <= current_time_ms() + 1_000,
+            "retry deferral must use the frozen run backoff"
         );
         assert!(state.is_claimed("1"));
     }
@@ -25401,6 +26132,7 @@ agent:
             retry_from_step: None,
             with_fixup: false,
         };
+        install_retry_pipeline_config(&orchestrator, &retry.issue_id).await;
         orchestrator.state.write().await.add_retry(retry.clone());
 
         orchestrator.handle_single_retry(&retry).await;

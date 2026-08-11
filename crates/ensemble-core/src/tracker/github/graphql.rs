@@ -360,6 +360,84 @@ pub(super) struct IssueStatesData {
     pub(super) nodes: Vec<Option<IssueNode>>,
 }
 
+pub(super) struct IssueBlockedBy;
+
+impl Operation for IssueBlockedBy {
+    const NAME: &'static str = "IssueBlockedBy";
+    const QUERY: &'static str = ISSUE_BLOCKED_BY_QUERY;
+    type Response = IssueBlockedByData;
+}
+
+pub(super) const ISSUE_BLOCKED_BY_QUERY: &str = r#"
+query($issueId: ID!, $cursor: String) {
+  node(id: $issueId) {
+    ... on Issue {
+      blockedBy(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id number state repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueBlockedByData {
+    pub(super) node: Option<IssueBlockedByNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueBlockedByNode {
+    pub(super) blocked_by: Connection<RelatedIssueNode>,
+}
+
+pub(super) struct IssueSubIssues;
+
+impl Operation for IssueSubIssues {
+    const NAME: &'static str = "IssueSubIssues";
+    const QUERY: &'static str = ISSUE_SUB_ISSUES_QUERY;
+    type Response = IssueSubIssuesData;
+}
+
+pub(super) const ISSUE_SUB_ISSUES_QUERY: &str = r#"
+query($issueId: ID!, $cursor: String) {
+  node(id: $issueId) {
+    ... on Issue {
+      subIssues(first: 50, after: $cursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes { id number state repository { nameWithOwner } }
+      }
+    }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueSubIssuesData {
+    pub(super) node: Option<IssueSubIssuesNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueSubIssuesNode {
+    pub(super) sub_issues: Connection<RelatedIssueNode>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct RelatedIssueNode {
+    pub(super) id: Option<String>,
+    pub(super) number: Option<u64>,
+    pub(super) state: Option<String>,
+    pub(super) repository: Option<RelatedRepository>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RelatedRepository {
+    pub(super) name_with_owner: Option<String>,
+}
+
 pub(super) struct IssueAssignees;
 
 impl Operation for IssueAssignees {
@@ -672,6 +750,8 @@ mod tests {
             decode_response::<ProjectItems>(br#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"edges":[]}}}}"#, "").map(|_| ()),
             decode_response::<RepositoryIssues>(br#"{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<IssueStates>(br#"{"data":{"nodes":[]}}"#, "").map(|_| ()),
+            decode_response::<IssueBlockedBy>(br#"{"data":{"node":{"blockedBy":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
+            decode_response::<IssueSubIssues>(br#"{"data":{"node":{"subIssues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<Viewer>(br#"{"data":{"viewer":{"id":"U_1","login":"octocat"}}}"#, "").map(|_| ()),
             decode_response::<IssueAssignees>(br#"{"data":{"node":{"id":"I_1","assignees":{"totalCount":0,"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<IssueComments>(br#"{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),

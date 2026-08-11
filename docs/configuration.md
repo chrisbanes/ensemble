@@ -533,6 +533,86 @@ opencode adapter command.
 - Direct runtime command strings are parsed with shell-style quoting into program arguments, then launched without shell interpolation.
 - Provide either `prompt` (inline) or `prompt_template` (file), not both.
 
+### Pipeline configuration modes
+
+Ensemble accepts exactly one of two pipeline modes:
+
+- **Legacy mode** uses the top-level `steps`, `on_success`, and `on_failure` fields documented
+  below. Existing single-pipeline configurations continue to use this mode.
+- **Selected mode** defines named `pipelines`, capacity-limited `scheduler.lanes`, and an ordered
+  `workflow_selection` rule list. Do not combine these fields with the legacy pipeline fields.
+
+Selected mode keeps issue vocabulary in configuration rather than assigning semantic roles to
+states or labels inside Ensemble:
+
+```yaml
+pipelines:
+  delivery:
+    steps:
+      - name: build
+        agent: builder
+    on_success: Done
+    on_failure: Failed
+  planning:
+    steps:
+      - name: plan
+        agent: planner
+    on_success: Plan Review
+    on_failure: Failed
+
+scheduler:
+  lanes:
+    delivery:
+      capacity: 3
+    planning:
+      capacity: 1
+
+workflow_selection:
+  - name: ready-delivery
+    precedence: 10
+    pipeline: delivery
+    lane: delivery
+    states: [Ready]
+    labels_all: [ready-for-agent]
+    labels_none: [hold]
+    require_unblocked: true
+    order_by: [priority, tracker_position, created_at]
+  - name: requested-planning
+    precedence: 20
+    pipeline: planning
+    lane: planning
+    states: [Planning]
+    labels_any: [needs-plan, revise-plan]
+    order_by: [created_at]
+  - name: alternate-vocabulary
+    precedence: 30
+    pipeline: delivery
+    lane: delivery
+    states: [Ausstehend]
+    labels_all: [bereit]
+    order_by: [tracker_position]
+  - name: tail
+    precedence: 100
+    pipeline: delivery
+    lane: delivery
+    order_by: [created_at]
+```
+
+Each rule may constrain `states`, `labels_all`, `labels_any`, `labels_none`, and
+`require_unblocked`. Omitted predicates are unconstrained, so a final catch-all rule is allowed.
+State and label comparisons trim whitespace and ignore case. A supplied predicate list must be
+non-empty and contain no blank or normalized-duplicate values.
+
+Rules are evaluated by ascending positive `precedence`; the first matching rule selects one named
+pipeline and one scheduler lane. Rule names and precedence values must be unique, and every
+pipeline and lane reference must exist. Lane capacity must be a positive integer. Every named
+pipeline is validated as a complete DAG with non-blank terminal transitions.
+
+`order_by` accepts `priority`, `tracker_position`, `created_at`, and `identifier`. Keys are applied
+in their listed order, ascending, with null values last. Keys cannot repeat, and `identifier`, when
+specified, must be final. Ensemble always adds `identifier` as the final deterministic tie-breaker
+when it is omitted.
+
 ### steps
 
 Pipeline step definitions. Each step invokes one agent.
@@ -602,8 +682,9 @@ steps:
 | `max_step_parallelism` | integer | `2` | Per-issue worker cap reserved for deferred multi-branch execution |
 
 These limits count live agent workers, not claimed or running issues. Ensemble reserves global,
-per-issue, and any configured `agent.max_concurrent_agents_by_state` slot atomically for each exact
-step worker before publishing the step as running or launching its agent. This describes the
+per-issue, and either the selected scheduler-lane slot or a configured legacy
+`agent.max_concurrent_agents_by_state` slot atomically for each exact step worker before publishing
+the step as running or launching its agent. This describes the
 implemented capacity accounting, not a supported guarantee of parallel execution in the sequential
 MVP. If any limit is full, the ready step remains pending without consuming a retry cycle. Pending
 ready steps in claimed pipelines are reconsidered when worker capacity is released and before new

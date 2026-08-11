@@ -14,7 +14,7 @@ use crate::orchestrator::{
     OrchestratorRuntimeParts, QuiescingLatch,
 };
 use crate::tracker::model::RetryEntry;
-use crate::tracker::{create_tracker, IssueTracker};
+use crate::tracker::{create_tracker_for_runtime, IssueTracker};
 use crate::transcript::events::TranscriptEventBus;
 use crate::workspace::manager::WorkspaceManager;
 use std::path::Path;
@@ -310,8 +310,8 @@ pub(crate) async fn prepare_orchestrator_runtime(
         return Ok(None);
     };
 
-    let config = Arc::new(RwLock::new(config.clone()));
-    let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker(&config.read().await.tracker)?);
+    let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker_for_runtime(&config)?);
+    let config = Arc::new(RwLock::new(config));
     tracker.validate_configuration().await?;
     // `AcpAgentRunner` is the shared runtime dispatcher: `acpx_agent` steps run through the
     // acpx CLI/session runtime, while explicit direct configs keep the ACP stdio path.

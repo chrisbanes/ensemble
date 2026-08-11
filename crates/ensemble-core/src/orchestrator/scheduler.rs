@@ -69,6 +69,42 @@ pub fn is_dispatch_eligible(
     None
 }
 
+/// Apply only tracker-independent run ownership and completion gates.
+///
+/// Selected workflow policy (states, labels and blockers) is evaluated by the
+/// configured selector. The legacy path continues to use `is_dispatch_eligible`.
+pub fn is_dispatch_structurally_eligible(
+    issue: &Issue,
+    state: &OrchestratorState,
+    terminal_states: &[String],
+) -> Option<String> {
+    if issue.id.is_empty() {
+        return Some("missing issue id".to_string());
+    }
+    if issue.identifier.is_empty() {
+        return Some("missing issue identifier".to_string());
+    }
+    if issue.title.is_empty() {
+        return Some("missing issue title".to_string());
+    }
+    if issue.state.is_empty() {
+        return Some("missing issue state".to_string());
+    }
+    if contains_state(terminal_states, &issue.state) {
+        return Some(format!("state '{}' is terminal", issue.state));
+    }
+    if state.is_running(&issue.id) {
+        return Some("already running".to_string());
+    }
+    if state.is_claimed(&issue.id) {
+        return Some("already claimed".to_string());
+    }
+    if state.completed.contains_key(&issue.id) {
+        return Some("already completed".to_string());
+    }
+    None
+}
+
 /// Check if an explicitly requested resume dispatch may proceed.
 ///
 /// This bypasses the normal claimed-issue filter so resolved waiting issues can
@@ -179,6 +215,22 @@ mod tests {
 
         let result = is_dispatch_eligible(&issue, &state, &default_active(), &default_terminal());
         assert!(result.is_none(), "expected eligible, got: {:?}", result);
+    }
+
+    #[test]
+    fn selected_structural_gate_does_not_embed_legacy_todo_blocker_policy() {
+        let state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
+        let mut issue = test_issue("1", "Todo");
+        issue.blocked_by = vec![BlockerRef {
+            id: Some("2".to_string()),
+            identifier: Some("repo#2".to_string()),
+            state: Some("Todo".to_string()),
+        }];
+
+        assert!(is_dispatch_structurally_eligible(&issue, &state, &default_terminal()).is_none());
+        assert!(
+            is_dispatch_eligible(&issue, &state, &default_active(), &default_terminal()).is_some()
+        );
     }
 
     #[test]
