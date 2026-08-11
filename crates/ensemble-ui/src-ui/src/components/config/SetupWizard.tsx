@@ -71,6 +71,7 @@ const DEFAULT_GH_TRACKER: SetupTracker = {
   kind: "github", 
   repository: "", 
   project_number: null,
+  status_field: null,
   api_key: { state: "unset" },
   api_key_edit: { action: "set_environment", variable: "GITHUB_TOKEN" },
   active_states: ["Todo", "In Progress"],
@@ -212,6 +213,8 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
           return draft.tracker.path.trim().length > 0;
         }
         return draft.tracker.repository.trim().length > 0
+          && (draft.tracker.project_number === null
+            || (draft.tracker.status_field?.trim().length ?? 0) > 0)
           && !trackerSecretError;
       case "repos":
         return draft.repos.length > 0;
@@ -436,13 +439,37 @@ export default function SetupWizard({ mode = "create", onComplete }: SetupWizard
               value={draft.tracker.project_number ?? ""}
               onChange={(e) => setDraft(prev => ({
                 ...prev,
-                tracker: { 
+                tracker: prev.tracker.kind === "github" ? {
                   ...prev.tracker,
                   project_number: e.target.value ? parseInt(e.target.value, 10) : null,
-                } as SetupTracker,
+                  status_field: e.target.value ? prev.tracker.status_field : null,
+                } : prev.tracker,
               }))}
             />
           </div>
+          {draft.tracker.project_number !== null && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium" htmlFor="gh-status-field">
+                Project status field name
+              </label>
+              <Input
+                id="gh-status-field"
+                value={draft.tracker.status_field ?? ""}
+                onChange={(e) => setDraft(prev => ({
+                  ...prev,
+                  tracker: prev.tracker.kind === "github" ? {
+                    ...prev.tracker,
+                    status_field: e.target.value,
+                  } : prev.tracker,
+                }))}
+                placeholder="Delivery state"
+                required
+              />
+              <p className="text-sm text-muted-foreground">
+                Enter the exact readable name of the Project single-select field used for state.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             <label className="text-sm font-medium" htmlFor="setup-secret-action">API Key</label>
             <p className="text-sm text-muted-foreground">

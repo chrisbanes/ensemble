@@ -227,6 +227,7 @@ fn to_issue(parsed: &ParsedIssue) -> Issue {
         title: parsed.title.clone(),
         description: parsed.description.clone(),
         priority: Some(parsed.priority),
+        tracker_position: None,
         state: parsed.state.clone(),
         branch_name: None,
         url: None,

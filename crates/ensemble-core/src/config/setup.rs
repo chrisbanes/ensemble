@@ -31,6 +31,8 @@ pub enum SetupTracker {
     GitHub {
         repository: String,
         project_number: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status_field: Option<String>,
         api_key: SecretDisplay,
         #[serde(default, skip_serializing_if = "SecretEdit::is_preserve")]
         #[schema(write_only = true)]
@@ -535,7 +537,24 @@ pub async fn discover_agent_capabilities(agent: &str) -> AgentCapabilities {
 
 fn validate_setup_secret_edit(request: &SetupRequest) -> Result<(), ConfigError> {
     match &request.tracker {
-        SetupTracker::GitHub { api_key_edit, .. } => api_key_edit.validate(),
+        SetupTracker::GitHub {
+            project_number,
+            status_field,
+            api_key_edit,
+            ..
+        } => {
+            api_key_edit.validate()?;
+            if project_number.is_some()
+                && status_field
+                    .as_deref()
+                    .is_none_or(|field| field.trim().is_empty())
+            {
+                return Err(ConfigError::ConfigParseError {
+                    reason: "GitHub Project setup requires a non-blank status_field".to_string(),
+                });
+            }
+            Ok(())
+        }
         SetupTracker::TodoFile { .. } => Ok(()),
     }
 }
@@ -570,6 +589,7 @@ fn build_tracker_mapping(request: &SetupRequest) -> serde_yaml::Mapping {
         SetupTracker::GitHub {
             repository,
             project_number,
+            status_field,
             api_key_edit,
             active_states,
             terminal_states,
@@ -597,6 +617,14 @@ fn build_tracker_mapping(request: &SetupRequest) -> serde_yaml::Mapping {
                     "project_number".into(),
                     serde_yaml::Value::Number((*n).into()),
                 );
+                if let Some(status_field) = status_field {
+                    let mut github = serde_yaml::Mapping::new();
+                    github.insert(
+                        "status_field".into(),
+                        serde_yaml::Value::String(status_field.clone()),
+                    );
+                    tracker_map.insert("github".into(), serde_yaml::Value::Mapping(github));
+                }
             }
             tracker_map.insert(
                 "active_states".into(),
@@ -961,6 +989,11 @@ fn extract_tracker(doc: &serde_yaml::Value) -> Result<SetupTracker, ConfigError>
                     reason: "github tracker missing repository".to_string(),
                 })?;
             let project_number = tracker.get("project_number").and_then(|n| n.as_i64());
+            let status_field = tracker
+                .get("github")
+                .and_then(|github| github.get("status_field"))
+                .and_then(|field| field.as_str())
+                .map(String::from);
             let api_key =
                 SecretDisplay::from_config_value(tracker.get("api_key").and_then(|k| k.as_str()));
             let active_states = tracker
@@ -985,6 +1018,7 @@ fn extract_tracker(doc: &serde_yaml::Value) -> Result<SetupTracker, ConfigError>
             Ok(SetupTracker::GitHub {
                 repository,
                 project_number,
+                status_field,
                 api_key,
                 api_key_edit: SecretEdit::Preserve,
                 api_token: None,
@@ -1147,7 +1181,30 @@ fn update_yaml_from_request(
     // Merge in fresh tracker data (shared with generate_yaml)
     let new_tracker = build_tracker_mapping(request);
     for (key, value) in new_tracker {
-        tracker_mapping.insert(key, value);
+        if key == "github" {
+            let mut github_mapping = tracker_mapping
+                .get("github")
+                .and_then(|value| value.as_mapping())
+                .cloned()
+                .unwrap_or_default();
+            if let Some(new_github_mapping) = value.as_mapping() {
+                for (key, value) in new_github_mapping {
+                    github_mapping.insert(key.clone(), value.clone());
+                }
+            }
+            tracker_mapping.insert("github".into(), serde_yaml::Value::Mapping(github_mapping));
+        } else {
+            tracker_mapping.insert(key, value);
+        }
+    }
+    if !matches!(
+        request.tracker,
+        SetupTracker::GitHub {
+            project_number: Some(_),
+            ..
+        }
+    ) {
+        tracker_mapping.remove("github");
     }
     if matches!(
         request.tracker,
@@ -1352,6 +1409,7 @@ mod tests {
             tracker: SetupTracker::GitHub {
                 repository: "acme/repo".to_string(),
                 project_number: None,
+                status_field: None,
                 api_key: SecretDisplay::Unset,
                 api_key_edit,
                 api_token: None,
@@ -1363,6 +1421,63 @@ mod tests {
             steps: vec![],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
+        }
+    }
+
+    #[test]
+    fn project_setup_persists_the_user_supplied_status_field_name() {
+        let request = SetupRequest {
+            tracker: SetupTracker::GitHub {
+                repository: "acme/repo".to_string(),
+                project_number: Some(7),
+                status_field: Some("Delivery state".to_string()),
+                api_key: SecretDisplay::Unset,
+                api_key_edit: SecretEdit::SetEnvironment {
+                    variable: "GITHUB_TOKEN".to_string(),
+                },
+                api_token: None,
+                active_states: vec!["Queued".to_string()],
+                terminal_states: vec!["Complete".to_string()],
+            },
+            repos: vec![],
+            agents: vec![],
+            steps: vec![],
+            on_success: "Complete".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = build_setup_artifacts(&request);
+
+        assert!(artifacts.raw_yaml.contains("project_number: 7"));
+        assert!(artifacts.raw_yaml.contains("status_field: Delivery state"));
+        assert!(!artifacts.raw_yaml.contains("status_field: Status"));
+    }
+
+    #[test]
+    fn project_setup_rejects_a_missing_or_blank_status_field_name() {
+        for status_field in [None, Some("   ".to_string())] {
+            let request = SetupRequest {
+                tracker: SetupTracker::GitHub {
+                    repository: "acme/repo".to_string(),
+                    project_number: Some(7),
+                    status_field,
+                    api_key: SecretDisplay::Unset,
+                    api_key_edit: SecretEdit::SetEnvironment {
+                        variable: "GITHUB_TOKEN".to_string(),
+                    },
+                    api_token: None,
+                    active_states: vec!["Queued".to_string()],
+                    terminal_states: vec!["Complete".to_string()],
+                },
+                repos: vec![],
+                agents: vec![],
+                steps: vec![],
+                on_success: "Complete".to_string(),
+                on_failure: "Failed".to_string(),
+            };
+
+            let error = merge_setup_request(None, &request).unwrap_err();
+            assert!(error.to_string().contains("status_field"));
         }
     }
 
@@ -1435,6 +1550,7 @@ on_failure: Failed
             tracker: SetupTracker::GitHub {
                 repository: "acme/repo".to_string(),
                 project_number: None,
+                status_field: None,
                 api_key: SecretDisplay::Redacted,
                 api_key_edit: SecretEdit::Preserve,
                 api_token: None,
@@ -1700,6 +1816,7 @@ on_failure: Failed
             tracker: SetupTracker::GitHub {
                 repository: "acme/frontend".to_string(),
                 project_number: Some(42),
+                status_field: Some("Status".to_string()),
                 api_key: SecretDisplay::Environment {
                     variable: "GITHUB_TOKEN".to_string(),
                 },
@@ -1782,6 +1899,7 @@ on_failure: Failed
             tracker: SetupTracker::GitHub {
                 repository: "acme/frontend".to_string(),
                 project_number: None,
+                status_field: None,
                 api_key: SecretDisplay::Environment {
                     variable: "GITHUB_TOKEN".to_string(),
                 },
@@ -2045,6 +2163,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 5
+  github:
+    status_field: Status
   api_key: $GITHUB_TOKEN
   active_states:
     - Todo
@@ -2072,6 +2192,7 @@ on_failure: Failed
             SetupTracker::GitHub {
                 repository,
                 project_number,
+                status_field,
                 api_key,
                 active_states,
                 terminal_states,
@@ -2080,6 +2201,7 @@ on_failure: Failed
             } => {
                 assert_eq!(repository, "acme/repo");
                 assert_eq!(*project_number, Some(5));
+                assert_eq!(status_field.as_deref(), Some("Status"));
                 assert_eq!(
                     api_key,
                     &SecretDisplay::Environment {
@@ -2163,6 +2285,11 @@ tracker:
   kind: github
   repository: acme/repo
   api_key: $GITHUB_TOKEN
+  github:
+    status_field: Previous state
+    priority:
+      field: Customer impact
+      options: [Critical, Normal]
   poll_interval_seconds: 120
 agents:
   builder:
@@ -2181,6 +2308,7 @@ on_failure: Failed
             tracker: SetupTracker::GitHub {
                 repository: "acme/updated".to_string(),
                 project_number: Some(7),
+                status_field: Some("Delivery state".to_string()),
                 api_key: SecretDisplay::Environment {
                     variable: "GITHUB_TOKEN".to_string(),
                 },
@@ -2218,9 +2346,67 @@ on_failure: Failed
         assert!(artifacts.raw_yaml.contains("unsupported_flag: keep-me"));
         assert!(artifacts.raw_yaml.contains("custom_step_key: keep-step"));
         assert!(artifacts.raw_yaml.contains("repository: acme/updated"));
+        assert!(artifacts.raw_yaml.contains("status_field: Delivery state"));
+        assert!(artifacts.raw_yaml.contains("field: Customer impact"));
+        assert!(artifacts.raw_yaml.contains("- Critical"));
+        assert!(artifacts.raw_yaml.contains("- Normal"));
         assert!(artifacts.raw_yaml.contains("acpx_agent: codex"));
         assert!(artifacts.raw_yaml.contains("model: sonnet"));
         assert!(artifacts.raw_yaml.contains("on_success: Merged"));
+    }
+
+    #[test]
+    fn setup_merge_removes_project_fields_when_switching_tracker_kind() {
+        let existing_yaml = r#"
+tracker:
+  kind: github
+  repository: acme/repo
+  project_number: 7
+  github:
+    status_field: Delivery state
+    priority:
+      field: Customer impact
+      options: [Critical, Normal]
+agents:
+  builder:
+    acpx_agent: codex
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+on_success: Done
+on_failure: Failed
+"#;
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "builder".to_string(),
+                acpx_agent: "codex".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: Some("Build it.".to_string()),
+                prompt_file: None,
+            }],
+            steps: vec![SetupStep {
+                name: "build".to_string(),
+                agent_role: "builder".to_string(),
+                kind: None,
+                depends: None,
+                tracker_state: None,
+            }],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let artifacts = merge_setup_request(Some(existing_yaml), &request).unwrap();
+
+        assert!(artifacts.raw_yaml.contains("kind: todo_file"));
+        assert!(!artifacts.raw_yaml.contains("github:"));
+        assert!(!artifacts.raw_yaml.contains("Customer impact"));
     }
 
     #[test]

@@ -15,6 +15,7 @@ fn sample_issue() -> Issue {
         title: "Add dark mode".to_string(),
         description: Some("Users want dark mode".to_string()),
         priority: Some(2),
+        tracker_position: None,
         state: "Todo".to_string(),
         branch_name: None,
         url: Some("https://github.com/acme/test-repo/issues/7".to_string()),

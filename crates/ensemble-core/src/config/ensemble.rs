@@ -193,6 +193,23 @@ pub struct TrackerConfig {
     pub labels_filter: Vec<String>,
     #[serde(default)]
     pub notion: Option<NotionTrackerConfig>,
+    #[serde(default)]
+    pub github: Option<GithubTrackerConfig>,
+}
+
+/// GitHub Projects v2 field names used to normalize project items.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct GithubTrackerConfig {
+    pub status_field: String,
+    #[serde(default)]
+    pub priority: Option<GithubPriorityConfig>,
+}
+
+/// The ordered single-select options that form GitHub Project priority ranks.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct GithubPriorityConfig {
+    pub field: String,
+    pub options: Vec<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
@@ -275,6 +292,7 @@ impl std::fmt::Debug for TrackerConfig {
             .field("project_number", &self.project_number)
             .field("labels_filter", &self.labels_filter)
             .field("notion", &self.notion)
+            .field("github", &self.github)
             .finish()
     }
 }
@@ -940,9 +958,49 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
     reject_unsupported_agent_max_turns(&value)?;
     reject_legacy_agent_permission_policy(&value)?;
     reject_legacy_notion_tracker_keys(&value)?;
-    serde_yaml::from_value(value).map_err(|e| crate::error::ConfigError::ConfigParseError {
-        reason: e.to_string(),
-    })
+    let config: EnsembleConfig =
+        serde_yaml::from_value(value).map_err(|e| crate::error::ConfigError::ConfigParseError {
+            reason: e.to_string(),
+        })?;
+    validate_github_project_config(&config)?;
+    Ok(config)
+}
+
+fn validate_github_project_config(
+    config: &EnsembleConfig,
+) -> Result<(), crate::error::ConfigError> {
+    if config.tracker.kind != "github" || config.tracker.project_number.is_none() {
+        return Ok(());
+    }
+
+    let github = config.tracker.github.as_ref().ok_or_else(|| {
+        crate::error::ConfigError::ConfigParseError {
+            reason: "tracker.github.status_field is required when tracker.project_number is set"
+                .to_string(),
+        }
+    })?;
+    if github.status_field.trim().is_empty() {
+        return Err(crate::error::ConfigError::ConfigParseError {
+            reason: "tracker.github.status_field must not be empty".to_string(),
+        });
+    }
+    if let Some(priority) = &github.priority {
+        if priority.field.trim().is_empty() {
+            return Err(crate::error::ConfigError::ConfigParseError {
+                reason: "tracker.github.priority.field must not be empty".to_string(),
+            });
+        }
+        if priority
+            .options
+            .iter()
+            .any(|option| option.trim().is_empty())
+        {
+            return Err(crate::error::ConfigError::ConfigParseError {
+                reason: "tracker.github.priority.options must not contain empty names".to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn reject_unsupported_agent_max_turns(
@@ -1786,6 +1844,8 @@ tracker:
   repository: acme/repo
   api_key: $GITHUB_TOKEN
   project_number: 42
+  github:
+    status_field: Status
   active_states:
     - In Progress
     - Review
@@ -1833,6 +1893,46 @@ on_failure: Failed
         assert_eq!(config.steps[1].tracker_state.as_deref(), Some("Review"));
         assert_eq!(config.concurrency.max_concurrent_agents, 8);
         assert_eq!(config.concurrency.max_step_parallelism, 4);
+    }
+
+    #[test]
+    fn parses_github_project_field_configuration_without_priority() {
+        let yaml = minimal_yaml().replacen(
+            "kind: todo_file\n  path: TODO.md",
+            "kind: github\n  repository: acme/repo\n  project_number: 7\n  github:\n    status_field: Delivery state",
+            1,
+        );
+
+        let config = parse_config(&yaml).unwrap();
+        let github = config.tracker.github.as_ref().unwrap();
+        assert_eq!(github.status_field, "Delivery state");
+        assert!(github.priority.is_none());
+    }
+
+    #[test]
+    fn parses_github_project_field_configuration_with_ordered_priority_options() {
+        let yaml = minimal_yaml().replacen(
+            "kind: todo_file\n  path: TODO.md",
+            "kind: github\n  repository: acme/repo\n  project_number: 7\n  github:\n    status_field: Delivery state\n    priority:\n      field: Customer impact\n      options: [Critical, Elevated, Normal]",
+            1,
+        );
+
+        let config = parse_config(&yaml).unwrap();
+        let priority = config.tracker.github.unwrap().priority.unwrap();
+        assert_eq!(priority.field, "Customer impact");
+        assert_eq!(priority.options, ["Critical", "Elevated", "Normal"]);
+    }
+
+    #[test]
+    fn rejects_github_project_configuration_without_status_field() {
+        let yaml = minimal_yaml().replacen(
+            "kind: todo_file\n  path: TODO.md",
+            "kind: github\n  repository: acme/repo\n  project_number: 7",
+            1,
+        );
+
+        let error = parse_config(&yaml).unwrap_err();
+        assert!(error.to_string().contains("tracker.github.status_field"));
     }
 
     #[test]

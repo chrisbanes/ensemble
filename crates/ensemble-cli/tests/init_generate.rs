@@ -53,6 +53,8 @@ tracker:
   repository: acme/frontend
   api_key: $GITHUB_TOKEN
   project_number: 42
+  github:
+    status_field: Status
   active_states:
     - Todo
   terminal_states:

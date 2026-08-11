@@ -49,6 +49,11 @@ pub enum TrackerError {
 /// poll, dispatch, retry, or stop work based on its own state machine.
 #[async_trait]
 pub trait IssueTracker: Send + Sync {
+    /// Validate adapter-specific configuration before a new runtime generation activates.
+    async fn validate_configuration(&self) -> Result<(), TrackerError> {
+        Ok(())
+    }
+
     /// Fetch candidate issues in active states for dispatch.
     async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError>;
 
@@ -167,10 +172,13 @@ pub fn create_tracker(config: &TrackerConfig) -> Result<Box<dyn IssueTracker>, T
                 endpoint,
                 token,
                 repository.clone(),
-                config.project_number,
-                config.active_states.clone(),
-                config.terminal_states.clone(),
-                config.labels_filter.clone(),
+                github::GithubTrackerSettings {
+                    project_number: config.project_number,
+                    project_fields: config.github.clone(),
+                    active_states: config.active_states.clone(),
+                    terminal_states: config.terminal_states.clone(),
+                    labels_filter: config.labels_filter.clone(),
+                },
             )?;
             Ok(Box::new(tracker))
         }
@@ -238,6 +246,7 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
+            github: None,
         }
     }
 
@@ -254,6 +263,7 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
+            github: None,
         }
     }
 
@@ -293,6 +303,7 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
+            github: None,
         };
         let result = create_tracker(&config);
         assert!(matches!(result, Err(TrackerError::MissingPath)));
@@ -377,6 +388,7 @@ mod tests {
                 enabled_property: "Ready to Implement".to_string(),
                 enabled_value_bool: true,
             }),
+            github: None,
         };
 
         let result = create_tracker(&config);
@@ -397,6 +409,7 @@ mod tests {
             project_number: None,
             labels_filter: vec![],
             notion: None,
+            github: None,
         };
 
         let result = create_tracker(&config);

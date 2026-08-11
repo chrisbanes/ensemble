@@ -292,6 +292,7 @@ mod tests {
         let tracker = TrackerChoice::GitHub {
             repository: "acme/frontend".to_string(),
             project_number: Some(42),
+            status_field: Some("Delivery state".to_string()),
             api_key_env: "GITHUB_TOKEN".to_string(),
             api_token: None,
             active_states: vec!["Todo".to_string()],
@@ -334,6 +335,8 @@ mod tests {
         assert!(yaml.contains("kind: github"));
         assert!(yaml.contains("repository: acme/frontend"));
         assert!(yaml.contains("project_number: 42"));
+        assert!(yaml.contains("status_field: Delivery state"));
+        assert!(!yaml.contains("status_field: Status"));
         assert!(yaml.contains("api_key: $GITHUB_TOKEN"));
         assert!(yaml.contains("- Todo"));
         assert!(yaml.contains("- Done"));
@@ -453,6 +456,7 @@ mod tests {
             tracker: SetupTracker::GitHub {
                 repository: "acme/repo".to_string(),
                 project_number: None,
+                status_field: None,
                 api_key: SecretDisplay::Environment {
                     variable: "GITHUB_TOKEN".to_string(),
                 },

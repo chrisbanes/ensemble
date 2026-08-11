@@ -182,6 +182,7 @@ pub async fn reconcile_tracker_states(
             title: format!("Missing tracked issue {issue_id}"),
             description: None,
             priority: None,
+            tracker_position: None,
             state: "missing".to_string(),
             branch_name: None,
             url: None,

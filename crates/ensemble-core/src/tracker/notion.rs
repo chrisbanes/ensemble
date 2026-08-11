@@ -358,6 +358,7 @@ impl NotionTracker {
             title,
             description: None,
             priority: None,
+            tracker_position: None,
             state,
             branch_name: None,
             url: None,
@@ -587,6 +588,7 @@ mod tests {
                 enabled_property: "Ready to Implement".to_string(),
                 enabled_value_bool: true,
             }),
+            github: None,
         };
         NotionTracker::new(
             "token".to_string(),

@@ -75,6 +75,7 @@ fn test_issue(id: &str, identifier: &str, state: &str) -> Issue {
         title: format!("Issue {}", identifier),
         description: Some(format!("Description for {}", identifier)),
         priority: Some(1),
+        tracker_position: None,
         state: state.to_string(),
         branch_name: None,
         url: Some(format!(
@@ -898,6 +899,8 @@ tracker:
   kind: github
   repository: acme/repo
   project_number: 11
+  github:
+    status_field: Status
   api_key: $GITHUB_TOKEN
   active_states:
     - Todo

@@ -12,6 +12,7 @@ pub mod test_helpers {
             title: format!("Issue {id}"),
             description: None,
             priority: Some(2),
+            tracker_position: None,
             state: state.to_string(),
             branch_name: None,
             url: None,
@@ -30,6 +31,8 @@ pub struct Issue {
     pub title: String,
     pub description: Option<String>,
     pub priority: Option<i32>,
+    /// Tracker-provided snapshot ordering data, when the adapter can supply it.
+    pub tracker_position: Option<u64>,
     pub state: String,
     pub branch_name: Option<String>,
     pub url: Option<String>,
@@ -118,6 +121,7 @@ mod tests {
             title: "Fix the bug".to_string(),
             description: Some("It's broken".to_string()),
             priority: Some(2),
+            tracker_position: Some(7),
             state: "Todo".to_string(),
             branch_name: None,
             url: Some("https://github.com/acme/repo/issues/42".to_string()),
@@ -131,6 +135,7 @@ mod tests {
         assert_eq!(deserialized.id, "NODE_123");
         assert_eq!(deserialized.identifier, "my-repo#42");
         assert_eq!(deserialized.labels, vec!["bug", "p1"]);
+        assert_eq!(deserialized.tracker_position, Some(7));
     }
 
     #[test]

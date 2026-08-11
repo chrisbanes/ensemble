@@ -463,7 +463,12 @@ describe("SetupWizard", () => {
         return jsonResponse({
           has_existing_config: true,
           defaults: {
-            tracker: { kind: "git_hub", repository: "existing-owner/existing-repo", project_number: 42 },
+            tracker: {
+              kind: "git_hub",
+              repository: "existing-owner/existing-repo",
+              project_number: 42,
+              status_field: "Delivery state",
+            },
             repos: [
               { path: "/existing/repo/path1", branch: "main" },
               { path: "/existing/repo/path2", branch: "develop" },
@@ -552,7 +557,7 @@ describe("SetupWizard", () => {
     expect(projectInput).toHaveValue(42);
   });
 
-  it("validates github setup with standard project state names", async () => {
+  it("requires and sends an explicit Project status field name", async () => {
     const user = userEvent.setup();
     const validateMock = vi.fn();
 
@@ -588,7 +593,12 @@ describe("SetupWizard", () => {
     renderWithProviders(<SetupWizard mode="reconfigure" />, { route: "/config" });
     expect(await screen.findByText("Reconfigure Ensemble")).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /next/i }));
+    await user.type(screen.getByLabelText(/project number/i), "42");
+    const next = screen.getByRole("button", { name: /next/i });
+    expect(next).toBeDisabled();
+    await user.type(screen.getByLabelText(/project status field name/i), "Delivery state");
+
+    await user.click(next);
     await user.click(screen.getByRole("button", { name: /next/i }));
     await user.click(screen.getByRole("button", { name: /next/i }));
     await user.click(screen.getByRole("button", { name: /next/i }));
@@ -600,6 +610,7 @@ describe("SetupWizard", () => {
 
     expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.active_states).toEqual(["Todo", "In Progress"]);
     expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.terminal_states).toEqual(["Done"]);
+    expect(validateMock.mock.calls[0]?.[0]?.setup.tracker.status_field).toBe("Delivery state");
   });
 
   it("offers default model when discovered models omit default", async () => {

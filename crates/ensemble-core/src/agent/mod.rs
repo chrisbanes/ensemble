@@ -939,6 +939,7 @@ mod tests {
             title: "Fix the bug".to_string(),
             description: Some("Something is broken".to_string()),
             priority: Some(2),
+            tracker_position: None,
             state: "Todo".to_string(),
             branch_name: None,
             url: None,

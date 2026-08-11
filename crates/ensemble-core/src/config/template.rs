@@ -140,6 +140,7 @@ mod tests {
             title: "Fix login bug".to_string(),
             description: Some("The login page crashes".to_string()),
             priority: Some(1),
+            tracker_position: None,
             state: "Todo".to_string(),
             branch_name: None,
             url: Some("https://github.com/acme/repo/issues/42".to_string()),
