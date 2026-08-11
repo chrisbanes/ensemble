@@ -1,4 +1,4 @@
-import type { IssueDetailSnapshot, TranscriptRecord } from "./generated/models";
+import type { DeliveryObservation, IssueDetailSnapshot, TranscriptRecord } from "./generated/models";
 import type { TimelineEventRecord } from "./hooks";
 
 export interface WsPipelineEvent {
@@ -11,6 +11,7 @@ export interface WsPipelineEvent {
   detail?: string;
   outcome?: string;
   conversation_index?: number;
+  observations?: Record<string, DeliveryObservation>;
   [key: string]: unknown;
 }
 

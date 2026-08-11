@@ -9,12 +9,20 @@ use tokio::time::timeout;
 use tracing::warn;
 
 use super::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind, TerminalOutcome};
+use super::retry::calculate_backoff;
 use super::state::{FinalizeStatus, IssueFinalizeState, RepoFinalizeState};
 use super::{
     FinalizeApprovalError, FinalizeRetryError, Orchestrator, HISTORY_OUTCOME_FAILED,
     HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
 };
 use crate::history::model::HistoryRecord;
+use crate::observability::events::PipelineEvent;
+use crate::orchestrator::delivery_observation::{
+    BaseFreshness, CheckConclusion, CheckStatus, DeliveryCheck, DeliveryObservation,
+    DeliveryObservationFacts, DeliveryObservationFailure, DeliveryObservationFailureKind,
+    DeliveryObservationRead, DeliveryObservationRetry, Mergeability, PullRequestTerminalState,
+    ReviewDecision,
+};
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
 use crate::tracker::OwnershipConflict;
 use crate::workspace::finalize::FinalizeMode;
@@ -58,6 +66,8 @@ pub(crate) struct DeliveryRepository {
     pub marker: String,
     pub pr_number: Option<u64>,
     pub pr_url: Option<String>,
+    #[serde(default)]
+    pub observation: Option<crate::orchestrator::delivery_observation::DeliveryObservation>,
     #[serde(default)]
     pub ownership_conflict: Option<OwnershipConflict>,
     pub last_error: Option<String>,
@@ -234,6 +244,10 @@ pub(crate) struct LocalRepositoryIdentity {
 
 #[async_trait]
 pub(crate) trait DeliveryRemote: Send + Sync {
+    fn supports_delivery_observation(&self) -> bool {
+        false
+    }
+
     fn pull_request_adoption_policy(
         &self,
         _config: &crate::config::ensemble::EnsembleConfig,
@@ -276,6 +290,21 @@ pub(crate) trait DeliveryRemote: Send + Sync {
         head_branch: &str,
         marker: &str,
     ) -> Result<(), String>;
+
+    async fn observe_pull_request(
+        &self,
+        _repository_path: &Path,
+        _pull_request_number: u64,
+        _pull_request_url: &str,
+        _base_branch: &str,
+        _head_branch: &str,
+        _remote: &str,
+    ) -> DeliveryObservationRead {
+        DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::UnsupportedResponse,
+            "delivery remote does not support pull request observation",
+        ))
+    }
 }
 
 pub(crate) struct CliDeliveryRemote;
@@ -306,6 +335,9 @@ struct GhRepository {
 
 #[async_trait]
 impl DeliveryRemote for CliDeliveryRemote {
+    fn supports_delivery_observation(&self) -> bool {
+        true
+    }
     fn pull_request_adoption_policy(
         &self,
         config: &crate::config::ensemble::EnsembleConfig,
@@ -496,14 +528,328 @@ impl DeliveryRemote for CliDeliveryRemote {
         .await
         .map(|_| ())
     }
+
+    async fn observe_pull_request(
+        &self,
+        repository_path: &Path,
+        pull_request_number: u64,
+        pull_request_url: &str,
+        base_branch: &str,
+        head_branch: &str,
+        remote: &str,
+    ) -> DeliveryObservationRead {
+        let (owner, name) = match github_repository_identity(repository_path, remote).await {
+            Ok(repository) => repository,
+            Err(read) => return read,
+        };
+        let query = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!, $head: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url state merged headRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } } comparison(base: $base, head: $head) { behindBy } } }";
+        let number = pull_request_number.to_string();
+        let variables = [
+            format!("query={query}"),
+            format!("owner={owner}"),
+            format!("name={name}"),
+            format!("number={number}"),
+            format!("base={base_branch}"),
+            format!("head={head_branch}"),
+        ];
+        let arguments = [
+            "api",
+            "graphql",
+            "-f",
+            variables[0].as_str(),
+            "-F",
+            variables[1].as_str(),
+            "-F",
+            variables[2].as_str(),
+            "-F",
+            variables[3].as_str(),
+            "-F",
+            variables[4].as_str(),
+            "-F",
+            variables[5].as_str(),
+        ];
+        let stdout = match observation_command_stdout(repository_path, &arguments).await {
+            Ok(stdout) => stdout,
+            Err(read) => return read,
+        };
+        let response: serde_json::Value = match serde_json::from_str(&stdout) {
+            Ok(value) => value,
+            Err(_) => {
+                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned an invalid pull request observation",
+                ));
+            }
+        };
+        let Some(value) = response.pointer("/data/repository/pullRequest") else {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an incomplete pull request observation",
+            ));
+        };
+        let number = value.get("number").and_then(serde_json::Value::as_u64);
+        let url = value.get("url").and_then(serde_json::Value::as_str);
+        let state = value.get("state").and_then(serde_json::Value::as_str);
+        let head_sha = value.get("headRefOid").and_then(serde_json::Value::as_str);
+        let observed_base = value.get("baseRefName").and_then(serde_json::Value::as_str);
+        let Some((number, url, state, head_sha, observed_base)) = number
+            .zip(url)
+            .zip(state)
+            .zip(head_sha)
+            .zip(observed_base)
+            .map(|((((number, url), state), head_sha), observed_base)| {
+                (number, url, state, head_sha, observed_base)
+            })
+        else {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an incomplete pull request observation",
+            ));
+        };
+        if number != pull_request_number || url != pull_request_url || observed_base != base_branch
+        {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::InvalidIdentity,
+                "GitHub returned a pull request other than the durable delivery identity",
+            ));
+        }
+        let terminal_state = match (
+            state,
+            value
+                .get("merged")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        ) {
+            ("OPEN", _) => PullRequestTerminalState::Open,
+            ("MERGED", _) | ("CLOSED", true) => PullRequestTerminalState::Merged,
+            ("CLOSED", false) => PullRequestTerminalState::ClosedWithoutMerge,
+            _ => {
+                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::UnsupportedResponse,
+                    "GitHub returned an unsupported pull request state",
+                ))
+            }
+        };
+        let mergeability = match value.get("mergeable").and_then(serde_json::Value::as_str) {
+            Some("MERGEABLE") => Mergeability::Mergeable,
+            Some("CONFLICTING") => Mergeability::Conflicting,
+            Some("UNKNOWN") | None => Mergeability::Unknown,
+            _ => {
+                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::UnsupportedResponse,
+                    "GitHub returned an unsupported mergeability state",
+                ))
+            }
+        };
+        let review_decision = match value
+            .get("reviewDecision")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("APPROVED") => ReviewDecision::Approved,
+            Some("CHANGES_REQUESTED") => ReviewDecision::ChangesRequested,
+            Some("REVIEW_REQUIRED") => ReviewDecision::ReviewRequired,
+            None => ReviewDecision::Unknown,
+            _ => {
+                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::UnsupportedResponse,
+                    "GitHub returned an unsupported review decision",
+                ))
+            }
+        };
+        let checks = match complete_checks(value) {
+            Ok(checks) => checks,
+            Err(failure) => return DeliveryObservationRead::Terminal(failure),
+        };
+        DeliveryObservationRead::Observed(DeliveryObservationFacts {
+            pull_request_number: number,
+            pull_request_url: url.to_string(),
+            head_sha: head_sha.to_string(),
+            matches_delivery: false,
+            head_diverged: false,
+            terminal_state,
+            mergeability,
+            base_freshness: match response
+                .pointer("/data/repository/comparison/behindBy")
+                .and_then(serde_json::Value::as_u64)
+            {
+                Some(0) => BaseFreshness::UpToDate,
+                Some(_) => BaseFreshness::Behind,
+                None => BaseFreshness::Unknown,
+            },
+            checks,
+            check_summary: crate::orchestrator::delivery_observation::CheckSummary::Pending,
+            review_decision,
+        })
+    }
 }
 
-async fn command_stdout(
+fn parse_check(value: &serde_json::Value) -> Option<DeliveryCheck> {
+    let name = value
+        .get("name")
+        .or_else(|| value.get("context"))
+        .and_then(serde_json::Value::as_str)?
+        .to_string();
+    let raw_status = value
+        .get("status")
+        .or_else(|| value.get("state"))
+        .and_then(serde_json::Value::as_str)?;
+    let status = match raw_status {
+        "PENDING" => CheckStatus::Pending,
+        "QUEUED" => CheckStatus::Queued,
+        "IN_PROGRESS" => CheckStatus::InProgress,
+        "COMPLETED" | "SUCCESS" | "FAILURE" | "ERROR" | "EXPECTED" => CheckStatus::Completed,
+        _ => return None,
+    };
+    let conclusion = match value.get("conclusion").and_then(serde_json::Value::as_str) {
+        Some("SUCCESS") | Some("EXPECTED") => Some(CheckConclusion::Success),
+        Some("NEUTRAL") => Some(CheckConclusion::Neutral),
+        Some("SKIPPED") => Some(CheckConclusion::Skipped),
+        Some("FAILURE") | Some("ERROR") => Some(CheckConclusion::Failure),
+        Some("TIMED_OUT") => Some(CheckConclusion::TimedOut),
+        Some("CANCELLED") => Some(CheckConclusion::Cancelled),
+        Some("ACTION_REQUIRED") => Some(CheckConclusion::ActionRequired),
+        Some("STARTUP_FAILURE") => Some(CheckConclusion::StartupFailure),
+        None => match raw_status {
+            "SUCCESS" | "EXPECTED" => Some(CheckConclusion::Success),
+            "FAILURE" | "ERROR" => Some(CheckConclusion::Failure),
+            _ => None,
+        },
+        Some(_) => return None,
+    };
+    Some(DeliveryCheck {
+        name,
+        status,
+        conclusion,
+    })
+}
+
+fn complete_checks(
+    value: &serde_json::Value,
+) -> Result<Vec<DeliveryCheck>, DeliveryObservationFailure> {
+    let Some(rollup) = value.get("statusCheckRollup") else {
+        return Ok(Vec::new());
+    };
+    if rollup.is_null() {
+        return Ok(Vec::new());
+    }
+    let Some(contexts) = rollup.get("contexts") else {
+        return Err(DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::MalformedResponse,
+            "GitHub returned an incomplete check rollup",
+        ));
+    };
+    let Some(total) = contexts
+        .get("totalCount")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Err(DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::MalformedResponse,
+            "GitHub returned a check rollup without a total count",
+        ));
+    };
+    let Some(nodes) = contexts.get("nodes").and_then(serde_json::Value::as_array) else {
+        return Err(DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::MalformedResponse,
+            "GitHub returned a check rollup without contexts",
+        ));
+    };
+    if total != nodes.len() as u64 {
+        return Err(DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::UnsupportedResponse,
+            "GitHub check rollup exceeds the complete observation limit",
+        ));
+    }
+    nodes
+        .iter()
+        .map(parse_check)
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::UnsupportedResponse,
+                "GitHub returned an unsupported check context",
+            )
+        })
+}
+
+async fn github_repository_identity(
+    repository_path: &Path,
+    remote: &str,
+) -> Result<(String, String), DeliveryObservationRead> {
+    let url = command_stdout(repository_path, "git", &["remote", "get-url", remote])
+        .await
+        .map_err(|_| {
+            DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::InvalidIdentity,
+                "delivery remote cannot identify its GitHub repository",
+            ))
+        })?;
+    let repository_path = url
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit_once(':')
+        .map_or(url.as_str(), |(_, path)| path);
+    match repository_path
+        .rsplit_once('/')
+        .and_then(|(owner_path, name)| owner_path.rsplit('/').next().zip(Some(name)))
+    {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() => {
+            Ok((owner.to_string(), name.to_string()))
+        }
+        _ => Err(DeliveryObservationRead::Terminal(
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::InvalidIdentity,
+                "delivery remote has no GitHub owner and repository name",
+            ),
+        )),
+    }
+}
+
+async fn observation_command_stdout(
+    repository_path: &Path,
+    arguments: &[&str],
+) -> Result<String, DeliveryObservationRead> {
+    let output = run_delivery_command(repository_path, "gh", arguments)
+        .await
+        .map_err(observation_command_error)?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let failure = if stderr.contains("authentication") || stderr.contains("401") {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::Authentication,
+            "GitHub authentication failed while observing delivery",
+        )
+    } else if stderr.contains("forbidden")
+        || stderr.contains("403")
+        || stderr.contains("resource not accessible")
+    {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::Authorization,
+            "GitHub authorization failed while observing delivery",
+        )
+    } else {
+        return Err(DeliveryObservationRead::Retryable(
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::Transport,
+                "GitHub observation request failed",
+            ),
+        ));
+    };
+    Err(DeliveryObservationRead::Terminal(failure))
+}
+
+enum DeliveryCommandError {
+    TimedOut,
+    Spawn(std::io::Error),
+}
+
+async fn run_delivery_command(
     repository_path: &Path,
     program: &str,
     arguments: &[&str],
-) -> Result<String, String> {
-    let output = timeout(
+) -> Result<std::process::Output, DeliveryCommandError> {
+    timeout(
         DELIVERY_COMMAND_TIMEOUT,
         tokio::process::Command::new(program)
             .args(arguments)
@@ -511,13 +857,41 @@ async fn command_stdout(
             .output(),
     )
     .await
-    .map_err(|_| {
-        format!(
-            "{program} command timed out after {}s",
-            DELIVERY_COMMAND_TIMEOUT.as_secs()
-        )
-    })?
-    .map_err(|error| format!("failed to run {program}: {error}"))?;
+    .map_err(|_| DeliveryCommandError::TimedOut)?
+    .map_err(DeliveryCommandError::Spawn)
+}
+
+fn observation_command_error(error: DeliveryCommandError) -> DeliveryObservationRead {
+    match error {
+        DeliveryCommandError::TimedOut => {
+            DeliveryObservationRead::Retryable(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::Transport,
+                "GitHub observation timed out",
+            ))
+        }
+        DeliveryCommandError::Spawn(_) => {
+            DeliveryObservationRead::Retryable(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::Transport,
+                "GitHub observation could not start",
+            ))
+        }
+    }
+}
+
+async fn command_stdout(
+    repository_path: &Path,
+    program: &str,
+    arguments: &[&str],
+) -> Result<String, String> {
+    let output = run_delivery_command(repository_path, program, arguments)
+        .await
+        .map_err(|error| match error {
+            DeliveryCommandError::TimedOut => format!(
+                "{program} command timed out after {}s",
+                DELIVERY_COMMAND_TIMEOUT.as_secs()
+            ),
+            DeliveryCommandError::Spawn(error) => format!("failed to run {program}: {error}"),
+        })?;
     if !output.status.success() {
         return Err(format!(
             "{program} command failed: {}",
@@ -1192,7 +1566,13 @@ impl Orchestrator {
                     .await;
                 continue;
             }
-            if delivery.aggregate() == DeliveryAggregate::Waiting {
+            let delivery = self
+                .reconcile_delivery_observations(delivery, snapshot.as_ref())
+                .await;
+            if matches!(
+                delivery.aggregate(),
+                DeliveryAggregate::Waiting | DeliveryAggregate::Blocked
+            ) {
                 self.project_delivery_artifacts(&delivery.issue_id, &delivery)
                     .await;
                 let finalize = Self::finalize_state_from_delivery(&delivery);
@@ -1242,6 +1622,186 @@ impl Orchestrator {
                 .await
                 .set_finalize_state(&delivery.issue_id, finalize);
         }
+    }
+
+    async fn reconcile_delivery_observations(
+        &self,
+        delivery: DeliveryRecord,
+        snapshot: Option<&PipelineRunSnapshot>,
+    ) -> DeliveryRecord {
+        if !self.delivery_remote.supports_delivery_observation() {
+            return delivery;
+        }
+        if self.config.read().await.tracker.kind != "github" {
+            return delivery;
+        }
+        let eligible = delivery.repositories.iter().any(|(_, repository)| {
+            repository.mode == DeliveryMode::PushAndPr
+                && repository.phase == DeliveryPhase::Waiting
+                && repository.pr_number.is_some()
+                && repository.pr_url.is_some()
+                && repository
+                    .observation
+                    .as_ref()
+                    .is_none_or(|observation| observation.is_due(Utc::now()))
+        });
+        if !eligible {
+            return delivery;
+        }
+        let worktrees = match self.workspace_mgr.owned_worktree_paths(&delivery.issue_id) {
+            Ok(worktrees) => worktrees,
+            Err(error) => {
+                warn!(issue_id = %delivery.issue_id, error = %error, "delivery observation could not resolve its owned worktrees");
+                return delivery;
+            }
+        };
+
+        let original = delivery.clone();
+        let mut current = delivery;
+        let mut updated_at = None;
+        for (repository_key, repository) in current.repositories.clone() {
+            let Some(pull_request_number) = repository.pr_number else {
+                continue;
+            };
+            let Some(pull_request_url) = repository.pr_url.as_deref() else {
+                continue;
+            };
+            if repository.mode != DeliveryMode::PushAndPr
+                || repository.phase != DeliveryPhase::Waiting
+                || repository
+                    .observation
+                    .as_ref()
+                    .is_some_and(|observation| !observation.is_due(Utc::now()))
+            {
+                continue;
+            }
+            let Some(worktree) = worktrees.get(&repository_key) else {
+                continue;
+            };
+            if !worktree.is_dir() {
+                continue;
+            };
+            let now = Utc::now();
+            let read = self
+                .delivery_remote
+                .observe_pull_request(
+                    worktree,
+                    pull_request_number,
+                    pull_request_url,
+                    &repository.base_branch,
+                    &repository.head_branch,
+                    &repository.remote,
+                )
+                .await;
+            let updated = current
+                .repositories
+                .get_mut(&repository_key)
+                .expect("repository was cloned from the delivery record");
+            match read {
+                DeliveryObservationRead::Observed(facts) => {
+                    let observation =
+                        match facts.validate_identity(pull_request_number, pull_request_url) {
+                            Ok(()) => DeliveryObservation::successful(
+                                facts.for_delivery(&repository.local_sha),
+                                now,
+                            ),
+                            Err(failure) => {
+                                updated.phase = DeliveryPhase::Blocked;
+                                updated.retry_from = Some(DeliveryPhase::Waiting);
+                                updated.last_error = Some(failure.message.clone());
+                                DeliveryObservation::failed(
+                                    updated.observation.as_ref(),
+                                    failure,
+                                    None,
+                                    now,
+                                )
+                            }
+                        };
+                    if observation
+                        .facts
+                        .as_ref()
+                        .is_some_and(|facts| facts.head_diverged)
+                    {
+                        updated.phase = DeliveryPhase::Blocked;
+                        updated.retry_from = Some(DeliveryPhase::Waiting);
+                        updated.last_error = Some(
+                            "pull request head diverged from the durable delivery SHA".to_string(),
+                        );
+                    }
+                    updated.observation = Some(observation);
+                }
+                DeliveryObservationRead::Retryable(failure) => {
+                    let attempt = updated
+                        .observation
+                        .as_ref()
+                        .and_then(|observation| observation.retry.as_ref())
+                        .map_or(1, |retry| retry.attempt.saturating_add(1));
+                    let delay = calculate_backoff(attempt, 300_000);
+                    let retry = DeliveryObservationRetry {
+                        attempt,
+                        due_at: now
+                            + chrono::Duration::milliseconds(
+                                i64::try_from(delay).unwrap_or(i64::MAX),
+                            ),
+                    };
+                    updated.observation = Some(DeliveryObservation::failed(
+                        updated.observation.as_ref(),
+                        failure,
+                        Some(retry),
+                        now,
+                    ));
+                }
+                DeliveryObservationRead::Terminal(failure) => {
+                    updated.phase = DeliveryPhase::Blocked;
+                    updated.retry_from = Some(DeliveryPhase::Waiting);
+                    updated.last_error = Some(failure.message.clone());
+                    updated.observation = Some(DeliveryObservation::failed(
+                        updated.observation.as_ref(),
+                        failure,
+                        None,
+                        now,
+                    ));
+                }
+            }
+            updated_at = Some(now);
+        }
+        if current == original {
+            return original;
+        }
+        let Ok(current) = self
+            .persist_delivery_candidate(&original, current, snapshot)
+            .await
+        else {
+            return original;
+        };
+        self.project_delivery_artifacts(&current.issue_id, &current)
+            .await;
+        let observations = current
+            .repositories
+            .iter()
+            .filter_map(|(key, repository)| {
+                repository
+                    .observation
+                    .clone()
+                    .map(|observation| (key.clone(), observation))
+            })
+            .collect();
+        let (run_id, sequence, attempt) = {
+            let mut state = self.state.write().await;
+            Self::run_context_for_issue(&mut state, &current.issue_id)
+        };
+        self.publish_pipeline_event(
+            run_id,
+            sequence,
+            attempt,
+            PipelineEvent::DeliveryObservationUpdated {
+                issue_identifier: current.identifier.clone(),
+                timestamp: updated_at.expect("a changed observation has an attempt timestamp"),
+                observations,
+            },
+        )
+        .await;
+        current
     }
 
     pub(super) async fn advance_review_projection(
@@ -1613,6 +2173,7 @@ impl Orchestrator {
                 .to_string()
             });
             artifact.last_error = repository.last_error.clone();
+            artifact.observation = repository.observation.clone();
         }
     }
     pub(super) fn finalize_state_from_delivery(delivery: &DeliveryRecord) -> IssueFinalizeState {
@@ -1653,6 +2214,7 @@ impl Orchestrator {
                 approval_required: repository.approval_required,
                 status: Self::finalize_status_from_delivery(repository),
                 last_error: repository.last_error.clone(),
+                observation: repository.observation.clone(),
             })
             .collect()
     }
@@ -2286,6 +2848,7 @@ impl Orchestrator {
                     marker: canonical_marker(&run_id, issue_id, repository_key),
                     pr_number: None,
                     pr_url: None,
+                    observation: None,
                     ownership_conflict: None,
                     last_error: None,
                     retry_from: None,
@@ -2351,6 +2914,7 @@ mod tests {
             marker: "<!-- ensemble:delivery:v1 -->".to_string(),
             pr_number: None,
             pr_url: None,
+            observation: None,
             ownership_conflict: None,
             last_error: None,
             retry_from: None,
@@ -2371,6 +2935,31 @@ mod tests {
             number: 420,
             url: "https://github.com/example/project/pull/420".to_string(),
         }
+    }
+
+    #[test]
+    fn legacy_status_contexts_contribute_to_the_complete_check_summary() {
+        let success = serde_json::json!({"context": "ci", "state": "SUCCESS"});
+        let failure = serde_json::json!({"context": "lint", "state": "FAILURE"});
+
+        let checks = vec![
+            parse_check(&success).unwrap(),
+            parse_check(&failure).unwrap(),
+        ];
+
+        assert_eq!(
+            crate::orchestrator::delivery_observation::CheckSummary::from_checks(&checks),
+            crate::orchestrator::delivery_observation::CheckSummary::Failing
+        );
+    }
+
+    #[test]
+    fn incomplete_check_rollups_are_rejected_instead_of_published_as_passing() {
+        let rollup = serde_json::json!({
+            "statusCheckRollup": {"contexts": {"totalCount": 101, "nodes": []}}
+        });
+
+        assert!(complete_checks(&rollup).is_err());
     }
 
     #[test]

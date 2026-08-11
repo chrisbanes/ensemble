@@ -387,6 +387,19 @@ Pipeline run recovery:
   dispatches no pipeline work, and does not project a terminal tracker state. `blocked` is likewise
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
+- A durable `push_and_pr` repository with an exact pull-request number and URL is observed on the
+  delivery recovery tick through one authenticated, read-only GitHub query. The version-1
+  observation records complete pull-request facts (head identity, terminal state, mergeability,
+  base freshness, checks, and review decision) together with freshness, retry, and typed
+  non-secret failure metadata. A successful read replaces all facts atomically; transient reads
+  retain prior facts as stale and use delivery-local exponential backoff. Authentication,
+  authorization, malformed, unsupported, and identity failures block the retained repository.
+  A returned head other than the durable local SHA is recorded as `head_diverged` and blocks
+  delivery without adopting the remote head.
+- Observing `merged` or `closed_without_merge` is evidence only. It does not create, update,
+  merge, queue, or close a pull request; project a tracker state; complete a run; release a claim
+  or workspace; or redispatch pipeline work. A blocked observation is retried only through the
+  existing explicit finalization retry path.
 - If the tracker moves a retained delivery to any configured terminal state, delivery recovery
   stops remote mutation and enters the same durable terminal-transition protocol using the
   observed state. It persists the prepared history as succeeded for the success state, failed for
@@ -2583,6 +2596,9 @@ Minimum endpoints:
     result prefixes are returned unchanged. The API and Mission Control only present this stored
     evidence: they do not re-evaluate acceptance, infer an outcome, inspect raw agent transcripts,
     or consult current acceptance configuration or tracker state.
+  - Each finalized repository may include the stored version-1 delivery observation. History
+    artifacts and the `delivery_observation_updated` WebSocket event expose the same repository-
+    keyed schema; neither endpoint performs GitHub reconciliation on demand.
   - Suggested response shape:
 
     ```json
