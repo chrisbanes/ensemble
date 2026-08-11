@@ -999,18 +999,14 @@ impl Orchestrator {
         .into_iter()
         .map(|issue| (issue.id.clone(), issue))
         .collect::<BTreeMap<_, _>>();
-        let (terminal_states, success_state, failure_state) = {
+        let terminal_states = {
             let config = self.config.read().await;
-            (
-                config
-                    .tracker
-                    .terminal_states
-                    .iter()
-                    .map(|state| state.to_lowercase())
-                    .collect::<Vec<_>>(),
-                config.on_success.clone(),
-                config.on_failure.clone(),
-            )
+            config
+                .tracker
+                .terminal_states
+                .iter()
+                .map(|state| state.to_lowercase())
+                .collect::<Vec<_>>()
         };
 
         let mut recoverable_issue_ids = BTreeSet::new();
@@ -1023,14 +1019,41 @@ impl Orchestrator {
                 continue;
             };
             if terminal_states.contains(&issue.state.to_lowercase()) {
-                let outcome = if issue.state.eq_ignore_ascii_case(&success_state) {
+                let snapshot = match self.load_delivery_snapshot(&delivery).await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        warn!(
+                            issue_id = %delivery.issue_id,
+                            error = %error,
+                            "terminal delivery reconciliation could not load its durable snapshot"
+                        );
+                        continue;
+                    }
+                };
+                let pipeline_config = match self
+                    .current_config_for_snapshot(snapshot.as_ref())
+                    .await
+                {
+                    Ok(config) => config,
+                    Err(error) => {
+                        warn!(
+                            issue_id = %delivery.issue_id,
+                            error = %error,
+                            "terminal delivery reconciliation could not resolve its selected workflow"
+                        );
+                        continue;
+                    }
+                };
+                let success_state = &pipeline_config.on_success;
+                let failure_state = &pipeline_config.on_failure;
+                let outcome = if issue.state.eq_ignore_ascii_case(success_state) {
                     TerminalOutcome::Succeeded
                 } else {
                     TerminalOutcome::Failed
                 };
-                let history_outcome = if issue.state.eq_ignore_ascii_case(&success_state) {
+                let history_outcome = if issue.state.eq_ignore_ascii_case(success_state) {
                     HISTORY_OUTCOME_SUCCEEDED
-                } else if issue.state.eq_ignore_ascii_case(&failure_state) {
+                } else if issue.state.eq_ignore_ascii_case(failure_state) {
                     HISTORY_OUTCOME_FAILED
                 } else {
                     HISTORY_OUTCOME_STOPPED
@@ -1165,7 +1188,8 @@ impl Orchestrator {
                 .await;
             let delivery = self.advance_review_projection(delivery).await;
             if delivery.aggregate() == DeliveryAggregate::Published {
-                self.complete_published_delivery(&delivery).await;
+                self.complete_published_delivery(&delivery, snapshot.as_ref())
+                    .await;
                 continue;
             }
             if delivery.aggregate() == DeliveryAggregate::Waiting {
@@ -1208,7 +1232,8 @@ impl Orchestrator {
             self.project_delivery_artifacts(&delivery.issue_id, &delivery)
                 .await;
             if delivery.aggregate() == DeliveryAggregate::Published {
-                self.complete_published_delivery(&delivery).await;
+                self.complete_published_delivery(&delivery, snapshot.as_ref())
+                    .await;
                 continue;
             }
             let finalize = Self::finalize_state_from_delivery(&delivery);
@@ -1495,7 +1520,11 @@ impl Orchestrator {
         record.artifacts = artifacts;
     }
 
-    async fn complete_published_delivery(&self, delivery: &DeliveryRecord) {
+    async fn complete_published_delivery(
+        &self,
+        delivery: &DeliveryRecord,
+        snapshot: Option<&PipelineRunSnapshot>,
+    ) {
         let Some(history_record) = self
             .projected_terminal_history(delivery, HISTORY_OUTCOME_SUCCEEDED)
             .await
@@ -1506,7 +1535,17 @@ impl Orchestrator {
             );
             return;
         };
-        let config = self.config.read().await.clone();
+        let config = match self.current_config_for_snapshot(snapshot).await {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(
+                    issue_id = %delivery.issue_id,
+                    error = %error,
+                    "published delivery could not resolve its selected workflow"
+                );
+                return;
+            }
+        };
         let finalize = Self::finalize_state_from_delivery(delivery);
         self.state
             .write()
@@ -1523,7 +1562,7 @@ impl Orchestrator {
             &delivery.identifier,
             issue,
             TerminalOutcome::Succeeded,
-            config.on_success,
+            config.on_success.clone(),
             Some(history_record),
         )
         .await;

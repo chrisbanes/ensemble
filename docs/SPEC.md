@@ -621,7 +621,8 @@ Loader behavior:
 ### 5.2 File Format
 
 `config.yaml` is a YAML file containing all pipeline configuration: tracker settings, agent
-definitions, step DAG, concurrency limits, and prompt references.
+definitions, one legacy step DAG or a set of named pipeline DAGs, concurrency limits, selection
+rules, and prompt references.
 
 Design note:
 
@@ -645,6 +646,9 @@ Top-level keys:
 - `steps`
 - `on_success`
 - `on_failure`
+- `pipelines`
+- `scheduler`
+- `workflow_selection`
 - `concurrency`
 - `max_cycles`
 - `polling`
@@ -652,6 +656,21 @@ Top-level keys:
 - `hooks`
 
 Unknown keys should be ignored for forward compatibility.
+
+Pipeline mode rules:
+
+- Legacy mode requires top-level `steps`, `on_success`, and `on_failure`.
+- Selected mode requires non-empty `pipelines`, `scheduler.lanes`, and `workflow_selection` and
+  forbids the legacy pipeline fields.
+- Every named pipeline is independently DAG-validated and supplies its own `steps`, `on_success`,
+  and `on_failure`.
+- Every scheduler lane has a positive live-worker `capacity`.
+- Selection rules have unique normalized names and unique positive precedence values, reference an
+  existing pipeline and lane, and may constrain normalized `states`, `labels_all`, `labels_any`,
+  `labels_none`, and `require_unblocked`.
+- Rule ordering keys are a non-empty, duplicate-free list drawn from `priority`,
+  `tracker_position`, `created_at`, and `identifier`. Values sort ascending with nulls last;
+  `identifier` is required as the final effective tie-breaker and is appended when omitted.
 
 Note:
 
@@ -1297,7 +1316,8 @@ Every live worker is also registered by an exact in-memory identity:
 until the worker's local event channel has closed and every event has been forwarded. More than one
 identity-distinct handle may temporarily exist for an issue, and issue-wide cancellation signals all
 of them. Registration is also the worker's capacity reservation: one mutex-protected operation
-checks the global and per-issue limits and inserts the exact identity before tracker step-entry,
+checks the global, per-issue, and selected capacity-bucket limits and inserts the exact identity
+before tracker step-entry,
 `StepRunning` publication, or process launch. A pre-launch failure rolls back only that exact
 reservation; a launched worker retains it until the bridge proves quiescence. Worker event channels
 remain bounded; while reconciliation or shutdown awaits bridge
@@ -1408,16 +1428,18 @@ Tick sequence:
 4. Run dispatch preflight validation.
 5. Fetch candidate issues from tracker using active states.
 6. Re-scan claimed pipelines for ready pending steps while live-worker slots remain.
-7. Sort issues by dispatch priority.
-8. Dispatch eligible issues while slots remain.
+7. In legacy mode, sort issues by the legacy dispatch priority. In selected mode, match rules and
+   sort by rule precedence plus each rule's configured ordering keys.
+8. Dispatch eligible issues while slots remain. Selected-mode fresh work is refreshed by stable ID
+   and re-matched immediately before the existing claim seam.
 9. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
 
 Reconciliation uses a broader active-state set than candidate dispatch. In addition to
-`tracker.active_states`, any non-terminal `steps[].tracker_state` and approval `state` written by
-the workflow are considered active for already-running or waiting issues. This prevents the
+`tracker.active_states`, any non-terminal tracker or approval state written by the legacy pipeline
+or any named pipeline is considered active for already-running or waiting issues. This prevents the
 orchestrator from abandoning a run just because it moved the tracker item into a workflow-owned
 intermediate state such as `Review` or `Plan Review`.
 
@@ -1439,6 +1461,29 @@ Sorting order (stable intent):
 1. `priority` ascending (1..4 are preferred; null/unknown sorts last)
 2. `created_at` oldest first
 3. `identifier` lexicographic tie-breaker
+
+Selected-mode admission instead applies these rules:
+
+- Structural eligibility requires the issue identity and title fields, a non-terminal state, and
+  no existing running, claimed, or completed owner. Active-state and blocker meanings come from the
+  matching rule rather than hard-coded state vocabulary.
+- Rules are matched by ascending precedence. `states` requires one normalized match;
+  `labels_all`, `labels_any`, and `labels_none` apply their literal set predicates;
+  `require_unblocked` rejects an issue while any normalized blocker is absent from the snapshot or
+  is in a non-terminal state.
+- Candidates sort first by matching-rule precedence, then by that rule's configured ascending keys
+  with nulls last, and finally by identifier.
+- Immediately before claiming, the orchestrator fetches exactly that issue by stable ID, recomputes
+  its relationship normalization and selection, and proceeds only when the same rule, pipeline, and
+  lane still match and lane capacity remains advisably available.
+- That refresh invokes the existing claim operation at most once. Recovered remote ownership is
+  adopted without a second claim.
+- The rule, pipeline, and lane identity are written into the first pipeline snapshot alongside any
+  opaque ownership lease and branch identity. Retries and recovery use the frozen pipeline and lane;
+  they do not reselect. A removed or changed identity fails closed.
+
+These rules preserve the single lifecycle authority in ADR-0012 and the configuration/runtime
+boundary for development methods in ADR-0014.
 
 ### 8.3 Concurrency Control
 
@@ -2206,9 +2251,14 @@ Additional normalization details:
 - `tracker_position` -> In project-board mode, the fresh numeric ordinal from the complete ordered
   Project-items traversal. Otherwise `null` unless another adapter supplies its own snapshot data.
 - `labels` -> lowercase strings from GitHub Issue labels
-- `blocked_by` -> GitHub Issues have no native blocking relations. Implementations may populate this
-  by scanning issue body/comments for `blocked by #N` patterns, using a label convention, or leave
-  it as an empty list.
+- `blocked_by` -> In selected-mode runtimes, native GitHub issue relationships. Include every open issue in the direct
+  `blockedBy` connection and every open descendant in the recursive `subIssues` graph. Traverse
+  through closed intermediate sub-issues, paginate each connection completely, and deduplicate or
+  break cycles by GitHub node ID. Use `owner/repository#<number>` for every related issue so
+  cross-repository relations remain unambiguous. A relationship authorization or payload
+  failure omits only the authoritative candidate whose dependency snapshot is incomplete; a base
+  Project-items query failure remains tracker-wide. Legacy no-selection runtimes retain the prior
+  GitHub snapshot and hard-coded `Todo` blocker behavior without issuing these relationship reads.
 - `branch_name` -> GitHub Issues do not provide branch metadata natively. Implementations may derive
   from issue number (for example `issue-42`), check for linked branches via the GitHub API, or
   leave it `null`.

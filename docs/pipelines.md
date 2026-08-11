@@ -6,6 +6,25 @@ For the first release, sequential list-order pipelines are the supported path. D
 can describe a DAG, but Ensemble does not promise guaranteed parallel execution. Finalization after
 a successful pipeline is recoverable and may create a pull request; a human owns review and merge.
 
+## Named pipeline selection and recovery
+
+A configuration can replace the legacy top-level pipeline with named `pipelines`,
+`scheduler.lanes`, and `workflow_selection` rules. The selector matches normalized issue state,
+labels, and blockers without assigning built-in meanings such as planning or delivery to them.
+The matching rule chooses both the executable pipeline and the live-worker capacity lane.
+
+For fresh work, Ensemble evaluates and orders the candidate snapshot, then refreshes the selected
+issue by stable ID immediately before the existing claim operation. The refreshed issue must still
+match the same rule, pipeline, and lane and the lane must still have capacity. If any of those
+conditions changed, Ensemble does not claim or dispatch it during that tick.
+
+The selected rule, pipeline, and lane are journaled with the run's ownership lease and workspace
+branch identity. Retries, interaction resumes, finalization, and restart recovery use that frozen
+identity rather than selecting again. If the named rule, pipeline, or lane is missing or points at
+a different combination after configuration changes, recovery fails closed for operator action.
+This preserves the orchestrator's single lifecycle authority described by ADR-0012 while keeping
+development-method vocabulary outside the runtime core as required by ADR-0014.
+
 ## Steps and agents
 
 Each step references an agent defined in `config.yaml`:

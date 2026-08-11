@@ -149,6 +149,12 @@ pub enum AgentError {
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
+    #[error("invalid workflow selection rule {rule}: {reason}")]
+    InvalidWorkflowSelection { rule: String, reason: String },
+    #[error("invalid scheduler lane {lane}: {reason}")]
+    InvalidSchedulerLane { lane: String, reason: String },
+    #[error("invalid named pipeline {pipeline}: {reason}")]
+    InvalidNamedPipeline { pipeline: String, reason: String },
     #[error("invalid repository finalization config for {repo}: {reason}")]
     InvalidFinalizeConfig { repo: String, reason: String },
     #[error("invalid acceptance command {name}: {reason}")]

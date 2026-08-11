@@ -129,9 +129,11 @@ pub(crate) fn parse_raw_yaml_with_dotenv(
                         report.issues.push(pipeline_error_to_validation_issue(e));
                         config_valid = false;
                     }
-                    if let Err(e) = build_dag(&config.steps) {
-                        report.issues.push(pipeline_error_to_validation_issue(e));
-                        config_valid = false;
+                    if config.workflow_selection.is_empty() {
+                        if let Err(e) = build_dag(&config.steps) {
+                            report.issues.push(pipeline_error_to_validation_issue(e));
+                            config_valid = false;
+                        }
                     }
                     ConfigDocumentState {
                         path,
@@ -190,19 +192,33 @@ pub fn validate_document(document: &serde_yaml::Value) -> DraftValidationReport 
 
     if let Some(mapping) = document.as_mapping() {
         // Validate presence of required top-level sections
-        let required_sections = [
-            ("tracker", "tracker"),
-            ("agents", "agents"),
-            ("steps", "workflow"),
-            ("on_success", "transitions"),
-            ("on_failure", "transitions"),
-        ];
+        let selected_mode = mapping
+            .get("workflow_selection")
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_some_and(|rules| !rules.is_empty());
+        let required_sections: &[(&str, &str)] = if selected_mode {
+            &[
+                ("tracker", "tracker"),
+                ("agents", "agents"),
+                ("pipelines", "workflow"),
+                ("scheduler", "workflow"),
+                ("workflow_selection", "workflow"),
+            ]
+        } else {
+            &[
+                ("tracker", "tracker"),
+                ("agents", "agents"),
+                ("steps", "workflow"),
+                ("on_success", "transitions"),
+                ("on_failure", "transitions"),
+            ]
+        };
         for (key, section) in required_sections {
             if !mapping.contains_key(serde_yaml::Value::String(key.to_string())) {
                 issues.push(ValidationIssue {
                     kind: ValidationIssueKind::Config,
                     message: format!("missing required section: {}", key),
-                    section: section.to_string(),
+                    section: (*section).to_string(),
                     field: None,
                     path: Some(key.to_string()),
                 });
@@ -311,6 +327,27 @@ fn pipeline_error_to_validation_issue(e: PipelineError) -> ValidationIssue {
     use crate::error::PipelineError;
 
     match e {
+        PipelineError::InvalidWorkflowSelection { rule, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid workflow selection rule '{rule}': {reason}"),
+            section: "workflow".to_string(),
+            field: Some(rule.clone()),
+            path: Some(format!("workflow_selection.{rule}")),
+        },
+        PipelineError::InvalidSchedulerLane { lane, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid scheduler lane '{lane}': {reason}"),
+            section: "workflow".to_string(),
+            field: Some(lane.clone()),
+            path: Some(format!("scheduler.lanes.{lane}")),
+        },
+        PipelineError::InvalidNamedPipeline { pipeline, reason } => ValidationIssue {
+            kind: ValidationIssueKind::Config,
+            message: format!("invalid named pipeline '{pipeline}': {reason}"),
+            section: "workflow".to_string(),
+            field: Some(pipeline.clone()),
+            path: Some(format!("pipelines.{pipeline}")),
+        },
         PipelineError::InvalidFinalizeConfig { repo, reason } => ValidationIssue {
             kind: ValidationIssueKind::Config,
             message: format!("invalid repository finalization config for '{repo}': {reason}"),
@@ -811,6 +848,47 @@ on_failure: Failed
         assert!(state.document.is_some());
         assert!(state.active_config.is_some());
         assert!(state.validation.issues.is_empty());
+    }
+
+    #[test]
+    fn parse_raw_yaml_activates_selected_pipeline_config() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: "Build it."
+pipelines:
+  delivery:
+    steps:
+      - name: build
+        agent: builder
+    on_success: Done
+    on_failure: Failed
+scheduler:
+  lanes:
+    delivery:
+      capacity: 1
+workflow_selection:
+  - name: delivery
+    precedence: 1
+    pipeline: delivery
+    lane: delivery
+    states: [Ready]
+    order_by: [tracker_position]
+"#;
+
+        let state = parse_raw_yaml(PathBuf::from("/tmp/config.yaml"), raw.to_string());
+
+        assert_eq!(state.kind, ConfigStateKind::Parsed);
+        assert!(
+            state.validation.issues.is_empty(),
+            "{:?}",
+            state.validation.issues
+        );
+        assert!(state.active_config.is_some());
     }
 
     #[test]

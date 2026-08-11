@@ -969,6 +969,9 @@ mod tests {
 
     fn test_config_with_steps() -> std::sync::Arc<EnsembleConfig> {
         std::sync::Arc::new(EnsembleConfig {
+            pipelines: Default::default(),
+            scheduler: Default::default(),
+            workflow_selection: Default::default(),
             tracker: TrackerConfig {
                 kind: "todo_file".to_string(),
                 active_states: vec!["In Progress".to_string()],

@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::{debug, info, warn};
 
-use super::model::{InteractionThreadRoot, Issue, TrackerComment};
+use super::model::{BlockerRef, InteractionThreadRoot, Issue, TrackerComment};
 use super::{IssueTracker, OwnershipClaim, OwnershipConflict, OwnershipLease, TrackerError};
 use crate::config::ensemble::{GithubClaimConfig, GithubTrackerConfig};
 use crate::workspace::key::issue_workspace_key;
@@ -25,6 +25,7 @@ pub struct GithubTracker {
     project_fields: Option<GithubTrackerConfig>,
     project_metadata: tokio::sync::RwLock<Option<ProjectMetadata>>,
     authenticated_viewer: tokio::sync::RwLock<Option<AuthenticatedViewer>>,
+    hydrate_native_relationships: bool,
 }
 
 #[derive(Clone)]
@@ -64,9 +65,12 @@ pub(crate) struct GithubTrackerSettings {
     pub active_states: Vec<String>,
     pub terminal_states: Vec<String>,
     pub labels_filter: Vec<String>,
+    pub hydrate_native_relationships: bool,
 }
 
 impl GithubTracker {
+    const MAX_RELATIONSHIP_NODES: usize = 10_000;
+    const MAX_RELATIONSHIP_PAGES: usize = 200;
     /// Create a new GithubTracker.
     ///
     /// Parses `owner/repo` from the repository string.
@@ -98,6 +102,7 @@ impl GithubTracker {
             client,
             project_metadata: tokio::sync::RwLock::new(None),
             authenticated_viewer: tokio::sync::RwLock::new(None),
+            hydrate_native_relationships: settings.hydrate_native_relationships,
         })
     }
 
@@ -487,6 +492,17 @@ impl GithubTracker {
         filter_states: &[String],
         apply_labels_filter: bool,
     ) -> Result<Vec<Issue>, TrackerError> {
+        let issues = self
+            .fetch_project_items_without_relationships(filter_states, apply_labels_filter)
+            .await?;
+        Ok(self.hydrate_issue_relationships(issues).await)
+    }
+
+    async fn fetch_project_items_without_relationships(
+        &self,
+        filter_states: &[String],
+        apply_labels_filter: bool,
+    ) -> Result<Vec<Issue>, TrackerError> {
         let metadata = self.ensure_project_metadata().await?;
 
         let mut all_issues = Vec::new();
@@ -672,7 +688,7 @@ impl GithubTracker {
             }
         }
 
-        Ok(all_issues)
+        Ok(self.hydrate_issue_relationships(all_issues).await)
     }
 
     /// Normalize a single repository issue node into an Issue.
@@ -732,6 +748,154 @@ impl GithubTracker {
         })
     }
 
+    async fn hydrate_issue_relationships(&self, issues: Vec<Issue>) -> Vec<Issue> {
+        if !self.hydrate_native_relationships {
+            return issues;
+        }
+        let mut hydrated = Vec::with_capacity(issues.len());
+        for mut issue in issues {
+            match self.relationships_for_issue(&issue.id).await {
+                Ok(blockers) => {
+                    issue.blocked_by = blockers;
+                    hydrated.push(issue);
+                }
+                Err(error) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        identifier = %issue.identifier,
+                        error = %error,
+                        "GitHub relationship hydration failed; omitting authoritative issue"
+                    );
+                }
+            }
+        }
+        hydrated
+    }
+
+    async fn relationships_for_issue(
+        &self,
+        issue_id: &str,
+    ) -> Result<Vec<BlockerRef>, TrackerError> {
+        let mut blockers = Vec::new();
+        let mut emitted = HashSet::new();
+        let mut relationship_nodes = HashSet::from([issue_id.to_string()]);
+        for related in self.fetch_direct_blockers(issue_id).await? {
+            let related = relationship_ref(related)?;
+            relationship_nodes.insert(related.id.clone().unwrap_or_default());
+            if relationship_nodes.len() > Self::MAX_RELATIONSHIP_NODES {
+                return Err(graphql::unexpected_payload::<graphql::IssueBlockedBy>(
+                    "relationship traversal exceeded bounded node limit",
+                ));
+            }
+            if related.state.as_deref() == Some("OPEN")
+                && emitted.insert(related.id.clone().unwrap_or_default())
+            {
+                blockers.push(related);
+            }
+        }
+
+        let mut seen = HashSet::from([issue_id.to_string()]);
+        let mut frontier = VecDeque::from([issue_id.to_string()]);
+        while let Some(parent_id) = frontier.pop_front() {
+            for child in self.fetch_sub_issues(&parent_id).await? {
+                let child_id = child.id.clone().ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::IssueSubIssues>(
+                        "sub-issue missing node ID",
+                    )
+                })?;
+                if !seen.insert(child_id.clone()) {
+                    continue;
+                }
+                relationship_nodes.insert(child_id.clone());
+                if relationship_nodes.len() > Self::MAX_RELATIONSHIP_NODES {
+                    return Err(graphql::unexpected_payload::<graphql::IssueSubIssues>(
+                        "relationship traversal exceeded bounded node limit",
+                    ));
+                }
+                frontier.push_back(child_id.clone());
+                let related = relationship_ref(child)?;
+                if related.state.as_deref() == Some("OPEN") && emitted.insert(child_id) {
+                    blockers.push(related);
+                }
+            }
+        }
+
+        Ok(blockers)
+    }
+
+    async fn fetch_direct_blockers(
+        &self,
+        issue_id: &str,
+    ) -> Result<Vec<graphql::RelatedIssueNode>, TrackerError> {
+        let mut nodes = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            if pages > Self::MAX_RELATIONSHIP_PAGES {
+                return Err(graphql::unexpected_payload::<graphql::IssueBlockedBy>(
+                    "relationship pagination exceeded bounded page limit",
+                ));
+            }
+            let data = self
+                .graphql::<graphql::IssueBlockedBy>(json!({
+                    "issueId": issue_id,
+                    "cursor": cursor,
+                }))
+                .await?;
+            let connection = data
+                .node
+                .ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::IssueBlockedBy>("issue not found")
+                })?
+                .blocked_by;
+            nodes.extend(connection.nodes.into_iter().flatten());
+            if nodes.len() > Self::MAX_RELATIONSHIP_NODES {
+                return Err(graphql::unexpected_payload::<graphql::IssueBlockedBy>(
+                    "direct blockers exceeded bounded node limit",
+                ));
+            }
+            match connection.page_info.next_cursor()? {
+                Some(next) => cursor = Some(next),
+                None => return Ok(nodes),
+            }
+        }
+    }
+
+    async fn fetch_sub_issues(
+        &self,
+        issue_id: &str,
+    ) -> Result<Vec<graphql::RelatedIssueNode>, TrackerError> {
+        let mut nodes = Vec::new();
+        let mut cursor = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            if pages > Self::MAX_RELATIONSHIP_PAGES {
+                return Err(graphql::unexpected_payload::<graphql::IssueSubIssues>(
+                    "relationship pagination exceeded bounded page limit",
+                ));
+            }
+            let data = self
+                .graphql::<graphql::IssueSubIssues>(json!({
+                    "issueId": issue_id,
+                    "cursor": cursor,
+                }))
+                .await?;
+            let connection = data
+                .node
+                .ok_or_else(|| {
+                    graphql::unexpected_payload::<graphql::IssueSubIssues>("issue not found")
+                })?
+                .sub_issues;
+            nodes.extend(connection.nodes.into_iter().flatten());
+            match connection.page_info.next_cursor()? {
+                Some(next) => cursor = Some(next),
+                None => return Ok(nodes),
+            }
+        }
+    }
+
     /// Batch fetch issue states by node IDs.
     async fn fetch_states_by_node_ids(&self, ids: &[String]) -> Result<Vec<Issue>, TrackerError> {
         if ids.is_empty() {
@@ -740,12 +904,13 @@ impl GithubTracker {
 
         if self.project_number.is_some() {
             let requested_ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
-            return Ok(self
-                .fetch_project_items(&[], false)
+            let issues = self
+                .fetch_project_items_without_relationships(&[], false)
                 .await?
                 .into_iter()
                 .filter(|issue| requested_ids.contains(issue.id.as_str()))
-                .collect());
+                .collect();
+            return Ok(self.hydrate_issue_relationships(issues).await);
         }
 
         let variables = json!({
@@ -761,7 +926,7 @@ impl GithubTracker {
             }
         }
 
-        Ok(issues)
+        Ok(self.hydrate_issue_relationships(issues).await)
     }
 
     async fn repository_label_id(&self, name: &str) -> Result<Option<String>, TrackerError> {
@@ -1073,6 +1238,32 @@ fn priority_rank(node: &graphql::ProjectItem, metadata: &ProjectMetadata) -> Opt
     priority.option_ranks.get(option_id).copied()
 }
 
+fn relationship_ref(node: graphql::RelatedIssueNode) -> Result<BlockerRef, TrackerError> {
+    let id = node.id.ok_or_else(|| {
+        graphql::unexpected_payload::<graphql::IssueSubIssues>("related issue missing node ID")
+    })?;
+    let number = node.number.ok_or_else(|| {
+        graphql::unexpected_payload::<graphql::IssueSubIssues>("related issue missing number")
+    })?;
+    let state = node.state.ok_or_else(|| {
+        graphql::unexpected_payload::<graphql::IssueSubIssues>("related issue missing state")
+    })?;
+    let repository = node
+        .repository
+        .and_then(|repository| repository.name_with_owner)
+        .filter(|repository| !repository.trim().is_empty())
+        .ok_or_else(|| {
+            graphql::unexpected_payload::<graphql::IssueSubIssues>(
+                "related issue missing repository identity",
+            )
+        })?;
+    Ok(BlockerRef {
+        id: Some(id),
+        identifier: Some(format!("{repository}#{number}")),
+        state: Some(state.to_uppercase()),
+    })
+}
+
 #[async_trait]
 impl IssueTracker for GithubTracker {
     async fn validate_configuration(&self) -> Result<(), TrackerError> {
@@ -1348,6 +1539,75 @@ mod tests {
         }
     }
 
+    struct RelationshipBlockedByResponder {
+        fail_issue: Option<&'static str>,
+    }
+
+    impl Respond for RelationshipBlockedByResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let request: Value = serde_json::from_slice(&request.body).unwrap();
+            let issue_id = request["variables"]["issueId"].as_str().unwrap();
+            if self.fail_issue == Some(issue_id) {
+                return ResponseTemplate::new(200)
+                    .set_body_json(graphql_response(json!({ "node": null })));
+            }
+            if issue_id == "I_paged" {
+                let cursor = request["variables"]["cursor"].as_str();
+                let (nodes, has_next, end_cursor) = if cursor.is_none() {
+                    (
+                        json!([{"id":"I_page_1","number":11,"state":"OPEN","repository":{"nameWithOwner":"acme/one"}}]),
+                        true,
+                        json!("page-2"),
+                    )
+                } else {
+                    (
+                        json!([{"id":"I_page_2","number":12,"state":"OPEN","repository":{"nameWithOwner":"acme/two"}}]),
+                        false,
+                        Value::Null,
+                    )
+                };
+                return ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "node": {"blockedBy": {"pageInfo":{"hasNextPage":has_next,"endCursor":end_cursor},"nodes":nodes}}
+                })));
+            }
+            let nodes = if issue_id == "I_root" {
+                json!([
+                    {"id":"I_block","number":7,"state":"OPEN","repository":{"nameWithOwner":"other/repo"}},
+                    {"id":"I_closed","number":8,"state":"CLOSED","repository":{"nameWithOwner":"other/repo"}}
+                ])
+            } else {
+                json!([])
+            };
+            ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "node": {"blockedBy": {"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":nodes}}
+            })))
+        }
+    }
+
+    struct RelationshipSubIssuesResponder;
+
+    impl Respond for RelationshipSubIssuesResponder {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            let request: Value = serde_json::from_slice(&request.body).unwrap();
+            let issue_id = request["variables"]["issueId"].as_str().unwrap();
+            let nodes = match issue_id {
+                "I_root" => json!([
+                    {"id":"I_mid","number":8,"state":"CLOSED","repository":{"nameWithOwner":"acme/my-repo"}}
+                ]),
+                "I_mid" => json!([
+                    {"id":"I_leaf","number":9,"state":"OPEN","repository":{"nameWithOwner":"acme/child"}}
+                ]),
+                "I_leaf" => json!([
+                    {"id":"I_root","number":1,"state":"OPEN","repository":{"nameWithOwner":"acme/my-repo"}}
+                ]),
+                _ => json!([]),
+            };
+            ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "node": {"subIssues": {"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":nodes}}
+            })))
+        }
+    }
+
     /// Helper to create a GithubTracker pointed at a wiremock server.
     fn create_test_tracker(server_url: &str, project_number: Option<i64>) -> GithubTracker {
         GithubTracker::new(
@@ -1364,6 +1624,7 @@ mod tests {
                 active_states: vec!["Todo".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string(), "Closed".to_string()],
                 labels_filter: vec![],
+                hydrate_native_relationships: false,
             },
         )
         .unwrap()
@@ -1390,6 +1651,7 @@ mod tests {
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],
                 labels_filter: vec![],
+                hydrate_native_relationships: false,
             },
         )
         .unwrap()
@@ -1416,9 +1678,119 @@ mod tests {
                 active_states: vec!["Open".to_string(), "In Progress".to_string()],
                 terminal_states: vec!["Done".to_string()],
                 labels_filter: vec![],
+                hydrate_native_relationships: false,
             },
         )
         .unwrap()
+    }
+
+    async fn mount_relationship_operations(server: &MockServer, fail_issue: Option<&'static str>) {
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("blockedBy(first:"))
+            .respond_with(RelationshipBlockedByResponder { fail_issue })
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("subIssues(first:"))
+            .respond_with(RelationshipSubIssuesResponder)
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn native_relationships_hydrate_candidates_and_fresh_snapshots() {
+        let server = MockServer::start().await;
+        let root = json!({
+            "id":"I_root","number":1,"title":"Root","body":"","createdAt":"2026-01-01T00:00:00Z",
+            "updatedAt":"2026-01-01T00:00:00Z","url":"https://example.test/issues/1","state":"OPEN",
+            "labels":{"nodes":[{"name":"Todo"}]},"assignees":{"totalCount":0,"nodes":[]}
+        });
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("issues(first:"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[root.clone()]}}
+            }))))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("nodes(ids:"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                    "nodes":[root]
+                }))),
+            )
+            .mount(&server)
+            .await;
+        mount_relationship_operations(&server, None).await;
+        let mut tracker = create_test_tracker(&server.uri(), None);
+        tracker.hydrate_native_relationships = true;
+
+        let candidates = tracker.fetch_candidate_issues().await.unwrap();
+        let fresh = tracker
+            .fetch_issue_states_by_ids(&["I_root".to_string()])
+            .await
+            .unwrap();
+
+        for issue in [&candidates[0], &fresh[0]] {
+            assert_eq!(
+                issue
+                    .blocked_by
+                    .iter()
+                    .filter_map(|blocker| blocker.identifier.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["other/repo#7", "acme/child#9"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn inaccessible_relationships_omit_only_the_authoritative_issue() {
+        let server = MockServer::start().await;
+        let issue = |id: &str, number: u64| {
+            json!({
+                "id":id,"number":number,"title":id,"body":"","createdAt":"2026-01-01T00:00:00Z",
+                "updatedAt":"2026-01-01T00:00:00Z","url":format!("https://example.test/issues/{number}"),"state":"OPEN",
+                "labels":{"nodes":[{"name":"Todo"}]},"assignees":{"totalCount":0,"nodes":[]}
+            })
+        };
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("issues(first:"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[issue("I_bad",1),issue("I_good",2)]}}
+            }))))
+            .mount(&server)
+            .await;
+        mount_relationship_operations(&server, Some("I_bad")).await;
+        let mut tracker = create_test_tracker(&server.uri(), None);
+        tracker.hydrate_native_relationships = true;
+
+        let candidates = tracker.fetch_candidate_issues().await.unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, "I_good");
+    }
+
+    #[tokio::test]
+    async fn native_relationship_pagination_completes_before_admission() {
+        let server = MockServer::start().await;
+        mount_relationship_operations(&server, None).await;
+        let mut tracker = create_test_tracker(&server.uri(), None);
+        tracker.hydrate_native_relationships = true;
+
+        let blockers = tracker.relationships_for_issue("I_paged").await.unwrap();
+
+        assert_eq!(
+            blockers
+                .iter()
+                .filter_map(|blocker| blocker.identifier.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["acme/one#11", "acme/two#12"]
+        );
     }
 
     #[test]
@@ -1447,6 +1819,7 @@ mod tests {
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],
                 labels_filter: Vec::new(),
+                hydrate_native_relationships: false,
             },
         )
         .unwrap();
@@ -2855,6 +3228,7 @@ mod tests {
                 active_states: vec![],
                 terminal_states: vec![],
                 labels_filter: vec![],
+                hydrate_native_relationships: false,
             },
         )
         .unwrap();
@@ -3147,6 +3521,7 @@ mod tests {
                 active_states: vec!["Queued".to_string()],
                 terminal_states: vec!["Done".to_string()],
                 labels_filter: vec![],
+                hydrate_native_relationships: false,
             },
         )
         .unwrap();
@@ -3234,6 +3609,7 @@ mod tests {
                 active_states: vec!["Todo".to_string()],
                 terminal_states: vec!["Done".to_string()],
                 labels_filter: vec!["bug".to_string()],
+                hydrate_native_relationships: false,
             },
         )
         .unwrap();
