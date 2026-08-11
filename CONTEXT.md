@@ -52,6 +52,16 @@ _Avoid_: Completion, cleanup
 The durable owner of configured repository publication after pipeline work and approval are complete. It preserves exact local and remote identity until publication is confirmed, waiting on a pull request, or blocked for operator recovery.
 _Avoid_: Worker, tracker state
 
+**Claim**:
+Adapter-issued remote ownership evidence for one issue. It may supply an opaque workspace branch
+identity, but the orchestrator records it durably and remains the lifecycle authority.
+_Avoid_: Assignment, scheduler policy
+
+**Ownership conflict**:
+Bounded adapter evidence that an owner is foreign or ambiguous. It blocks admission or recovery
+without creating a competing run, workspace, or pull request.
+_Avoid_: Workflow branch, implicit adoption
+
 **Workspace**:
 The issue-owned filesystem area in which repository worktrees and run artifacts persist across steps and retries.
 _Avoid_: Checkout, repository

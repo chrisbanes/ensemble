@@ -121,7 +121,41 @@ pub(super) struct IssueNode {
     pub(super) url: Option<String>,
     pub(super) state: Option<String>,
     pub(super) labels: Option<Nodes<Label>>,
+    pub(super) assignees: Option<AssigneeConnection>,
     pub(super) project_items: Option<Nodes<ProjectItem>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct User {
+    pub(super) id: Option<String>,
+    pub(super) login: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AssigneeConnection {
+    #[serde(default)]
+    pub(super) total_count: Option<u64>,
+    pub(super) nodes: Vec<Option<User>>,
+}
+
+pub(super) struct Viewer;
+
+impl Operation for Viewer {
+    const NAME: &'static str = "Viewer";
+    const QUERY: &'static str = VIEWER_QUERY;
+    type Response = ViewerData;
+}
+
+pub(super) const VIEWER_QUERY: &str = r#"
+query {
+  viewer { id login }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct ViewerData {
+    pub(super) viewer: Option<User>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +274,7 @@ query($projectId: ID!, $cursor: String) {
               ... on Issue {
                 id number title body createdAt updatedAt url
                 labels(first: 20) { nodes { name } }
+                assignees(first: 100) { totalCount nodes { id login } }
               }
             }
           }
@@ -283,6 +318,7 @@ query($owner: String!, $repo: String!, $cursor: String, $labels: [String!]) {
       nodes {
         id number title body createdAt updatedAt url state
         labels(first: 20) { nodes { name } }
+        assignees(first: 100) { totalCount nodes { id login } }
       }
     }
   }
@@ -313,6 +349,7 @@ query($ids: [ID!]!) {
     ... on Issue {
       id number title state url
       labels(first: 20) { nodes { name } }
+      assignees(first: 100) { totalCount nodes { id login } }
     }
   }
 }
@@ -321,6 +358,55 @@ query($ids: [ID!]!) {
 #[derive(Debug, Deserialize)]
 pub(super) struct IssueStatesData {
     pub(super) nodes: Vec<Option<IssueNode>>,
+}
+
+pub(super) struct IssueAssignees;
+
+impl Operation for IssueAssignees {
+    const NAME: &'static str = "IssueAssignees";
+    const QUERY: &'static str = ISSUE_ASSIGNEES_QUERY;
+    type Response = IssueAssigneesData;
+}
+
+pub(super) const ISSUE_ASSIGNEES_QUERY: &str = r#"
+query($issueId: ID!) {
+  node(id: $issueId) {
+    ... on Issue { id assignees(first: 100) { totalCount nodes { id login } } }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueAssigneesData {
+    pub(super) node: Option<IssueNode>,
+}
+
+pub(super) struct AddAssignees;
+
+impl Operation for AddAssignees {
+    const NAME: &'static str = "AddAssignees";
+    const QUERY: &'static str = ADD_ASSIGNEES_MUTATION;
+    type Response = AddAssigneesData;
+}
+
+pub(super) const ADD_ASSIGNEES_MUTATION: &str = r#"
+mutation($issueId: ID!, $assigneeId: ID!) {
+  addAssigneesToAssignable(input: {assignableId: $issueId, assigneeIds: [$assigneeId]}) {
+    assignable { ... on Issue { id } }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AddAssigneesData {
+    #[serde(rename = "addAssigneesToAssignable")]
+    _result: Option<AssignableMutationPayload>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct AssignableMutationPayload {
+    _assignable: Option<IdNode>,
 }
 
 pub(super) struct IssueComments;
@@ -586,6 +672,8 @@ mod tests {
             decode_response::<ProjectItems>(br#"{"data":{"node":{"items":{"pageInfo":{"hasNextPage":false,"endCursor":null},"edges":[]}}}}"#, "").map(|_| ()),
             decode_response::<RepositoryIssues>(br#"{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<IssueStates>(br#"{"data":{"nodes":[]}}"#, "").map(|_| ()),
+            decode_response::<Viewer>(br#"{"data":{"viewer":{"id":"U_1","login":"octocat"}}}"#, "").map(|_| ()),
+            decode_response::<IssueAssignees>(br#"{"data":{"node":{"id":"I_1","assignees":{"totalCount":0,"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<IssueComments>(br#"{"data":{"node":{"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}"#, "").map(|_| ()),
             decode_response::<RepositoryLabel>(br#"{"data":{"repository":{"label":{"id":"L_1","name":"Todo"}}}}"#, "").map(|_| ()),
             decode_response::<FindProjectItem>(br#"{"data":{"node":{"projectItems":{"nodes":[]}}}}"#, "").map(|_| ()),
@@ -601,6 +689,7 @@ mod tests {
             decode_response::<UpdateProjectItemField>(br#"{"data":{"updateProjectV2ItemFieldValue":{"projectV2Item":{"id":"PVTI_1"}}}}"#, "").map(|_| ()),
             decode_response::<AddLabels>(br#"{"data":{"addLabelsToLabelable":{"labelable":{"id":"I_1"}}}}"#, "").map(|_| ()),
             decode_response::<RemoveLabels>(br#"{"data":{"removeLabelsFromLabelable":{"labelable":{"id":"I_1"}}}}"#, "").map(|_| ()),
+            decode_response::<AddAssignees>(br#"{"data":{"addAssigneesToAssignable":{"assignable":{"id":"I_1"}}}}"#, "").map(|_| ()),
         ] {
             result.unwrap();
         }
@@ -613,6 +702,7 @@ mod tests {
             decode_response::<UpdateProjectItemField>(br#"{"data":{}}"#, "").map(|_| ()),
             decode_response::<AddLabels>(br#"{"data":{}}"#, "").map(|_| ()),
             decode_response::<RemoveLabels>(br#"{"data":{}}"#, "").map(|_| ()),
+            decode_response::<AddAssignees>(br#"{"data":{}}"#, "").map(|_| ()),
         ] {
             result.unwrap();
         }

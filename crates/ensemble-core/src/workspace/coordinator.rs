@@ -25,6 +25,7 @@ pub struct WorktreeCoordinator {
     repos: HashMap<String, RepoConfig>,
     base_date: String,
     worktree_root: PathBuf,
+    branch_name: Option<String>,
 }
 
 impl WorktreeCoordinator {
@@ -37,6 +38,21 @@ impl WorktreeCoordinator {
             repos,
             base_date,
             worktree_root,
+            branch_name: None,
+        }
+    }
+
+    pub fn new_with_branch(
+        repos: HashMap<String, RepoConfig>,
+        base_date: String,
+        worktree_root: PathBuf,
+        branch_name: Option<String>,
+    ) -> Self {
+        Self {
+            repos,
+            base_date,
+            worktree_root,
+            branch_name,
         }
     }
 
@@ -64,7 +80,7 @@ impl WorktreeCoordinator {
                 });
             }
 
-            let worktree_path = self.worktree_root.join(repo_name).join(&branch);
+            let worktree_path = self.worktree_path(repo_name, &branch);
             let worktree_path_str = worktree_path.to_string_lossy().to_string();
             let repo_path_str = &repo_config.path;
 
@@ -189,12 +205,7 @@ impl WorktreeCoordinator {
         let branch = self.format_branch_name(issue_id);
         self.repos
             .keys()
-            .map(|repo_name| {
-                (
-                    repo_name.clone(),
-                    self.worktree_root.join(repo_name).join(&branch),
-                )
-            })
+            .map(|repo_name| (repo_name.clone(), self.worktree_path(repo_name, &branch)))
             .collect()
     }
 
@@ -207,7 +218,7 @@ impl WorktreeCoordinator {
         let mut errors: Vec<(String, String)> = Vec::new();
 
         for (repo_name, repo_config) in &self.repos {
-            let worktree_path = self.worktree_root.join(repo_name).join(&branch);
+            let worktree_path = self.worktree_path(repo_name, &branch);
             let worktree_path_str = worktree_path.to_string_lossy().to_string();
 
             if let Err(e) = remove_worktree(&repo_config.path, &worktree_path_str, &branch).await {
@@ -250,7 +261,7 @@ impl WorktreeCoordinator {
         let mut paths = HashMap::new();
 
         for repo_name in self.repos.keys() {
-            let worktree_path = self.worktree_root.join(repo_name).join(&branch);
+            let worktree_path = self.worktree_path(repo_name, &branch);
             paths.insert(repo_name.clone(), worktree_path);
         }
 
@@ -258,8 +269,20 @@ impl WorktreeCoordinator {
     }
 
     fn format_branch_name(&self, issue_id: &str) -> String {
+        if let Some(branch_name) = &self.branch_name {
+            return branch_name.clone();
+        }
         let sanitized = sanitize_branch_name(&issue_workspace_key(issue_id));
         format!("ensemble-{}-{}", self.base_date, sanitized)
+    }
+
+    fn worktree_path(&self, repository: &str, branch: &str) -> PathBuf {
+        let directory = if self.branch_name.is_some() {
+            issue_workspace_key(branch)
+        } else {
+            branch.to_string()
+        };
+        self.worktree_root.join(repository).join(directory)
     }
 
     async fn rollback(

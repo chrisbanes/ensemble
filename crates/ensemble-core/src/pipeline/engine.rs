@@ -6,6 +6,7 @@ use crate::acceptance::AcceptanceAttempt;
 use crate::config::ensemble::{OnFailure, StepKind};
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
+use crate::tracker::OwnershipLease;
 
 /// The execution state of a single pipeline step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,6 +129,10 @@ pub struct PipelineRun {
     dag: StepDag,
     /// Synthetic fixup steps generated for step-level retries.
     synthetic_fixup_steps: HashSet<String>,
+    /// Opaque adapter ownership captured before any agent work starts.
+    ownership_lease: Option<OwnershipLease>,
+    /// Opaque configured workspace branch, including policies that do not claim remotely.
+    workspace_branch_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -142,6 +147,10 @@ pub struct PipelineRunSnapshot {
     pub resolved_acceptance_plan: Option<crate::acceptance::ResolvedAcceptancePlan>,
     pub dag_steps: Vec<DagStep>,
     pub synthetic_fixup_steps: HashSet<String>,
+    #[serde(default)]
+    pub ownership_lease: Option<OwnershipLease>,
+    #[serde(default)]
+    pub workspace_branch_name: Option<String>,
 }
 
 impl PipelineRun {
@@ -162,6 +171,8 @@ impl PipelineRun {
             resolved_acceptance_plan: None,
             dag,
             synthetic_fixup_steps: HashSet::new(),
+            ownership_lease: None,
+            workspace_branch_name: None,
         }
     }
 
@@ -175,6 +186,8 @@ impl PipelineRun {
             resolved_acceptance_plan: self.resolved_acceptance_plan.clone(),
             dag_steps: self.dag.steps.clone(),
             synthetic_fixup_steps: self.synthetic_fixup_steps.clone(),
+            ownership_lease: self.ownership_lease.clone(),
+            workspace_branch_name: self.workspace_branch_name.clone(),
         }
     }
 
@@ -193,7 +206,30 @@ impl PipelineRun {
                 steps: snapshot.dag_steps,
             },
             synthetic_fixup_steps: snapshot.synthetic_fixup_steps,
+            ownership_lease: snapshot.ownership_lease,
+            workspace_branch_name: snapshot.workspace_branch_name,
         })
+    }
+
+    /// Records opaque adapter ownership alongside the durable pipeline snapshot.
+    pub(crate) fn set_ownership_lease(&mut self, lease: OwnershipLease) {
+        self.ownership_lease = Some(lease);
+    }
+
+    pub(crate) fn workspace_branch_name(&self) -> Option<&str> {
+        self.workspace_branch_name.as_deref().or_else(|| {
+            self.ownership_lease
+                .as_ref()
+                .and_then(|lease| lease.branch_name.as_deref())
+        })
+    }
+
+    pub(crate) fn set_workspace_branch_name(&mut self, branch_name: String) {
+        self.workspace_branch_name = Some(branch_name);
+    }
+
+    pub(crate) fn ownership_lease(&self) -> Option<&OwnershipLease> {
+        self.ownership_lease.as_ref()
     }
 
     pub fn normalize_stale_running_steps(&mut self) {
@@ -822,6 +858,29 @@ mod tests {
             restored.step("review").unwrap().depends,
             vec!["fixup-review".to_string()]
         );
+    }
+
+    #[test]
+    fn pipeline_run_snapshot_preserves_opaque_ownership_lease() {
+        let dag = crate::pipeline::dag::build_dag(&[test_step("build", "builder", Some(vec![]))])
+            .unwrap();
+        let mut run = PipelineRun::new("issue-1".to_string(), 1, dag);
+        run.set_ownership_lease(OwnershipLease {
+            id: "adapter-lease-1".to_string(),
+            branch_name: Some("ensemble/issue-1".to_string()),
+        });
+        run.set_workspace_branch_name("configured/issue-1".to_string());
+
+        let snapshot = run.to_snapshot();
+        assert_eq!(
+            snapshot.ownership_lease,
+            Some(OwnershipLease {
+                id: "adapter-lease-1".to_string(),
+                branch_name: Some("ensemble/issue-1".to_string()),
+            })
+        );
+        let restored = PipelineRun::from_snapshot(snapshot).unwrap();
+        assert_eq!(restored.workspace_branch_name(), Some("configured/issue-1"));
     }
 
     #[test]

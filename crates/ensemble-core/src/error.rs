@@ -75,6 +75,14 @@ pub enum WorkspaceError {
         expected_repositories: BTreeMap<String, String>,
         actual_repositories: BTreeMap<String, String>,
     },
+    #[error(
+        "workspace branch identity mismatch at {path}: expected {expected_branch:?}, found {actual_branch:?}"
+    )]
+    BranchIdentityMismatch {
+        path: String,
+        expected_branch: Option<String>,
+        actual_branch: Option<String>,
+    },
     #[error("hook failed: {hook} — {reason}")]
     HookFailed { hook: String, reason: String },
     #[error("hook timed out: {hook} after {timeout_ms}ms")]

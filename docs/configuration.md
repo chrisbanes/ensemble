@@ -183,6 +183,16 @@ tracker:
     priority:
       field: Customer impact
       options: [Critical, Elevated, Normal]
+    # Optional: adapter-owned exclusive claims and exact orphan-PR adoption.
+    ownership:
+      claim:
+        claimed_state: Agent-owned
+        resume_states: [Agent-owned, Recovering]
+      delivery_adoption:
+        repository: acme/my-project
+        base_branch: main
+        branch_template: ensemble/{issue_workspace_key}
+        require_authenticated_author: true
   active_states:
     - Todo
     - In Progress
@@ -731,3 +741,19 @@ This is retry attempt {{ attempt }}. Review previous work in the workspace and f
 
 Implement the changes described above. Run tests before finishing.
 ```
+
+### GitHub ownership policy
+
+`tracker.github.ownership` is optional. When omitted, GitHub, Notion, and TODO trackers keep their
+existing dispatch behavior. `claim` configures an adapter-owned exclusive authenticated-assignee
+claim: `claimed_state` and every non-empty `resume_states` entry are arbitrary configured normalized
+state names. `resume_states` must include `claimed_state`, so a claim remains discoverable if the
+runtime stops before its first journal append. The adapter must re-read remote evidence before reporting a lease; the orchestrator
+receives only opaque ownership outcomes and remains the lifecycle authority.
+
+`delivery_adoption` permits recovery of an unpersisted pull-request identity only when one pull
+request matches the configured repository, base branch, rendered `branch_template`, and the stored
+commit identity. The template must contain exactly one `{issue_workspace_key}` token and render a
+valid Git branch. `require_authenticated_author` additionally requires the GitHub viewer to be the
+PR author. A persisted delivery marker always takes precedence; foreign or multiple candidates are
+conflicts and never cause a replacement pull request.

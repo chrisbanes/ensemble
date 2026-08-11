@@ -23,6 +23,8 @@ struct WorkspaceMetadata {
     issue_identifier: String,
     branch_date: String,
     #[serde(default)]
+    branch_name: Option<String>,
+    #[serde(default)]
     repositories: BTreeMap<String, String>,
     #[serde(default)]
     before_remove_started: bool,
@@ -140,10 +142,11 @@ impl WorkspaceManager {
         let metadata = self.load_metadata(issue_id)?;
         Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
         self.verify_repository_configuration(&metadata_path, &metadata)?;
-        let coordinator = WorktreeCoordinator::new(
+        let coordinator = WorktreeCoordinator::new_with_branch(
             self.repos.clone(),
             metadata.branch_date,
             self.workspace_path(issue_id),
+            metadata.branch_name,
         );
         Ok(coordinator.worktree_paths(issue_id))
     }
@@ -266,6 +269,7 @@ impl WorkspaceManager {
         issue_id: &str,
         identifier: &str,
         date: &str,
+        branch_name: Option<&str>,
     ) -> Result<MetadataCreation, WorkspaceError> {
         let metadata_dir = self.metadata_dir();
         std::fs::create_dir_all(&metadata_dir).map_err(|error| WorkspaceError::CreationFailed {
@@ -277,6 +281,7 @@ impl WorkspaceManager {
             issue_id: issue_id.to_string(),
             issue_identifier: identifier.to_string(),
             branch_date: date.to_string(),
+            branch_name: branch_name.map(str::to_owned),
             repositories: self.repository_identities(),
             before_remove_started: false,
         };
@@ -348,6 +353,21 @@ impl WorkspaceManager {
         })
     }
 
+    fn verify_branch_identity(
+        metadata_path: &Path,
+        metadata: &WorkspaceMetadata,
+        requested_branch: Option<&str>,
+    ) -> Result<(), WorkspaceError> {
+        if requested_branch.is_none() || metadata.branch_name.as_deref() == requested_branch {
+            return Ok(());
+        }
+        Err(WorkspaceError::BranchIdentityMismatch {
+            path: metadata_path.display().to_string(),
+            expected_branch: metadata.branch_name.clone(),
+            actual_branch: requested_branch.map(str::to_owned),
+        })
+    }
+
     fn canonical_repository_identities(
         repositories: &BTreeMap<String, String>,
     ) -> BTreeMap<String, String> {
@@ -369,6 +389,17 @@ impl WorkspaceManager {
         &self,
         issue_id: &str,
         identifier: &str,
+    ) -> Result<WorkspaceResult, WorkspaceError> {
+        self.prepare_workspace_with_branch(issue_id, identifier, None)
+            .await
+    }
+
+    /// Prepare a workspace while preserving an adapter-provided opaque branch identity.
+    pub async fn prepare_workspace_with_branch(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        branch_name: Option<&str>,
     ) -> Result<WorkspaceResult, WorkspaceError> {
         let prepare_started_at = std::time::Instant::now();
         info!(
@@ -401,6 +432,7 @@ impl WorkspaceManager {
             let metadata_path = self.metadata_path(issue_id);
             Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
             self.verify_repository_configuration(&metadata_path, &metadata)?;
+            Self::verify_branch_identity(&metadata_path, &metadata, branch_name)?;
             if metadata.issue_identifier != identifier {
                 metadata.issue_identifier = identifier.to_string();
                 self.refresh_metadata(&metadata)?;
@@ -414,44 +446,53 @@ impl WorkspaceManager {
                 reason: format!("mkdir failed: {e}"),
             })?;
             let branch_date = chrono::Local::now().format("%Y-%m-%d").to_string();
-            let metadata = match self.create_metadata(issue_id, identifier, &branch_date) {
-                Ok(MetadataCreation::Created(metadata)) => metadata,
-                Ok(MetadataCreation::AlreadyExists) => match self.load_metadata(issue_id) {
-                    Ok(mut existing) => {
-                        if let Err(error) = Self::verify_ownership(
-                            &self.metadata_path(issue_id),
-                            &existing,
-                            issue_id,
-                        ) {
-                            let _ = std::fs::remove_dir(&base_path);
-                            return Err(error);
-                        }
-                        if let Err(error) = self.verify_repository_configuration(
-                            &self.metadata_path(issue_id),
-                            &existing,
-                        ) {
-                            let _ = std::fs::remove_dir(&base_path);
-                            return Err(error);
-                        }
-                        if existing.issue_identifier != identifier {
-                            existing.issue_identifier = identifier.to_string();
-                            if let Err(error) = self.refresh_metadata(&existing) {
+            let metadata =
+                match self.create_metadata(issue_id, identifier, &branch_date, branch_name) {
+                    Ok(MetadataCreation::Created(metadata)) => metadata,
+                    Ok(MetadataCreation::AlreadyExists) => match self.load_metadata(issue_id) {
+                        Ok(mut existing) => {
+                            if let Err(error) = Self::verify_ownership(
+                                &self.metadata_path(issue_id),
+                                &existing,
+                                issue_id,
+                            ) {
                                 let _ = std::fs::remove_dir(&base_path);
                                 return Err(error);
                             }
+                            if let Err(error) = self.verify_repository_configuration(
+                                &self.metadata_path(issue_id),
+                                &existing,
+                            ) {
+                                let _ = std::fs::remove_dir(&base_path);
+                                return Err(error);
+                            }
+                            if let Err(error) = Self::verify_branch_identity(
+                                &self.metadata_path(issue_id),
+                                &existing,
+                                branch_name,
+                            ) {
+                                let _ = std::fs::remove_dir(&base_path);
+                                return Err(error);
+                            }
+                            if existing.issue_identifier != identifier {
+                                existing.issue_identifier = identifier.to_string();
+                                if let Err(error) = self.refresh_metadata(&existing) {
+                                    let _ = std::fs::remove_dir(&base_path);
+                                    return Err(error);
+                                }
+                            }
+                            existing
                         }
-                        existing
-                    }
-                    Err(load_error) => {
+                        Err(load_error) => {
+                            let _ = std::fs::remove_dir(&base_path);
+                            return Err(load_error);
+                        }
+                    },
+                    Err(create_error) => {
                         let _ = std::fs::remove_dir(&base_path);
-                        return Err(load_error);
+                        return Err(create_error);
                     }
-                },
-                Err(create_error) => {
-                    let _ = std::fs::remove_dir(&base_path);
-                    return Err(create_error);
-                }
-            };
+                };
             if !base_path.is_dir() {
                 if let Err(cleanup_error) = std::fs::remove_dir_all(&base_path) {
                     warn!(
@@ -469,10 +510,11 @@ impl WorkspaceManager {
 
         // Prepare worktrees if repos configured
         let worktrees = if !self.repos.is_empty() {
-            let coordinator = WorktreeCoordinator::new(
+            let coordinator = WorktreeCoordinator::new_with_branch(
                 self.repos.clone(),
                 metadata.branch_date,
                 base_path.clone(),
+                metadata.branch_name.clone(),
             );
             info!(workspace = %base_path.display(), "preparing worktrees inside workspace");
             match coordinator.prepare_worktrees(issue_id).await {
@@ -530,8 +572,12 @@ impl WorkspaceManager {
             Self::verify_ownership(&metadata_path, &metadata, issue_id)?;
             self.verify_repository_configuration(&metadata_path, &metadata)?;
             if !self.repos.is_empty() {
-                let coordinator =
-                    WorktreeCoordinator::new(self.repos.clone(), metadata.branch_date, base_path);
+                let coordinator = WorktreeCoordinator::new_with_branch(
+                    self.repos.clone(),
+                    metadata.branch_date,
+                    base_path,
+                    metadata.branch_name,
+                );
                 coordinator
                     .cleanup_worktrees(issue_id)
                     .await
@@ -569,10 +615,11 @@ impl WorkspaceManager {
 
         // Clean up worktrees first - use persisted branch date to avoid date drift
         if !self.repos.is_empty() {
-            let coordinator = WorktreeCoordinator::new(
+            let coordinator = WorktreeCoordinator::new_with_branch(
                 self.repos.clone(),
                 metadata.branch_date,
                 base_path.clone(),
+                metadata.branch_name,
             );
             warn!(workspace = %base_path.display(), "cleaning up worktrees");
             coordinator.cleanup_worktrees(issue_id).await.map_err(|e| {
@@ -712,6 +759,35 @@ mod tests {
                 .into_iter()
                 .map(|(name, worktree)| (name, worktree.path))
                 .collect()
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_uses_and_persists_an_opaque_claim_branch() {
+        let root = TempDir::new().unwrap();
+        let (_repo, config) = setup_repo("owned");
+        let mgr = WorkspaceManager::new(root.path(), Some(vec![config])).unwrap();
+
+        let prepared = mgr
+            .prepare_workspace_with_branch(
+                "NODE_42",
+                "my-repo#42",
+                Some("configured/NODE_42-lease"),
+            )
+            .await
+            .unwrap();
+        let worktree = prepared.worktrees.values().next().unwrap();
+
+        assert_eq!(worktree.branch, "configured/NODE_42-lease");
+        assert!(worktree.path.is_dir());
+
+        let reused = mgr
+            .prepare_workspace("NODE_42", "my-repo#42")
+            .await
+            .unwrap();
+        assert_eq!(
+            reused.worktrees.values().next().unwrap().branch,
+            "configured/NODE_42-lease"
         );
     }
 
@@ -1422,7 +1498,7 @@ mod tests {
         let test_path = dir.path().join("test-workspace");
         std::fs::create_dir_all(&test_path).unwrap();
 
-        mgr.create_metadata("NODE_TEST", "test-workspace", "2024-06-15")
+        mgr.create_metadata("NODE_TEST", "test-workspace", "2024-06-15", None)
             .unwrap();
 
         let loaded = mgr.load_metadata("NODE_TEST").unwrap();
@@ -1445,7 +1521,7 @@ mod tests {
             finalize: Default::default(),
         }];
         let mgr = WorkspaceManager::new(dir.path(), Some(repos)).unwrap();
-        mgr.create_metadata(issue_id, "test-issue", "2020-01-01")
+        mgr.create_metadata(issue_id, "test-issue", "2020-01-01", None)
             .unwrap();
 
         let result = mgr.remove_workspace(issue_id).await;
@@ -1472,7 +1548,7 @@ mod tests {
 
         let ws_path = mgr.workspace_path("NODE_CLEANUP");
         std::fs::create_dir_all(&ws_path).unwrap();
-        mgr.create_metadata("NODE_CLEANUP", "cleanup-test", "2020-01-01")
+        mgr.create_metadata("NODE_CLEANUP", "cleanup-test", "2020-01-01", None)
             .unwrap();
 
         let remove_result = mgr.remove_workspace("NODE_CLEANUP").await;

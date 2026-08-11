@@ -1463,6 +1463,7 @@ mod tests {
                     marker: canonical_marker("run-1", "issue-1", "primary"),
                     pr_number: Some(420),
                     pr_url: Some("https://github.com/example/project/pull/420".to_string()),
+                    ownership_conflict: None,
                     last_error: None,
                     retry_from: None,
                 },
