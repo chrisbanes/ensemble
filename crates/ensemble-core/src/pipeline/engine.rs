@@ -1012,10 +1012,9 @@ fn resolve_actions_for_step(
             .then(Vec::new)
             .ok_or_else(|| format!("step '{step_name}' has actions but no structured output"));
     };
-    let source_output_digest = format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(value).map_err(|error| error.to_string())?)
-    );
+    let source_output_digest = hex::encode(Sha256::digest(
+        serde_json::to_vec(value).map_err(|error| error.to_string())?,
+    ));
     step.actions
             .iter()
             .enumerate()
@@ -1057,7 +1056,10 @@ fn resolve_actions_for_step(
                 };
                 let identity_material = format!("{issue_id}:{cycle}:{generation}:{step_name}:{index}:{source_output_digest}");
                 Ok(PendingStepAction {
-                    identity: format!("action:{:x}", Sha256::digest(identity_material.as_bytes())),
+                    identity: format!(
+                        "action:{}",
+                        hex::encode(Sha256::digest(identity_material.as_bytes()))
+                    ),
                     source_output_digest: source_output_digest.clone(),
                     action,
                 })
@@ -1625,7 +1627,7 @@ impl PipelineRun {
             source_step: config.source.step.clone(),
             pointer: config.source.pointer.clone(),
             selected_case,
-            source_output_digest: format!("{:x}", Sha256::digest(bytes)),
+            source_output_digest: hex::encode(Sha256::digest(bytes)),
         };
         self.route_decisions
             .insert(step.name.clone(), decision.clone());

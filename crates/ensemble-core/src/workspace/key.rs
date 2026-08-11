@@ -26,7 +26,7 @@ pub fn issue_workspace_key(issue_id: &str) -> String {
     digest.update((issue_id.len() as u64).to_be_bytes());
     digest.update(issue_id.as_bytes());
 
-    format!("{prefix}--{:x}", digest.finalize())
+    format!("{prefix}--{}", hex::encode(digest.finalize()))
 }
 
 #[cfg(test)]

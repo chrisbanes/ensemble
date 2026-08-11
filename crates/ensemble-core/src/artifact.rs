@@ -323,7 +323,7 @@ fn digest_path_digests(path_digests: &BTreeMap<String, String>) -> String {
         digest.update([0]);
         digest.update(path_digest.as_bytes());
     }
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 #[cfg(unix)]
@@ -349,7 +349,7 @@ async fn gitlink_path_digest(
         digest.update(len.to_le_bytes());
         digest.update(mode.to_le_bytes());
         digest_directory_filtered(&mut digest, directory, "tracked", 0, &[], &[])?;
-        Ok(Some(format!("{:x}", digest.finalize())))
+        Ok(Some(hex::encode(digest.finalize())))
     })
     .await
     .map_err(|error| format!("Artifact gitlink digest task failed: {error}"))?
@@ -450,7 +450,7 @@ fn path_digest_blocking(
             digest.update(mode.to_le_bytes());
         }
     }
-    Ok(Some(format!("{:x}", digest.finalize())))
+    Ok(Some(hex::encode(digest.finalize())))
 }
 
 #[cfg(not(unix))]
@@ -551,7 +551,7 @@ fn path_digest_blocking(
         );
         digest_directory_non_unix(&mut digest, directory, path_kind, 0)?;
     }
-    Ok(Some(format!("{:x}", digest.finalize())))
+    Ok(Some(hex::encode(digest.finalize())))
 }
 
 #[cfg(not(unix))]
@@ -1350,7 +1350,7 @@ async fn git_stdout_bytes(worktree: &Path, args: &[&str]) -> Result<Vec<u8>, Str
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut digest = Sha256::new();
     digest.update(bytes);
-    format!("{:x}", digest.finalize())
+    hex::encode(digest.finalize())
 }
 
 fn observation_digest(observation: &ArtifactRepositoryObservation) -> String {
