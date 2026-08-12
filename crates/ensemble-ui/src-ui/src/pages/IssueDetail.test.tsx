@@ -1165,6 +1165,7 @@ describe("useIssueRuntime lifecycle", () => {
     async (status, terminalStepState) => {
       const terminalDetail = {
         acceptance_attempts: [],
+        attention_items: [],
         issue_identifier: "todo-1",
         issue_id: "NODE_1",
         status,

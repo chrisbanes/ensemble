@@ -1,4 +1,5 @@
 use crate::api::router::AppState;
+use crate::api::security::ApiExposure;
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{EnsembleConfig, StepKind};
 use crate::history::artifacts::StepTranscriptArtifact;
@@ -11,7 +12,7 @@ use crate::observability::snapshot::{
     WorkflowStepInfo, WorkspaceInfo,
 };
 use crate::workspace::key::issue_workspace_key;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
@@ -61,16 +62,34 @@ impl ApiError {
     path = "/api/v1/state",
     operation_id = "getState",
     responses(
-        (status = 200, description = "Runtime snapshot", body = RuntimeSnapshot)
+        (status = 200, description = "Runtime snapshot", body = RuntimeSnapshot),
+        (status = 503, description = "Attention history unavailable", body = ApiError)
     ),
     tag = "state"
 )]
-pub async fn get_state(State(state): State<AppState>) -> (StatusCode, Json<RuntimeSnapshot>) {
+pub async fn get_state(
+    State(state): State<AppState>,
+    Extension(exposure): Extension<ApiExposure>,
+) -> impl IntoResponse {
     let lock = state.orchestrator_state.read().await;
-    let snapshot = build_state_snapshot(&lock);
+    let mut snapshot = build_state_snapshot(&lock);
     drop(lock);
 
-    (StatusCode::OK, Json(snapshot))
+    if exposure == ApiExposure::TrustedLocal {
+        let Some(store) = state.history_store.as_ref() else {
+            return attention_history_unavailable("attention history store is unavailable");
+        };
+        match store.read_open_attention().await {
+            Ok(attention_items) => snapshot.attention_items = attention_items,
+            Err(error) => {
+                return attention_history_unavailable(format!(
+                    "failed to read attention history: {error}"
+                ));
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(snapshot)).into_response()
 }
 
 /// GET /api/v1/{identifier}
@@ -86,12 +105,14 @@ pub async fn get_state(State(state): State<AppState>) -> (StatusCode, Json<Runti
     ),
     responses(
         (status = 200, description = "Issue detail", body = IssueDetailSnapshot),
-        (status = 404, description = "Issue not found", body = ApiError)
+        (status = 404, description = "Issue not found", body = ApiError),
+        (status = 503, description = "Attention history unavailable", body = ApiError)
     ),
     tag = "issues"
 )]
 pub async fn get_issue_detail(
     State(state): State<AppState>,
+    Extension(exposure): Extension<ApiExposure>,
     Path(identifier): Path<String>,
 ) -> impl IntoResponse {
     let config_dir = state
@@ -111,7 +132,10 @@ pub async fn get_issue_detail(
         enrich_issue_snapshot_pending_input(detail, &interaction_store).await;
     }
 
-    if let Some(detail) = live_detail {
+    if let Some(mut detail) = live_detail {
+        if let Err(response) = enrich_issue_attention(&state, exposure, &mut detail).await {
+            return response;
+        }
         return (StatusCode::OK, Json(detail)).into_response();
     }
 
@@ -134,7 +158,12 @@ pub async fn get_issue_detail(
     };
 
     match detail {
-        Some(detail) => (StatusCode::OK, Json(detail)).into_response(),
+        Some(mut detail) => {
+            if let Err(response) = enrich_issue_attention(&state, exposure, &mut detail).await {
+                return response;
+            }
+            (StatusCode::OK, Json(detail)).into_response()
+        }
         None => {
             let error = ApiError::new(
                 "issue_not_found",
@@ -146,6 +175,36 @@ pub async fn get_issue_detail(
             (StatusCode::NOT_FOUND, Json(error)).into_response()
         }
     }
+}
+
+async fn enrich_issue_attention(
+    state: &AppState,
+    exposure: ApiExposure,
+    detail: &mut IssueDetailSnapshot,
+) -> Result<(), axum::response::Response> {
+    if exposure == ApiExposure::UnsafeRemote {
+        return Ok(());
+    }
+    let Some(store) = state.history_store.as_ref() else {
+        return Err(attention_history_unavailable(
+            "attention history store is unavailable",
+        ));
+    };
+    detail.attention_items = store
+        .read_open_attention_for_subject(&detail.issue_identifier)
+        .await
+        .map_err(|error| {
+            attention_history_unavailable(format!("failed to read attention history: {error}"))
+        })?;
+    Ok(())
+}
+
+fn attention_history_unavailable(message: impl Into<String>) -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        api_error("attention_history_unavailable", message),
+    )
+        .into_response()
 }
 
 /// Build a name → step kind map from the active config so that
@@ -265,6 +324,7 @@ fn issue_snapshot_from_history_record(
         retry: Option::<RetryRow>::None,
         pending_input: None,
         current_interaction: None,
+        attention_items: vec![],
         last_error: record.last_error.clone(),
         finalize: FinalizeSnapshot {
             status: "not_required".to_string(),
@@ -563,6 +623,17 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use tempfile::NamedTempFile;
 
+    fn trusted_local() -> Extension<ApiExposure> {
+        Extension(ApiExposure::TrustedLocal)
+    }
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
     fn test_issue() -> Issue {
         Issue {
             id: "NODE_123".to_string(),
@@ -723,11 +794,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_state_returns_json() {
         let app_state = build_populated_state();
-        let (status, Json(snapshot)) = get_state(State(app_state)).await;
+        let response = get_state(State(app_state), trusted_local())
+            .await
+            .into_response();
 
-        assert_eq!(status, StatusCode::OK);
-
-        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
         assert_eq!(json["counts"]["running"], 1);
         assert_eq!(json["counts"]["retrying"], 1);
         assert_eq!(json["agent_totals"]["input_tokens"], 5000);
@@ -738,11 +810,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_state_empty() {
         let app_state = build_empty_state();
-        let (status, Json(snapshot)) = get_state(State(app_state)).await;
+        let response = get_state(State(app_state), trusted_local())
+            .await
+            .into_response();
 
-        assert_eq!(status, StatusCode::OK);
-
-        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
         assert_eq!(json["counts"]["running"], 0);
         assert_eq!(json["counts"]["retrying"], 0);
     }
@@ -750,7 +823,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_detail_found() {
         let app_state = build_populated_state();
-        let response = get_issue_detail(State(app_state), Path("my-repo#42".to_string())).await;
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("my-repo#42".to_string()),
+        )
+        .await;
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -759,8 +837,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_detail_not_found() {
         let app_state = build_populated_state();
-        let response =
-            get_issue_detail(State(app_state), Path("nonexistent#999".to_string())).await;
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("nonexistent#999".to_string()),
+        )
+        .await;
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -769,9 +851,13 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_detail_not_found_message_mentions_waiting_issues() {
         let app_state = build_empty_state();
-        let response = get_issue_detail(State(app_state), Path("nonexistent#999".to_string()))
-            .await
-            .into_response();
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("nonexistent#999".to_string()),
+        )
+        .await
+        .into_response();
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -828,7 +914,12 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_detail_retrying_issue() {
         let app_state = build_populated_state();
-        let response = get_issue_detail(State(app_state), Path("my-repo#99".to_string())).await;
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("my-repo#99".to_string()),
+        )
+        .await;
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
@@ -867,9 +958,13 @@ mod tests {
             .await
             .unwrap();
 
-        let response = get_issue_detail(State(app_state), Path("todo-0".to_string()))
-            .await
-            .into_response();
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("todo-0".to_string()),
+        )
+        .await
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::OK);
     }
@@ -907,9 +1002,13 @@ mod tests {
             .await
             .unwrap();
 
-        let response = get_issue_detail(State(app_state), Path("history#419".to_string()))
-            .await
-            .into_response();
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("history#419".to_string()),
+        )
+        .await
+        .into_response();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -953,9 +1052,13 @@ mod tests {
             .await
             .unwrap();
 
-        let response = get_issue_detail(State(app_state), Path("history#empty".to_string()))
-            .await
-            .into_response();
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("history#empty".to_string()),
+        )
+        .await
+        .into_response();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
@@ -970,9 +1073,13 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         app_state.history_path = temp_dir.path().to_path_buf();
 
-        let response = get_issue_detail(State(app_state), Path("todo-0".to_string()))
-            .await
-            .into_response();
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("todo-0".to_string()),
+        )
+        .await
+        .into_response();
 
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -1010,7 +1117,7 @@ mod tests {
             .await
             .unwrap();
 
-        let response = get_issue_detail(State(app_state), Path(".".to_string()))
+        let response = get_issue_detail(State(app_state), trusted_local(), Path(".".to_string()))
             .await
             .into_response();
 
@@ -1102,9 +1209,13 @@ on_failure: Failed
             .await
             .unwrap();
 
-        let response = get_issue_detail(State(app_state), Path("synth-1".to_string()))
-            .await
-            .into_response();
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("synth-1".to_string()),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
@@ -1171,7 +1282,12 @@ on_failure: Failed
         app_state.history_path = history_path;
         app_state.workspace_root = tmp.path().display().to_string();
 
-        let response = get_issue_detail(State(app_state), Path("repo#77".to_string())).await;
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("repo#77".to_string()),
+        )
+        .await;
         let body = axum::body::to_bytes(response.into_response().into_body(), usize::MAX)
             .await
             .unwrap();

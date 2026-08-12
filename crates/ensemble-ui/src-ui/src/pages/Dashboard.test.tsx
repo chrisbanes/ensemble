@@ -9,6 +9,22 @@ import Dashboard from "./Dashboard";
 function mockSnapshot(): RuntimeSnapshot {
   return {
     agent_totals: { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 },
+    attention_items: [{
+      identity: {
+        producer_key: "runtime.interaction",
+        subject_ref: "repo#2",
+        kind: "runtime.interaction.awaiting_input",
+      },
+      presentation: {
+        summary: "Agent needs a decision",
+        remedy: "Reply in the issue panel.",
+        references: ["interaction:ask-1"],
+      },
+      evidence: { fingerprint: "ask-1" },
+      state: "open",
+      opened_at: "2026-07-09T09:10:00Z",
+      updated_at: "2026-07-09T09:10:00Z",
+    }],
     counts: { running: 1, retrying: 0, waiting_on_human: 1, completed: 0 },
     generated_at: "2026-07-09T09:30:00Z",
     last_tick_at: "2026-07-09T09:29:58Z",

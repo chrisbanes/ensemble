@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { RuntimeSnapshot } from "@/generated/models";
+import type { AttentionItem, RuntimeSnapshot } from "@/generated/models";
 import {
   deriveMissionControlState,
   filterMissionControlIssues,
@@ -9,6 +9,26 @@ import {
   type MissionControlFilters,
 } from "./model";
 
+function attentionItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
+  return {
+    identity: {
+      producer_key: "runtime.interaction",
+      subject_ref: "repo#3",
+      kind: "runtime.interaction.awaiting_input",
+    },
+    presentation: {
+      summary: "Agent needs a decision",
+      remedy: "Reply in the issue panel.",
+      references: ["interaction:ask-1"],
+    },
+    evidence: { fingerprint: "abc123" },
+    state: "open",
+    opened_at: "2026-07-09T09:10:00Z",
+    updated_at: "2026-07-09T09:10:00Z",
+    ...overrides,
+  };
+}
+
 function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
   return {
     agent_totals: {
@@ -17,6 +37,7 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
       total_tokens: 3500,
       seconds_running: 95,
     },
+    attention_items: [],
     counts: { running: 1, retrying: 1, waiting_on_human: 1, completed: 1 },
     generated_at: "2026-07-09T09:30:00Z",
     last_tick_at: "2026-07-09T09:29:58Z",
@@ -80,13 +101,69 @@ describe("mission-control model", () => {
     ]);
   });
 
-  it("promotes human questions and retry recovery into attention items", () => {
-    const state = deriveMissionControlState(snapshot());
+  it("uses only persisted attention records, including unknown kinds and multiple producers", () => {
+    const state = deriveMissionControlState(
+      snapshot({
+        attention_items: [
+          attentionItem(),
+          attentionItem({
+            identity: {
+              producer_key: "adapter.policy",
+              subject_ref: "repo#3",
+              kind: "adapter.policy.escalation",
+            },
+            presentation: {
+              summary: "External approval is required",
+              remedy: "Review the linked policy record.",
+              references: ["policy:42", "run:run-7"],
+            },
+            opened_at: "2026-07-09T09:12:00Z",
+          }),
+        ],
+      }),
+    );
 
-    expect(state.attentionItems.map((item) => [item.issueIdentifier, item.kind, item.primaryAction])).toEqual([
-      ["repo#3", "human_input", "Reply"],
-      ["repo#2", "retry", "Inspect"],
+    expect(state.attentionItems).toMatchObject([
+      {
+        issueIdentifier: "repo#3",
+        kind: "runtime.interaction.awaiting_input",
+        title: "Agent needs a decision",
+        detail: "Reply in the issue panel.",
+        references: ["interaction:ask-1"],
+        requestedAt: "2026-07-09T09:10:00Z",
+        canNavigate: true,
+      },
+      {
+        issueIdentifier: "repo#3",
+        kind: "adapter.policy.escalation",
+        title: "External approval is required",
+        detail: "Review the linked policy record.",
+        references: ["policy:42", "run:run-7"],
+        requestedAt: "2026-07-09T09:12:00Z",
+        canNavigate: true,
+      },
     ]);
+    expect(state.issues.find((issue) => issue.identifier === "repo#2")?.attention).toBe(false);
+    expect(state.issues.find((issue) => issue.identifier === "repo#3")?.attention).toBe(true);
+  });
+
+  it("keeps persisted orphan attention visible but not navigable", () => {
+    const state = deriveMissionControlState(
+      snapshot({
+        attention_items: [attentionItem({
+          identity: {
+            producer_key: "adapter.policy",
+            subject_ref: "repo#orphan",
+            kind: "adapter.policy.escalation",
+          },
+        })],
+      }),
+    );
+
+    expect(state.attentionItems[0]).toMatchObject({
+      issueIdentifier: "repo#orphan",
+      canNavigate: false,
+    });
   });
 
   it("classifies synthetic halted waits as blocked failures instead of human input", () => {
@@ -114,18 +191,10 @@ describe("mission-control model", () => {
         identifier: "repo#halted",
         statusLabel: "Halted",
         activity: "Pipeline halted after review failed",
-        attention: true,
+        attention: false,
       }),
     ]);
-    expect(state.attentionItems).toEqual([
-      expect.objectContaining({
-        issueIdentifier: "repo#halted",
-        kind: "failure",
-        title: "Pipeline halted",
-        detail: "Blocked after review failed",
-        primaryAction: "Inspect",
-      }),
-    ]);
+    expect(state.attentionItems).toEqual([]);
     expect(state.stats).toMatchObject({ waitingOnHuman: 0, failed: 1 });
   });
 
@@ -173,18 +242,19 @@ describe("mission-control model", () => {
     ]);
   });
 
-  it("filters to attention-only issues", () => {
-    const state = deriveMissionControlState(snapshot());
+  it("filters to issues with persisted attention only", () => {
+    const state = deriveMissionControlState(
+      snapshot({ attention_items: [attentionItem()] }),
+    );
     const filters: MissionControlFilters = { query: "", status: "all", attentionOnly: true };
 
     expect(filterMissionControlIssues(state.issues, filters).map((issue) => issue.identifier)).toEqual([
-      "repo#2",
       "repo#3",
     ]);
   });
 
   it("searches status label, step name, and activity", () => {
-    const state = deriveMissionControlState(snapshot());
+    const state = deriveMissionControlState(snapshot({ attention_items: [attentionItem()] }));
 
     expect(
       filterMissionControlIssues(state.issues, { query: "completed_succeeded", status: "all", attentionOnly: false })
@@ -206,8 +276,8 @@ describe("mission-control model", () => {
 
     expect(regroupMissionControlIssues(filteredIssues).map((group) => [group.id, group.issues.length])).toEqual([
       ["running", 0],
-      ["retrying", 1],
-      ["waiting_on_human", 1],
+      ["retrying", 0],
+      ["waiting_on_human", 0],
       ["failed_or_blocked", 0],
       ["completed_recently", 0],
     ]);
@@ -238,22 +308,16 @@ describe("mission-control model", () => {
     );
 
     expect(state.groups.find((group) => group.id === "failed_or_blocked")?.issues).toEqual([
-      expect.objectContaining({ identifier: "repo#failed", attention: true }),
+      expect.objectContaining({ identifier: "repo#failed", attention: false }),
     ]);
     expect(state.groups.find((group) => group.id === "completed_recently")?.issues).toEqual([
       expect.objectContaining({ identifier: "repo#succeeded", attention: false }),
     ]);
-    expect(state.attentionItems).toContainEqual(
-      expect.objectContaining({
-        issueIdentifier: "repo#failed",
-        kind: "failure",
-        primaryAction: "Inspect",
-      }),
-    );
+    expect(state.attentionItems).toEqual([]);
     expect(state.stats).toMatchObject({ completed: 2, failed: 1 });
   });
 
-  it("includes completed_failed in failed and attention-only filters", () => {
+  it("keeps completed_failed in failed filters without inferring attention", () => {
     const state = deriveMissionControlState(
       snapshot({
         counts: { running: 0, retrying: 0, waiting_on_human: 0, completed: 1 },
@@ -278,13 +342,11 @@ describe("mission-control model", () => {
         attentionOnly: false,
       }).map((issue) => issue.identifier),
     ).toEqual(["repo#failed"]);
-    expect(
-      filterMissionControlIssues(state.issues, {
-        query: "",
-        status: "all",
-        attentionOnly: true,
-      }).map((issue) => issue.identifier),
-    ).toEqual(["repo#failed"]);
+    expect(filterMissionControlIssues(state.issues, {
+      query: "",
+      status: "all",
+      attentionOnly: true,
+    })).toEqual([]);
   });
 
   it("does not infer retry exhaustion from unspecified completed statuses", () => {

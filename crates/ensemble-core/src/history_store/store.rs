@@ -11,7 +11,7 @@ use crate::timeline::{TimelineQuery, TimelineResponse};
 
 #[derive(Debug, Clone)]
 pub struct HistoryStore {
-    db_path: PathBuf,
+    pub(crate) db_path: PathBuf,
 }
 
 impl HistoryStore {

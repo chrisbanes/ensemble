@@ -48,6 +48,10 @@ _Avoid_: Step result, execution result
 A durable question, approval, or handoff that blocks a run until a human resolves it.
 _Avoid_: Prompt, comment
 
+**Operator-attention item**:
+A durable, non-authoritative report from a producer that fresh evidence says a subject needs an operator.
+_Avoid_: Interaction request, action, command
+
 **Finalization**:
 The recoverable post-pipeline phase that performs configured repository publication, if any, before an issue is considered complete.
 _Avoid_: Completion, cleanup

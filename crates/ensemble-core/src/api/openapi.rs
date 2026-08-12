@@ -13,6 +13,7 @@ use utoipa::OpenApi;
         crate::api::handlers::get_step_detail,
         crate::api::handlers::post_refresh,
         crate::api::history_handler::get_history,
+        crate::api::attention_handler::get_attention_history,
         crate::api::timeline_handler::get_timeline,
         crate::api::config_handler::get_config,
         crate::api::config_edit_handler::validate_yaml,
@@ -138,6 +139,13 @@ use utoipa::OpenApi;
         crate::history::model::HistoryRecord,
         crate::history::model::TokenTotals,
         crate::history::reader::HistoryResponse,
+        crate::attention::AttentionIdentity,
+        crate::attention::AttentionPresentation,
+        crate::attention::AttentionEvidence,
+        crate::attention::AttentionLifecycleState,
+        crate::attention::AttentionItem,
+        crate::attention::AttentionEvent,
+        crate::attention::AttentionHistoryResponse,
         // Timeline types
         crate::timeline::model::TimelineEventRecord,
         crate::timeline::TimelineResponse,
@@ -156,6 +164,7 @@ use utoipa::OpenApi;
         (name = "controls", description = "Agent control"),
         (name = "interactions", description = "Human interaction requests"),
         (name = "history", description = "Completion history"),
+        (name = "attention", description = "Trusted-local operator-attention history"),
         (name = "config", description = "Configuration"),
         (name = "conversation", description = "Agent conversation logs"),
         (name = "filesystem", description = "File browser"),
@@ -174,6 +183,16 @@ mod tests {
         assert!(spec.contains("Ensemble API"));
         assert!(spec.contains("HumanInteractionConfig"));
         assert!(spec.contains("HumanResumeMode"));
+    }
+
+    #[test]
+    fn test_openapi_documents_read_only_attention_history() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        assert!(spec["paths"]["/api/v1/attention"]["get"].is_object());
+        assert!(spec["paths"]["/api/v1/attention"].get("post").is_none());
+        assert!(spec["components"]["schemas"]["AttentionHistoryResponse"].is_object());
     }
 
     #[test]

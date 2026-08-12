@@ -87,14 +87,13 @@ const stats: MissionSystemStats = {
 const attentionItems: MissionAttentionItem[] = [
   {
     id: "ask-1",
-    issueId: "issue-1",
     issueIdentifier: "repo#1",
-    kind: "human_input",
-    title: "Agent needs input",
-    detail: "Waiting in review",
-    stepName: "review",
+    kind: "runtime.interaction.awaiting_input",
+    title: "Agent needs a decision",
+    detail: "Reply in the issue panel.",
+    references: ["interaction:ask-1"],
     requestedAt: "2026-07-09T09:10:00Z",
-    primaryAction: "Reply",
+    canNavigate: true,
   },
 ];
 
@@ -121,6 +120,40 @@ function issue(overrides: Partial<MissionIssueSummary> = {}): MissionIssueSummar
 function runtimeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
   return {
     agent_totals: { input_tokens: 100, output_tokens: 50, total_tokens: 150, seconds_running: 60 },
+    attention_items: [
+      {
+        identity: {
+          producer_key: "runtime.interaction",
+          subject_ref: "repo#3",
+          kind: "runtime.interaction.awaiting_input",
+        },
+        presentation: {
+          summary: "Agent needs a decision",
+          remedy: "Reply in the issue panel.",
+          references: ["interaction:ask-1"],
+        },
+        evidence: { fingerprint: "ask-1" },
+        state: "open",
+        opened_at: "2026-07-09T09:10:00Z",
+        updated_at: "2026-07-09T09:10:00Z",
+      },
+      {
+        identity: {
+          producer_key: "adapter.policy",
+          subject_ref: "repo#2",
+          kind: "adapter.policy.escalation",
+        },
+        presentation: {
+          summary: "Retry scheduling needs review",
+          remedy: "Inspect the policy record.",
+          references: ["policy:retry-2"],
+        },
+        evidence: { fingerprint: "retry-2" },
+        state: "open",
+        opened_at: "2026-07-09T09:11:00Z",
+        updated_at: "2026-07-09T09:11:00Z",
+      },
+    ],
     counts: { running: 1, retrying: 1, waiting_on_human: 1, completed: 1 },
     generated_at: "2026-07-09T09:30:00Z",
     last_tick_at: "2026-07-09T09:29:58Z",
@@ -183,6 +216,7 @@ function mockMutation<T>(): T {
 function runtimeFixture(identifier: string): IssueRuntimeState {
   const data = {
     acceptance_attempts: [],
+    attention_items: [],
     issue_identifier: identifier,
     issue_id: `id:${identifier}`,
     status: "running",
@@ -473,7 +507,7 @@ describe("Mission Control shell components", () => {
       />,
     );
 
-    await userEvent.click(screen.getByRole("button", { name: /Reply to repo#1/i }));
+    await userEvent.click(screen.getByRole("button", { name: "Open repo#1" }));
 
     expect(onSelectIssue).toHaveBeenCalledWith("repo#1");
   });
@@ -488,25 +522,23 @@ describe("Mission Control shell components", () => {
           ...attentionItems,
           {
             id: "retry:issue-2",
-            issueId: "issue-2",
             issueIdentifier: "repo#2",
-            kind: "retry",
-            title: "Retry scheduled",
-            detail: "clippy failed",
-            stepName: null,
-            requestedAt: null,
-            primaryAction: "Inspect",
+            kind: "adapter.policy.escalation",
+            title: "Policy review required",
+            detail: "A retry needs policy review.",
+            references: ["policy:retry-2", "run:7"],
+            requestedAt: "2026-07-09T09:20:00Z",
+            canNavigate: true,
           },
           {
             id: "failure:issue-3",
-            issueId: "issue-3",
             issueIdentifier: "repo#failed",
-            kind: "failure",
-            title: "Run failed",
-            detail: "completed_failed",
-            stepName: null,
+            kind: "integration.release.decision",
+            title: "Release decision required",
+            detail: "Check the release record.",
+            references: [],
             requestedAt: "2026-07-09T09:30:00Z",
-            primaryAction: "Inspect",
+            canNavigate: true,
           },
         ]}
         selectedIssueIdentifier="repo#1"
@@ -515,18 +547,19 @@ describe("Mission Control shell components", () => {
     );
 
     expect(screen.getByText("repo#1")).toBeInTheDocument();
-    expect(screen.getByText("Agent needs input")).toBeInTheDocument();
-    expect(screen.getByText("Waiting in review")).toBeInTheDocument();
-    expect(screen.getByText("review")).toBeInTheDocument();
-    expect(screen.getByText("Reply")).toBeInTheDocument();
+    expect(screen.getByText("Agent needs a decision")).toBeInTheDocument();
+    expect(screen.getByText("Reply in the issue panel.")).toBeInTheDocument();
+    expect(screen.getByText("runtime.interaction.awaiting_input")).toBeInTheDocument();
+    expect(screen.getByText("1 reference")).toBeInTheDocument();
     expect(screen.getByText("32m ago")).toBeInTheDocument();
     expect(screen.getByText("repo#2")).toBeInTheDocument();
-    expect(screen.getAllByText("Inspect")).toHaveLength(2);
-    expect(screen.getByText("scheduled")).toBeInTheDocument();
+    expect(screen.getByText("adapter.policy.escalation")).toBeInTheDocument();
+    expect(screen.getByText("2 references")).toBeInTheDocument();
     expect(screen.getByText("repo#failed")).toBeInTheDocument();
-    expect(screen.getByText("Run failed")).toBeInTheDocument();
-    expect(screen.getByText("failure")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Reply to repo#1/i })).toHaveAttribute(
+    expect(screen.getByText("Release decision required")).toBeInTheDocument();
+    expect(screen.getByText("integration.release.decision")).toBeInTheDocument();
+    expect(screen.getByText("0 references")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open repo#1" })).toHaveAttribute(
       "aria-current",
       "true",
     );
@@ -540,6 +573,19 @@ describe("Mission Control shell components", () => {
     expect(screen.getByText("Needs Attention")).toBeInTheDocument();
     expect(screen.getByText("0")).toBeInTheDocument();
     expect(screen.getByText("Nothing needs intervention right now.")).toBeInTheDocument();
+  });
+
+  it("renders an orphan attention item without a navigation action", () => {
+    render(
+      <AttentionQueue
+        items={[{ ...attentionItems[0]!, issueIdentifier: "repo#orphan", canNavigate: false }]}
+        selectedIssueIdentifier={null}
+        onSelectIssue={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("repo#orphan")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open repo#orphan" })).not.toBeInTheDocument();
   });
 });
 
@@ -706,7 +752,7 @@ describe("Mission Control page", () => {
     expect(within(operations).getByText("repo#2")).toBeInTheDocument();
     expect(within(operations).getByText("repo#3")).toBeInTheDocument();
     expect(within(operations).queryByText("repo#1")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reply to repo#3" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open repo#3" })).toBeInTheDocument();
   });
 
   it("shows one filtered-empty state in board mode", async () => {
@@ -751,67 +797,45 @@ describe("Mission Control page", () => {
     await waitFor(() => expect(trigger).toHaveFocus());
   });
 
-  it("opens human attention on Respond and preserves the current tab for retry attention", async () => {
+  it("opens a canonical attention record without changing the selected panel tab", async () => {
     const user = userEvent.setup();
     renderMissionControl(runtimeSnapshot());
 
-    await user.click(screen.getByRole("button", { name: "Reply to repo#3" }));
+    await user.click(screen.getByRole("button", { name: "Open repo#3" }));
     expect(screen.getByRole("heading", { name: "repo#3" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Respond" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
 
-    await user.click(screen.getByRole("button", { name: "Inspect to repo#2" }));
+    await user.click(screen.getByRole("button", { name: "Open repo#2" }));
     expect(screen.getByRole("heading", { name: "repo#2" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Respond" })).toHaveAttribute("aria-selected", "true");
-  });
-
-  it("does not force Respond when opening an ordinary or retrying issue", async () => {
-    const user = userEvent.setup();
-    renderMissionControl(runtimeSnapshot());
-    const operations = screen.getByRole("region", { name: "Operations" });
-
-    await user.click(within(operations).getByRole("button", { name: /Open\s*repo#1/i }));
-    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
-
-    await user.click(screen.getByRole("button", { name: "Close issue panel" }));
-    await user.click(screen.getByRole("button", { name: "Inspect to repo#2" }));
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
   });
 
-  it("switches from Respond to Overview when opening halted attention for inspection", async () => {
-    const user = userEvent.setup();
+  it("does not infer attention from waiting, retrying, halted, or failed runtime rows", () => {
     renderMissionControl(
       runtimeSnapshot({
-        counts: { running: 0, retrying: 0, waiting_on_human: 2, completed: 0 },
+        attention_items: [],
+        counts: { running: 0, retrying: 1, waiting_on_human: 1, completed: 1 },
         running: [],
-        retrying: [],
-        waiting_on_human: [
-          {
-            interaction_request_id: "ask-human",
-            issue_id: "issue-human",
-            issue_identifier: "repo#human",
-            requested_at: "2026-07-09T09:10:00Z",
-            step_name: "build",
-          },
-          {
-            interaction_request_id: "halted:issue-halted:review",
-            issue_id: "issue-halted",
-            issue_identifier: "repo#halted",
-            requested_at: "2026-07-09T09:15:00Z",
-            step_name: "review",
-          },
-        ],
-        completed: [],
+        waiting_on_human: [{
+          interaction_request_id: "halted:issue-halted:review",
+          issue_id: "issue-halted",
+          issue_identifier: "repo#halted",
+          requested_at: "2026-07-09T09:15:00Z",
+          step_name: "review",
+        }],
+        completed: [{
+          issue_id: "issue-failed",
+          issue_identifier: "repo#failed",
+          completed_at: "2026-07-09T09:25:00Z",
+          status: "completed_failed",
+        }],
       }),
     );
 
-    await user.click(screen.getByRole("button", { name: "Reply to repo#human" }));
-    expect(screen.getByRole("tab", { name: "Respond" })).toHaveAttribute("aria-selected", "true");
-
-    expect(screen.queryByRole("button", { name: "Reply to repo#halted" })).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Inspect to repo#halted" }));
-
-    expect(screen.getByRole("heading", { name: "repo#halted" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Overview" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByText("Nothing needs intervention right now.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open repo#2" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open repo#halted" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open repo#failed" })).not.toBeInTheDocument();
   });
 
   it("closes the panel and focuses Operations when a refreshed snapshot removes the selected issue", async () => {
@@ -987,6 +1011,7 @@ describe("Mission Control page", () => {
   it("shows a true empty operational state", () => {
     renderMissionControl(
       runtimeSnapshot({
+        attention_items: [],
         counts: { running: 0, retrying: 0, waiting_on_human: 0, completed: 0 },
         running: [],
         retrying: [],

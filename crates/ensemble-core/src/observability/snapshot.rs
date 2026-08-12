@@ -1,4 +1,5 @@
 use crate::acceptance::AcceptanceAttempt;
+use crate::attention::AttentionItem;
 use crate::history::artifacts::{RunArtifacts, StepTranscriptArtifact};
 use crate::interaction::store::InteractionStore;
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
@@ -17,6 +18,7 @@ pub struct RuntimeSnapshot {
     pub running: Vec<RunningSessionRow>,
     pub retrying: Vec<RetryRow>,
     pub waiting_on_human: Vec<WaitingInteractionRow>,
+    pub attention_items: Vec<AttentionItem>,
     pub completed: Vec<CompletedRow>,
     pub agent_totals: AgentTotalsSnapshot,
     pub rate_limits: Option<RateLimitSnapshot>,
@@ -128,6 +130,7 @@ pub struct IssueDetailSnapshot {
     pub pending_input: Option<PendingInputSummary>,
     /// Deprecated compatibility field. Prefer `pending_input`.
     pub current_interaction: Option<CurrentInteractionSummary>,
+    pub attention_items: Vec<AttentionItem>,
     pub last_error: Option<String>,
     pub finalize: FinalizeSnapshot,
     pub workflow_steps: Vec<WorkflowStepInfo>,
@@ -288,6 +291,7 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
         running: running_rows,
         retrying: retry_rows,
         waiting_on_human: waiting_rows,
+        attention_items: vec![],
         completed: completed_rows,
         agent_totals: AgentTotalsSnapshot {
             input_tokens: state.agent_totals.input_tokens,
@@ -721,6 +725,7 @@ pub async fn build_issue_snapshot(
         retry: retry_detail,
         pending_input,
         current_interaction,
+        attention_items: vec![],
         last_error,
         finalize,
         workflow_steps,

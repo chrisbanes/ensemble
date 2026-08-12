@@ -1,5 +1,7 @@
 use crate::api::handlers::ApiError;
 use crate::api::router::AppState;
+use crate::attention::interaction::interaction_attention_close;
+use crate::attention::AttentionReporter;
 use crate::interaction::error::InteractionError;
 use crate::interaction::model::{
     AcceptedInteractionCommand, InteractionKind, InteractionRequest, InteractionResponse,
@@ -14,6 +16,7 @@ use axum::Json;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::warn;
 
 static LOCAL_API_INPUT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -255,15 +258,26 @@ pub async fn respond_to_interaction(
         received_at,
     };
 
-    match interaction_store(&state)
-        .accept_response(&id, command, response)
-        .await
-    {
-        Ok(InteractionAcceptance::Accepted(interaction)) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(interaction).unwrap()),
-        )
-            .into_response(),
+    let store = interaction_store(&state);
+    let before = match store.get(&id).await {
+        Ok(Some(interaction)) => interaction,
+        Ok(None) => {
+            return interaction_error_response(InteractionError::NotFound { id }).into_response();
+        }
+        Err(error) => return interaction_error_response(error).into_response(),
+    };
+
+    match store.accept_response(&id, command, response).await {
+        Ok(InteractionAcceptance::Accepted(interaction)) => {
+            if let Err(error) = retire_attention(&state, &before, &interaction).await {
+                warn!(interaction_id = %interaction.id, error, "interaction attention retirement will reconcile on a later tick");
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(interaction).unwrap()),
+            )
+                .into_response()
+        }
         Ok(InteractionAcceptance::Ignored(interaction)) => {
             let error = if interaction.status == InteractionStatus::Cancelled {
                 InteractionError::AlreadyCancelled { id }
@@ -308,12 +322,138 @@ pub async fn cancel_interaction(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match interaction_store(&state).cancel(&id).await {
-        Ok(interaction) => (
-            StatusCode::OK,
-            Json(serde_json::to_value(interaction).unwrap()),
-        )
-            .into_response(),
+    let store = interaction_store(&state);
+    let before = match store.get(&id).await {
+        Ok(Some(interaction)) => interaction,
+        Ok(None) => {
+            return interaction_error_response(InteractionError::NotFound { id }).into_response();
+        }
+        Err(error) => return interaction_error_response(error).into_response(),
+    };
+    match store.cancel(&id).await {
+        Ok(interaction) => {
+            if let Err(error) = retire_attention(&state, &before, &interaction).await {
+                warn!(interaction_id = %interaction.id, error, "interaction attention retirement will reconcile on a later tick");
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(interaction).unwrap()),
+            )
+                .into_response()
+        }
         Err(error) => interaction_error_response(error).into_response(),
+    }
+}
+
+async fn retire_attention(
+    state: &AppState,
+    before: &InteractionRequest,
+    after: &InteractionRequest,
+) -> Result<(), String> {
+    let Some(history_store) = state.history_store.clone() else {
+        return Err("attention history store is unavailable".into());
+    };
+    let close = interaction_attention_close(before, after)
+        .map_err(|error| format!("failed to derive attention close evidence: {error}"))?;
+    AttentionReporter::new(history_store)
+        .resolve(close)
+        .await
+        .map_err(|error| format!("failed to retire interaction attention: {error}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::test_helpers::{app_state_with_document_state, parsed_document_state};
+    use crate::interaction::InteractionResumeStrategy;
+
+    fn request(id: &str) -> InteractionRequest {
+        InteractionRequest {
+            id: id.into(),
+            schema_version: 1,
+            issue_id: "issue-514".into(),
+            issue_identifier: "repo#514".into(),
+            pipeline_cycle: 1,
+            completed_steps: vec![],
+            step_name: "build".into(),
+            agent_name: "solver".into(),
+            step_depends: vec![],
+            step_tracker_state: None,
+            kind: InteractionKind::Question,
+            status: InteractionStatus::Open,
+            blocking: true,
+            awaiting_resume: true,
+            resume_strategy: InteractionResumeStrategy::RerunStep,
+            title: "Need input".into(),
+            body: "Choose an option".into(),
+            options: vec![],
+            artifacts: vec![],
+            thread_root_comment_id: None,
+            thread_root_comment_url: None,
+            last_processed_comment_id: None,
+            accepted_command: None,
+            ignored_commands: vec![],
+            response: None,
+            waiting_started_at: None,
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at: Utc::now(),
+            resolved_at: None,
+        }
+    }
+
+    fn state_without_attention_history(config_path: std::path::PathBuf) -> AppState {
+        let mut state = app_state_with_document_state(parsed_document_state());
+        state.config_runtime.config_path = config_path;
+        state.history_store = None;
+        state
+    }
+
+    #[tokio::test]
+    async fn response_keeps_committed_resolution_when_attention_retirement_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.yaml");
+        let state = state_without_attention_history(config_path);
+        let store = interaction_store(&state);
+        store.create(request("response-1")).await.unwrap();
+
+        let response = respond_to_interaction(
+            State(state),
+            Path("response-1".into()),
+            Ok(Json(InteractionResponseBody::Question {
+                response_schema_version: 1,
+                text: "Proceed".into(),
+                selected_option: None,
+            })),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store.get("response-1").await.unwrap().unwrap().status,
+            InteractionStatus::Resolved
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_keeps_committed_cancellation_when_attention_retirement_is_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_path = temp.path().join("config.yaml");
+        let state = state_without_attention_history(config_path);
+        let store = interaction_store(&state);
+        store.create(request("cancel-1")).await.unwrap();
+
+        let response = cancel_interaction(State(state), Path("cancel-1".into()))
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            store.get("cancel-1").await.unwrap().unwrap().status,
+            InteractionStatus::Cancelled
+        );
     }
 }
