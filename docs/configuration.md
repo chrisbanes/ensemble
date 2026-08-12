@@ -567,9 +567,20 @@ pipelines:
 scheduler:
   lanes:
     delivery:
+      precedence: 10
       capacity: 3
     planning:
+      precedence: 20
       capacity: 1
+      idle_only: true
+  resources:
+    shared-sandbox:
+      capacity: 1
+  recovery:
+    max_attempts: 3
+    max_backoff_ms: 300000
+  one_shot:
+    deadline_ms: 300000
 
 workflow_selection:
   - name: ready-delivery
@@ -609,8 +620,13 @@ non-empty and contain no blank or normalized-duplicate values.
 
 Rules are evaluated by ascending positive `precedence`; the first matching rule selects one named
 pipeline and one scheduler lane. Rule names and precedence values must be unique, and every
-pipeline and lane reference must exist. Lane capacity must be a positive integer. Every named
-pipeline is validated as a complete DAG with non-blank terminal transitions.
+pipeline and lane reference must exist. Lanes have unique positive `precedence`; `capacity`, when
+set, is a positive live-worker cap, while `idle_only` admits the lane only when no worker is live.
+Named resources are positive-capacity unit pools. `scheduler.recovery.max_attempts` bounds all
+automatic recovery paths; exhaustion retains the claimed run and asks an operator to provide fresh
+evidence before resuming it. `scheduler.one_shot.deadline_ms` supplies the default deadline for
+`ensemble run --once`. Every named pipeline is validated as a complete DAG with non-blank terminal
+transitions.
 
 `order_by` accepts `priority`, `tracker_position`, `created_at`, and `identifier`. Keys are applied
 in their listed order, ascending, with null values last. Keys cannot repeat, and `identifier`, when
@@ -631,6 +647,8 @@ Pipeline step definitions. Each step invokes one agent.
 | `timeout_ms` | integer | inherits `agent.turn_timeout_ms` | Optional maximum time for each runtime prompt or turn in this step |
 | `approval.mode` | string | — | Optional post-step approval policy: `always` or `when_requested_by_agent` |
 | `approval.state` | string | — | Optional tracker state to mirror while waiting for approval |
+| `resource_requests` | map of string to integer | `{}` | Named scheduler resource units required atomically before the step starts |
+| `affected_paths` | object | — | Output path source with `step` (direct dependency) and JSON `pointer`; normalized repository-relative paths are leased while the worker is live |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
 

@@ -33,7 +33,14 @@ enum Command {
     /// Interactively create an ensemble configuration directory.
     Init,
     /// Start the ensemble orchestrator in headless mode.
-    Run,
+    Run {
+        /// Stop after a bounded scheduler drain and emit one JSON result.
+        #[arg(long)]
+        once: bool,
+        /// Override the configured one-shot deadline in milliseconds.
+        #[arg(long)]
+        deadline_ms: Option<u64>,
+    },
     /// Start the ensemble orchestrator with web UI.
     #[cfg(feature = "web-ui")]
     Web {
@@ -139,7 +146,14 @@ async fn main() -> ExitCode {
         Some(Command::Init) => {
             commands::init::execute(commands::init::InitArgs { config_dir }).await
         }
-        Some(Command::Run) => commands::run::execute(commands::run::RunArgs { config_dir }).await,
+        Some(Command::Run { once, deadline_ms }) => {
+            commands::run::execute(commands::run::RunArgs {
+                config_dir,
+                once,
+                deadline_ms,
+            })
+            .await
+        }
         #[cfg(feature = "web-ui")]
         Some(Command::Web {
             host,
@@ -160,7 +174,14 @@ async fn main() -> ExitCode {
             })
             .await
         }
-        None => commands::run::execute(commands::run::RunArgs { config_dir }).await,
+        None => {
+            commands::run::execute(commands::run::RunArgs {
+                config_dir,
+                once: false,
+                deadline_ms: None,
+            })
+            .await
+        }
     }
 }
 
@@ -218,7 +239,9 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run", "--config-dir", "/tmp/ensemble"]);
         match cli.command {
-            Some(Command::Run) => {
+            Some(Command::Run { once, deadline_ms }) => {
+                assert!(!once);
+                assert_eq!(deadline_ms, None);
                 assert_eq!(cli.config.config_dir, Some(PathBuf::from("/tmp/ensemble")))
             }
             other => panic!("expected Run subcommand, got {:?}", other),
@@ -231,9 +254,27 @@ mod tests {
         let (_guard, host, port) = lock_and_clear_env();
         let cli = Cli::parse_from(["ensemble", "run"]);
         match cli.command {
-            Some(Command::Run) => assert_eq!(cli.config.config_dir, None),
+            Some(Command::Run { once, deadline_ms }) => {
+                assert!(!once);
+                assert_eq!(deadline_ms, None);
+                assert_eq!(cli.config.config_dir, None)
+            }
             other => panic!("expected Run subcommand, got {:?}", other),
         }
+        restore_env(host, port);
+    }
+
+    #[test]
+    fn test_cli_parse_bounded_run_options() {
+        let (_guard, host, port) = lock_and_clear_env();
+        let cli = Cli::parse_from(["ensemble", "run", "--once", "--deadline-ms", "25"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Run {
+                once: true,
+                deadline_ms: Some(25)
+            })
+        ));
         restore_env(host, port);
     }
 

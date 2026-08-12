@@ -14,6 +14,8 @@ use ensemble_core::workspace::finalize::FinalizeMode;
 #[derive(Debug, Clone)]
 pub struct RunArgs {
     pub config_dir: Option<PathBuf>,
+    pub once: bool,
+    pub deadline_ms: Option<u64>,
 }
 
 /// Run the orchestrator in headless mode (terminal output only)
@@ -115,6 +117,50 @@ pub async fn execute(args: RunArgs) -> ExitCode {
         }
     }
 
+    if args.once {
+        watcher.abort();
+        let config = prepared
+            .app_state
+            .config_runtime
+            .document_state
+            .read()
+            .await
+            .active_config
+            .clone()
+            .expect("runnable config has active config");
+        let deadline_ms = args
+            .deadline_ms
+            .unwrap_or(config.scheduler.one_shot.deadline_ms);
+        if deadline_ms == 0 {
+            eprintln!("error: --deadline-ms must be positive");
+            return ExitCode::FAILURE;
+        }
+        let result = match ensemble_core::api::bootstrap::run_orchestrator_once_for_app(
+            &prepared.app_state,
+            std::time::Duration::from_millis(deadline_ms),
+        )
+        .await
+        {
+            Ok(Some(result)) => result,
+            Ok(None) | Err(_) => {
+                eprintln!("error: runnable config did not produce an orchestrator runtime");
+                return ExitCode::FAILURE;
+            }
+        };
+        println!(
+            "{}",
+            serde_json::to_string(&result).expect("drain result serializes")
+        );
+        return if matches!(
+            result.outcome,
+            ensemble_core::orchestrator::DrainOutcome::Success
+        ) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
+
     match start_or_replace_registered_orchestrator(&prepared.app_state).await {
         Ok(true) => {}
         Ok(false) => {
@@ -155,13 +201,19 @@ mod tests {
     fn test_run_args() {
         let args = RunArgs {
             config_dir: Some(PathBuf::from("/tmp/test")),
+            once: false,
+            deadline_ms: None,
         };
         assert_eq!(args.config_dir, Some(PathBuf::from("/tmp/test")));
     }
 
     #[test]
     fn test_run_args_none() {
-        let args = RunArgs { config_dir: None };
+        let args = RunArgs {
+            config_dir: None,
+            once: false,
+            deadline_ms: None,
+        };
         assert!(args.config_dir.is_none());
     }
 }

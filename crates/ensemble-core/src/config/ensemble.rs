@@ -66,13 +66,69 @@ pub struct PipelineConfig {
 pub struct SchedulerConfig {
     #[serde(default)]
     pub lanes: BTreeMap<String, SchedulerLaneConfig>,
+    #[serde(default)]
+    pub resources: BTreeMap<String, SchedulerResourceConfig>,
+    #[serde(default)]
+    pub recovery: Option<SchedulerRecoveryConfig>,
+    #[serde(default)]
+    pub one_shot: SchedulerOneShotConfig,
 }
 
-/// A positive-capacity worker bucket shared by selected runs in one lane.
+/// A precedence-ordered worker bucket shared by selected runs in one lane.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SchedulerLaneConfig {
+    #[serde(default = "default_lane_precedence")]
+    pub precedence: u32,
+    #[serde(default)]
+    pub idle_only: bool,
+    #[serde(default)]
+    pub capacity: Option<u32>,
+}
+
+fn default_lane_precedence() -> u32 {
+    1
+}
+
+/// A named scheduler resource with a positive number of fungible units.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerResourceConfig {
+    #[serde(default = "default_resource_capacity")]
     pub capacity: u32,
+}
+
+fn default_resource_capacity() -> u32 {
+    1
+}
+
+/// Bounded automatic recovery for retained scheduler runs.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerRecoveryConfig {
+    pub max_attempts: u32,
+    #[serde(default)]
+    pub max_backoff_ms: Option<u64>,
+}
+
+/// The default deadline for bounded scheduler execution.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SchedulerOneShotConfig {
+    #[serde(default = "default_one_shot_deadline_ms")]
+    pub deadline_ms: u64,
+}
+
+fn default_one_shot_deadline_ms() -> u64 {
+    300_000
+}
+
+impl Default for SchedulerOneShotConfig {
+    fn default() -> Self {
+        Self {
+            deadline_ms: default_one_shot_deadline_ms(),
+        }
+    }
 }
 
 /// A precedence-ordered rule over normalized tracker fields.
@@ -584,6 +640,18 @@ pub struct StepConfig {
     pub on_failure: OnFailure,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixup_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub resource_requests: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affected_paths: Option<AffectedPathSource>,
+}
+
+/// A validated string-array selected from one direct dependency's step output.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AffectedPathSource {
+    pub step: String,
+    pub pointer: String,
 }
 
 /// Concurrency limits for the pipeline orchestrator.
@@ -1359,6 +1427,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         });
     }
 
+    let mut lane_precedences = std::collections::HashSet::new();
     for (name, lane) in &config.scheduler.lanes {
         if name.trim().is_empty() {
             return Err(PipelineError::InvalidSchedulerLane {
@@ -1366,12 +1435,43 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                 reason: "name must not be blank".to_string(),
             });
         }
-        if lane.capacity == 0 {
+        if lane.precedence == 0 || !lane_precedences.insert(lane.precedence) {
             return Err(PipelineError::InvalidSchedulerLane {
                 lane: name.clone(),
-                reason: "capacity must be greater than 0".to_string(),
+                reason: "precedence must be positive and unique".to_string(),
             });
         }
+        if lane.capacity == Some(0) {
+            return Err(PipelineError::InvalidSchedulerLane {
+                lane: name.clone(),
+                reason: "capacity must be greater than 0 when supplied".to_string(),
+            });
+        }
+    }
+    for (name, resource) in &config.scheduler.resources {
+        if name.trim().is_empty() || resource.capacity == 0 {
+            return Err(PipelineError::InvalidSchedulerLane {
+                lane: name.clone(),
+                reason: "resource names and capacities must be non-blank and positive".to_string(),
+            });
+        }
+    }
+    if config
+        .scheduler
+        .recovery
+        .as_ref()
+        .is_some_and(|recovery| recovery.max_attempts == 0 || recovery.max_backoff_ms == Some(0))
+    {
+        return Err(PipelineError::InvalidSchedulerLane {
+            lane: "recovery".to_string(),
+            reason: "recovery max_attempts and max_backoff_ms must be positive".to_string(),
+        });
+    }
+    if config.scheduler.one_shot.deadline_ms == 0 {
+        return Err(PipelineError::InvalidSchedulerLane {
+            lane: "one_shot".to_string(),
+            reason: "one_shot deadline_ms must be positive".to_string(),
+        });
     }
 
     let mut rule_names = std::collections::HashSet::new();
@@ -1857,19 +1957,76 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                     reason: "synthesis steps require explicit non-empty depends".to_string(),
                 });
             }
+            for (resource, units) in &step.resource_requests {
+                let Some(configured) = config.scheduler.resources.get(resource) else {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: format!("resource request '{resource}' is not configured"),
+                    });
+                };
+                if resource.trim().is_empty() || *units == 0 || *units > configured.capacity {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: format!("resource request '{resource}' must be positive and within configured capacity"),
+                    });
+                }
+            }
+            if let Some(source) = &step.affected_paths {
+                if source.step.trim().is_empty() || !is_valid_json_pointer(&source.pointer) {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: "affected_paths requires a non-blank direct dependency and valid non-empty JSON Pointer".to_string(),
+                    });
+                }
+            }
         }
-        if selected_mode {
+        let dag = if selected_mode {
             crate::pipeline::dag::build_dag(steps).map_err(|error| {
                 PipelineError::InvalidNamedPipeline {
                     pipeline: pipeline_name.to_string(),
                     reason: error.to_string(),
                 }
-            })?;
+            })?
         } else {
-            crate::pipeline::dag::build_dag(steps)?;
+            crate::pipeline::dag::build_dag(steps)?
+        };
+        for step in &dag.steps {
+            let Some(source) = &steps
+                .iter()
+                .find(|configured| configured.name == step.name)
+                .and_then(|configured| configured.affected_paths.as_ref())
+            else {
+                continue;
+            };
+            if !step
+                .depends
+                .iter()
+                .any(|dependency| dependency == &source.step)
+            {
+                return Err(PipelineError::InvalidStepConfig {
+                    step: step.name.clone(),
+                    reason: format!(
+                        "affected_paths step '{}' must be a direct dependency",
+                        source.step
+                    ),
+                });
+            }
         }
     }
     Ok(())
+}
+
+fn is_valid_json_pointer(pointer: &str) -> bool {
+    pointer.starts_with('/')
+        && pointer.split('/').skip(1).all(|segment| {
+            let mut characters = segment.chars();
+            while let Some(character) = characters.next() {
+                if character == '~' && !matches!(characters.next(), Some('0' | '1')) {
+                    return false;
+                }
+            }
+            true
+        })
 }
 
 #[cfg(test)]
@@ -1995,7 +2152,7 @@ workflow_selection:
 
         assert!(config.steps.is_empty());
         assert_eq!(config.pipelines["delivery"].steps[0].name, "build");
-        assert_eq!(config.scheduler.lanes["delivery"].capacity, 2);
+        assert_eq!(config.scheduler.lanes["delivery"].capacity, Some(2));
         assert_eq!(config.workflow_selection[0].name, "ready");
         assert_eq!(
             config.workflow_selection[0].order_by,
@@ -2070,11 +2227,133 @@ workflow_selection:
         ));
 
         let mut config = parse_config(selected).unwrap();
-        config.scheduler.lanes.get_mut("main").unwrap().capacity = 0;
+        config.scheduler.lanes.get_mut("main").unwrap().capacity = Some(0);
         assert!(matches!(
             validate_config(&config),
             Err(PipelineError::InvalidSchedulerLane { .. })
         ));
+    }
+
+    #[test]
+    fn selected_scheduler_parses_neutral_lane_resource_and_path_policy() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/ensemble
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: build
+pipelines:
+  main:
+    steps:
+      - name: produce
+        agent: build
+      - name: consume
+        agent: build
+        depends: [produce]
+        resource_requests: { database: 2 }
+        affected_paths: { step: produce, pointer: /data/paths }
+    on_success: Done
+    on_failure: Failed
+scheduler:
+  lanes:
+    primary: { precedence: 10, capacity: 2 }
+    background: { precedence: 20, idle_only: true }
+  resources:
+    database: { capacity: 2 }
+  recovery: { max_attempts: 3, max_backoff_ms: 1000 }
+  one_shot: { deadline_ms: 2000 }
+workflow_selection:
+  - name: ready
+    precedence: 1
+    pipeline: main
+    lane: primary
+    order_by: [identifier]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.scheduler.lanes["primary"].precedence, 10);
+        assert_eq!(config.scheduler.lanes["primary"].capacity, Some(2));
+        assert!(config.scheduler.lanes["background"].idle_only);
+        assert_eq!(config.scheduler.resources["database"].capacity, 2);
+        assert_eq!(config.scheduler.recovery.as_ref().unwrap().max_attempts, 3);
+        assert_eq!(config.scheduler.one_shot.deadline_ms, 2_000);
+        assert_eq!(
+            config.pipelines["main"].steps[1]
+                .affected_paths
+                .as_ref()
+                .unwrap()
+                .pointer,
+            "/data/paths"
+        );
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn selected_scheduler_rejects_impossible_lane_resource_and_path_policy() {
+        let source = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/ensemble
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: build
+pipelines:
+  main:
+    steps:
+      - name: produce
+        agent: build
+      - name: consume
+        agent: build
+        depends: [produce]
+    on_success: Done
+    on_failure: Failed
+scheduler:
+  lanes:
+    primary: { precedence: 10, capacity: 1 }
+  resources:
+    database: {}
+workflow_selection:
+  - name: ready
+    precedence: 1
+    pipeline: main
+    lane: primary
+    order_by: [identifier]
+"#;
+
+        let mut config = parse_config(source).unwrap();
+        config
+            .scheduler
+            .lanes
+            .get_mut("primary")
+            .unwrap()
+            .precedence = 0;
+        assert!(validate_config(&config).is_err());
+
+        let mut config = parse_config(source).unwrap();
+        config.pipelines.get_mut("main").unwrap().steps[1].resource_requests =
+            BTreeMap::from([("missing".to_string(), 1)]);
+        assert!(validate_config(&config).is_err());
+
+        let mut config = parse_config(source).unwrap();
+        config.pipelines.get_mut("main").unwrap().steps[1].affected_paths =
+            Some(AffectedPathSource {
+                step: "produce".to_string(),
+                pointer: "not-a-pointer".to_string(),
+            });
+        assert!(validate_config(&config).is_err());
     }
 
     #[test]

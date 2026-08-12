@@ -405,6 +405,22 @@ pub async fn start_orchestrator_for_app(
         .map(launch_orchestrator_runtime))
 }
 
+/// Build the standard runtime components and drive their scheduler once without
+/// spawning the daemon host loop.
+pub async fn run_orchestrator_once_for_app(
+    app_state: &AppState,
+    deadline: Duration,
+) -> Result<Option<crate::orchestrator::DrainResult>, EnsembleError> {
+    let candidate = app_state.config_runtime.document_state.read().await.clone();
+    let Some(prepared) = prepare_orchestrator_runtime(app_state, &candidate).await? else {
+        return Ok(None);
+    };
+    let PreparedOrchestratorRuntime {
+        mut orchestrator, ..
+    } = prepared;
+    Ok(Some(orchestrator.run_once(deadline).await))
+}
+
 pub fn take_registered_orchestrator(app_state: &AppState) -> Option<OrchestratorRuntime> {
     registered_orchestrator_guard(app_state)
         .take()

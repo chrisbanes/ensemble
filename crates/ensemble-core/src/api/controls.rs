@@ -1019,6 +1019,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }])
         .unwrap();
 

@@ -20,6 +20,17 @@ _Avoid_: Workflow when referring to the executable graph
 A named, configuration-defined live-worker capacity bucket shared by runs selected into that lane.
 _Avoid_: Tracker state, workflow role
 
+**Scheduler resource lease**:
+The exact live-agent reservation of declared resource units and normalized repository-relative paths.
+It is journaled with dispatch and released when the agent is no longer live.
+
+**Parked run**:
+A claimed run retained after configured automatic recovery is exhausted; it has no live-agent lease
+and is reported through durable operator attention until fresh evidence permits resumption.
+
+**Drain outcome**:
+The structured terminal result of bounded scheduler execution: success, waiting for human, or partial drain.
+
 **Step**:
 A named unit of agent or synthesis work within a pipeline.
 _Avoid_: Stage, phase

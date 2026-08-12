@@ -2,6 +2,7 @@ pub(crate) mod delivery;
 pub mod delivery_observation;
 pub mod pipeline_journal;
 pub mod reconciler;
+pub mod resources;
 pub mod retry;
 pub mod scheduler;
 pub mod selection;
@@ -35,8 +36,8 @@ use crate::agent::cancellation::{
     has_available_state_worker_capacity, is_reconciliation_owned, live_worker_count,
     mark_all_for_drain, mark_issue_for_drain, mark_worker_launched, new_cancellation_registry,
     pending_reconciliation_issue_ids, remove_completed_worker, remove_drained_workers,
-    rollback_worker_reservation, try_reserve_worker, CancellationRegistry, WorkerCapacity,
-    WorkerDrainHandle, WorkerReservationError,
+    rollback_worker_reservation, try_reserve_scheduler_worker, CancellationRegistry,
+    WorkerCapacity, WorkerDrainHandle, WorkerReservationError,
 };
 use crate::agent::events::{
     AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
@@ -48,9 +49,10 @@ use crate::attention::{
         awaiting_interaction_observation, interaction_attention_close_from_open,
         interaction_attention_identity,
     },
-    AttentionReporter,
+    AttentionEvidence, AttentionIdentity, AttentionPresentation, AttentionReporter,
+    AttentionUpsert,
 };
-use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
+use crate::config::ensemble::{repository_key, EnsembleConfig, OnFailure, StepKind};
 use crate::error::{AgentError, EnsembleError};
 use crate::history::artifacts::{finalize_mode_name, RunArtifacts};
 use crate::history::model::{HistoryRecord, TokenTotals};
@@ -79,6 +81,7 @@ use crate::orchestrator::pipeline_journal::{
     PendingTerminalTransition, PipelineRunJournal, PipelineTransitionInput, PipelineTransitionKind,
     PipelineTransitionRecord, TerminalOutcome,
 };
+use crate::orchestrator::resources::{resolve_output_paths, SchedulerReservation};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
     DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, SelectedWorkflowSnapshot,
@@ -111,8 +114,8 @@ use scheduler::{
 };
 use selection::{sort_selected_candidates, SelectedWorkflow, WorkflowSelector};
 use state::{
-    FinalizeStatus, IssueFinalizeState, OrchestratorState, PendingTerminalEntry, RepoFinalizeState,
-    WaitingOnHumanEntry,
+    FinalizeStatus, IssueFinalizeState, OrchestratorState, ParkedRunEntry, PendingTerminalEntry,
+    RepoFinalizeState, WaitingOnHumanEntry,
 };
 
 struct StepDispatchContext<'a> {
@@ -211,8 +214,22 @@ struct ExhaustedRetryTerminal {
     history_record: Option<HistoryRecord>,
 }
 
+struct ParkedRecoveryRequest<'a> {
+    issue_id: &'a str,
+    entry: &'a RunningEntry,
+    step: &'a str,
+    attempt: u32,
+    reason: &'a str,
+}
+
 enum WholeIssueFailureRetry {
     Scheduled(Option<Box<PipelineTransitionInput>>),
+    Parked {
+        transition: Option<Box<PipelineTransitionInput>>,
+        identifier: String,
+        attempt: u32,
+        reason: String,
+    },
     Exhausted(Box<ExhaustedRetryTerminal>),
 }
 
@@ -494,6 +511,32 @@ pub(crate) struct QuiescingLatch(Arc<std::sync::Mutex<bool>>);
 
 struct DispatchPermit;
 
+/// The terminal result of a bounded scheduler run.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrainOutcome {
+    Success,
+    WaitingForHuman,
+    PartialDrain,
+}
+
+/// Stable summary of residual scheduler ownership at a bounded-run boundary.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ResidualWorkSummary {
+    pub runnable: Vec<String>,
+    pub retrying: Vec<String>,
+    pub externally_waiting: Vec<String>,
+    pub delivery_or_finalization: Vec<String>,
+    pub parked: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DrainResult {
+    pub outcome: DrainOutcome,
+    #[serde(default)]
+    pub residual: ResidualWorkSummary,
+}
+
 impl QuiescingLatch {
     pub(crate) fn request(&self) {
         *self
@@ -552,6 +595,131 @@ struct WaitingHistoryRecordInput<'a> {
 }
 
 impl Orchestrator {
+    fn drain_snapshot(state: &OrchestratorState) -> ResidualWorkSummary {
+        let mut summary = ResidualWorkSummary {
+            runnable: state.running.keys().cloned().collect(),
+            retrying: state.retry_attempts.keys().cloned().collect(),
+            externally_waiting: state.waiting_on_human.keys().cloned().collect(),
+            delivery_or_finalization: state
+                .delivery
+                .keys()
+                .chain(state.finalize.keys())
+                .cloned()
+                .collect(),
+            parked: state.parked_runs.keys().cloned().collect(),
+        };
+        summary.runnable.sort();
+        summary.retrying.sort();
+        summary.externally_waiting.sort();
+        summary.delivery_or_finalization.sort();
+        summary.delivery_or_finalization.dedup();
+        summary.parked.sort();
+        summary
+    }
+
+    /// Drive the same tick loop without installing the daemon watcher.
+    pub async fn run_once(&mut self, deadline: Duration) -> DrainResult {
+        {
+            let config = self.config.read().await;
+            let mut state = self.state.write().await;
+            state.poll_interval_ms = config.polling.interval_ms;
+            state.max_concurrent_agents = config.concurrency.max_concurrent_agents;
+            state.init_state_lists(&config);
+        }
+        let started = std::time::Instant::now();
+        let mut consecutive_empty = 0_u8;
+        loop {
+            self.handle_tick().await;
+            while let Ok(event) = self.worker_rx.lock().await.try_recv() {
+                self.handle_worker_event(event).await;
+            }
+            self.handle_retry_fires().await;
+            let state = self.state.read().await;
+            let summary = Self::drain_snapshot(&state);
+            drop(state);
+            if summary.runnable.is_empty()
+                && summary.retrying.is_empty()
+                && summary.externally_waiting.is_empty()
+                && summary.delivery_or_finalization.is_empty()
+                && summary.parked.is_empty()
+            {
+                consecutive_empty = consecutive_empty.saturating_add(1);
+                if consecutive_empty == 2 {
+                    return DrainResult {
+                        outcome: DrainOutcome::Success,
+                        residual: summary,
+                    };
+                }
+            } else {
+                consecutive_empty = 0;
+                if !summary.externally_waiting.is_empty()
+                    && summary.runnable.is_empty()
+                    && summary.retrying.is_empty()
+                    && summary.delivery_or_finalization.is_empty()
+                    && summary.parked.is_empty()
+                {
+                    return DrainResult {
+                        outcome: DrainOutcome::WaitingForHuman,
+                        residual: summary,
+                    };
+                }
+            }
+            if started.elapsed() >= deadline {
+                return DrainResult {
+                    outcome: DrainOutcome::PartialDrain,
+                    residual: summary,
+                };
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    fn park_exhausted_recovery(
+        state: &mut OrchestratorState,
+        config: &EnsembleConfig,
+        request: ParkedRecoveryRequest<'_>,
+        transitions: &mut Vec<PipelineTransitionInput>,
+    ) -> Option<(String, u32, String)> {
+        config.scheduler.recovery.as_ref()?;
+        state.parked_runs.insert(
+            request.issue_id.to_string(),
+            ParkedRunEntry {
+                issue_id: request.issue_id.to_string(),
+                identifier: request.entry.identifier.clone(),
+                condition_key: "runtime.scheduler.recovery_exhausted".to_string(),
+                attempt: request.attempt,
+                reason: request.reason.to_string(),
+                parked_at: Utc::now(),
+            },
+        );
+        state.add_runtime_seconds(request.entry);
+        if let Some(input) = Self::transition_input_for_run(
+            state,
+            request.issue_id,
+            &request.entry.identifier,
+            PipelineTransitionKind::RunParked,
+            Some(request.step.to_string()),
+            Some(request.reason.to_string()),
+            None,
+        ) {
+            transitions.push(input);
+        }
+        Some((
+            request.entry.identifier.clone(),
+            request.attempt,
+            request.reason.to_string(),
+        ))
+    }
+
+    fn automatic_recovery_max_attempts(config: &EnsembleConfig) -> u32 {
+        config
+            .scheduler
+            .recovery
+            .as_ref()
+            .map(|recovery| recovery.max_attempts)
+            .unwrap_or(config.max_cycles)
+    }
+
     fn effective_step_timeout_ms(timeout_ms: Option<u64>, config: &EnsembleConfig) -> u64 {
         timeout_ms.unwrap_or(config.agent.turn_timeout_ms)
     }
@@ -827,6 +995,7 @@ impl Orchestrator {
         }
 
         self.restore_pipeline_runs_from_journal().await;
+        self.reconcile_parked_recovery_attention().await;
         self.reconcile_pending_terminal_transitions().await;
 
         // Startup terminal workspace cleanup
@@ -983,6 +1152,7 @@ impl Orchestrator {
         Box::pin(self.reconcile_pending_run_started_transitions()).await;
         self.reconcile_pending_acceptance_transitions().await;
         self.restore_pipeline_runs_from_journal().await;
+        self.reconcile_parked_recovery_attention().await;
         self.reconcile_pending_terminal_transitions().await;
         self.hydrate_waiting_on_human_from_store().await;
         self.process_interaction_thread_commands().await;
@@ -1234,6 +1404,9 @@ impl Orchestrator {
         {
             let config = self.config.read().await;
             let capacity_available = if let Some(selected) = selected.as_ref() {
+                if selected.lane_idle_only && live_worker_count(&self.cancellation_registry) > 0 {
+                    return;
+                }
                 has_available_lane_worker_capacity(
                     &self.cancellation_registry,
                     &selected.lane,
@@ -3010,7 +3183,49 @@ impl Orchestrator {
                 &config_snapshot.agent.max_concurrent_agents_by_state,
             )
         };
-        match try_reserve_worker(
+        let scheduler_reservation = {
+            let (resource_requests, affected_paths, outputs) = {
+                let state = self.state.read().await;
+                let run =
+                    state
+                        .get_pipeline_run(&issue.id)
+                        .ok_or_else(|| AgentError::PromptError {
+                            reason: format!(
+                                "cannot dispatch step '{}' without a pipeline run",
+                                dispatch.step_name
+                            ),
+                        })?;
+                let (resource_requests, affected_paths) = run
+                    .scheduler_requirements_for(dispatch.step_name)
+                    .ok_or_else(|| AgentError::PromptError {
+                        reason: format!("pipeline run has no step '{}'", dispatch.step_name),
+                    })?;
+                (resource_requests, affected_paths, run.step_outputs.clone())
+            };
+            let repositories = config_snapshot
+                .repos
+                .iter()
+                .enumerate()
+                .map(|(index, repo)| repository_key(repo, index))
+                .collect();
+            let paths = affected_paths
+                .as_ref()
+                .map(|source| resolve_output_paths(source, &outputs, &repositories))
+                .transpose()
+                .map_err(|reason| AgentError::PromptError { reason })?
+                .unwrap_or_default();
+            SchedulerReservation {
+                resources: resource_requests,
+                paths,
+            }
+        };
+        let resource_capacities = config_snapshot
+            .scheduler
+            .resources
+            .iter()
+            .map(|(name, config)| (name.clone(), config.capacity))
+            .collect();
+        match try_reserve_scheduler_worker(
             &self.cancellation_registry,
             worker_identity.clone(),
             cancel_token.clone(),
@@ -3018,12 +3233,16 @@ impl Orchestrator {
             config_snapshot.concurrency.max_concurrent_agents,
             config_snapshot.concurrency.max_step_parallelism,
             worker_capacity,
+            &resource_capacities,
+            scheduler_reservation.clone(),
         ) {
             Ok(()) => {}
             Err(
                 WorkerReservationError::GlobalCapacityExhausted
                 | WorkerReservationError::IssueCapacityExhausted
-                | WorkerReservationError::CapacityBucketExhausted,
+                | WorkerReservationError::CapacityBucketExhausted
+                | WorkerReservationError::ResourceExhausted
+                | WorkerReservationError::PathConflict,
             ) => {
                 debug!(
                     issue_id = %issue.id,
@@ -3153,6 +3372,7 @@ impl Orchestrator {
                 "{}-{}-{}",
                 issue.id, dispatch.step_name, dispatch.agent_name
             );
+            run.set_active_scheduler_reservation(dispatch.step_name, scheduler_reservation);
             run.mark_running(dispatch.step_name, running_session_id.clone());
             let transition = Self::transition_input_for_run(
                 &state,
@@ -3193,13 +3413,12 @@ impl Orchestrator {
                             })
                         {
                             if let Some(previous_step_state) = previous_step_state {
-                                state
-                                    .get_pipeline_run_mut(&issue.id)
-                                    .expect(
-                                        "pipeline run was present while validating dispatch rollback",
-                                    )
-                                    .step_states
+                                let run = state.get_pipeline_run_mut(&issue.id).expect(
+                                    "pipeline run was present while validating dispatch rollback",
+                                );
+                                run.step_states
                                     .insert(dispatch.step_name.to_string(), previous_step_state);
+                                run.clear_active_scheduler_reservation(dispatch.step_name);
                             }
                         }
                         return Err(AgentError::PromptError {
@@ -3248,6 +3467,7 @@ impl Orchestrator {
                             if let Some(previous_step_state) = previous_step_state.clone() {
                                 run.step_states
                                     .insert(dispatch.step_name.to_string(), previous_step_state);
+                                run.clear_active_scheduler_reservation(dispatch.step_name);
                             }
                         }
                     }
@@ -4358,6 +4578,7 @@ impl Orchestrator {
                             let mut history_record = None;
                             let mut terminal_issue = None;
                             let mut rejection_comment = None;
+                            let mut parked_recovery = None;
                             let mut post_failure_transitions = Vec::new();
                             if let Some(input) = step_transition {
                                 post_failure_transitions.push(input);
@@ -4389,13 +4610,33 @@ impl Orchestrator {
                                                 max_backoff_ms: config_snapshot
                                                     .agent
                                                     .max_retry_backoff_ms,
-                                                max_cycles: config_snapshot.max_cycles,
+                                                max_cycles: config_snapshot
+                                                    .scheduler
+                                                    .recovery
+                                                    .as_ref()
+                                                    .map(|recovery| recovery.max_attempts)
+                                                    .unwrap_or(config_snapshot.max_cycles),
                                                 error: &reason,
                                                 retry_from_step: Some(step.clone()),
                                                 with_fixup: false,
                                             },
                                         );
                                         final_failure = retry_scheduled.is_exhausted();
+                                        if final_failure {
+                                            parked_recovery = Self::park_exhausted_recovery(
+                                                &mut state,
+                                                &config_snapshot,
+                                                ParkedRecoveryRequest {
+                                                    issue_id,
+                                                    entry: &entry,
+                                                    step: &step,
+                                                    attempt,
+                                                    reason: &reason,
+                                                },
+                                                &mut post_failure_transitions,
+                                            );
+                                            final_failure = parked_recovery.is_none();
+                                        }
                                         if final_failure {
                                             history_record =
                                                 state.get_pipeline_run(issue_id).map(|run| {
@@ -4473,13 +4714,33 @@ impl Orchestrator {
                                                 max_backoff_ms: config_snapshot
                                                     .agent
                                                     .max_retry_backoff_ms,
-                                                max_cycles: config_snapshot.max_cycles,
+                                                max_cycles: config_snapshot
+                                                    .scheduler
+                                                    .recovery
+                                                    .as_ref()
+                                                    .map(|recovery| recovery.max_attempts)
+                                                    .unwrap_or(config_snapshot.max_cycles),
                                                 error: &reason,
                                                 retry_from_step: Some(step.clone()),
                                                 with_fixup: true,
                                             },
                                         );
                                         final_failure = retry_scheduled.is_exhausted();
+                                        if final_failure {
+                                            parked_recovery = Self::park_exhausted_recovery(
+                                                &mut state,
+                                                &config_snapshot,
+                                                ParkedRecoveryRequest {
+                                                    issue_id,
+                                                    entry: &entry,
+                                                    step: &step,
+                                                    attempt,
+                                                    reason: &reason,
+                                                },
+                                                &mut post_failure_transitions,
+                                            );
+                                            final_failure = parked_recovery.is_none();
+                                        }
                                         if final_failure {
                                             history_record =
                                                 state.get_pipeline_run(issue_id).map(|run| {
@@ -4581,13 +4842,32 @@ impl Orchestrator {
                                                 max_backoff_ms: config_snapshot
                                                     .agent
                                                     .max_retry_backoff_ms,
-                                                max_cycles: config_snapshot.max_cycles,
+                                                max_cycles: Self::automatic_recovery_max_attempts(
+                                                    &config_snapshot,
+                                                ),
                                                 error: &reason,
                                                 retry_from_step: None,
                                                 with_fixup: false,
                                             },
                                         );
                                         final_failure = retry_scheduled.is_exhausted();
+                                        if final_failure {
+                                            parked_recovery = Self::park_exhausted_recovery(
+                                                &mut state,
+                                                &config_snapshot,
+                                                ParkedRecoveryRequest {
+                                                    issue_id,
+                                                    entry: &entry,
+                                                    step: &step,
+                                                    attempt,
+                                                    reason: &reason,
+                                                },
+                                                &mut post_failure_transitions,
+                                            );
+                                        }
+                                        if parked_recovery.is_some() {
+                                            final_failure = false;
+                                        }
                                         if final_failure {
                                             history_record =
                                                 state.get_pipeline_run(issue_id).map(|run| {
@@ -4635,6 +4915,16 @@ impl Orchestrator {
                             drop(state);
                             for input in post_failure_transitions {
                                 self.append_pipeline_transition(input).await;
+                            }
+                            if let Some((identifier, attempt, reason)) = parked_recovery {
+                                self.report_recovery_exhausted_attention(
+                                    issue_id,
+                                    &identifier,
+                                    attempt,
+                                    &reason,
+                                )
+                                .await;
+                                return;
                             }
                             if final_failure {
                                 if let Some((step_name, summary)) = rejection_comment {
@@ -4795,6 +5085,8 @@ impl Orchestrator {
                 let mut history_record = None;
                 let mut terminal_issue = None;
                 let mut retry_transition = None;
+                let mut parked_recovery = None;
+                let mut parked_transitions = Vec::new();
 
                 if let Some(entry) = state.running.get(issue_id).cloned() {
                     terminal_issue = Some(entry.issue.clone());
@@ -4808,7 +5100,7 @@ impl Orchestrator {
                                 identifier: &entry.identifier,
                                 attempt: next_attempt(entry.retry_attempt),
                                 max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
-                                max_cycles: config_snapshot.max_cycles,
+                                max_cycles: Self::automatic_recovery_max_attempts(&config_snapshot),
                                 error: &error,
                                 retry_from_step: None,
                                 with_fixup: false,
@@ -4818,6 +5110,22 @@ impl Orchestrator {
                     final_failure = retry_scheduled
                         .as_ref()
                         .is_none_or(FailureRetryDisposition::is_exhausted);
+                    if final_failure && retry_scheduled.is_some() {
+                        let attempt = next_attempt(entry.retry_attempt);
+                        parked_recovery = Self::park_exhausted_recovery(
+                            &mut state,
+                            &config_snapshot,
+                            ParkedRecoveryRequest {
+                                issue_id,
+                                entry: &entry,
+                                step: step_name,
+                                attempt,
+                                reason: &error,
+                            },
+                            &mut parked_transitions,
+                        );
+                        final_failure = parked_recovery.is_none();
+                    }
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             self.build_history_record(RunningHistoryRecordInput {
@@ -4851,6 +5159,19 @@ impl Orchestrator {
                 if let Some(input) = retry_transition {
                     self.append_pipeline_transition(input).await;
                 }
+                for input in parked_transitions {
+                    self.append_pipeline_transition(input).await;
+                }
+                if let Some((identifier, attempt, reason)) = parked_recovery {
+                    self.report_recovery_exhausted_attention(
+                        issue_id,
+                        &identifier,
+                        attempt,
+                        &reason,
+                    )
+                    .await;
+                    return;
+                }
                 if final_failure {
                     if let Some(issue) = terminal_issue {
                         self.begin_terminal_transition(
@@ -4882,7 +5203,7 @@ impl Orchestrator {
                 identifier: &entry.identifier,
                 attempt: next_attempt(entry.retry_attempt),
                 max_backoff_ms: config.agent.max_retry_backoff_ms,
-                max_cycles: config.max_cycles,
+                max_cycles: Self::automatic_recovery_max_attempts(config),
                 error,
                 retry_from_step: None,
                 with_fixup: false,
@@ -4915,6 +5236,29 @@ impl Orchestrator {
                 WholeIssueFailureRetry::Scheduled(transition.map(Box::new))
             }
             FailureRetryDisposition::Exhausted => {
+                if config.scheduler.recovery.is_some() {
+                    let mut transitions = Vec::new();
+                    let attempt = next_attempt(entry.retry_attempt);
+                    let parked = Self::park_exhausted_recovery(
+                        state,
+                        config,
+                        ParkedRecoveryRequest {
+                            issue_id: &issue_id,
+                            entry: &entry,
+                            step: "runtime",
+                            attempt,
+                            reason: error,
+                        },
+                        &mut transitions,
+                    )
+                    .expect("configured recovery parks exhausted automatic retries");
+                    return WholeIssueFailureRetry::Parked {
+                        transition: transitions.pop().map(Box::new),
+                        identifier: parked.0,
+                        attempt: parked.1,
+                        reason: parked.2,
+                    };
+                }
                 state.running.insert(issue_id.clone(), entry.clone());
                 let history_record = state.get_pipeline_run(&issue_id).map(|run| {
                     self.build_history_record(RunningHistoryRecordInput {
@@ -5010,6 +5354,22 @@ impl Orchestrator {
                 )
                 .await;
             }
+            Some(WholeIssueFailureRetry::Parked {
+                transition,
+                identifier,
+                attempt,
+                reason,
+            }) => {
+                let issue_id = transition
+                    .as_ref()
+                    .map(|input| input.issue_id.clone())
+                    .unwrap_or_else(|| identifier.clone());
+                if let Some(input) = transition {
+                    self.append_pipeline_transition(*input).await;
+                }
+                self.report_recovery_exhausted_attention(&issue_id, &identifier, attempt, &reason)
+                    .await;
+            }
             Some(WholeIssueFailureRetry::Scheduled(None)) | None => {}
         }
     }
@@ -5046,6 +5406,7 @@ impl Orchestrator {
         let mut history_record = None;
         let mut terminal_issue = None;
         let mut rejection_comment = None;
+        let mut parked_recovery = None;
         let mut post_failure_transitions = Vec::new();
         if let Some(input) = step_failed_transition {
             post_failure_transitions.push(input);
@@ -5077,13 +5438,28 @@ impl Orchestrator {
                             identifier: &entry.identifier,
                             attempt,
                             max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
-                            max_cycles: config_snapshot.max_cycles,
+                            max_cycles: Self::automatic_recovery_max_attempts(&config_snapshot),
                             error: &reason,
                             retry_from_step: Some(step_name.clone()),
                             with_fixup: false,
                         },
                     );
                     final_failure = retry_scheduled.is_exhausted();
+                    if final_failure {
+                        parked_recovery = Self::park_exhausted_recovery(
+                            &mut state,
+                            &config_snapshot,
+                            ParkedRecoveryRequest {
+                                issue_id,
+                                entry: &entry,
+                                step,
+                                attempt,
+                                reason: &reason,
+                            },
+                            &mut post_failure_transitions,
+                        );
+                        final_failure = parked_recovery.is_none();
+                    }
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
@@ -5148,13 +5524,28 @@ impl Orchestrator {
                             identifier: &entry.identifier,
                             attempt,
                             max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
-                            max_cycles: config_snapshot.max_cycles,
+                            max_cycles: Self::automatic_recovery_max_attempts(&config_snapshot),
                             error: &reason,
                             retry_from_step: Some(step_name.clone()),
                             with_fixup: true,
                         },
                     );
                     final_failure = retry_scheduled.is_exhausted();
+                    if final_failure {
+                        parked_recovery = Self::park_exhausted_recovery(
+                            &mut state,
+                            &config_snapshot,
+                            ParkedRecoveryRequest {
+                                issue_id,
+                                entry: &entry,
+                                step,
+                                attempt,
+                                reason: &reason,
+                            },
+                            &mut post_failure_transitions,
+                        );
+                        final_failure = parked_recovery.is_none();
+                    }
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
@@ -5243,13 +5634,28 @@ impl Orchestrator {
                             identifier: &entry.identifier,
                             attempt,
                             max_backoff_ms: config_snapshot.agent.max_retry_backoff_ms,
-                            max_cycles: config_snapshot.max_cycles,
+                            max_cycles: Self::automatic_recovery_max_attempts(&config_snapshot),
                             error: &reason,
                             retry_from_step: None,
                             with_fixup: false,
                         },
                     );
                     final_failure = retry_scheduled.is_exhausted();
+                    if final_failure {
+                        parked_recovery = Self::park_exhausted_recovery(
+                            &mut state,
+                            &config_snapshot,
+                            ParkedRecoveryRequest {
+                                issue_id,
+                                entry: &entry,
+                                step,
+                                attempt,
+                                reason: &reason,
+                            },
+                            &mut post_failure_transitions,
+                        );
+                        final_failure = parked_recovery.is_none();
+                    }
                     if final_failure {
                         history_record = state.get_pipeline_run(issue_id).map(|run| {
                             rejection_comment = Self::rejection_comment_for_step(run, step);
@@ -5288,6 +5694,11 @@ impl Orchestrator {
         drop(state);
         for input in post_failure_transitions {
             self.append_pipeline_transition(input).await;
+        }
+        if let Some((identifier, attempt, reason)) = parked_recovery {
+            self.report_recovery_exhausted_attention(issue_id, &identifier, attempt, &reason)
+                .await;
+            return;
         }
         if final_failure {
             if let Some((step_name, summary)) = rejection_comment {
@@ -6241,6 +6652,58 @@ impl Orchestrator {
         true
     }
 
+    async fn report_recovery_exhausted_attention(
+        &self,
+        issue_id: &str,
+        identifier: &str,
+        attempt: u32,
+        reason: &str,
+    ) -> bool {
+        let Some(reporter) = &self.attention_reporter else {
+            return true;
+        };
+        let observation: Result<AttentionUpsert, crate::attention::AttentionError> = (|| {
+            Ok(AttentionUpsert::new(
+                AttentionIdentity::new(
+                    "runtime.scheduler",
+                    issue_id,
+                    "runtime.scheduler.recovery_exhausted",
+                )?,
+                AttentionPresentation::new(
+                    format!("{identifier} exhausted automatic recovery"),
+                    "Provide fresh evidence, then explicitly resume the retained run.",
+                    vec![],
+                )?,
+                AttentionEvidence::new(format!("attempt:{attempt}:{reason}"))?,
+            ))
+        })();
+        let Ok(observation) = observation else {
+            return false;
+        };
+        if let Err(error) = reporter.upsert_open(observation).await {
+            warn!(issue_id, error = %error, "failed to persist exhausted-recovery attention");
+            return false;
+        }
+        true
+    }
+
+    /// Retry durable attention projection for retained runs without changing their ownership.
+    async fn reconcile_parked_recovery_attention(&self) {
+        let parked = {
+            let state = self.state.read().await;
+            state.parked_runs.values().cloned().collect::<Vec<_>>()
+        };
+        for entry in parked {
+            self.report_recovery_exhausted_attention(
+                &entry.issue_id,
+                &entry.identifier,
+                entry.attempt,
+                &entry.reason,
+            )
+            .await;
+        }
+    }
+
     async fn reconcile_interaction_attention(&self, interaction: &InteractionRequest) -> bool {
         if interaction.status == InteractionStatus::Open {
             return self.report_awaiting_interaction(interaction).await;
@@ -6639,6 +7102,23 @@ impl Orchestrator {
                 run_id: record.run_id.clone(),
                 issue: issues_by_id.get(&record.issue_id).cloned(),
             });
+        }
+
+        if record.kind == PipelineTransitionKind::RunParked {
+            state
+                .parked_runs
+                .entry(record.issue_id.clone())
+                .or_insert_with(|| ParkedRunEntry {
+                    issue_id: record.issue_id.clone(),
+                    identifier: record.identifier.clone(),
+                    condition_key: "runtime.scheduler.recovery_exhausted".to_string(),
+                    attempt: record.cycle.max(1),
+                    reason: record
+                        .reason
+                        .clone()
+                        .unwrap_or_else(|| "automatic recovery exhausted".to_string()),
+                    parked_at: record.written_at,
+                });
         }
 
         Ok(())
@@ -9646,6 +10126,7 @@ fn validate_acceptance_attempts(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::cancellation::try_reserve_worker;
     use crate::agent::events::{
         AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
         WorkerEvent, WorkerIdentity, WorkerResult,
@@ -13406,6 +13887,100 @@ agent:
         (orchestrator, state)
     }
 
+    #[tokio::test]
+    async fn one_shot_requires_two_fresh_empty_snapshots() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = make_config();
+        let issue = test_issue("1", "Done");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &config, &issue);
+
+        let result = orchestrator.run_once(Duration::from_millis(100)).await;
+
+        assert_eq!(result.outcome, DrainOutcome::Success);
+        assert!(result.residual.runnable.is_empty());
+        assert!(state.read().await.running.is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_shot_reports_attention_only_wait_as_waiting_for_human() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = make_config();
+        let issue = test_issue("1", "Todo");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &config, &issue);
+        state
+            .write()
+            .await
+            .add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: "1".to_string(),
+                identifier: issue.identifier.clone(),
+                interaction_request_id: "ask-1".to_string(),
+                step_name: "build".to_string(),
+                kind: InteractionKind::Question,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: None,
+                issue: Some(issue),
+            });
+
+        let result = orchestrator.run_once(Duration::from_millis(100)).await;
+
+        assert_eq!(result.outcome, DrainOutcome::WaitingForHuman);
+        assert_eq!(result.residual.externally_waiting, vec!["1"]);
+    }
+
+    #[tokio::test]
+    async fn one_shot_deadline_reports_parked_residual() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = make_config();
+        let issue = test_issue("1", "Todo");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &config, &issue);
+        state.write().await.parked_runs.insert(
+            "1".to_string(),
+            ParkedRunEntry {
+                issue_id: "1".to_string(),
+                identifier: issue.identifier,
+                condition_key: "runtime.scheduler.recovery_exhausted".to_string(),
+                attempt: 1,
+                reason: "network".to_string(),
+                parked_at: Utc::now(),
+            },
+        );
+
+        let result = orchestrator.run_once(Duration::from_millis(1)).await;
+
+        assert_eq!(result.outcome, DrainOutcome::PartialDrain);
+        assert_eq!(result.residual.parked, vec!["1"]);
+    }
+
+    #[tokio::test]
+    async fn one_shot_deadline_keeps_retry_residual_without_consuming_a_worker_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = make_config();
+        let issue = test_issue("retrying", "Todo");
+        let (mut orchestrator, state) = make_restart_test_orchestrator(&temp, &config, &issue);
+        state.write().await.add_retry(RetryEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            attempt: 1,
+            due_at_ms: current_time_ms() + 60_000,
+            error: Some("transient".to_string()),
+            retry_from_step: None,
+            with_fixup: false,
+        });
+
+        let result = orchestrator.run_once(Duration::from_millis(1)).await;
+
+        assert_eq!(result.outcome, DrainOutcome::PartialDrain);
+        assert_eq!(result.residual.retrying, vec![issue.id]);
+        assert_eq!(live_worker_count(&orchestrator.cancellation_registry), 0);
+    }
+
     fn make_acceptance_test_orchestrator(
         temp: &tempfile::TempDir,
         cfg: &EnsembleConfig,
@@ -14577,6 +15152,55 @@ agent:
         assert!(lock.get_pipeline_run(&issue.id).is_some());
         assert!(lock.is_claimed(&issue.id));
         assert!(lock.is_waiting_on_human(&issue.id));
+    }
+
+    #[tokio::test]
+    async fn restore_pipeline_run_preserves_parked_owner_and_reconciles_attention() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = make_config();
+        cfg.scheduler.recovery = Some(crate::config::ensemble::SchedulerRecoveryConfig {
+            max_attempts: 1,
+            max_backoff_ms: None,
+        });
+        let issue = test_issue("parked-restart", "Todo");
+        let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let run = PipelineRun::new(issue.id.clone(), 2, build_dag(&cfg.steps).unwrap());
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::RunParked,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-parked".to_string()),
+                cycle: 2,
+                step: Some("build".to_string()),
+                reason: Some("retry budget exhausted".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.reconcile_parked_recovery_attention().await;
+
+        let state = state.read().await;
+        let parked = state.parked_runs.get(&issue.id).unwrap();
+        assert_eq!(parked.attempt, 2);
+        assert_eq!(parked.reason, "retry budget exhausted");
+        assert!(state.is_claimed(&issue.id));
+        assert!(state.get_pipeline_run(&issue.id).is_some());
+        drop(state);
+        let items = orchestrator
+            .attention_reporter
+            .as_ref()
+            .unwrap()
+            .items_for_subject(&issue.id)
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
     }
 
     #[tokio::test]
@@ -16233,6 +16857,8 @@ agent:
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);
@@ -21435,7 +22061,15 @@ agent:
             },
         );
         config.scheduler = SchedulerConfig {
-            lanes: BTreeMap::from([("delivery".to_string(), SchedulerLaneConfig { capacity: 1 })]),
+            lanes: BTreeMap::from([(
+                "delivery".to_string(),
+                SchedulerLaneConfig {
+                    precedence: 1,
+                    idle_only: false,
+                    capacity: Some(1),
+                },
+            )]),
+            ..SchedulerConfig::default()
         };
         config.workflow_selection = vec![WorkflowSelectionRuleConfig {
             name: "ready".to_string(),

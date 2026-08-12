@@ -56,6 +56,17 @@ pub struct WaitingOnHumanEntry {
     pub issue: Option<Issue>,
 }
 
+/// A retained run whose configured automatic recovery bound was reached.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParkedRunEntry {
+    pub issue_id: String,
+    pub identifier: String,
+    pub condition_key: String,
+    pub attempt: u32,
+    pub reason: String,
+    pub parked_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompletedEntry {
     pub issue_id: String,
@@ -139,6 +150,8 @@ pub struct OrchestratorState {
     pub retry_attempts: HashMap<String, RetryEntry>,
     /// Issues blocked waiting for a human response: issue_id -> waiting entry.
     pub waiting_on_human: HashMap<String, WaitingOnHumanEntry>,
+    /// Retained runs that need fresh external evidence before they are requeued.
+    pub parked_runs: HashMap<String, ParkedRunEntry>,
     /// Explicit resume requests queued by the API/UI: issue IDs.
     pub resume_requested: HashSet<String>,
     /// Completed issues: issue_id -> CompletedEntry.
@@ -195,6 +208,7 @@ impl OrchestratorState {
             claimed: HashSet::new(),
             retry_attempts: HashMap::new(),
             waiting_on_human: HashMap::new(),
+            parked_runs: HashMap::new(),
             resume_requested: HashSet::new(),
             completed: HashMap::new(),
             completed_expiry_secs: config.completed_expiry_secs,
@@ -385,6 +399,7 @@ impl OrchestratorState {
         self.running.remove(issue_id);
         self.retry_attempts.remove(issue_id);
         self.waiting_on_human.remove(issue_id);
+        self.parked_runs.remove(issue_id);
         self.resume_requested.remove(issue_id);
         self.pipeline_configs.remove(issue_id);
         self.finalize.remove(issue_id);
@@ -1173,5 +1188,37 @@ mod tests {
         assert_eq!(state.completed.len(), 2);
         assert!(state.completed.contains_key("issue-1"));
         assert!(state.completed.contains_key("issue-2"));
+    }
+
+    #[test]
+    fn release_claim_removes_parked_recovery_without_touching_other_owners() {
+        let mut state = OrchestratorState::new(30_000, &ConcurrencyConfig::default());
+        state.parked_runs.insert(
+            "issue-1".to_string(),
+            ParkedRunEntry {
+                issue_id: "issue-1".to_string(),
+                identifier: "repo#issue-1".to_string(),
+                condition_key: "runtime.scheduler.recovery_exhausted".to_string(),
+                attempt: 2,
+                reason: "network".to_string(),
+                parked_at: Utc::now(),
+            },
+        );
+        state.parked_runs.insert(
+            "issue-2".to_string(),
+            ParkedRunEntry {
+                issue_id: "issue-2".to_string(),
+                identifier: "repo#issue-2".to_string(),
+                condition_key: "runtime.scheduler.recovery_exhausted".to_string(),
+                attempt: 2,
+                reason: "network".to_string(),
+                parked_at: Utc::now(),
+            },
+        );
+
+        state.release_claim("issue-1");
+
+        assert!(!state.parked_runs.contains_key("issue-1"));
+        assert!(state.parked_runs.contains_key("issue-2"));
     }
 }

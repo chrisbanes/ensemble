@@ -25,6 +25,31 @@ a different combination after configuration changes, recovery fails closed for o
 This preserves the orchestrator's single lifecycle authority described by ADR-0012 while keeping
 development-method vocabulary outside the runtime core as required by ADR-0014.
 
+## Scheduler leases and bounded execution
+
+Selected lanes have a unique positive `precedence`, optional live-agent `capacity`, and may be
+`idle_only`. Lower precedence runs first; idle-only fresh work waits until recovered and eligible
+non-idle work has had an admission opportunity. Omitted lane capacity adds no further cap beyond
+the global and per-issue worker limits.
+
+Steps may request configured named resource units and may select a direct dependency's validated
+string-array output with a JSON Pointer as their affected-path declaration. Paths use the strict
+`repository:path` form, are repository-relative slash paths, and conflict only when equal or when
+one is a component ancestor of another in the same repository. Every live dispatch reserves worker,
+lane, resources, and paths atomically; its effective lease is journaled before `StepRunning` and is
+cleared when a stale running step is restored to pending after restart.
+
+`scheduler.recovery.max_attempts` bounds automatic retry recovery. Once exhausted, Ensemble keeps
+the claim, workspace, run state, and completed steps as a parked run, releases live-agent leases,
+and reports the generic `runtime.scheduler.recovery_exhausted` operator-attention item. Parking
+does not add tracker or dashboard mutation authority.
+
+`ensemble run --once [--deadline-ms N]` drives the same scheduler without starting the daemon
+watcher and emits one JSON result. It returns `success` after two fresh empty snapshots,
+`waiting_for_human` only when open interactions are the sole residual, and `partial_drain` on the
+configured/overridden deadline with a deterministic residual summary. Non-success results exit
+nonzero.
+
 ## Steps and agents
 
 Each step references an agent defined in `config.yaml`:

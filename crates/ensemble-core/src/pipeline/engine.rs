@@ -3,7 +3,8 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::acceptance::AcceptanceAttempt;
-use crate::config::ensemble::{OnFailure, StepKind};
+use crate::config::ensemble::{AffectedPathSource, OnFailure, StepKind};
+use crate::orchestrator::resources::SchedulerReservation;
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::tracker::OwnershipLease;
@@ -135,6 +136,8 @@ pub struct PipelineRun {
     workspace_branch_name: Option<String>,
     /// Configured workflow identity frozen before ownership is journaled.
     selected_workflow: Option<SelectedWorkflowSnapshot>,
+    /// Concrete scheduler leases captured with running dispatch transitions, by step.
+    active_scheduler_reservations: HashMap<String, SchedulerReservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +165,8 @@ pub struct PipelineRunSnapshot {
     pub workspace_branch_name: Option<String>,
     #[serde(default)]
     pub selected_workflow: Option<SelectedWorkflowSnapshot>,
+    #[serde(default)]
+    pub active_scheduler_reservations: HashMap<String, SchedulerReservation>,
 }
 
 impl PipelineRun {
@@ -185,6 +190,7 @@ impl PipelineRun {
             ownership_lease: None,
             workspace_branch_name: None,
             selected_workflow: None,
+            active_scheduler_reservations: HashMap::new(),
         }
     }
 
@@ -201,7 +207,35 @@ impl PipelineRun {
             ownership_lease: self.ownership_lease.clone(),
             workspace_branch_name: self.workspace_branch_name.clone(),
             selected_workflow: self.selected_workflow.clone(),
+            active_scheduler_reservations: self.active_scheduler_reservations.clone(),
         }
+    }
+
+    pub(crate) fn scheduler_requirements_for(
+        &self,
+        step_name: &str,
+    ) -> Option<(
+        std::collections::BTreeMap<String, u32>,
+        Option<AffectedPathSource>,
+    )> {
+        self.dag
+            .steps
+            .iter()
+            .find(|step| step.name == step_name)
+            .map(|step| (step.resource_requests.clone(), step.affected_paths.clone()))
+    }
+
+    pub(crate) fn set_active_scheduler_reservation(
+        &mut self,
+        step_name: &str,
+        reservation: SchedulerReservation,
+    ) {
+        self.active_scheduler_reservations
+            .insert(step_name.to_string(), reservation);
+    }
+
+    pub(crate) fn clear_active_scheduler_reservation(&mut self, step_name: &str) {
+        self.active_scheduler_reservations.remove(step_name);
     }
 
     pub fn from_snapshot(
@@ -222,6 +256,7 @@ impl PipelineRun {
             ownership_lease: snapshot.ownership_lease,
             workspace_branch_name: snapshot.workspace_branch_name,
             selected_workflow: snapshot.selected_workflow,
+            active_scheduler_reservations: snapshot.active_scheduler_reservations,
         })
     }
 
@@ -255,10 +290,15 @@ impl PipelineRun {
     }
 
     pub fn normalize_stale_running_steps(&mut self) {
+        let mut normalized = false;
         for state in self.step_states.values_mut() {
             if matches!(state, StepState::Running { .. }) {
                 *state = StepState::Pending;
+                normalized = true;
             }
+        }
+        if normalized {
+            self.active_scheduler_reservations.clear();
         }
     }
 
@@ -292,6 +332,7 @@ impl PipelineRun {
         output: StepOutput,
         approval_requested: bool,
     ) -> PipelineAction {
+        self.clear_active_scheduler_reservation(step_name);
         let result = output.result.clone();
         self.step_outputs.insert(step_name.to_string(), output);
         match result {
@@ -527,6 +568,8 @@ impl PipelineRun {
                         approval: None,
                         on_failure: OnFailure::Halt,
                         fixup_agent: None,
+                        resource_requests: Default::default(),
+                        affected_paths: None,
                         depends: original_deps,
                     },
                 );
@@ -838,6 +881,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }
     }
 
@@ -852,6 +897,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }
     }
 
@@ -925,6 +972,51 @@ mod tests {
                 lane: "delivery".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn stale_running_snapshot_releases_durable_scheduler_reservation() {
+        let mut run = make_run(&[make_step("build", "builder", &[])]);
+        run.set_active_scheduler_reservation(
+            "build",
+            SchedulerReservation {
+                resources: std::collections::BTreeMap::from([("database".to_string(), 1)]),
+                paths: vec![crate::orchestrator::resources::NormalizedPath {
+                    repository: "app".to_string(),
+                    path: "src/main.rs".to_string(),
+                }],
+            },
+        );
+        run.mark_running("build", "session".to_string());
+
+        let mut restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+        restored.normalize_stale_running_steps();
+
+        assert!(restored.active_scheduler_reservations.is_empty());
+        assert_eq!(restored.step_states["build"], StepState::Pending);
+    }
+
+    #[test]
+    fn completing_one_parallel_step_keeps_the_other_durable_reservation() {
+        let mut run = make_run(&[
+            make_step("left", "builder", &[]),
+            make_step("right", "builder", &[]),
+        ]);
+        run.set_active_scheduler_reservation("left", SchedulerReservation::default());
+        run.set_active_scheduler_reservation(
+            "right",
+            SchedulerReservation {
+                resources: std::collections::BTreeMap::from([("database".to_string(), 1)]),
+                paths: vec![],
+            },
+        );
+        run.mark_running("left", "left-session".to_string());
+        run.mark_running("right", "right-session".to_string());
+
+        run.step_completed("left", approve_output(), false);
+
+        assert!(!run.active_scheduler_reservations.contains_key("left"));
+        assert!(run.active_scheduler_reservations.contains_key("right"));
     }
 
     #[test]
@@ -1057,6 +1149,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }];
         let run = make_run(&steps);
 
@@ -1088,6 +1182,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }
     }
 
@@ -1116,6 +1212,8 @@ mod tests {
             }),
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }
     }
 
@@ -1860,6 +1958,8 @@ mod tests {
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -1871,6 +1971,8 @@ mod tests {
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
             },
         ];
         let mut run = make_run(&steps);
