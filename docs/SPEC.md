@@ -677,7 +677,14 @@ Pipeline mode rules:
   forbids the legacy pipeline fields.
 - Every named pipeline is independently DAG-validated and supplies its own `steps`, `on_success`,
   and `on_failure`.
-- Every scheduler lane has a positive live-worker `capacity`.
+- Every scheduler lane has unique positive `precedence`, optional positive live-worker `capacity`,
+  and optional `idle_only` admission. Named scheduler resources have positive capacity.
+- A worker atomically reserves its global/per-issue/lane capacity together with named resource
+  units and normalized repository-relative output paths before `StepRunning` is journaled. The
+  effective reservation is snapshot-persisted; stale restored workers release it before retry.
+- `scheduler.recovery.max_attempts` bounds every automatic recovery route. Exhaustion journals a
+  retained parked owner, keeps its workspace and claim, and idempotently projects generic operator
+  attention. `scheduler.one_shot.deadline_ms` configures bounded `ensemble run --once` execution.
 - Selection rules have unique normalized names and unique positive precedence values, reference an
   existing pipeline and lane, and may constrain normalized `states`, `labels_all`, `labels_any`,
   `labels_none`, and `require_unblocked`.

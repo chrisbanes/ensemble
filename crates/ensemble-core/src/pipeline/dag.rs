@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ensemble::{OnFailure, StepApprovalConfig, StepConfig, StepKind};
+use crate::config::ensemble::{
+    AffectedPathSource, OnFailure, StepApprovalConfig, StepConfig, StepKind,
+};
 use crate::error::PipelineError;
 
 /// A single step in the resolved DAG, with its explicit dependency list.
@@ -17,6 +19,10 @@ pub struct DagStep {
     pub approval: Option<StepApprovalConfig>,
     pub on_failure: OnFailure,
     pub fixup_agent: Option<String>,
+    #[serde(default)]
+    pub resource_requests: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub affected_paths: Option<AffectedPathSource>,
     pub depends: Vec<String>,
 }
 
@@ -116,6 +122,8 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             approval: step.approval.clone(),
             on_failure: step.on_failure,
             fixup_agent: step.fixup_agent.clone(),
+            resource_requests: step.resource_requests.clone(),
+            affected_paths: step.affected_paths.clone(),
             depends: deps,
         });
     }
@@ -209,6 +217,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }
     }
 
@@ -223,6 +233,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }
     }
 
@@ -378,6 +390,8 @@ mod tests {
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -389,6 +403,8 @@ mod tests {
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
             },
         ];
 
@@ -414,6 +430,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -436,6 +454,8 @@ mod tests {
             }),
             on_failure: OnFailure::RetryIssue,
             fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -464,6 +484,8 @@ mod tests {
             approval: None,
             on_failure: OnFailure::Fixup,
             fixup_agent: Some("fixer".to_string()),
+            resource_requests: Default::default(),
+            affected_paths: None,
         }];
 
         let dag = build_dag(&steps).unwrap();

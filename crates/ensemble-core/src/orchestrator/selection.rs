@@ -10,7 +10,9 @@ pub struct SelectedWorkflow {
     pub rule: String,
     pub pipeline: String,
     pub lane: String,
-    pub lane_capacity: u32,
+    pub lane_capacity: Option<u32>,
+    pub lane_idle_only: bool,
+    lane_precedence: u32,
     precedence: u32,
     order_by: Vec<WorkflowOrderKey>,
 }
@@ -37,10 +39,9 @@ impl WorkflowSelector {
     ) -> Result<Self, PipelineError> {
         let mut compiled = Vec::with_capacity(rules.len());
         for rule in rules {
-            let lane_capacity =
+            let lane =
                 lanes
                     .get(&rule.lane)
-                    .map(|lane| lane.capacity)
                     .ok_or_else(|| PipelineError::InvalidSchedulerLane {
                         lane: rule.lane.clone(),
                         reason: "referenced by a workflow-selection rule but not configured"
@@ -55,7 +56,9 @@ impl WorkflowSelector {
                     rule: rule.name.clone(),
                     pipeline: rule.pipeline.clone(),
                     lane: rule.lane.clone(),
-                    lane_capacity,
+                    lane_capacity: lane.capacity,
+                    lane_idle_only: lane.idle_only,
+                    lane_precedence: lane.precedence,
                     precedence: rule.precedence,
                     order_by,
                 },
@@ -118,8 +121,9 @@ fn normalize(value: &str) -> String {
 
 pub fn sort_selected_candidates(candidates: &mut [(Issue, SelectedWorkflow)]) {
     candidates.sort_by(|(left_issue, left), (right_issue, right)| {
-        left.precedence
-            .cmp(&right.precedence)
+        left.lane_precedence
+            .cmp(&right.lane_precedence)
+            .then_with(|| left.precedence.cmp(&right.precedence))
             .then_with(|| {
                 if left.rule == right.rule {
                     compare_by_rule(left_issue, right_issue, &left.order_by)
@@ -194,6 +198,42 @@ mod tests {
         assert_eq!(selected.rule, "higher");
         assert_eq!(selected.pipeline, "higher-pipeline");
         assert_eq!(selected.lane, "higher-lane");
+    }
+
+    #[test]
+    fn candidate_order_uses_lane_precedence_before_rule_ordering() {
+        let mut candidates = vec![
+            (
+                test_issue("lower", "ready"),
+                SelectedWorkflow {
+                    rule: "lower".to_string(),
+                    pipeline: "main".to_string(),
+                    lane: "lower-lane".to_string(),
+                    lane_capacity: Some(1),
+                    lane_idle_only: false,
+                    lane_precedence: 20,
+                    precedence: 1,
+                    order_by: vec![WorkflowOrderKey::Identifier],
+                },
+            ),
+            (
+                test_issue("higher", "ready"),
+                SelectedWorkflow {
+                    rule: "higher".to_string(),
+                    pipeline: "main".to_string(),
+                    lane: "higher-lane".to_string(),
+                    lane_capacity: Some(1),
+                    lane_idle_only: false,
+                    lane_precedence: 10,
+                    precedence: 99,
+                    order_by: vec![WorkflowOrderKey::Identifier],
+                },
+            ),
+        ];
+
+        sort_selected_candidates(&mut candidates);
+
+        assert_eq!(candidates[0].1.lane, "higher-lane");
     }
 
     #[test]
@@ -340,7 +380,16 @@ mod tests {
             ("urgent-lane".to_string(), 1),
         ]
         .into_iter()
-        .map(|(name, capacity)| (name, SchedulerLaneConfig { capacity }))
+        .map(|(name, capacity)| {
+            (
+                name,
+                SchedulerLaneConfig {
+                    precedence: 1,
+                    idle_only: false,
+                    capacity: Some(capacity),
+                },
+            )
+        })
         .collect()
     }
 }

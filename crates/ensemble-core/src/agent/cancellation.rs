@@ -9,11 +9,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agent::events::WorkerIdentity;
 use crate::config::ensemble::normalize_state_worker_cap_key;
+use crate::orchestrator::resources::{paths_conflict, SchedulerReservation};
 
 struct ActiveWorker {
     cancellation: CancellationToken,
     completion: watch::Receiver<bool>,
     capacity_bucket: String,
+    scheduler_reservation: SchedulerReservation,
     reconciliation_owned: bool,
     launched: bool,
 }
@@ -32,6 +34,8 @@ pub(crate) enum WorkerReservationError {
     GlobalCapacityExhausted,
     IssueCapacityExhausted,
     CapacityBucketExhausted,
+    ResourceExhausted,
+    PathConflict,
 }
 
 pub(crate) struct WorkerCapacity<'a> {
@@ -45,7 +49,7 @@ enum CapacitySource<'a> {
     },
     Lane {
         lane: &'a str,
-        capacity: u32,
+        capacity: Option<u32>,
     },
 }
 
@@ -62,7 +66,7 @@ impl<'a> WorkerCapacity<'a> {
         }
     }
 
-    pub(crate) fn lane(lane: &'a str, capacity: u32) -> Self {
+    pub(crate) fn lane(lane: &'a str, capacity: Option<u32>) -> Self {
         Self {
             source: CapacitySource::Lane { lane, capacity },
         }
@@ -78,7 +82,7 @@ impl<'a> WorkerCapacity<'a> {
                 let limit = max_workers_by_state.get(&bucket).copied();
                 (format!("state:{bucket}"), limit)
             }
-            CapacitySource::Lane { lane, capacity } => (format!("lane:{lane}"), Some(capacity)),
+            CapacitySource::Lane { lane, capacity } => (format!("lane:{lane}"), capacity),
         }
     }
 }
@@ -103,12 +107,14 @@ pub fn register_worker(
             cancellation,
             completion,
             capacity_bucket: String::new(),
+            scheduler_reservation: SchedulerReservation::default(),
             reconciliation_owned: false,
             launched: true,
         },
     );
 }
 
+#[cfg(test)]
 pub(crate) fn try_reserve_worker(
     registry: &CancellationRegistry,
     identity: WorkerIdentity,
@@ -117,6 +123,31 @@ pub(crate) fn try_reserve_worker(
     max_global_workers: u32,
     max_issue_workers: u32,
     capacity: WorkerCapacity<'_>,
+) -> Result<(), WorkerReservationError> {
+    try_reserve_scheduler_worker(
+        registry,
+        identity,
+        cancellation,
+        completion,
+        max_global_workers,
+        max_issue_workers,
+        capacity,
+        &BTreeMap::new(),
+        SchedulerReservation::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_reserve_scheduler_worker(
+    registry: &CancellationRegistry,
+    identity: WorkerIdentity,
+    cancellation: CancellationToken,
+    completion: watch::Receiver<bool>,
+    max_global_workers: u32,
+    max_issue_workers: u32,
+    capacity: WorkerCapacity<'_>,
+    resource_capacities: &BTreeMap<String, u32>,
+    scheduler_reservation: SchedulerReservation,
 ) -> Result<(), WorkerReservationError> {
     let mut workers = registry_guard(registry);
     if workers.contains_key(&identity) {
@@ -137,12 +168,38 @@ pub(crate) fn try_reserve_worker(
     if !capacity_available(&workers, &capacity_bucket, limit) {
         return Err(WorkerReservationError::CapacityBucketExhausted);
     }
+    for (resource, units) in &scheduler_reservation.resources {
+        let used = workers
+            .values()
+            .filter_map(|worker| worker.scheduler_reservation.resources.get(resource))
+            .sum::<u32>();
+        if resource_capacities
+            .get(resource)
+            .copied()
+            .unwrap_or_default()
+            < used.saturating_add(*units)
+        {
+            return Err(WorkerReservationError::ResourceExhausted);
+        }
+    }
+    if scheduler_reservation.paths.iter().any(|path| {
+        workers.values().any(|worker| {
+            worker
+                .scheduler_reservation
+                .paths
+                .iter()
+                .any(|active| paths_conflict(active, path))
+        })
+    }) {
+        return Err(WorkerReservationError::PathConflict);
+    }
     workers.insert(
         identity,
         ActiveWorker {
             cancellation,
             completion,
             capacity_bucket,
+            scheduler_reservation,
             reconciliation_owned: false,
             launched: false,
         },
@@ -170,10 +227,10 @@ pub(crate) fn has_available_state_worker_capacity(
 pub(crate) fn has_available_lane_worker_capacity(
     registry: &CancellationRegistry,
     lane: &str,
-    capacity: u32,
+    capacity: Option<u32>,
 ) -> bool {
     let bucket = format!("lane:{lane}");
-    capacity_available(&registry_guard(registry), &bucket, Some(capacity))
+    capacity_available(&registry_guard(registry), &bucket, capacity)
 }
 
 fn capacity_available(
@@ -949,11 +1006,13 @@ mod tests {
             lane_completion,
             4,
             1,
-            WorkerCapacity::lane("delivery", 1),
+            WorkerCapacity::lane("delivery", Some(1)),
         )
         .unwrap();
         assert!(!has_available_lane_worker_capacity(
-            &registry, "delivery", 1
+            &registry,
+            "delivery",
+            Some(1)
         ));
 
         let (_, blocked_completion) = watch::channel(false);
@@ -968,12 +1027,16 @@ mod tests {
                 blocked_completion,
                 4,
                 1,
-                WorkerCapacity::lane("delivery", 1),
+                WorkerCapacity::lane("delivery", Some(1)),
             ),
             Err(WorkerReservationError::CapacityBucketExhausted)
         );
 
         assert!(rollback_worker_reservation(&registry, &lane_identity));
-        assert!(has_available_lane_worker_capacity(&registry, "delivery", 1));
+        assert!(has_available_lane_worker_capacity(
+            &registry,
+            "delivery",
+            Some(1)
+        ));
     }
 }
