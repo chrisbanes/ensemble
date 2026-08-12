@@ -24,11 +24,11 @@ chrono = { version = "0.4.45", features = ["serde"] }
 tempfile = "3.27.0"
 async-trait = "0.1.92"
 reqwest = { version = "0.13.4", features = ["json"] }
-futures = "0.3.33"
+futures = "0.3.34"
 libc = "0.2.189"
 wiremock = "0.6.5"
 axum = { version = "0.8.9", features = ["ws"] }
-futures-util = "0.3.33"
+futures-util = "0.3.34"
 async-stream = "0.3.6"
 tower-http = { version = "0.7.0", features = ["cors", "fs"] }
 tower = "0.5.3"
