@@ -2,8 +2,8 @@ use crate::agent::cancellation::CancellationRegistry;
 use crate::api::interactions;
 use crate::api::security::ApiExposure;
 use crate::api::{
-    config_edit_handler, config_handler, controls, conversation, fs_handler, handlers,
-    history_handler, timeline_handler, ws,
+    attention_handler, config_edit_handler, config_handler, controls, conversation, fs_handler,
+    handlers, history_handler, timeline_handler, ws,
 };
 use crate::config::draft::ConfigDocumentState;
 use crate::history_store::store::HistoryStore;
@@ -73,6 +73,7 @@ pub struct AppState {
 /// - `GET /api/v1/state` — runtime snapshot
 /// - `POST /api/v1/refresh` — trigger immediate poll+reconcile
 /// - `GET /api/v1/history` — query history records
+/// - `GET /api/v1/attention` — query operator-attention history on trusted-local hosts
 /// - `GET /api/v1/{identifier}` — issue-specific detail
 /// - `GET /api/v1/{identifier}/runs/{run_id}/steps/{step_name}/conversation` — paginated step transcript records
 /// - `GET /api/v1/{identifier}/runs/{run_id}/steps/{step_name}/conversation/{sequence}` — single transcript record
@@ -99,6 +100,7 @@ pub fn create_api_router(state: AppState, exposure: ApiExposure) -> Router {
                 .patch(handlers::method_not_allowed),
         )
         .route("/history", get(history_handler::get_history))
+        .route("/attention", get(attention_handler::get_attention_history))
         .route("/interactions", get(interactions::list_open_interactions))
         .route(
             "/interactions/{id}",

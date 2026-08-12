@@ -430,7 +430,7 @@ impl InteractionStore {
         self.write_interaction(replacement).await
     }
 
-    async fn list_all(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
+    pub(crate) async fn list_all(&self) -> Result<Vec<InteractionRequest>, InteractionError> {
         let dir = self.interactions_dir();
         let mut entries = match tokio::fs::read_dir(&dir).await {
             Ok(entries) => entries,

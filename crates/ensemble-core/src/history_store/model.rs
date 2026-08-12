@@ -1,3 +1,7 @@
+use crate::attention::{
+    AttentionError, AttentionEvent, AttentionEvidence, AttentionIdentity, AttentionItem,
+    AttentionLifecycleState, AttentionPresentation,
+};
 use crate::history::model::{HistoryRecord, TokenTotals};
 use crate::timeline::model::TimelineEventRecord;
 use chrono::{DateTime, Utc};
@@ -9,6 +13,40 @@ fn parse_utc(ts: &str) -> rusqlite::Result<DateTime<Utc>> {
         .map_err(|e| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
         })
+}
+
+pub(crate) fn row_to_attention_event(row: &Row<'_>) -> rusqlite::Result<AttentionEvent> {
+    let state: String = row.get("state")?;
+    let timestamp: String = row.get("timestamp")?;
+    let superseding_identity_json: Option<String> = row.get("superseding_identity_json")?;
+    let superseding_identity = superseding_identity_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(sql_conversion_error)?;
+    let evidence = AttentionEvidence {
+        fingerprint: row.get("fingerprint")?,
+    };
+    AttentionEvidence::new(&evidence.fingerprint).map_err(attention_conversion_error)?;
+    let sequence: i64 = row.get("sequence")?;
+    Ok(AttentionEvent {
+        sequence: u64::try_from(sequence).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Integer,
+                Box::new(error),
+            )
+        })?,
+        identity: AttentionIdentity {
+            producer_key: row.get("producer_key")?,
+            subject_ref: row.get("subject_ref")?,
+            kind: row.get("kind")?,
+        },
+        state: AttentionLifecycleState::parse(&state).map_err(attention_conversion_error)?,
+        evidence,
+        timestamp: parse_utc(&timestamp)?,
+        superseding_identity,
+    })
 }
 
 pub(crate) fn row_to_history_record(row: &Row<'_>) -> rusqlite::Result<HistoryRecord> {
@@ -73,4 +111,56 @@ pub(crate) fn row_to_timeline_record(row: &Row<'_>) -> rusqlite::Result<Timeline
         verdict: row.get("verdict")?,
         tool_name: row.get("tool_name")?,
     })
+}
+
+pub(crate) fn row_to_attention_item(row: &Row<'_>) -> rusqlite::Result<AttentionItem> {
+    let references_json: String = row.get("references_json")?;
+    let references = serde_json::from_str(&references_json).map_err(sql_conversion_error)?;
+    let superseding_identity_json: Option<String> = row.get("superseding_identity_json")?;
+    let superseding_identity = superseding_identity_json
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(sql_conversion_error)?;
+    let identity = AttentionIdentity {
+        producer_key: row.get("producer_key")?,
+        subject_ref: row.get("subject_ref")?,
+        kind: row.get("kind")?,
+    };
+    identity.validate().map_err(attention_conversion_error)?;
+    let presentation = AttentionPresentation {
+        summary: row.get("summary")?,
+        remedy: row.get("remedy")?,
+        references,
+    };
+    presentation
+        .validate()
+        .map_err(attention_conversion_error)?;
+    let evidence = AttentionEvidence {
+        fingerprint: row.get("fingerprint")?,
+    };
+    AttentionEvidence::new(&evidence.fingerprint).map_err(attention_conversion_error)?;
+    let state: String = row.get("state")?;
+    let opened_at: String = row.get("opened_at")?;
+    let updated_at: String = row.get("updated_at")?;
+    let closed_at: Option<String> = row.get("closed_at")?;
+
+    Ok(AttentionItem {
+        identity,
+        presentation,
+        evidence,
+        state: AttentionLifecycleState::parse(&state).map_err(attention_conversion_error)?,
+        opened_at: parse_utc(&opened_at)?,
+        updated_at: parse_utc(&updated_at)?,
+        closed_at: closed_at.as_deref().map(parse_utc).transpose()?,
+        superseding_identity,
+    })
+}
+
+fn sql_conversion_error(error: serde_json::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
+}
+
+fn attention_conversion_error(error: AttentionError) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error))
 }

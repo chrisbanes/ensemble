@@ -47,6 +47,40 @@ pub fn bootstrap_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_run_events_run_sequence ON run_events(run_id, sequence);
         CREATE INDEX IF NOT EXISTS idx_runs_identifier_completed_at ON runs(issue_identifier, completed_at);
         CREATE INDEX IF NOT EXISTS idx_runs_outcome_completed_at ON runs(outcome, completed_at);
+
+        CREATE TABLE IF NOT EXISTS attention_items (
+            producer_key TEXT NOT NULL,
+            subject_ref TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            remedy TEXT NOT NULL,
+            references_json TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            state TEXT NOT NULL,
+            opened_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            closed_at TEXT,
+            superseding_identity_json TEXT,
+            PRIMARY KEY (producer_key, subject_ref, kind)
+        );
+
+        CREATE TABLE IF NOT EXISTS attention_events (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            producer_key TEXT NOT NULL,
+            subject_ref TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            state TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            superseding_identity_json TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_attention_items_open_updated
+            ON attention_items(state, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_attention_items_subject_open
+            ON attention_items(subject_ref, state, updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_attention_events_identity_sequence
+            ON attention_events(producer_key, subject_ref, kind, sequence);
         "#,
     )?;
     add_column_if_missing(conn, "runs", "artifacts", "TEXT")?;

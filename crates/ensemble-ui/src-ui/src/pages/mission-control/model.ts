@@ -1,4 +1,5 @@
 import type {
+  AttentionItem,
   CompletedRow,
   RetryRow,
   RunningSessionRow,
@@ -13,8 +14,6 @@ export type MissionIssueStatus =
   | "waiting_on_human"
   | "failed_or_blocked"
   | "completed_recently";
-export type MissionAttentionKind = "human_input" | "retry" | "failure";
-export type MissionPrimaryAction = "Reply" | "Inspect" | "Open";
 
 export interface MissionIssueSummary {
   id: string;
@@ -41,14 +40,13 @@ export interface MissionGroup {
 
 export interface MissionAttentionItem {
   id: string;
-  issueId: string;
   issueIdentifier: string;
-  kind: MissionAttentionKind;
+  kind: string;
   title: string;
   detail: string;
-  stepName: string | null;
-  requestedAt: string | null;
-  primaryAction: MissionPrimaryAction;
+  references: string[];
+  requestedAt: string;
+  canNavigate: boolean;
 }
 
 export interface MissionSystemStats {
@@ -146,7 +144,7 @@ function retryIssue(row: RetryRow): MissionIssueSummary {
     retryAttempt: row.attempt,
     tokenTotal: null,
     turnCount: null,
-    attention: true,
+    attention: false,
     source: row,
   };
 }
@@ -166,7 +164,7 @@ function waitingIssue(row: WaitingInteractionRow): MissionIssueSummary {
     retryAttempt: null,
     tokenTotal: null,
     turnCount: null,
-    attention: true,
+    attention: false,
     source: row,
   };
 }
@@ -186,7 +184,7 @@ function completedIssue(row: CompletedRow): MissionIssueSummary {
     retryAttempt: null,
     tokenTotal: null,
     turnCount: null,
-    attention: failed,
+    attention: false,
     source: row,
   };
 }
@@ -202,60 +200,19 @@ export function deriveMissionControlState(snapshot: RuntimeSnapshot): MissionCon
     ...snapshot.waiting_on_human.map(waitingIssue),
     ...snapshot.completed.map(completedIssue),
   ];
+  const attentionBySubject = new Set(
+    snapshot.attention_items.map((item) => item.identity.subject_ref),
+  );
+  const issuesWithAttention = issues.map((issue) => ({
+    ...issue,
+    attention: attentionBySubject.has(issue.identifier),
+  }));
+  const issueIdentifiers = new Set(issues.map((issue) => issue.identifier));
 
   return {
-    issues,
-    groups: regroupMissionControlIssues(issues),
-    attentionItems: [
-      ...snapshot.waiting_on_human.map(
-        (row): MissionAttentionItem =>
-          isSyntheticHaltedInteractionId(row.interaction_request_id)
-            ? {
-                id: row.interaction_request_id,
-                issueId: row.issue_id,
-                issueIdentifier: row.issue_identifier,
-                kind: "failure",
-                title: "Pipeline halted",
-                detail: `Blocked after ${row.step_name} failed`,
-                stepName: row.step_name,
-                requestedAt: row.requested_at,
-                primaryAction: "Inspect",
-              }
-            : {
-                id: row.interaction_request_id,
-                issueId: row.issue_id,
-                issueIdentifier: row.issue_identifier,
-                kind: "human_input",
-                title: "Agent needs input",
-                detail: `Waiting in ${row.step_name}`,
-                stepName: row.step_name,
-                requestedAt: row.requested_at,
-                primaryAction: "Reply",
-              },
-      ),
-      ...snapshot.retrying.map((row): MissionAttentionItem => ({
-        id: `retry:${row.issue_id}`,
-        issueId: row.issue_id,
-        issueIdentifier: row.issue_identifier,
-        kind: "retry",
-        title: "Retry scheduled",
-        detail: row.error ?? `Attempt ${row.attempt} is waiting to retry`,
-        stepName: null,
-        requestedAt: null,
-        primaryAction: "Inspect",
-      })),
-      ...failedRows.map((row): MissionAttentionItem => ({
-        id: `failure:${row.issue_id}`,
-        issueId: row.issue_id,
-        issueIdentifier: row.issue_identifier,
-        kind: "failure",
-        title: "Run failed",
-        detail: row.status,
-        stepName: null,
-        requestedAt: row.completed_at,
-        primaryAction: "Inspect",
-      })),
-    ],
+    issues: issuesWithAttention,
+    groups: regroupMissionControlIssues(issuesWithAttention),
+    attentionItems: snapshot.attention_items.map((item) => missionAttentionItem(item, issueIdentifiers)),
     stats: {
       running: snapshot.counts.running,
       retrying: snapshot.counts.retrying,
@@ -269,6 +226,26 @@ export function deriveMissionControlState(snapshot: RuntimeSnapshot): MissionCon
       rateLimitLimit: snapshot.rate_limits?.limit ?? null,
       rateLimitResetAt: snapshot.rate_limits?.reset_at ?? null,
     },
+  };
+}
+
+function missionAttentionItem(
+  item: AttentionItem,
+  issueIdentifiers: Set<string>,
+): MissionAttentionItem {
+  return {
+    id: JSON.stringify([
+      item.identity.producer_key,
+      item.identity.subject_ref,
+      item.identity.kind,
+    ]),
+    issueIdentifier: item.identity.subject_ref,
+    kind: item.identity.kind,
+    title: item.presentation.summary,
+    detail: item.presentation.remedy,
+    references: item.presentation.references,
+    requestedAt: item.opened_at,
+    canNavigate: issueIdentifiers.has(item.identity.subject_ref),
   };
 }
 

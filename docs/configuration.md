@@ -2,6 +2,10 @@
 
 ## First-release configuration boundary
 
+Operator-attention reporting is a runtime primitive backed by the shared workspace history
+database. This release adds no `config.yaml` routing, kind, or development-method vocabulary for
+attention; configured branch adapters may use the generic reporter in a later change.
+
 Configuration serves one trusted local operator. ACPX-backed agents and sequential pipelines are
 the supported first-release path. `agent.max_turns` is not a supported field and is rejected.
 Changes to `workspace.root` or the ordered `repos` list persist but require an Ensemble restart

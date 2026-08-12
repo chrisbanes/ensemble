@@ -43,6 +43,13 @@ use crate::agent::events::{
     WorkerEvent, WorkerFailureKind, WorkerIdentity, WorkerResult,
 };
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
+use crate::attention::{
+    interaction::{
+        awaiting_interaction_observation, interaction_attention_close_from_open,
+        interaction_attention_identity,
+    },
+    AttentionReporter,
+};
 use crate::config::ensemble::{EnsembleConfig, OnFailure, StepKind};
 use crate::error::{AgentError, EnsembleError};
 use crate::history::artifacts::{finalize_mode_name, RunArtifacts};
@@ -54,7 +61,7 @@ use crate::interaction::model::{
 };
 use crate::interaction::{
     parse_scoped_interaction_command, InteractionAcceptance, InteractionCommand,
-    InteractionResumeStrategy, InteractionStatus, InteractionStore,
+    InteractionRequest, InteractionResumeStrategy, InteractionStatus, InteractionStore,
     ParseScopedInteractionCommandError,
 };
 use crate::observability::events::{EventBus, PipelineEvent};
@@ -455,6 +462,8 @@ pub struct Orchestrator {
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
     history_store: Option<HistoryStore>,
+    attention_reporter: Option<AttentionReporter>,
+    attention_reconciled_on_startup: AtomicBool,
     pipeline_journal: PipelineRunJournal,
     pipeline_journal_restored: AtomicBool,
     pending_run_started_transitions:
@@ -623,6 +632,7 @@ impl Orchestrator {
         let (worker_tx, worker_rx) = mpsc::channel(1000);
         let (command_tx, command_rx) = mpsc::channel(100);
         let timeline_persistence = history_store.clone().map(TimelinePersistence::new);
+        let attention_reporter = history_store.clone().map(AttentionReporter::new);
 
         Self {
             state: parts.state,
@@ -637,6 +647,8 @@ impl Orchestrator {
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             history_store,
+            attention_reporter,
+            attention_reconciled_on_startup: AtomicBool::new(false),
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             pipeline_journal_restored: AtomicBool::new(false),
             pending_run_started_transitions: Box::new(std::sync::Mutex::new(HashMap::new())),
@@ -5409,6 +5421,7 @@ impl Orchestrator {
         interaction.agent_output_tokens = waiting_output_tokens;
         interaction.agent_total_tokens = waiting_total_tokens;
         self.interaction_store.create(interaction.clone()).await?;
+        self.report_awaiting_interaction(&interaction).await;
         let root_body = format_interaction_thread_root_comment(&interaction);
         match self
             .tracker
@@ -5650,6 +5663,7 @@ impl Orchestrator {
         interaction.agent_output_tokens = waiting_output_tokens;
         interaction.agent_total_tokens = waiting_total_tokens;
         self.interaction_store.create(interaction.clone()).await?;
+        self.report_awaiting_interaction(&interaction).await;
 
         let root_body = format_interaction_thread_root_comment(&interaction);
         match self
@@ -6066,7 +6080,8 @@ impl Orchestrator {
                 .retire_waiting_state(&interaction.id)
                 .await
             {
-                Ok(_) => {
+                Ok((_, retired)) => {
+                    self.reconcile_interaction_attention(&retired).await;
                     warn!(
                         issue_id = %interaction.issue_id,
                         interaction_id = %interaction.id,
@@ -6201,14 +6216,97 @@ impl Orchestrator {
         true
     }
 
+    async fn report_awaiting_interaction(&self, interaction: &InteractionRequest) -> bool {
+        if interaction.status != InteractionStatus::Open || !interaction.awaiting_resume {
+            return true;
+        }
+        let Some(reporter) = &self.attention_reporter else {
+            return true;
+        };
+        let observation = match awaiting_interaction_observation(interaction) {
+            Ok(observation) => observation,
+            Err(error) => {
+                warn!(interaction_id = %interaction.id, error = %error, "interaction could not be represented as operator attention");
+                return false;
+            }
+        };
+        if let Err(error) = reporter.upsert_open(observation).await {
+            warn!(
+                interaction_id = %interaction.id,
+                error = %error,
+                "failed to persist operator attention; startup reconciliation will retry"
+            );
+            return false;
+        }
+        true
+    }
+
+    async fn reconcile_interaction_attention(&self, interaction: &InteractionRequest) -> bool {
+        if interaction.status == InteractionStatus::Open {
+            return self.report_awaiting_interaction(interaction).await;
+        }
+        let Some(reporter) = &self.attention_reporter else {
+            return true;
+        };
+        let identity = match interaction_attention_identity(interaction) {
+            Ok(identity) => identity,
+            Err(error) => {
+                warn!(interaction_id = %interaction.id, error = %error, "interaction could not be reconciled as operator attention");
+                return false;
+            }
+        };
+        let open_item = match reporter.open_item(&identity).await {
+            Ok(item) => item,
+            Err(error) => {
+                warn!(interaction_id = %interaction.id, error = %error, "failed to read operator attention during reconciliation");
+                return false;
+            }
+        };
+        let Some(open_item) = open_item else {
+            return true;
+        };
+        let close = match interaction_attention_close_from_open(&open_item, interaction) {
+            Ok(Some(close)) => close,
+            Ok(None) => return true,
+            Err(error) => {
+                warn!(interaction_id = %interaction.id, error = %error, "failed to derive operator attention close during reconciliation");
+                return false;
+            }
+        };
+        if let Err(error) = reporter.resolve(close).await {
+            warn!(
+                interaction_id = %interaction.id,
+                error = %error,
+                "failed to reconcile resolved operator attention; startup reconciliation will retry"
+            );
+            return false;
+        }
+        true
+    }
+
     async fn hydrate_waiting_on_human_from_store(&self) {
-        let mut interactions = match self.interaction_store.list_awaiting_resume().await {
+        let reconcile_all = !self.attention_reconciled_on_startup.load(Ordering::Acquire);
+        let mut interactions = match if reconcile_all {
+            self.interaction_store.list_all().await
+        } else {
+            self.interaction_store.list_awaiting_resume().await
+        } {
             Ok(interactions) => interactions,
             Err(error) => {
                 warn!(error = %error, "failed to hydrate waiting interactions from store");
                 return;
             }
         };
+        let mut attention_reconciled = true;
+        for interaction in &interactions {
+            attention_reconciled &= self.reconcile_interaction_attention(interaction).await;
+        }
+        if reconcile_all && attention_reconciled {
+            self.attention_reconciled_on_startup
+                .store(true, Ordering::Release);
+        }
+        interactions.retain(|interaction| interaction.blocking && interaction.awaiting_resume);
+        interactions.sort_by_key(|interaction| interaction.requested_at);
         if !interactions.is_empty() {
             let live_records = match self.pipeline_journal.latest_live_records().await {
                 Ok(records) => records
@@ -6239,7 +6337,8 @@ impl Orchestrator {
                         .retire_waiting_state(&interaction.id)
                         .await
                     {
-                        Ok(_) => {
+                        Ok((_, retired)) => {
+                            self.reconcile_interaction_attention(&retired).await;
                             let mut state = self.state.write().await;
                             state.remove_waiting_on_human(&interaction.issue_id);
                             state.clear_resume_request(&interaction.issue_id);
@@ -7229,16 +7328,21 @@ impl Orchestrator {
             return;
         };
 
-        if let Err(error) = self
+        match self
             .interaction_store
-            .clear_waiting_state(&interaction_request_id)
+            .retire_waiting_state(&interaction_request_id)
             .await
         {
-            warn!(
-                interaction_request_id = %interaction_request_id,
-                error = %error,
-                "failed to clear interaction waiting state during waiting-issue cleanup"
-            );
+            Ok((_, retired)) => {
+                self.reconcile_interaction_attention(&retired).await;
+            }
+            Err(error) => {
+                warn!(
+                    interaction_request_id = %interaction_request_id,
+                    error = %error,
+                    "failed to clear interaction waiting state during waiting-issue cleanup"
+                );
+            }
         }
     }
 
@@ -13173,6 +13277,44 @@ agent:
             accepted_command: None,
             ignored_commands: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn startup_attention_reconciliation_retries_terminal_records_after_a_read_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_config();
+        let issue = test_issue("attention-retry", "Todo");
+        let (mut orchestrator, _) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let mut interaction = test_question_interaction(&issue, 1, "attention-retry");
+        let reporter = AttentionReporter::new(orchestrator.history_store.clone().unwrap());
+        reporter
+            .upsert_open(awaiting_interaction_observation(&interaction).unwrap())
+            .await
+            .unwrap();
+        interaction.status = InteractionStatus::Resolved;
+        interaction.resolved_at = Some(Utc::now());
+        orchestrator
+            .interaction_store
+            .create(interaction)
+            .await
+            .unwrap();
+
+        orchestrator.attention_reporter = Some(AttentionReporter::new(HistoryStore {
+            db_path: temp.path().join("missing/history.db"),
+        }));
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        assert!(!orchestrator
+            .attention_reconciled_on_startup
+            .load(Ordering::Acquire));
+
+        orchestrator.attention_reporter = Some(reporter.clone());
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        assert!(orchestrator
+            .attention_reconciled_on_startup
+            .load(Ordering::Acquire));
+        assert!(reporter.open_items().await.unwrap().is_empty());
     }
 
     fn make_retry_step_config() -> EnsembleConfig {

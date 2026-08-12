@@ -129,17 +129,6 @@ export default function MissionControl() {
     selectionTriggerRef.current =
       document.activeElement instanceof HTMLButtonElement ? document.activeElement : null;
     setSelectedIssueIdentifier(identifier);
-    const attentionItem = missionState?.attentionItems.find(
-      (item) => item.issueIdentifier === identifier,
-    );
-    if (attentionItem?.kind === "human_input") {
-      setActiveTab("respond");
-    } else if (
-      attentionItem?.kind === "failure" &&
-      (attentionItem.primaryAction === "Inspect" || attentionItem.primaryAction === "Open")
-    ) {
-      setActiveTab("overview");
-    }
   }
 
   function closePanel() {

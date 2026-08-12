@@ -1929,6 +1929,20 @@ across repeated restarts. Failure to read the durable maximum prevents that jour
 being restored under a potentially reused sequence; the issue remains undispatched rather than
 falling back to a fresh run.
 
+The same shared database stores durable operator-attention records separately from run history.
+An attention item has stable `(producer_key, subject_ref, kind)` identity, an opaque namespaced
+kind, bounded presentation (summary, remedy, ordered references), an evidence fingerprint, and
+`open`, `resolved`, or `superseded` lifecycle state. Equal open observations are no-ops; fresh
+evidence refreshes the retained item. Resolution and supersession compare the prior fingerprint and
+require distinct closing evidence, so stale observations cannot close newer records and a missing
+transient poll never closes one. Each effective transition appends immutable lifecycle evidence;
+terminal records remain queryable for restart and completed-history audit.
+
+Attention is observational: it does not pause/resume a run, grant tracker/control authority, or
+substitute for an interaction request. The first producer maps durable interactions awaiting resume
+to `runtime.interaction.awaiting_input`; retries, failures, and synthetic halted waits do not become
+attention merely through inference.
+
 For each pipeline step, Ensemble persists a typed JSONL transcript at:
 
 ```text
@@ -2582,6 +2596,8 @@ Minimum endpoints:
     }
     ```
 
+  - Includes `attention_items`, containing only open records read from the shared history database.
+
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information
     the implementation tracks that is useful for debugging.
@@ -2599,6 +2615,7 @@ Minimum endpoints:
   - Each finalized repository may include the stored version-1 delivery observation. History
     artifacts and the `delivery_observation_updated` WebSocket event expose the same repository-
     keyed schema; neither endpoint performs GitHub reconciliation on demand.
+  - Includes matching open `attention_items` from the same shared history database.
   - Suggested response shape:
 
     ```json
@@ -2673,6 +2690,12 @@ Minimum endpoints:
   - Repeated persistence of the same `(run_id, sequence)` is idempotent.
   - The endpoint and runtime persistence must use the same canonical
     `{workspace}/.ensemble/history.db`; per-run timeline JSONL is not a fallback source.
+
+- `GET /api/v1/attention`
+  - Returns bounded, read-only operator-attention lifecycle history with optional `subject_ref`,
+    lifecycle `state`, cursor, and limit filters. Terminal evidence is included only when requested.
+  - It has no action or mutation counterpart; selecting an attention item may navigate only to
+    existing issue detail.
 
 - `POST /api/v1/interactions/{id}/respond`
   - Attempts to resolve a specific open human interaction. The body is typed by interaction kind and

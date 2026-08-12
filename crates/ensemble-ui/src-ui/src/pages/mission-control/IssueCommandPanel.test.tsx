@@ -49,6 +49,7 @@ function mockMutation<T>(mutate: ReturnType<typeof vi.fn>, overrides: Record<str
 }
 
 const issue = {
+  attention_items: [],
   issue_identifier: "repo#1",
   issue_id: "issue-1",
   status: "running",

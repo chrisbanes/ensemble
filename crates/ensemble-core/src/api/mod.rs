@@ -1,3 +1,4 @@
+pub mod attention_handler;
 pub mod bootstrap;
 pub mod config_edit_handler;
 pub mod config_handler;
