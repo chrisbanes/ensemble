@@ -1309,6 +1309,8 @@ on_failure: Failed
                         record_count: 5,
                     }],
                     artifact_snapshots: Vec::new(),
+                    artifact_integrity_violations: Vec::new(),
+                    artifact_access_evidence: Vec::new(),
                 }),
             })
             .await
@@ -1367,6 +1369,8 @@ on_failure: Failed
                         record_count: 5,
                     }],
                     artifact_snapshots: Vec::new(),
+                    artifact_integrity_violations: Vec::new(),
+                    artifact_access_evidence: Vec::new(),
                 }),
             })
             .await

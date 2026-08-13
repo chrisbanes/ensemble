@@ -651,6 +651,8 @@ Pipeline step definitions. Each step invokes one agent.
 | `affected_paths` | object | — | Output path source with `step` (direct dependency) and JSON `pointer`; normalized repository-relative paths are leased while the worker is live |
 | `output_schema` | object | — | Config-relative JSON Schema declaration, with `path` naming a Draft 2020-12 schema file; every result variant must provide a matching `output` |
 | `artifact_snapshot` | object | — | Producer declaration with a non-empty `repositories` list of configured repository keys to observe after output validation |
+| `artifact_inputs` | list of strings | `[]` | Direct producer dependencies whose completed Artifact snapshots this step consumes |
+| `artifact_access` | string | `mutable` | `immutable` verifies every declared input immediately before the step starts and halts on drift; `mutable` permits normal workspace mutation |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
 
@@ -658,6 +660,11 @@ See [Pipeline Guide](pipelines.md) for details on DAG construction and execution
 Schema Draft 2020-12 (an omitted `$schema` uses that dialect). `artifact_snapshot.repositories`
 must contain unique configured repository keys. A step may declare either or both; an empty
 snapshot declaration is rejected during configuration activation.
+`artifact_inputs` entries must be unique direct dependencies that declare `artifact_snapshot`.
+For immutable consumers, their producer snapshots must select disjoint repository keys.
+`artifact_access: immutable` requires at least one input. ACPX consumers use read approval unless
+the configured agent explicitly uses `deny_all`; direct ACP has no equivalent launch-time
+permission classification, so snapshot verification remains the enforcement boundary.
 
 Approval behavior:
 

@@ -21,6 +21,8 @@ async-trait = { workspace = true }
 reqwest = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
+rustix = { workspace = true }
+ignore = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 futures-util = { workspace = true }
@@ -38,7 +40,12 @@ tempfile = { workspace = true }
 shell-words = { workspace = true }
 jsonschema = { workspace = true }
 
+[target.'cfg(not(unix))'.dependencies]
+cap-std = { workspace = true }
+cap-fs-ext = { workspace = true }
+
 [dev-dependencies]
+cap-std = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = { workspace = true }
 tower = { workspace = true }

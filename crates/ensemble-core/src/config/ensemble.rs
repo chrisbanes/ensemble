@@ -650,6 +650,27 @@ pub struct StepConfig {
     /// Optional selection of repository state captured after this step's output validates.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_snapshot: Option<ArtifactSnapshotConfig>,
+    /// Direct producer steps whose Artifact snapshots this step consumes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_inputs: Vec<String>,
+    /// Whether this step may mutate its Artifact inputs.
+    #[serde(default, skip_serializing_if = "ArtifactAccess::is_default")]
+    pub artifact_access: ArtifactAccess,
+}
+
+/// Access requested by a consumer of one or more Artifact snapshots.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ArtifactAccess {
+    #[default]
+    Mutable,
+    Immutable,
+}
+
+impl ArtifactAccess {
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::Mutable)
+    }
 }
 
 /// One config-relative Draft 2020-12 JSON Schema used to validate a step output.
@@ -2164,25 +2185,68 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
             crate::pipeline::dag::build_dag(steps)?
         };
         for step in &dag.steps {
-            let Some(source) = &steps
+            let configured = steps
                 .iter()
                 .find(|configured| configured.name == step.name)
-                .and_then(|configured| configured.affected_paths.as_ref())
-            else {
-                continue;
-            };
-            if !step
-                .depends
-                .iter()
-                .any(|dependency| dependency == &source.step)
+                .expect("resolved DAG steps originate from configuration");
+            if let Some(source) = &configured.affected_paths {
+                if !step
+                    .depends
+                    .iter()
+                    .any(|dependency| dependency == &source.step)
+                {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: format!(
+                            "affected_paths step '{}' must be a direct dependency",
+                            source.step
+                        ),
+                    });
+                }
+            }
+            if configured.artifact_access == ArtifactAccess::Immutable
+                && configured.artifact_inputs.is_empty()
             {
                 return Err(PipelineError::InvalidStepConfig {
                     step: step.name.clone(),
-                    reason: format!(
-                        "affected_paths step '{}' must be a direct dependency",
-                        source.step
-                    ),
+                    reason: "immutable artifact_access requires at least one artifact_inputs entry"
+                        .to_string(),
                 });
+            }
+            let mut artifact_inputs = std::collections::HashSet::new();
+            let mut selected_repositories = std::collections::HashMap::new();
+            for producer in &configured.artifact_inputs {
+                let producer_config = steps.iter().find(|candidate| candidate.name == *producer);
+                if producer.trim().is_empty()
+                    || !artifact_inputs.insert(producer)
+                    || !step.depends.iter().any(|dependency| dependency == producer)
+                    || producer_config.is_none_or(|candidate| candidate.artifact_snapshot.is_none())
+                {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: format!(
+                            "artifact_inputs must name unique direct dependencies that declare artifact_snapshot ('{producer}')"
+                        ),
+                    });
+                }
+                if configured.artifact_access == ArtifactAccess::Immutable {
+                    for repository in &producer_config
+                        .expect("validated artifact producer is configured")
+                        .artifact_snapshot
+                        .as_ref()
+                        .expect("validated artifact producer declares a snapshot")
+                        .repositories
+                    {
+                        if let Some(previous) = selected_repositories.insert(repository, producer) {
+                            return Err(PipelineError::InvalidStepConfig {
+                                step: step.name.clone(),
+                                reason: format!(
+                                    "immutable artifact_inputs must select disjoint artifact_snapshot repositories ('{previous}' and '{producer}' overlap '{repository}')"
+                                ),
+                            });
+                        }
+                    }
+                }
             }
         }
     }
@@ -2320,6 +2384,133 @@ on_failure: Failed
         assert!(error
             .to_string()
             .contains("artifact_snapshot must select at least one repository"));
+    }
+
+    #[test]
+    fn artifact_inputs_reject_invalid_immutable_consumer_references() {
+        let config = minimal_yaml().replace(
+            "    agent: build\n",
+            "    agent: build\n    artifact_access: immutable\n",
+        );
+
+        let error = validate_config(&parse_config(&config).unwrap()).unwrap_err();
+
+        assert!(error.to_string().contains("artifact_inputs"));
+    }
+
+    #[test]
+    fn artifact_inputs_accept_direct_snapshot_producer() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build
+steps:
+  - name: build
+    agent: build
+    artifact_snapshot:
+      repositories: [repo]
+  - name: review
+    agent: build
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn immutable_artifact_inputs_reject_overlapping_producer_repositories() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build
+steps:
+  - name: build-a
+    agent: build
+    artifact_snapshot:
+      repositories: [repo]
+  - name: build-b
+    agent: build
+    artifact_snapshot:
+      repositories: [repo]
+  - name: review
+    agent: build
+    depends: [build-a, build-b]
+    artifact_inputs: [build-a, build-b]
+    artifact_access: immutable
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let error = validate_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("disjoint"));
+        assert!(error.to_string().contains("repo"));
+    }
+
+    #[test]
+    fn immutable_artifact_inputs_accept_disjoint_producer_repositories() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo-a
+    branch: main
+  - path: /tmp/repo-b
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build
+steps:
+  - name: build-a
+    agent: build
+    artifact_snapshot:
+      repositories: [repo-a]
+  - name: build-b
+    agent: build
+    artifact_snapshot:
+      repositories: [repo-b]
+  - name: review
+    agent: build
+    depends: [build-a, build-b]
+    artifact_inputs: [build-a, build-b]
+    artifact_access: immutable
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_config(&config).is_ok());
     }
 
     #[test]

@@ -861,6 +861,8 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 affected_paths: None,
                 output_schema: None,
                 artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
 })
         })
         .collect::<Result<Vec<_>, _>>()?;

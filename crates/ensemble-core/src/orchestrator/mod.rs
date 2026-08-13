@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use tokio::sync::RwLock;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -29,16 +29,18 @@ use crate::acceptance::{
     evaluate_file_requirement, evaluate_handoff_requirement, AcceptanceCommandRunner,
     AcceptanceEvidence, AcceptanceStatus, ResolvedAcceptancePlan, ShellAcceptanceCommandRunner,
 };
-#[cfg(test)]
-use crate::agent::cancellation::StateWorkerCapacity;
 use crate::agent::cancellation::{
-    await_worker_drain, await_worker_quiescence, has_available_lane_worker_capacity,
-    has_available_state_worker_capacity, is_reconciliation_owned, live_worker_count,
-    mark_all_for_drain, mark_issue_for_drain, mark_worker_launched, new_cancellation_registry,
-    pending_reconciliation_issue_ids, remove_completed_worker, remove_drained_workers,
-    rollback_worker_reservation, sibling_worker_completion_handles, try_reserve_scheduler_worker,
-    CancellationRegistry, WorkerCapacity, WorkerDrainHandle, WorkerReservationError,
+    acquire_issue_workspace_capture, await_worker_drain, await_worker_quiescence,
+    has_available_lane_worker_capacity, has_available_state_worker_capacity,
+    is_reconciliation_owned, live_worker_count, mark_all_for_drain, mark_issue_for_drain,
+    mark_worker_launched, new_cancellation_registry, pending_reconciliation_issue_ids,
+    remove_completed_worker, remove_drained_workers, rollback_worker_reservation,
+    sibling_worker_completion_handles, try_reserve_scheduler_worker_with_workspace_exclusivity,
+    worker_uses_exclusive_issue_workspace, CancellationRegistry, WorkerCapacity, WorkerDrainHandle,
+    WorkerReservationError,
 };
+#[cfg(test)]
+use crate::agent::cancellation::{issue_workspace_capture_is_active, StateWorkerCapacity};
 use crate::agent::events::{
     AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
     WorkerEvent, WorkerFailureKind, WorkerIdentity, WorkerResult,
@@ -53,7 +55,9 @@ use crate::attention::{
     AttentionEvidence, AttentionIdentity, AttentionPresentation, AttentionReporter,
     AttentionUpsert,
 };
-use crate::config::ensemble::{repository_key, EnsembleConfig, OnFailure, StepKind};
+use crate::config::ensemble::{
+    repository_key, AgentConfig, ArtifactAccess, EnsembleConfig, OnFailure, StepKind,
+};
 use crate::error::{AgentError, EnsembleError};
 use crate::history::artifacts::{finalize_mode_name, RunArtifacts};
 use crate::history::model::{HistoryRecord, TokenTotals};
@@ -88,7 +92,7 @@ use crate::pipeline::engine::{
     DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, SelectedWorkflowSnapshot,
     StepOutputTemplateContext, StepState,
 };
-use crate::pipeline::verdict::StepResult;
+use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::timeline::persistence::TimelinePersistence;
 use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
 use crate::tracker::{IssueTracker, OwnershipClaim, OwnershipLease};
@@ -119,6 +123,107 @@ use state::{
     RepoFinalizeState, WaitingOnHumanEntry,
 };
 
+fn immutable_artifact_verification_failure(error: impl std::fmt::Display) -> StepOutput {
+    StepOutput {
+        result: StepResult::Failed {
+            summary: format!("immutable Artifact input could not be verified: {error}"),
+        },
+        summary: Some("immutable Artifact input could not be verified".to_string()),
+        output: None,
+    }
+}
+
+fn artifact_snapshot_capture_failure(error: impl std::fmt::Display) -> StepOutput {
+    StepOutput {
+        result: StepResult::Failed {
+            summary: format!("artifact snapshot capture failed: {error}"),
+        },
+        summary: Some("artifact snapshot capture failed".to_string()),
+        output: None,
+    }
+}
+
+fn worker_failure_output(error: String) -> StepOutput {
+    StepOutput {
+        result: StepResult::Failed {
+            summary: error.clone(),
+        },
+        summary: Some(error),
+        output: None,
+    }
+}
+
+struct SuccessfulWorkerExitAction {
+    action: PipelineAction,
+    config_snapshot: Option<Arc<EnsembleConfig>>,
+    step_transition: Option<PipelineTransitionInput>,
+    integrity_failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepDispatchFailureKind {
+    Ordinary,
+    ImmutableIntegrity,
+}
+
+#[derive(Debug)]
+struct StepDispatchError {
+    kind: StepDispatchFailureKind,
+    error: EnsembleError,
+}
+
+impl StepDispatchError {
+    fn ordinary(error: impl Into<EnsembleError>) -> Self {
+        Self {
+            kind: StepDispatchFailureKind::Ordinary,
+            error: error.into(),
+        }
+    }
+
+    fn immutable_integrity(error: impl Into<EnsembleError>) -> Self {
+        Self {
+            kind: StepDispatchFailureKind::ImmutableIntegrity,
+            error: error.into(),
+        }
+    }
+}
+
+impl From<EnsembleError> for StepDispatchError {
+    fn from(error: EnsembleError) -> Self {
+        Self::ordinary(error)
+    }
+}
+
+impl From<AgentError> for StepDispatchError {
+    fn from(error: AgentError) -> Self {
+        Self::ordinary(error)
+    }
+}
+
+impl std::fmt::Display for StepDispatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+fn immutable_artifact_access_enforcement(
+    agent: Option<&AgentConfig>,
+) -> artifact::ArtifactAccessEnforcement {
+    match agent {
+        Some(agent)
+            if crate::agent::runtime::RuntimeKind::for_agent(agent)
+                == crate::agent::runtime::RuntimeKind::Acpx =>
+        {
+            if agent.permission_mode.as_deref() == Some("deny_all") {
+                artifact::ArtifactAccessEnforcement::AcpxDenyAll
+            } else {
+                artifact::ArtifactAccessEnforcement::AcpxApproveReads
+            }
+        }
+        _ => artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+    }
+}
+
 struct StepDispatchContext<'a> {
     step_name: &'a str,
     agent_name: &'a str,
@@ -145,6 +250,32 @@ struct PendingWorkerReservation {
     identity: WorkerIdentity,
     completion: Option<watch::Sender<bool>>,
 }
+
+/// A worker task exists behind `start_gate`, but cannot call an agent runtime
+/// until `expected` is durably visible. `StepLaunched` is launch authority,
+/// not proof that the child processed instructions.
+struct PendingImmutableLaunch {
+    issue: Issue,
+    expected: PipelineTransitionInput,
+    identity: WorkerIdentity,
+    reservation: PendingWorkerReservation,
+    start_gate: oneshot::Sender<()>,
+    local_event_rx: mpsc::Receiver<WorkerEvent>,
+    previous_step_state: StepState,
+    running_session_id: String,
+    evidence: artifact::ArtifactAccessEvidence,
+    previous_evidence: Option<artifact::ArtifactAccessEvidence>,
+    retired_interaction: Option<(InteractionRequest, InteractionRequest)>,
+}
+
+struct ArtifactWorkerExitOutcome {
+    output: StepOutput,
+    captured_snapshot: Option<artifact::ArtifactSnapshot>,
+    deferred_sibling_exits: Vec<OrchestratorWorkerEvent>,
+    integrity_failed: bool,
+}
+
+type ImmutablePostcheckOutcome = (StepOutput, Vec<OrchestratorWorkerEvent>, bool);
 
 impl PendingWorkerReservation {
     fn new(
@@ -486,6 +617,8 @@ pub struct Orchestrator {
     pipeline_journal_restored: AtomicBool,
     pending_run_started_transitions:
         Box<std::sync::Mutex<HashMap<String, PendingRunStartedTransition>>>,
+    /// Immutable workers waiting for exact `StepLaunched` reconciliation.
+    pending_immutable_launches: std::sync::Mutex<HashMap<WorkerIdentity, PendingImmutableLaunch>>,
     pending_acceptance_transitions: std::sync::Mutex<HashMap<String, PendingAcceptanceTransition>>,
     /// Remote claims held only until their first synchronous `RunStarted` journal append.
     pending_ownership_leases: std::sync::Mutex<HashMap<String, OwnershipLease>>,
@@ -821,6 +954,7 @@ impl Orchestrator {
             pipeline_journal: PipelineRunJournal::new(config_dir.to_path_buf()),
             pipeline_journal_restored: AtomicBool::new(false),
             pending_run_started_transitions: Box::new(std::sync::Mutex::new(HashMap::new())),
+            pending_immutable_launches: std::sync::Mutex::new(HashMap::new()),
             pending_acceptance_transitions: std::sync::Mutex::new(HashMap::new()),
             pending_ownership_leases: std::sync::Mutex::new(HashMap::new()),
             event_bus: parts.event_bus,
@@ -1151,6 +1285,7 @@ impl Orchestrator {
         }
 
         Box::pin(self.reconcile_pending_run_started_transitions()).await;
+        self.reconcile_pending_immutable_launches().await;
         self.reconcile_pending_acceptance_transitions().await;
         self.restore_pipeline_runs_from_journal().await;
         self.reconcile_parked_recovery_attention().await;
@@ -2355,6 +2490,147 @@ impl Orchestrator {
         }
     }
 
+    async fn reconcile_pending_immutable_launches(&self) {
+        let identities = self
+            .pending_immutable_launches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for identity in identities {
+            let Some(pending) = self
+                .pending_immutable_launches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&identity)
+            else {
+                continue;
+            };
+            let transaction = self
+                .pipeline_journal
+                .begin_issue_transition(&pending.issue.id)
+                .await;
+            match transaction.latest_record_matches(&pending.expected).await {
+                Ok(true) => self.release_immutable_launch(pending).await,
+                Ok(false) => {
+                    self.rollback_unconfirmed_immutable_launch(pending, &transaction)
+                        .await;
+                }
+                Err(error) => {
+                    warn!(
+                        issue_id = %pending.issue.id,
+                        step = %pending.identity.step_name,
+                        error = %error,
+                        "immutable worker launch remains ambiguous; retaining its closed gate"
+                    );
+                    self.pending_immutable_launches
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(identity, pending);
+                }
+            }
+        }
+    }
+
+    async fn release_immutable_launch(&self, pending: PendingImmutableLaunch) {
+        let PendingImmutableLaunch {
+            identity,
+            reservation,
+            start_gate,
+            local_event_rx,
+            ..
+        } = pending;
+        match reservation.mark_launched() {
+            Ok(completion_tx) => {
+                tokio::spawn(bridge_worker_events(
+                    local_event_rx,
+                    self.worker_tx.clone(),
+                    self.cancellation_registry.clone(),
+                    identity,
+                    completion_tx,
+                ));
+                let _ = start_gate.send(());
+            }
+            Err(error) => {
+                warn!(error = %error, "durably committed immutable worker could not be released");
+            }
+        }
+    }
+
+    async fn rollback_unconfirmed_immutable_launch(
+        &self,
+        pending: PendingImmutableLaunch,
+        transaction: &crate::orchestrator::pipeline_journal::PipelineIssueJournalTransaction<'_>,
+    ) {
+        let PendingImmutableLaunch {
+            issue,
+            identity,
+            previous_step_state,
+            running_session_id,
+            evidence,
+            previous_evidence,
+            retired_interaction,
+            ..
+        } = pending;
+        let rollback_transition = {
+            let mut state = self.state.write().await;
+            let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                return;
+            };
+            if run.step_states.get(&identity.step_name)
+                != Some(&StepState::Running {
+                    session_id: running_session_id,
+                })
+            {
+                return;
+            }
+            run.step_states
+                .insert(identity.step_name.clone(), previous_step_state.clone());
+            run.clear_active_scheduler_reservation(&identity.step_name);
+            run.clear_immutable_consumer_launch_commitment(&identity.step_name);
+            run.restore_artifact_access_evidence(&evidence, previous_evidence);
+            let kind = match previous_step_state {
+                StepState::BlockedOnHuman { .. } => {
+                    Some(PipelineTransitionKind::StepBlockedOnHuman)
+                }
+                StepState::AwaitingApproval { .. } => {
+                    Some(PipelineTransitionKind::StepAwaitingApproval)
+                }
+                _ => None,
+            };
+            kind.and_then(|kind| {
+                Self::transition_input_for_run(
+                    &state,
+                    &issue.id,
+                    &issue.identifier,
+                    kind,
+                    Some(identity.step_name.clone()),
+                    Some("immutable worker launch was not durably committed".to_string()),
+                    None,
+                )
+            })
+        };
+        let restores_interaction = retired_interaction.is_some();
+        if let Some((previous, retired)) = retired_interaction {
+            if let Err(error) = self
+                .interaction_store
+                .restore_waiting_state_after_failed_transition(&retired, &previous)
+                .await
+            {
+                warn!(issue_id = %issue.id, interaction_id = %previous.id, error = %error, "failed to restore interaction after unconfirmed immutable launch");
+            }
+        }
+        if restores_interaction {
+            self.state.write().await.remove_running(&issue.id);
+        }
+        if let Some(transition) = rollback_transition {
+            if let Err(error) = transaction.append(transition).await {
+                warn!(issue_id = %issue.id, step = %identity.step_name, error = %error, "failed to persist unconfirmed immutable launch rollback");
+            }
+        }
+    }
+
     async fn dispatch_ready_active_pipelines(&self, permit: &DispatchPermit) {
         let mut active_issue_ids = {
             let state = self.state.read().await;
@@ -2457,6 +2733,7 @@ impl Orchestrator {
             let workspace_path = match self.prepare_step_workspace(&issue, &config_snapshot).await {
                 Ok(path) => path,
                 Err(error) => {
+                    let error = StepDispatchError::ordinary(error);
                     self.handle_step_dispatch_error(
                         &issue,
                         &request.step_name,
@@ -2532,7 +2809,10 @@ impl Orchestrator {
         let Some(record) = record else {
             return Ok(None);
         };
-        if record.kind != PipelineTransitionKind::StepRunning {
+        if !matches!(
+            record.kind,
+            PipelineTransitionKind::StepRunning | PipelineTransitionKind::StepLaunched
+        ) {
             return Ok(None);
         }
         let Some(interaction_id) = interaction_id_from_resume_reason(record.reason.as_deref())
@@ -2598,7 +2878,7 @@ impl Orchestrator {
         issue: &Issue,
         step_name: &str,
         config_snapshot: &Arc<EnsembleConfig>,
-        error: &EnsembleError,
+        error: &StepDispatchError,
     ) {
         warn!(
             issue_id = %issue.id,
@@ -2606,6 +2886,108 @@ impl Orchestrator {
             error = %error,
             "failed to persist step dispatch"
         );
+        let immutable_integrity_failure = error.kind == StepDispatchFailureKind::ImmutableIntegrity;
+        if immutable_integrity_failure {
+            let mut sibling_handles = mark_issue_for_drain(&self.cancellation_registry, &issue.id);
+            if !self
+                .await_worker_drain_with_event_pump(
+                    &mut sibling_handles,
+                    WORKER_DRAIN_TIMEOUT,
+                    DrainEventMode::ApplyExceptIssue(&issue.id),
+                )
+                .await
+            {
+                warn!(issue_id = %issue.id, step = step_name, "immutable Artifact halt could not drain siblings");
+                return;
+            }
+            remove_drained_workers(&self.cancellation_registry, &sibling_handles);
+            let journal_transaction = self
+                .pipeline_journal
+                .begin_issue_transition(&issue.id)
+                .await;
+            let mut state = self.state.write().await;
+            let Some(entry) = state.get_running(&issue.id) else {
+                return;
+            };
+            let Some(run) = state.get_pipeline_run(&issue.id) else {
+                return;
+            };
+            let mut halted_run = run.clone();
+            halted_run.step_failed(step_name, error.to_string());
+            let transition = PipelineTransitionInput {
+                kind: PipelineTransitionKind::PipelineHalted,
+                issue_id: issue.id.clone(),
+                identifier: entry.identifier.clone(),
+                run_id: entry.run_id.clone(),
+                cycle: halted_run.cycle,
+                step: Some(step_name.to_string()),
+                reason: Some(error.to_string()),
+                retry: None,
+                snapshot: Some(halted_run.to_snapshot()),
+                terminal_transition: None,
+                delivery: None,
+            };
+            let transition_is_durable = match journal_transaction.append(transition.clone()).await {
+                Ok(_) => true,
+                Err(append_error) => {
+                    match journal_transaction.latest_record_matches(&transition).await {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            warn!(
+                                issue_id = %issue.id,
+                                step = step_name,
+                                error = %append_error,
+                                "immutable Artifact halt was not durably committed; retaining running owner"
+                            );
+                            false
+                        }
+                        Err(reconciliation_error) => {
+                            warn!(
+                                issue_id = %issue.id,
+                                step = step_name,
+                                append_error = %append_error,
+                                reconciliation_error = %reconciliation_error,
+                                "immutable Artifact halt remains ambiguous; retaining running owner"
+                            );
+                            false
+                        }
+                    }
+                }
+            };
+            if !transition_is_durable {
+                return;
+            }
+            let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                return;
+            };
+            run.step_failed(step_name, error.to_string());
+            let agent_name = run
+                .step(step_name)
+                .map(|step| step.agent.clone())
+                .unwrap_or_default();
+            let entry = state
+                .remove_running(&issue.id)
+                .expect("validated immutable halt owner is still running");
+            state.add_runtime_seconds(&entry);
+            state.add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: issue.id.clone(),
+                identifier: entry.identifier.clone(),
+                interaction_request_id: format!("halted:{}:{step_name}", issue.id),
+                step_name: step_name.to_string(),
+                kind: InteractionKind::Handoff,
+                prompt: error.to_string(),
+                agent_name,
+                retry_attempt: entry.retry_attempt,
+                started_at: Some(entry.started_at),
+                agent_input_tokens: entry.agent_input_tokens,
+                agent_output_tokens: entry.agent_output_tokens,
+                agent_total_tokens: entry.agent_total_tokens,
+                requested_at: Utc::now(),
+                run_id: entry.run_id.clone(),
+                issue: Some(entry.issue),
+            });
+            return;
+        }
         let terminal = {
             let mut state = self.state.write().await;
             let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
@@ -3108,14 +3490,33 @@ impl Orchestrator {
     }
 
     /// Dispatch a single pipeline step after its workspace is ready.
-    async fn dispatch_step(
+    // Keep the #480 immutable preflight disposition out of callers that already retain event or
+    // terminal-lifecycle state on a Tokio worker stack.
+    fn dispatch_step<'a>(
+        &'a self,
+        issue: &'a Issue,
+        config_snapshot: Arc<EnsembleConfig>,
+        dispatch: StepDispatchContext<'a>,
+        permit: &'a DispatchPermit,
+    ) -> Pin<Box<dyn Future<Output = Result<StepDispatchOutcome, StepDispatchError>> + Send + 'a>>
+    {
+        Box::pin(self.dispatch_step_inner(issue, config_snapshot, dispatch, permit))
+    }
+
+    async fn dispatch_step_inner(
         &self,
         issue: &Issue,
         config_snapshot: Arc<EnsembleConfig>,
         dispatch: StepDispatchContext<'_>,
         _permit: &DispatchPermit,
-    ) -> Result<StepDispatchOutcome, EnsembleError> {
-        let (worker_identity, issue_snapshot) = {
+    ) -> Result<StepDispatchOutcome, StepDispatchError> {
+        let (
+            worker_identity,
+            issue_snapshot,
+            immutable_inputs,
+            immutable_input_count,
+            artifact_access,
+        ) = {
             let state = self.state.read().await;
             let running_entry =
                 state
@@ -3144,6 +3545,34 @@ impl Orchestrator {
                         dispatch.step_name
                     ),
                 })?;
+            let (immutable_inputs, immutable_input_count): (
+                Vec<artifact::ArtifactSnapshot>,
+                usize,
+            ) = state
+                .get_pipeline_run(&issue.id)
+                .filter(|run| {
+                    run.artifact_inputs_for(dispatch.step_name)
+                        .is_some_and(|(_, access)| access == ArtifactAccess::Immutable)
+                })
+                .map(|run| {
+                    let producers = run
+                        .artifact_inputs_for(dispatch.step_name)
+                        .expect("immutable Artifact access has resolved inputs")
+                        .0;
+                    (
+                        producers
+                            .iter()
+                            .filter_map(|producer| run.artifact_snapshots.get(producer).cloned())
+                            .collect(),
+                        producers.len(),
+                    )
+                })
+                .unwrap_or_default();
+            let artifact_access = state
+                .get_pipeline_run(&issue.id)
+                .and_then(|run| run.artifact_inputs_for(dispatch.step_name))
+                .map(|(_, access)| access)
+                .unwrap_or_default();
             (
                 WorkerIdentity {
                     issue_id: issue.id.clone(),
@@ -3153,9 +3582,22 @@ impl Orchestrator {
                     started_at: running_entry.started_at,
                 },
                 running_entry.issue.clone(),
+                immutable_inputs,
+                immutable_input_count,
+                artifact_access,
             )
         };
         let issue = &issue_snapshot;
+        if immutable_inputs.len() != immutable_input_count {
+            return Err(StepDispatchError::immutable_integrity(
+                AgentError::PromptError {
+                    reason: format!(
+                        "immutable Artifact input is unavailable before step '{}'",
+                        dispatch.step_name
+                    ),
+                },
+            ));
+        }
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let (completion_tx, completion_rx) = watch::channel(false);
         let selected_lane = {
@@ -3226,7 +3668,7 @@ impl Orchestrator {
             .iter()
             .map(|(name, config)| (name.clone(), config.capacity))
             .collect();
-        match try_reserve_scheduler_worker(
+        match try_reserve_scheduler_worker_with_workspace_exclusivity(
             &self.cancellation_registry,
             worker_identity.clone(),
             cancel_token.clone(),
@@ -3236,6 +3678,7 @@ impl Orchestrator {
             worker_capacity,
             &resource_capacities,
             scheduler_reservation.clone(),
+            artifact_access == ArtifactAccess::Immutable,
         ) {
             Ok(()) => {}
             Err(
@@ -3243,7 +3686,8 @@ impl Orchestrator {
                 | WorkerReservationError::IssueCapacityExhausted
                 | WorkerReservationError::CapacityBucketExhausted
                 | WorkerReservationError::ResourceExhausted
-                | WorkerReservationError::PathConflict,
+                | WorkerReservationError::PathConflict
+                | WorkerReservationError::IssueWorkspaceExclusive,
             ) => {
                 debug!(
                     issue_id = %issue.id,
@@ -3267,6 +3711,51 @@ impl Orchestrator {
             worker_identity.clone(),
             completion_tx,
         );
+        if !immutable_inputs.is_empty() {
+            let repositories = self
+                .workspace_mgr
+                .owned_worktree_paths(&issue.id)
+                .map(|paths| paths.into_iter().collect::<BTreeMap<_, _>>())
+                .map_err(|error| StepDispatchError::immutable_integrity(AgentError::PromptError {
+                    reason: format!(
+                        "immutable Artifact input could not be verified: prepared worktree unavailable: {error}"
+                    ),
+                }))?;
+            let violations = artifact::verify_immutable_inputs(
+                dispatch.step_name,
+                &immutable_inputs,
+                &repositories,
+            )
+            .await
+            .map_err(|reason| {
+                StepDispatchError::immutable_integrity(AgentError::PromptError {
+                    reason: format!("immutable Artifact input could not be verified: {reason}"),
+                })
+            })?;
+            if !violations.is_empty() {
+                if let Some(run) = self.state.write().await.get_pipeline_run_mut(&issue.id) {
+                    run.record_artifact_integrity_violations(violations.clone());
+                }
+                return Err(StepDispatchError::immutable_integrity(
+                    AgentError::PromptError {
+                        reason: format!(
+                            "immutable Artifact input changed before step '{}': {}",
+                            dispatch.step_name,
+                            violations
+                                .iter()
+                                .map(|violation| format!(
+                                    "{}:{} ({})",
+                                    violation.producer_step,
+                                    violation.repository,
+                                    violation.artifact_identity
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
+                ));
+            }
+        }
         info!(
             event = STEP_STARTED,
             issue_id = %issue.id,
@@ -3322,6 +3811,14 @@ impl Orchestrator {
             .pipeline_journal
             .begin_issue_transition(&issue.id)
             .await;
+        let artifact_access_evidence = (artifact_access == ArtifactAccess::Immutable).then(|| {
+            artifact::ArtifactAccessEvidence {
+                consumer_step: dispatch.step_name.to_string(),
+                enforcement: immutable_artifact_access_enforcement(
+                    config_snapshot.agents.get(dispatch.agent_name),
+                ),
+            }
+        });
 
         // Mark step as running in pipeline
         let (
@@ -3331,6 +3828,7 @@ impl Orchestrator {
             step_running_transition,
             previous_step_state,
             running_session_id,
+            previous_artifact_access_evidence,
         ) = {
             let mut state = self.state.write().await;
             let step_owner_is_current = state
@@ -3368,6 +3866,9 @@ impl Orchestrator {
                             dispatch.step_name
                         ),
                     })?;
+            let previous_artifact_access_evidence = artifact_access_evidence
+                .as_ref()
+                .and_then(|evidence| run.record_artifact_access_evidence(evidence.clone()));
             let previous_step_state = run.step_states.get(dispatch.step_name).cloned();
             let running_session_id = format!(
                 "{}-{}-{}",
@@ -3393,6 +3894,7 @@ impl Orchestrator {
                 transition,
                 previous_step_state,
                 running_session_id,
+                previous_artifact_access_evidence,
             )
         };
 
@@ -3420,6 +3922,12 @@ impl Orchestrator {
                                 run.step_states
                                     .insert(dispatch.step_name.to_string(), previous_step_state);
                                 run.clear_active_scheduler_reservation(dispatch.step_name);
+                                if let Some(evidence) = artifact_access_evidence.as_ref() {
+                                    run.restore_artifact_access_evidence(
+                                        evidence,
+                                        previous_artifact_access_evidence.clone(),
+                                    );
+                                }
                             }
                         }
                         return Err(AgentError::PromptError {
@@ -3450,72 +3958,87 @@ impl Orchestrator {
             }
         }
 
-        if let Some(interaction_id) = dispatch.interaction_to_retire {
-            if let Err(interaction_error) = self
+        let retired_interaction = if let Some(interaction_id) = dispatch.interaction_to_retire {
+            match self
                 .interaction_store
                 .retire_waiting_state(interaction_id)
                 .await
             {
-                let derived_rollback_transition = {
-                    let mut state = self.state.write().await;
-                    let run = state.get_pipeline_run_mut(&issue.id);
-                    if let Some(run) = run {
-                        if run.step_states.get(dispatch.step_name)
-                            == Some(&StepState::Running {
-                                session_id: running_session_id.clone(),
-                            })
-                        {
-                            if let Some(previous_step_state) = previous_step_state.clone() {
-                                run.step_states
-                                    .insert(dispatch.step_name.to_string(), previous_step_state);
-                                run.clear_active_scheduler_reservation(dispatch.step_name);
+                Ok(retired) => Some(retired),
+                Err(interaction_error) => {
+                    let derived_rollback_transition = {
+                        let mut state = self.state.write().await;
+                        let run = state.get_pipeline_run_mut(&issue.id);
+                        if let Some(run) = run {
+                            if run.step_states.get(dispatch.step_name)
+                                == Some(&StepState::Running {
+                                    session_id: running_session_id.clone(),
+                                })
+                            {
+                                if let Some(previous_step_state) = previous_step_state.clone() {
+                                    run.step_states.insert(
+                                        dispatch.step_name.to_string(),
+                                        previous_step_state,
+                                    );
+                                    run.clear_active_scheduler_reservation(dispatch.step_name);
+                                    if let Some(evidence) = artifact_access_evidence.as_ref() {
+                                        run.restore_artifact_access_evidence(
+                                            evidence,
+                                            previous_artifact_access_evidence.clone(),
+                                        );
+                                    }
+                                }
                             }
                         }
-                    }
-                    let rollback_kind = match previous_step_state {
-                        Some(StepState::BlockedOnHuman { .. }) => {
-                            Some(PipelineTransitionKind::StepBlockedOnHuman)
-                        }
-                        Some(StepState::AwaitingApproval { .. }) => {
-                            Some(PipelineTransitionKind::StepAwaitingApproval)
-                        }
-                        _ => None,
+                        let rollback_kind = match previous_step_state {
+                            Some(StepState::BlockedOnHuman { .. }) => {
+                                Some(PipelineTransitionKind::StepBlockedOnHuman)
+                            }
+                            Some(StepState::AwaitingApproval { .. }) => {
+                                Some(PipelineTransitionKind::StepAwaitingApproval)
+                            }
+                            _ => None,
+                        };
+                        rollback_kind.and_then(|kind| {
+                            Self::transition_input_for_run(
+                                &state,
+                                &issue.id,
+                                &issue.identifier,
+                                kind,
+                                Some(dispatch.step_name.to_string()),
+                                Some(format!(
+                                    "interaction '{}' retirement failed: {interaction_error}",
+                                    interaction_id
+                                )),
+                                None,
+                            )
+                        })
                     };
-                    rollback_kind.and_then(|kind| {
-                        Self::transition_input_for_run(
-                            &state,
-                            &issue.id,
-                            &issue.identifier,
-                            kind,
-                            Some(dispatch.step_name.to_string()),
-                            Some(format!(
-                                "interaction '{}' retirement failed: {interaction_error}",
-                                interaction_id
-                            )),
-                            None,
-                        )
-                    })
-                };
-                let rollback_transition = dispatch
-                    .interaction_retirement_rollback
-                    .clone()
-                    .or(derived_rollback_transition);
-                if let Some(rollback_transition) = rollback_transition {
-                    if let Err(rollback_error) =
-                        journal_transaction.append(rollback_transition).await
-                    {
-                        warn!(
-                            issue_id = %issue.id,
-                            step = dispatch.step_name,
-                            interaction_id,
-                            error = %rollback_error,
-                            "failed to persist blocked owner after interaction retirement failure"
-                        );
+                    let rollback_transition = dispatch
+                        .interaction_retirement_rollback
+                        .clone()
+                        .or(derived_rollback_transition);
+                    if let Some(rollback_transition) = rollback_transition {
+                        if let Err(rollback_error) =
+                            journal_transaction.append(rollback_transition).await
+                        {
+                            warn!(
+                                issue_id = %issue.id,
+                                step = dispatch.step_name,
+                                interaction_id,
+                                error = %rollback_error,
+                                "failed to persist blocked owner after interaction retirement failure"
+                            );
+                        }
                     }
+                    return Err(StepDispatchError::ordinary(EnsembleError::from(
+                        interaction_error,
+                    )));
                 }
-                return Err(interaction_error.into());
             }
-        }
+        } else {
+            None
+        };
 
         self.publish_pipeline_event(
             run_id,
@@ -3531,7 +4054,8 @@ impl Orchestrator {
         )
         .await;
 
-        // Spawn worker task
+        // Spawn worker task. Immutable consumers wait behind a gate until a
+        // `StepLaunched` snapshot commits their authority to run.
         let issue_clone = issue.clone();
         let step_name_owned = dispatch.step_name.to_string();
         let agent_name_owned = dispatch.agent_name.to_string();
@@ -3542,10 +4066,120 @@ impl Orchestrator {
         let attempt = dispatch.attempt;
         let timeout_ms = dispatch.timeout_ms;
         let step_outputs = dispatch.step_outputs.clone();
-        let (local_event_tx, local_event_rx) = mpsc::channel(100);
+        if artifact_access == ArtifactAccess::Immutable {
+            let (start_gate, wait_for_launch) = oneshot::channel();
+            let local_event_rx = spawn_agent_worker(
+                runner,
+                config_snapshot,
+                issue_clone,
+                agent_name_owned,
+                step_name_owned,
+                dispatch.step_kind,
+                artifact_access,
+                attempt,
+                timeout_ms,
+                interaction_response,
+                workspace_path,
+                cancel_token,
+                step_outputs,
+                Some(wait_for_launch),
+            );
+
+            let launch_transition = {
+                let mut state = self.state.write().await;
+                let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                    return Err(AgentError::PromptError {
+                        reason: format!(
+                            "cannot confirm immutable step '{}' launch without a pipeline run",
+                            dispatch.step_name
+                        ),
+                    }
+                    .into());
+                };
+                run.mark_immutable_consumer_launch_committed(dispatch.step_name);
+                Self::transition_input_for_run(
+                    &state,
+                    &issue.id,
+                    &issue.identifier,
+                    PipelineTransitionKind::StepLaunched,
+                    Some(dispatch.step_name.to_string()),
+                    dispatch.interaction_resume_id.map(|interaction_id| {
+                        format!("{INTERACTION_RESUME_REASON_PREFIX}{interaction_id}")
+                    }),
+                    None,
+                )
+            }
+            .expect("running immutable step has a transition snapshot");
+            let pending = PendingImmutableLaunch {
+                issue: issue.clone(),
+                expected: launch_transition.clone(),
+                identity: worker_identity.clone(),
+                reservation,
+                start_gate,
+                local_event_rx,
+                previous_step_state: previous_step_state
+                    .clone()
+                    .expect("immutable launch has a prior step state"),
+                running_session_id: running_session_id.clone(),
+                evidence: artifact_access_evidence
+                    .expect("immutable launch records access evidence"),
+                previous_evidence: previous_artifact_access_evidence,
+                retired_interaction,
+            };
+            match journal_transaction.append(launch_transition.clone()).await {
+                Ok(_) => self.release_immutable_launch(pending).await,
+                Err(error) => match journal_transaction
+                    .latest_record_matches(&launch_transition)
+                    .await
+                {
+                    Ok(true) => self.release_immutable_launch(pending).await,
+                    Ok(false) => {
+                        self.rollback_unconfirmed_immutable_launch(pending, &journal_transaction)
+                            .await;
+                        return Err(AgentError::PromptError {
+                            reason: format!(
+                                "failed to persist immutable step '{}' launch: {error}",
+                                dispatch.step_name
+                            ),
+                        }
+                        .into());
+                    }
+                    Err(reconciliation_error) => {
+                        warn!(
+                            issue_id = %issue.id,
+                            step = dispatch.step_name,
+                            append_error = %error,
+                            reconciliation_error = %reconciliation_error,
+                            "immutable worker launch remains ambiguous; retaining its closed gate"
+                        );
+                        self.pending_immutable_launches
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .insert(worker_identity, pending);
+                    }
+                },
+            }
+            return Ok(StepDispatchOutcome::Spawned);
+        }
         let bridge_registry = self.cancellation_registry.clone();
         let bridge_identity = worker_identity.clone();
         let completion_tx = reservation.mark_launched()?;
+        let local_event_rx = spawn_agent_worker(
+            runner,
+            config_snapshot,
+            issue_clone,
+            agent_name_owned,
+            step_name_owned,
+            dispatch.step_kind,
+            artifact_access,
+            attempt,
+            timeout_ms,
+            interaction_response,
+            workspace_path,
+            cancel_token,
+            step_outputs,
+            None,
+        );
         tokio::spawn(bridge_worker_events(
             local_event_rx,
             orchestrator_event_tx,
@@ -3553,43 +4187,17 @@ impl Orchestrator {
             bridge_identity,
             completion_tx,
         ));
-        tokio::spawn(async move {
-            let worker_result = catch_worker_panic(
-                runner.run(AgentRunRequest {
-                    config: Arc::clone(&config_snapshot),
-                    issue: &issue_clone,
-                    agent_name: &agent_name_owned,
-                    step_name: &step_name_owned,
-                    step_kind: dispatch.step_kind,
-                    attempt,
-                    timeout_ms,
-                    interaction_response: interaction_response.clone(),
-                    workspace_path: &workspace_path,
-                    event_tx: local_event_tx.clone(),
-                    cancel_token,
-                    step_outputs,
-                }),
-                &issue_clone.id,
-                &step_name_owned,
-            )
-            .await;
-
-            let _ = local_event_tx
-                .send(WorkerEvent::WorkerExited {
-                    issue_id: issue_clone.id.clone(),
-                    step_name: step_name_owned,
-                    result: worker_result,
-                    timestamp: Utc::now(),
-                })
-                .await;
-        });
-
         Ok(StepDispatchOutcome::Spawned)
     }
 
     /// Handle a worker event from the channel.
     async fn handle_worker_event(&self, owned_event: OrchestratorWorkerEvent) {
-        let worker_exit_permit = if matches!(&owned_event.event, WorkerEvent::WorkerExited { .. }) {
+        let OrchestratorWorkerEvent {
+            identity,
+            event,
+            workspace_capture,
+        } = owned_event;
+        let worker_exit_permit = if matches!(&event, WorkerEvent::WorkerExited { .. }) {
             let Some(permit) = self.quiescing.begin_dispatch() else {
                 return;
             };
@@ -3597,8 +4205,7 @@ impl Orchestrator {
         } else {
             None
         };
-        let identity = owned_event.identity;
-        let event_matches_identity = match &owned_event.event {
+        let event_matches_identity = match &event {
             WorkerEvent::AgentUpdate {
                 issue_id,
                 step_name,
@@ -3618,7 +4225,7 @@ impl Orchestrator {
         }
 
         let reconciliation_owned = is_reconciliation_owned(&self.cancellation_registry, &identity);
-        match owned_event.event {
+        match event {
             WorkerEvent::AgentUpdate {
                 issue_id,
                 step_name,
@@ -3631,52 +4238,75 @@ impl Orchestrator {
                 self.handle_agent_update(&issue_id, &step_name, agent_event, timestamp)
                     .await;
             }
-            WorkerEvent::WorkerExited {
-                issue_id,
-                step_name,
-                result,
-                ..
-            } => {
-                if !reconciliation_owned {
-                    if worker_result_halts_pipeline(&result) {
-                        let mut sibling_handles =
-                            mark_issue_for_drain(&self.cancellation_registry, &issue_id);
-                        if !self
-                            .await_worker_drain_with_event_pump(
-                                &mut sibling_handles,
-                                WORKER_DRAIN_TIMEOUT,
-                                DrainEventMode::ApplyExceptIssue(&issue_id),
-                            )
-                            .await
-                        {
-                            warn!(
-                                issue_id = %issue_id,
-                                step = %step_name,
-                                siblings = sibling_handles.len(),
-                                "parallel sibling drain timed out before failure disposition"
-                            );
-                            return;
-                        }
-                        remove_drained_workers(&self.cancellation_registry, &sibling_handles);
-                        if !self.worker_identity_is_current(&identity).await {
-                            return;
-                        }
-                    }
-                    self.handle_worker_exit_with_permit(
-                        &issue_id,
-                        &step_name,
-                        result,
-                        worker_exit_permit
-                            .as_ref()
-                            .expect("worker exit has a dispatch permit"),
-                    )
-                    .await;
-                }
+            WorkerEvent::WorkerExited { result, .. } => {
+                self.handle_worker_exit_event(
+                    result,
+                    identity,
+                    reconciliation_owned,
+                    workspace_capture.is_some(),
+                    worker_exit_permit
+                        .as_ref()
+                        .expect("worker exit has a dispatch permit"),
+                )
+                .await;
             }
         }
+        drop(workspace_capture);
         if let Some(permit) = worker_exit_permit.as_ref() {
             self.dispatch_ready_active_pipelines(permit).await;
         }
+    }
+
+    // Do not retain the worker event, sibling-drain state, and the terminal lifecycle state
+    // machine in one Tokio poll frame. This is the worker-exit boundary; downstream lifecycle
+    // boundaries remain unchanged.
+    fn handle_worker_exit_event<'a>(
+        &'a self,
+        result: WorkerResult,
+        identity: WorkerIdentity,
+        reconciliation_owned: bool,
+        workspace_capture_held: bool,
+        permit: &'a DispatchPermit,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let issue_id = identity.issue_id.clone();
+            let step_name = identity.step_name.clone();
+            if reconciliation_owned {
+                return;
+            }
+            if worker_result_halts_pipeline(&result) {
+                let mut sibling_handles =
+                    mark_issue_for_drain(&self.cancellation_registry, &issue_id);
+                if !self
+                    .await_worker_drain_with_event_pump(
+                        &mut sibling_handles,
+                        WORKER_DRAIN_TIMEOUT,
+                        DrainEventMode::ApplyExceptIssue(&issue_id),
+                    )
+                    .await
+                {
+                    warn!(
+                        issue_id = %issue_id,
+                        step = %step_name,
+                        siblings = sibling_handles.len(),
+                        "parallel sibling drain timed out before failure disposition"
+                    );
+                    return;
+                }
+                remove_drained_workers(&self.cancellation_registry, &sibling_handles);
+                if !self.worker_identity_is_current(&identity).await {
+                    return;
+                }
+            }
+            self.handle_worker_exit_with_permit(
+                &issue_id,
+                &step_name,
+                result,
+                workspace_capture_held,
+                permit,
+            )
+            .await;
+        })
     }
 
     #[cfg(test)]
@@ -4274,13 +4904,321 @@ impl Orchestrator {
         }
     }
 
+    // The immutable post-check awaits workspace drains and Git observations. Keep it out of the
+    // worker-exit future so the expanded Artifact evidence cannot inflate the normal acceptance
+    // and terminal-transition poll stack.
+    fn verify_immutable_inputs_after_worker_exit<'a>(
+        &'a self,
+        issue_id: &'a str,
+        step_name: &'a str,
+        output: crate::pipeline::verdict::StepOutput,
+        workspace_capture_held: bool,
+    ) -> Pin<Box<dyn Future<Output = ImmutablePostcheckOutcome> + Send + 'a>> {
+        Box::pin(self.verify_immutable_inputs_after_worker_exit_inner(
+            issue_id,
+            step_name,
+            output,
+            workspace_capture_held,
+        ))
+    }
+
+    async fn verify_immutable_inputs_after_worker_exit_inner(
+        &self,
+        issue_id: &str,
+        step_name: &str,
+        mut output: crate::pipeline::verdict::StepOutput,
+        workspace_capture_held: bool,
+    ) -> (
+        crate::pipeline::verdict::StepOutput,
+        Vec<OrchestratorWorkerEvent>,
+        bool,
+    ) {
+        let immutable_inputs: Vec<artifact::ArtifactSnapshot> = {
+            let state = self.state.read().await;
+            state
+                .get_pipeline_run(issue_id)
+                .filter(|run| {
+                    run.artifact_inputs_for(step_name)
+                        .is_some_and(|(_, access)| access == ArtifactAccess::Immutable)
+                })
+                .map(|run| {
+                    run.artifact_inputs_for(step_name)
+                        .expect("immutable Artifact access has resolved inputs")
+                        .0
+                        .iter()
+                        .filter_map(|producer| run.artifact_snapshots.get(producer).cloned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        if immutable_inputs.is_empty() {
+            return (output, Vec::new(), false);
+        }
+
+        let _capture_guard = if workspace_capture_held {
+            None
+        } else {
+            Some(acquire_issue_workspace_capture(&self.cancellation_registry, issue_id).await)
+        };
+        let mut sibling_writers =
+            sibling_worker_completion_handles(&self.cancellation_registry, issue_id, step_name);
+        let deferred_exits = match self
+            .await_sibling_workspace_writers(issue_id, &mut sibling_writers)
+            .await
+        {
+            Ok(exits) => exits,
+            Err(error) => {
+                output = immutable_artifact_verification_failure(error);
+                return (output, Vec::new(), true);
+            }
+        };
+        let repositories = match self.workspace_mgr.owned_worktree_paths(issue_id) {
+            Ok(paths) => paths.into_iter().collect(),
+            Err(error) => {
+                output = immutable_artifact_verification_failure(error);
+                return (output, deferred_exits, true);
+            }
+        };
+        let mut integrity_failed = false;
+        match artifact::verify_immutable_inputs(step_name, &immutable_inputs, &repositories).await {
+            Ok(violations) if violations.is_empty() => {}
+            Ok(violations) => {
+                integrity_failed = true;
+                if let Some(run) = self.state.write().await.get_pipeline_run_mut(issue_id) {
+                    run.record_artifact_integrity_violations(violations.clone());
+                }
+                output = crate::pipeline::verdict::StepOutput {
+                    result: StepResult::Failed {
+                        summary: format!(
+                            "immutable Artifact input changed after step execution: {}",
+                            violations
+                                .iter()
+                                .map(|violation| format!(
+                                    "{}:{} ({})",
+                                    violation.producer_step,
+                                    violation.repository,
+                                    violation.artifact_identity
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    },
+                    summary: Some("immutable Artifact input changed".to_string()),
+                    output: None,
+                };
+            }
+            Err(error) => {
+                integrity_failed = true;
+                output = immutable_artifact_verification_failure(error);
+            }
+        }
+        (output, deferred_exits, integrity_failed)
+    }
+
+    // Producer capture and consumer verification both carry ArtifactSnapshot state. Type-erase
+    // this #480 addition so it cannot enlarge the acceptance and terminal failure poll chain.
+    fn process_artifacts_after_worker_exit<'a>(
+        &'a self,
+        issue_id: &'a str,
+        step_name: &'a str,
+        output: StepOutput,
+        capture_artifact: bool,
+        workspace_capture_held: bool,
+    ) -> Pin<Box<dyn Future<Output = Box<ArtifactWorkerExitOutcome>> + Send + 'a>> {
+        Box::pin(self.process_artifacts_after_worker_exit_inner(
+            issue_id,
+            step_name,
+            output,
+            capture_artifact,
+            workspace_capture_held,
+        ))
+    }
+
+    async fn process_artifacts_after_worker_exit_inner(
+        &self,
+        issue_id: &str,
+        step_name: &str,
+        mut output: StepOutput,
+        capture_artifact: bool,
+        workspace_capture_held: bool,
+    ) -> Box<ArtifactWorkerExitOutcome> {
+        let capture_request = if !capture_artifact
+            || matches!(output.result, StepResult::Failed { .. })
+        {
+            None
+        } else {
+            let state = self.state.read().await;
+            state.get_pipeline_run(issue_id).and_then(|run| {
+                run.artifact_snapshot_selection_for(step_name)
+                    .cloned()
+                    .map(|selection| {
+                        let running = state.running.get(issue_id);
+                        let run_id = running
+                            .and_then(|entry| entry.run_id.clone())
+                            .or_else(|| state.issue_run_ids.get(issue_id).cloned())
+                            .unwrap_or_else(|| issue_id.to_string());
+                        let attempt = running.and_then(|entry| entry.retry_attempt).unwrap_or(1);
+                        (run_id, run.cycle, attempt, selection)
+                    })
+            })
+        };
+        let mut captured_snapshot = None;
+        let mut deferred_sibling_exits = Vec::new();
+        if let Some((run_id, cycle, attempt, selection)) = capture_request {
+            let capture_guard = if workspace_capture_held {
+                None
+            } else {
+                Some(acquire_issue_workspace_capture(&self.cancellation_registry, issue_id).await)
+            };
+            let mut sibling_writers =
+                sibling_worker_completion_handles(&self.cancellation_registry, issue_id, step_name);
+            let capture_result = self
+                .await_sibling_workspace_writers(issue_id, &mut sibling_writers)
+                .await
+                .and_then(|deferred_exits| {
+                    deferred_sibling_exits = deferred_exits;
+                    self.workspace_mgr
+                        .owned_worktree_paths(issue_id)
+                        .map(|paths| paths.into_iter().collect::<BTreeMap<_, _>>())
+                        .map_err(|error| error.to_string())
+                });
+            match capture_result {
+                Ok(repositories) => match artifact::capture(
+                    &run_id,
+                    cycle,
+                    step_name,
+                    attempt,
+                    output.output.as_ref().unwrap_or(&serde_json::Value::Null),
+                    &selection,
+                    &repositories,
+                )
+                .await
+                {
+                    Ok(snapshot) => captured_snapshot = Some(snapshot),
+                    Err(error) => {
+                        output = artifact_snapshot_capture_failure(error);
+                    }
+                },
+                Err(error) => output = artifact_snapshot_capture_failure(error),
+            }
+            drop(capture_guard);
+        }
+        let (output, postcheck_exits, integrity_failed) = self
+            .verify_immutable_inputs_after_worker_exit(
+                issue_id,
+                step_name,
+                output,
+                workspace_capture_held,
+            )
+            .await;
+        deferred_sibling_exits.extend(postcheck_exits);
+        if integrity_failed {
+            captured_snapshot = None;
+        }
+        Box::new(ArtifactWorkerExitOutcome {
+            output,
+            captured_snapshot,
+            deferred_sibling_exits,
+            integrity_failed,
+        })
+    }
+
+    // Complete the #480 Artifact observation before re-entering the existing success/acceptance
+    // state machine. Keeping this boxed prevents the observation vectors from inflating that
+    // Tokio worker future.
+    fn process_successful_worker_exit<'a>(
+        &'a self,
+        issue_id: &'a str,
+        step_name: &'a str,
+        issue_identifier: Option<&'a str>,
+        output: StepOutput,
+        has_approval_request: bool,
+        workspace_capture_held: bool,
+    ) -> Pin<Box<dyn Future<Output = Option<SuccessfulWorkerExitAction>> + Send + 'a>> {
+        Box::pin(self.process_successful_worker_exit_inner(
+            issue_id,
+            step_name,
+            issue_identifier,
+            output,
+            has_approval_request,
+            workspace_capture_held,
+        ))
+    }
+
+    async fn process_successful_worker_exit_inner(
+        &self,
+        issue_id: &str,
+        step_name: &str,
+        issue_identifier: Option<&str>,
+        output: StepOutput,
+        has_approval_request: bool,
+        workspace_capture_held: bool,
+    ) -> Option<SuccessfulWorkerExitAction> {
+        let mut artifact_outcome = self
+            .process_artifacts_after_worker_exit(
+                issue_id,
+                step_name,
+                output,
+                true,
+                workspace_capture_held,
+            )
+            .await;
+        while let Some(event) = artifact_outcome.deferred_sibling_exits.pop() {
+            if self.worker_tx.send(event).await.is_err() {
+                warn!(issue_id = %issue_id, "failed to restore deferred sibling worker exit");
+            }
+        }
+        let captured_snapshot = artifact_outcome.captured_snapshot.take();
+        let integrity_failed = artifact_outcome.integrity_failed;
+        let output = artifact_outcome.output;
+        let verdict_value = match &output.result {
+            StepResult::Succeeded => "succeeded",
+            StepResult::Failed { .. } => "failed",
+            StepResult::Concern { .. } => "concern",
+        };
+        info!(
+            issue_id = %issue_id,
+            step = step_name,
+            verdict_value,
+            "received validated step result"
+        );
+        let mut state = self.state.write().await;
+        let run = match state.get_pipeline_run_mut(issue_id) {
+            Some(run) => run,
+            None => {
+                warn!(issue_id = %issue_id, "no pipeline run found for worker exit");
+                return None;
+            }
+        };
+        if let Some(snapshot) = captured_snapshot {
+            run.record_artifact_snapshot(step_name, snapshot);
+        }
+        let action = run.step_completed(step_name, output, has_approval_request);
+        let config_snapshot = state.get_pipeline_config(issue_id).cloned();
+        let step_transition = Self::transition_input_for_run(
+            &state,
+            issue_id,
+            issue_identifier.unwrap_or(issue_id),
+            Self::transition_kind_for_action(&action),
+            Some(step_name.to_string()),
+            Some(verdict_value.to_string()),
+            None,
+        );
+        Some(SuccessfulWorkerExitAction {
+            action,
+            config_snapshot,
+            step_transition,
+            integrity_failed,
+        })
+    }
+
     /// Handle a worker exit. Integrates with PipelineRun to drive step DAG.
     #[cfg(test)]
     async fn handle_worker_exit(&self, issue_id: &str, step_name: &str, result: WorkerResult) {
         let Some(permit) = self.quiescing.begin_dispatch() else {
             return;
         };
-        self.handle_worker_exit_with_permit(issue_id, step_name, result, &permit)
+        self.handle_worker_exit_with_permit(issue_id, step_name, result, false, &permit)
             .await;
     }
 
@@ -4291,12 +5229,14 @@ impl Orchestrator {
         issue_id: &'a str,
         step_name: &'a str,
         result: WorkerResult,
+        workspace_capture_held: bool,
         worker_exit_permit: &'a DispatchPermit,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(self.handle_worker_exit_with_permit_inner(
             issue_id,
             step_name,
             result,
+            workspace_capture_held,
             worker_exit_permit,
         ))
     }
@@ -4306,6 +5246,7 @@ impl Orchestrator {
         issue_id: &str,
         step_name: &str,
         result: WorkerResult,
+        workspace_capture_held: bool,
         worker_exit_permit: &DispatchPermit,
     ) {
         // Get the issue snapshot for potential re-dispatch
@@ -4325,131 +5266,27 @@ impl Orchestrator {
                     "worker exited successfully"
                 );
 
-                let capture_request = if matches!(output.result, StepResult::Failed { .. }) {
-                    None
-                } else {
-                    let state = self.state.read().await;
-                    state.get_pipeline_run(issue_id).and_then(|run| {
-                        run.artifact_snapshot_selection_for(step_name)
-                            .cloned()
-                            .map(|selection| {
-                                let running = state.running.get(issue_id);
-                                let run_id = running
-                                    .and_then(|entry| entry.run_id.clone())
-                                    .or_else(|| state.issue_run_ids.get(issue_id).cloned())
-                                    .unwrap_or_else(|| issue_id.to_string());
-                                let attempt =
-                                    running.and_then(|entry| entry.retry_attempt).unwrap_or(1);
-                                (run_id, run.cycle, attempt, selection)
-                            })
-                    })
-                };
-                let mut captured_snapshot = None;
-                let mut resolved_output = output;
-                let mut deferred_sibling_exits = Vec::new();
-                if let Some((run_id, cycle, attempt, selection)) = capture_request {
-                    let mut sibling_writers = sibling_worker_completion_handles(
-                        &self.cancellation_registry,
+                let successful_action = self
+                    .process_successful_worker_exit(
                         issue_id,
                         step_name,
-                    );
-                    let capture_result = self
-                        .await_sibling_workspace_writers(issue_id, &mut sibling_writers)
-                        .await
-                        .and_then(|deferred_exits| {
-                            deferred_sibling_exits = deferred_exits;
-                            self.workspace_mgr
-                                .owned_worktree_paths(issue_id)
-                                .map(|paths| paths.into_iter().collect::<BTreeMap<_, _>>())
-                                .map_err(|error| error.to_string())
-                        });
-                    match capture_result {
-                        Ok(repositories) => match artifact::capture(
-                            &run_id,
-                            cycle,
-                            step_name,
-                            attempt,
-                            resolved_output
-                                .output
-                                .as_ref()
-                                .unwrap_or(&serde_json::Value::Null),
-                            &selection,
-                            &repositories,
-                        )
-                        .await
-                        {
-                            Ok(snapshot) => captured_snapshot = Some(snapshot),
-                            Err(error) => {
-                                resolved_output = crate::pipeline::verdict::StepOutput {
-                                    result: StepResult::Failed {
-                                        summary: format!(
-                                            "artifact snapshot capture failed: {error}"
-                                        ),
-                                    },
-                                    summary: Some("artifact snapshot capture failed".to_string()),
-                                    output: None,
-                                };
-                            }
-                        },
-                        Err(error) => {
-                            resolved_output = crate::pipeline::verdict::StepOutput {
-                                result: StepResult::Failed {
-                                    summary: format!("artifact snapshot capture failed: {error}"),
-                                },
-                                summary: Some("artifact snapshot capture failed".to_string()),
-                                output: None,
-                            };
-                        }
-                    }
-                }
-
-                for event in deferred_sibling_exits {
-                    if self.worker_tx.send(event).await.is_err() {
-                        warn!(issue_id = %issue_id, "failed to restore deferred sibling worker exit");
-                    }
-                }
-
-                let mut state = self.state.write().await;
-
-                let verdict_value = match &resolved_output.result {
-                    StepResult::Succeeded => "succeeded",
-                    StepResult::Failed { .. } => "failed",
-                    StepResult::Concern { .. } => "concern",
-                };
-                info!(
-                    issue_id = %issue_id,
-                    step = step_name,
-                    verdict_value,
-                    "received validated step result"
-                );
-
-                // Drive the pipeline
-                let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
-                    if let Some(snapshot) = captured_snapshot {
-                        run.record_artifact_snapshot(step_name, snapshot);
-                    }
-                    Some((
-                        run.step_completed(step_name, resolved_output, approval_request.is_some()),
-                        state.get_pipeline_config(issue_id).cloned(),
-                    ))
-                } else {
-                    warn!(issue_id = %issue_id, "no pipeline run found for worker exit");
-                    None
-                };
-
-                if let Some((action, config_snapshot)) = pipeline_action {
-                    let step_transition = Self::transition_input_for_run(
-                        &state,
-                        issue_id,
                         issue_snapshot
                             .as_ref()
-                            .map(|issue| issue.identifier.as_str())
-                            .unwrap_or(issue_id),
-                        Self::transition_kind_for_action(&action),
-                        Some(step_name.to_string()),
-                        Some(verdict_value.to_string()),
-                        None,
-                    );
+                            .map(|issue| issue.identifier.as_str()),
+                        output,
+                        approval_request.is_some(),
+                        workspace_capture_held,
+                    )
+                    .await;
+
+                if let Some(SuccessfulWorkerExitAction {
+                    action,
+                    config_snapshot,
+                    step_transition,
+                    integrity_failed,
+                }) = successful_action
+                {
+                    let mut state = self.state.write().await;
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Collect output contexts while state lock is still held
@@ -4706,11 +5543,15 @@ impl Orchestrator {
                                 .and_then(|run| run.step(&step))
                                 .cloned();
                             let step_config = config_snapshot.steps.iter().find(|s| s.name == step);
-                            let on_failure = runtime_step
-                                .as_ref()
-                                .map(|s| s.on_failure)
-                                .or_else(|| step_config.map(|s| s.on_failure))
-                                .unwrap_or_default();
+                            let on_failure = if integrity_failed {
+                                OnFailure::Halt
+                            } else {
+                                runtime_step
+                                    .as_ref()
+                                    .map(|s| s.on_failure)
+                                    .or_else(|| step_config.map(|s| s.on_failure))
+                                    .unwrap_or_default()
+                            };
                             match on_failure {
                                 OnFailure::RetryStep => {
                                     if let Some(run) = state.get_pipeline_run_mut(issue_id) {
@@ -5131,6 +5972,42 @@ impl Orchestrator {
                 }
             }
             WorkerResult::BlockedOnHuman { request } => {
+                // Keep the all-exit Artifact outcome boxed before entering interaction handling.
+                let artifact_outcome = self
+                    .process_artifacts_after_worker_exit(
+                        issue_id,
+                        step_name,
+                        StepOutput {
+                            result: StepResult::Succeeded,
+                            summary: None,
+                            output: None,
+                        },
+                        false,
+                        workspace_capture_held,
+                    )
+                    .await;
+                let ArtifactWorkerExitOutcome {
+                    output,
+                    deferred_sibling_exits,
+                    integrity_failed,
+                    ..
+                } = *artifact_outcome;
+                for event in deferred_sibling_exits {
+                    if self.worker_tx.send(event).await.is_err() {
+                        warn!(issue_id = %issue_id, "failed to restore deferred sibling worker exit");
+                    }
+                }
+                if integrity_failed {
+                    let reason = match output.result {
+                        StepResult::Failed { summary } => summary,
+                        StepResult::Succeeded | StepResult::Concern { .. } => {
+                            "immutable Artifact input could not be verified".to_string()
+                        }
+                    };
+                    self.handle_pipeline_step_failure(issue_id, step_name, reason, true)
+                        .await;
+                    return;
+                }
                 if let Err(error) = self
                     .handle_blocked_on_human(issue_id, step_name, &request, issue_snapshot.as_ref())
                     .await
@@ -5167,6 +6044,32 @@ impl Orchestrator {
                 }
             }
             WorkerResult::Failed { error, kind } => {
+                // Keep the #480 Artifact result off this already large failure/retry future.
+                let mut artifact_outcome = self
+                    .process_artifacts_after_worker_exit(
+                        issue_id,
+                        step_name,
+                        worker_failure_output(error.clone()),
+                        false,
+                        workspace_capture_held,
+                    )
+                    .await;
+                while let Some(event) = artifact_outcome.deferred_sibling_exits.pop() {
+                    if self.worker_tx.send(event).await.is_err() {
+                        warn!(issue_id = %issue_id, "failed to restore deferred sibling worker exit");
+                    }
+                }
+                if artifact_outcome.integrity_failed {
+                    let reason = match &artifact_outcome.output.result {
+                        StepResult::Failed { summary } => summary.clone(),
+                        StepResult::Succeeded | StepResult::Concern { .. } => {
+                            "immutable Artifact input could not be verified".to_string()
+                        }
+                    };
+                    self.handle_pipeline_step_failure(issue_id, step_name, reason, true)
+                        .await;
+                    return;
+                }
                 if kind == WorkerFailureKind::Timeout {
                     warn!(
                         issue_id = %issue_id,
@@ -5174,7 +6077,7 @@ impl Orchestrator {
                         error = %error,
                         "worker exited with timeout"
                     );
-                    self.handle_pipeline_step_failure(issue_id, step_name, error)
+                    self.handle_pipeline_step_failure(issue_id, step_name, error, false)
                         .await;
                     return;
                 }
@@ -5492,7 +6395,13 @@ impl Orchestrator {
         }
     }
 
-    async fn handle_pipeline_step_failure(&self, issue_id: &str, step: &str, reason: String) {
+    async fn handle_pipeline_step_failure(
+        &self,
+        issue_id: &str,
+        step: &str,
+        reason: String,
+        force_integrity_halt: bool,
+    ) {
         let mut state = self.state.write().await;
         let Some(config_snapshot) = state.get_pipeline_config(issue_id).cloned() else {
             warn!(
@@ -5535,11 +6444,15 @@ impl Orchestrator {
             .and_then(|run| run.step(step))
             .cloned();
         let step_config = config_snapshot.steps.iter().find(|s| s.name == step);
-        let on_failure = runtime_step
-            .as_ref()
-            .map(|s| s.on_failure)
-            .or_else(|| step_config.map(|s| s.on_failure))
-            .unwrap_or_default();
+        let on_failure = if force_integrity_halt {
+            OnFailure::Halt
+        } else {
+            runtime_step
+                .as_ref()
+                .map(|s| s.on_failure)
+                .or_else(|| step_config.map(|s| s.on_failure))
+                .unwrap_or_default()
+        };
 
         match on_failure {
             OnFailure::RetryStep => {
@@ -6632,8 +7545,10 @@ impl Orchestrator {
         }
         let repair_matches_durable_predecessor = match interaction.resume_strategy {
             InteractionResumeStrategy::RerunStep => {
-                latest_record.kind == PipelineTransitionKind::StepRunning
-                    && latest_record.cycle == interaction.pipeline_cycle
+                matches!(
+                    latest_record.kind,
+                    PipelineTransitionKind::StepRunning | PipelineTransitionKind::StepLaunched
+                ) && latest_record.cycle == interaction.pipeline_cycle
                     && latest_record.step.as_deref() == Some(interaction.step_name.as_str())
                     && interaction_id_from_resume_reason(latest_record.reason.as_deref()).is_none()
             }
@@ -6907,11 +7822,21 @@ impl Orchestrator {
                 let step_dispatch_was_reserved = live_records
                     .get(&interaction.issue_id)
                     .is_some_and(|record| {
-                        record.kind == PipelineTransitionKind::StepRunning
-                            && interaction.status == InteractionStatus::Resolved
+                        matches!(
+                            record.kind,
+                            PipelineTransitionKind::StepRunning
+                                | PipelineTransitionKind::StepLaunched
+                        ) && interaction.status == InteractionStatus::Resolved
                             && interaction_id_from_resume_reason(record.reason.as_deref())
                                 == Some(interaction.id.as_str())
-                    });
+                    })
+                    && self
+                        .state
+                        .read()
+                        .await
+                        .get_pipeline_run(&interaction.issue_id)
+                        .and_then(|run| run.step_states.get(&interaction.step_name))
+                        .is_some_and(|step_state| matches!(step_state, StepState::Running { .. }));
                 if step_dispatch_was_reserved {
                     match self
                         .interaction_store
@@ -8575,6 +9500,9 @@ impl Orchestrator {
             .any(|step_state| matches!(step_state, StepState::Running { .. }))
     }
 
+    // Keep #480 Artifact evidence projection and the resulting HistoryRecord out of lifecycle
+    // futures that carry terminal-transition state on Tokio worker stacks.
+    #[inline(never)]
     pub(super) fn build_history_record(
         &self,
         input: RunningHistoryRecordInput<'_>,
@@ -8628,13 +9556,22 @@ impl Orchestrator {
         running_entry: &RunningEntry,
         workspace_path: &str,
     ) -> Option<RunArtifacts> {
-        if run.artifact_snapshots.is_empty() {
+        if run.artifact_snapshots.is_empty()
+            && run.artifact_integrity_violations.is_empty()
+            && run.artifact_access_evidence.is_empty()
+        {
             return artifacts;
         }
         let mut snapshots = run.artifact_snapshots.values().cloned().collect::<Vec<_>>();
         snapshots.sort_by(|left, right| left.producer_step.cmp(&right.producer_step));
+        let violations = run.artifact_integrity_violations.clone();
+        let access_evidence = run.artifact_access_evidence.clone();
         match artifacts.as_mut() {
-            Some(artifacts) => artifacts.artifact_snapshots = snapshots,
+            Some(artifacts) => {
+                artifacts.artifact_snapshots = snapshots;
+                artifacts.artifact_integrity_violations = violations;
+                artifacts.artifact_access_evidence = access_evidence;
+            }
             None => {
                 artifacts = Some(RunArtifacts {
                     run_id: running_entry
@@ -8645,6 +9582,8 @@ impl Orchestrator {
                     repos: Vec::new(),
                     transcripts: Vec::new(),
                     artifact_snapshots: snapshots,
+                    artifact_integrity_violations: violations,
+                    artifact_access_evidence: access_evidence,
                 });
             }
         }
@@ -9121,6 +10060,16 @@ impl Orchestrator {
                 {
                     Ok(outcome) => outcome,
                     Err(error) => {
+                        if error.kind == StepDispatchFailureKind::ImmutableIntegrity {
+                            self.handle_step_dispatch_error(
+                                issue,
+                                &pipeline_step.name,
+                                &pipeline_config,
+                                &error,
+                            )
+                            .await;
+                            return Err(error.error);
+                        }
                         let dispatch_retains_owner = {
                             let state = self.state.read().await;
                             matches!(
@@ -9138,7 +10087,7 @@ impl Orchestrator {
                                 previous_running.as_ref(),
                             );
                         }
-                        return Err(error);
+                        return Err(error.error);
                     }
                 };
                 if dispatch_outcome == StepDispatchOutcome::Deferred {
@@ -9313,6 +10262,16 @@ impl Orchestrator {
                             {
                                 Ok(outcome) => outcome,
                                 Err(error) => {
+                                    if error.kind == StepDispatchFailureKind::ImmutableIntegrity {
+                                        self.handle_step_dispatch_error(
+                                            issue,
+                                            &req.step_name,
+                                            &pipeline_config,
+                                            &error,
+                                        )
+                                        .await;
+                                        return Err(error.error);
+                                    }
                                     let failed_dispatch_retains_owner = {
                                         let state = self.state.read().await;
                                         matches!(
@@ -9337,7 +10296,7 @@ impl Orchestrator {
                                         state.remove_waiting_on_human(&issue.id);
                                         state.clear_resume_request(&issue.id);
                                     }
-                                    return Err(error);
+                                    return Err(error.error);
                                 }
                             };
                             if dispatch_outcome == StepDispatchOutcome::Deferred {
@@ -9761,6 +10720,16 @@ impl Orchestrator {
     }
 
     async fn cancel_active_runs(&self) -> bool {
+        // A launch whose journal visibility is still ambiguous has a closed
+        // runtime gate and no event bridge. Dropping its pending reservation
+        // signals completion and releases its capacity before shutdown waits.
+        let pending_launches = std::mem::take(
+            &mut *self
+                .pending_immutable_launches
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        drop(pending_launches);
         let mut handles = mark_all_for_drain(&self.cancellation_registry);
         let cancelled = handles.len();
         if cancelled > 0 {
@@ -9885,10 +10854,18 @@ async fn bridge_worker_events(
     completion_tx: watch::Sender<bool>,
 ) {
     while let Some(event) = local_event_rx.recv().await {
+        let workspace_capture = if matches!(&event, WorkerEvent::WorkerExited { .. })
+            && worker_uses_exclusive_issue_workspace(&cancellation_registry, &identity)
+        {
+            Some(acquire_issue_workspace_capture(&cancellation_registry, &identity.issue_id).await)
+        } else {
+            None
+        };
         if orchestrator_event_tx
             .send(OrchestratorWorkerEvent {
                 identity: identity.clone(),
                 event,
+                workspace_capture,
             })
             .await
             .is_err()
@@ -9898,6 +10875,70 @@ async fn bridge_worker_events(
     }
     let _ = completion_tx.send(true);
     remove_completed_worker(&cancellation_registry, &identity);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_agent_worker(
+    runner: Arc<dyn AgentRunner>,
+    config: Arc<EnsembleConfig>,
+    issue: Issue,
+    agent_name: String,
+    step_name: String,
+    step_kind: StepKind,
+    artifact_access: ArtifactAccess,
+    attempt: Option<u32>,
+    timeout_ms: u64,
+    interaction_response: Option<InteractionResponseEnvelope>,
+    workspace_path: std::path::PathBuf,
+    cancel_token: tokio_util::sync::CancellationToken,
+    step_outputs: StepOutputTemplateContext,
+    start_gate: Option<oneshot::Receiver<()>>,
+) -> mpsc::Receiver<WorkerEvent> {
+    let (local_event_tx, local_event_rx) = mpsc::channel(100);
+    tokio::spawn(async move {
+        if let Some(start_gate) = start_gate {
+            tokio::select! {
+                result = start_gate => {
+                    if result.is_err() {
+                        return;
+                    }
+                }
+                () = cancel_token.cancelled() => return,
+            }
+        }
+        if cancel_token.is_cancelled() {
+            return;
+        }
+        let worker_result = catch_worker_panic(
+            runner.run(AgentRunRequest {
+                config,
+                issue: &issue,
+                agent_name: &agent_name,
+                step_name: &step_name,
+                step_kind,
+                artifact_access,
+                attempt,
+                timeout_ms,
+                interaction_response,
+                workspace_path: &workspace_path,
+                event_tx: local_event_tx.clone(),
+                cancel_token,
+                step_outputs,
+            }),
+            &issue.id,
+            &step_name,
+        )
+        .await;
+        let _ = local_event_tx
+            .send(WorkerEvent::WorkerExited {
+                issue_id: issue.id,
+                step_name,
+                result: worker_result,
+                timestamp: Utc::now(),
+            })
+            .await;
+    });
+    local_event_rx
 }
 
 async fn catch_worker_panic<F>(fut: F, issue_id: &str, step_name: &str) -> WorkerResult
@@ -10899,6 +11940,45 @@ mod tests {
                 approval_request: None,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn gated_immutable_worker_exits_when_cancelled_before_launch() {
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config = Arc::new(make_config());
+        let issue = test_issue("gated-cancel", "Todo");
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let (_gate_sender, start_gate) = oneshot::channel();
+        let mut events = spawn_agent_worker(
+            runner,
+            Arc::clone(&config),
+            issue,
+            "builder".to_string(),
+            "build".to_string(),
+            StepKind::Agent,
+            ArtifactAccess::Immutable,
+            None,
+            config.agent.turn_timeout_ms,
+            None,
+            std::path::PathBuf::new(),
+            cancel_token.clone(),
+            StepOutputTemplateContext::default(),
+            Some(start_gate),
+        );
+
+        cancel_token.cancel();
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), events.recv()).await,
+            Ok(None)
+        ));
+        assert!(observed_commands.read().await.is_empty());
     }
 
     fn succeeded_step_output() -> crate::pipeline::verdict::StepOutput {
@@ -12945,6 +14025,8 @@ mod tests {
                 }],
                 transcripts: Vec::new(),
                 artifact_snapshots: Vec::new(),
+                artifact_integrity_violations: Vec::new(),
+                artifact_access_evidence: Vec::new(),
             });
         let snapshot = {
             let config = orchestrator.config.read().await;
@@ -13123,6 +14205,8 @@ mod tests {
             }],
             transcripts: Vec::new(),
             artifact_snapshots: Vec::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
         });
         let snapshot = {
             let config = orchestrator.config.read().await;
@@ -13877,6 +14961,30 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    #[test]
+    fn immutable_artifact_access_evidence_uses_the_resolved_runtime_kind() {
+        let mut config = make_config();
+        let agent = config.agents.get_mut("builder").unwrap();
+        agent.acpx_agent = Some("configured-through-acpx".to_string());
+        agent.runtime = Some("direct".to_string());
+        assert_eq!(
+            immutable_artifact_access_enforcement(Some(agent)),
+            artifact::ArtifactAccessEnforcement::DirectAcpUnsupported
+        );
+
+        agent.runtime = Some("acpx".to_string());
+        assert_eq!(
+            immutable_artifact_access_enforcement(Some(agent)),
+            artifact::ArtifactAccessEnforcement::AcpxApproveReads
+        );
+
+        agent.permission_mode = Some("deny_all".to_string());
+        assert_eq!(
+            immutable_artifact_access_enforcement(Some(agent)),
+            artifact::ArtifactAccessEnforcement::AcpxDenyAll
+        );
     }
 
     async fn install_retry_pipeline_config(orchestrator: &Orchestrator, issue_id: &str) {
@@ -15157,6 +16265,16 @@ agent:
         let dag = build_dag(&cfg.steps).unwrap();
         let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
         run.step_failed("build", "manual halt".to_string());
+        run.record_artifact_integrity_violations([artifact::ArtifactIntegrityViolation {
+            consumer_step: "build".to_string(),
+            producer_step: "producer".to_string(),
+            artifact_identity: "artifact-1".to_string(),
+            repository: "repo".to_string(),
+            expected_digest: "expected".to_string(),
+            observed_digest: "observed".to_string(),
+            changed_paths: vec!["src/lib.rs".to_string()],
+            omitted_changed_path_count: 0,
+        }]);
         setup
             .pipeline_journal
             .append(PipelineTransitionInput {
@@ -15297,6 +16415,16 @@ agent:
         let dag = build_dag(&cfg.steps).unwrap();
         let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
         run.step_failed("build", "manual halt".to_string());
+        run.record_artifact_integrity_violations([artifact::ArtifactIntegrityViolation {
+            consumer_step: "build".to_string(),
+            producer_step: "producer".to_string(),
+            artifact_identity: "artifact-1".to_string(),
+            repository: "repo".to_string(),
+            expected_digest: "expected".to_string(),
+            observed_digest: "observed".to_string(),
+            changed_paths: vec!["src/lib.rs".to_string()],
+            omitted_changed_path_count: 0,
+        }]);
         orchestrator
             .pipeline_journal
             .append(PipelineTransitionInput {
@@ -15319,6 +16447,13 @@ agent:
 
         let lock = state.read().await;
         assert!(lock.get_pipeline_run(&issue.id).is_some());
+        assert_eq!(
+            lock.get_pipeline_run(&issue.id)
+                .unwrap()
+                .artifact_integrity_violations
+                .len(),
+            1
+        );
         assert!(lock.is_claimed(&issue.id));
         assert!(lock.is_waiting_on_human(&issue.id));
     }
@@ -15635,9 +16770,10 @@ agent:
     }
 
     #[tokio::test]
-    async fn restart_reconciles_reserved_step_before_hydrating_stale_interaction() {
+    async fn restart_discards_unlaunched_immutable_evidence_before_hydrating_interaction() {
         let temp = tempfile::tempdir().unwrap();
-        let cfg = make_config();
+        let mut cfg = make_config();
+        cfg.steps[0].artifact_access = ArtifactAccess::Immutable;
         let issue = test_issue("1", "Todo");
         let responses = Arc::new(RwLock::new(Vec::new()));
         let runner: Arc<dyn AgentRunner> = Arc::new(InteractionCaptureRunner {
@@ -15648,6 +16784,10 @@ agent:
         let dag = build_dag(&cfg.steps).unwrap();
         let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
         run.start();
+        run.record_artifact_access_evidence(artifact::ArtifactAccessEvidence {
+            consumer_step: "build".to_string(),
+            enforcement: artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+        });
         run.mark_running("build", "reserved-session".to_string());
         orchestrator
             .pipeline_journal
@@ -15711,20 +16851,25 @@ agent:
         orchestrator.restore_pipeline_runs_from_journal().await;
         orchestrator.hydrate_waiting_on_human_from_store().await;
 
-        let state = state.read().await;
-        assert!(state.is_claimed(&issue.id));
-        assert!(!state.is_waiting_on_human(&issue.id));
+        let restored_state = state.read().await;
+        assert!(restored_state.is_claimed(&issue.id));
+        assert!(restored_state.is_waiting_on_human(&issue.id));
         assert_eq!(
-            state
+            restored_state
                 .get_pipeline_run(&issue.id)
                 .unwrap()
                 .step_states
                 .get("build"),
             Some(&StepState::Pending)
         );
-        drop(state);
+        assert!(restored_state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .artifact_access_evidence
+            .is_empty());
+        drop(restored_state);
         assert!(
-            !orchestrator
+            orchestrator
                 .interaction_store
                 .get("interaction-1")
                 .await
@@ -15743,6 +16888,18 @@ agent:
                 .map(|response| serde_json::to_value(response).unwrap()["interaction_id"].clone()),
             Some(serde_json::json!("interaction-1"))
         );
+        assert_eq!(
+            state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .artifact_access_evidence,
+            vec![artifact::ArtifactAccessEvidence {
+                consumer_step: "build".to_string(),
+                enforcement: artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+            }]
+        );
         drop(captured);
         let latest = orchestrator
             .pipeline_journal
@@ -15750,10 +16907,14 @@ agent:
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            interaction_id_from_resume_reason(latest.reason.as_deref()),
-            Some("interaction-1")
-        );
+        assert_eq!(latest.kind, PipelineTransitionKind::StepLaunched);
+        assert!(latest
+            .snapshot
+            .unwrap()
+            .artifact_integrity_evidence
+            .artifact_access_evidence
+            .iter()
+            .any(|evidence| evidence.consumer_step == "build"));
         drop(orchestrator);
 
         let runner: Arc<dyn AgentRunner> = Arc::new(InteractionCaptureRunner {
@@ -15767,6 +16928,8 @@ agent:
         tokio::time::sleep(Duration::from_millis(10)).await;
         let captured = responses.read().await;
         assert_eq!(captured.len(), 2);
+        // A committed `StepLaunched` marker retains the input identity, so a
+        // crash before gate delivery replays the resolved response exactly.
         assert_eq!(
             captured[1]
                 .as_ref()
@@ -17030,6 +18193,8 @@ agent:
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);
@@ -17752,6 +18917,118 @@ agent:
     }
 
     #[tokio::test]
+    async fn immutable_halt_returns_without_reentrant_state_locking() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let issue = test_issue("immutable-halt", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        install_retry_pipeline_config(&orchestrator, &issue.id).await;
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state
+                .get_pipeline_run_mut(&issue.id)
+                .unwrap()
+                .record_artifact_integrity_violations([artifact::ArtifactIntegrityViolation {
+                    consumer_step: "build".to_string(),
+                    producer_step: "producer".to_string(),
+                    artifact_identity: "artifact-1".to_string(),
+                    repository: "repo".to_string(),
+                    expected_digest: "expected".to_string(),
+                    observed_digest: "observed".to_string(),
+                    changed_paths: vec!["src/lib.rs".to_string()],
+                    omitted_changed_path_count: 0,
+                }]);
+        }
+        let error = StepDispatchError::immutable_integrity(AgentError::PromptError {
+            reason: "immutable Artifact input changed before step 'build': build:repo (artifact-1)"
+                .to_string(),
+        });
+        let config_snapshot = Arc::new(config.read().await.clone());
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            orchestrator.handle_step_dispatch_error(&issue, "build", &config_snapshot, &error),
+        )
+        .await
+        .expect("immutable halt does not reenter the state lock during its journal checkpoint");
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(!state.retry_attempts.contains_key(&issue.id));
+        let waiting = state.waiting_on_human.get(&issue.id).unwrap();
+        assert!(waiting.interaction_request_id.starts_with("halted:"));
+        drop(state);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .expect("halt transition is journaled for restart recovery");
+        assert_eq!(latest.kind, PipelineTransitionKind::PipelineHalted);
+    }
+
+    #[tokio::test]
+    async fn ordinary_dispatch_error_phrase_does_not_force_immutable_artifact_halt() {
+        let config = Arc::new(RwLock::new(make_retry_step_config()));
+        let issue = test_issue("ordinary-dispatch-phrase", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        install_retry_pipeline_config(&orchestrator, &issue.id).await;
+        orchestrator
+            .state
+            .write()
+            .await
+            .add_running(&issue, Some(1));
+        let error = StepDispatchError::ordinary(AgentError::PromptError {
+            reason: "ordinary setup error quoted immutable Artifact input".to_string(),
+        });
+        let config_snapshot = Arc::new(config.read().await.clone());
+
+        orchestrator
+            .handle_step_dispatch_error(&issue, "build", &config_snapshot, &error)
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.retry_attempts.contains_key(&issue.id));
+        assert!(!state.waiting_on_human.contains_key(&issue.id));
+    }
+
+    #[tokio::test]
     async fn dispatch_passes_effective_step_timeout_to_agent_runner() {
         let observed_timeouts = Arc::new(RwLock::new(Vec::new()));
         let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
@@ -17892,6 +19169,8 @@ agent:
                     }],
                     transcripts: vec![],
                     artifact_snapshots: Vec::new(),
+                    artifact_integrity_violations: Vec::new(),
+                    artifact_access_evidence: Vec::new(),
                 },
             );
         }
@@ -18165,6 +19444,58 @@ agent:
             run.step_states.get("test"),
             Some(StepState::Pending)
         ));
+    }
+
+    #[tokio::test]
+    async fn ordinary_failure_text_does_not_force_an_immutable_artifact_halt() {
+        let config = Arc::new(RwLock::new(make_retry_step_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let issue = test_issue("ordinary-failure-phrase", "Todo");
+        let cfg = config.read().await;
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&cfg.steps).unwrap());
+        run.start();
+        run.mark_running("build", "session-1".to_string());
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, None);
+            state.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+        }
+        drop(cfg);
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "build",
+                WorkerResult::Success {
+                    output: failed_step_output(
+                        "agent quoted immutable Artifact input but did not observe it",
+                    ),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.retry_attempts.contains_key(&issue.id));
+        assert!(!state.waiting_on_human.contains_key(&issue.id));
     }
 
     #[tokio::test]
@@ -19591,6 +20922,8 @@ agent:
                     }],
                     transcripts: vec![],
                     artifact_snapshots: Vec::new(),
+                    artifact_integrity_violations: Vec::new(),
+                    artifact_access_evidence: Vec::new(),
                 },
             );
         }
@@ -19669,6 +21002,11 @@ agent:
         assert!(!state.is_running("1"));
         assert!(state.is_claimed("1"));
         assert!(state.is_waiting_on_human("1"));
+        assert!(state
+            .get_pipeline_run("1")
+            .unwrap()
+            .artifact_integrity_violations
+            .is_empty());
         assert!(state.agent_totals.seconds_running >= 0.0);
     }
 
@@ -20816,6 +22154,8 @@ agent:
                 repos: vec![],
                 transcripts: vec![],
                 artifact_snapshots: Vec::new(),
+                artifact_integrity_violations: Vec::new(),
+                artifact_access_evidence: Vec::new(),
             },
         );
 
@@ -21907,7 +23247,9 @@ agent:
     async fn restored_interaction_does_not_dispatch_when_running_journal_write_fails() {
         use std::os::unix::fs::PermissionsExt;
 
-        let config = Arc::new(RwLock::new(make_config()));
+        let mut immutable_config = make_config();
+        immutable_config.steps[0].artifact_access = ArtifactAccess::Immutable;
+        let config = Arc::new(RwLock::new(immutable_config));
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![])),
         });
@@ -21936,6 +23278,10 @@ agent:
             let dag = build_dag(&cfg.steps).unwrap();
             let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
             run.start();
+            run.record_artifact_access_evidence(artifact::ArtifactAccessEvidence {
+                consumer_step: "build".to_string(),
+                enforcement: artifact::ArtifactAccessEnforcement::AcpxDenyAll,
+            });
             run.step_blocked_on_human("build", "interaction-1".to_string());
             let snapshot = run.to_snapshot();
             let mut state = orchestrator.state.write().await;
@@ -22041,6 +23387,15 @@ agent:
             state.get_pipeline_run(&issue.id).unwrap().to_snapshot(),
             snapshot
         );
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .artifact_access_evidence,
+            snapshot
+                .artifact_integrity_evidence
+                .artifact_access_evidence
+        );
         drop(state);
         assert!(
             orchestrator
@@ -22092,11 +23447,118 @@ agent:
             PipelineTransitionKind::StepBlockedOnHuman
         );
 
-        orchestrator.pipeline_journal.transaction_append_late_error = true;
+        // A confirmed-absent `StepLaunched` append restores the interaction
+        // and never releases the worker gate.
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+        let absent_error = orchestrator
+            .resume_blocked_issue(&issue)
+            .await
+            .expect_err("an absent launch commitment must prevent worker launch");
+        assert!(absent_error.to_string().contains("immutable step"));
+        assert!(observed_commands.read().await.is_empty());
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+        // An unreadable outcome retains its closed gate until exact visibility
+        // is retried; confirmed absence then performs the same rollback.
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = true;
         orchestrator
             .resume_blocked_issue(&issue)
             .await
-            .expect("an exact visible running record makes a late append error successful");
+            .expect("ambiguous immutable launch is retained for reconciliation");
+        assert!(observed_commands.read().await.is_empty());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(100),
+            orchestrator.cancel_active_runs()
+        )
+        .await
+        .expect("shutdown must drain an ambiguous gated launch"));
+        assert!(orchestrator
+            .pending_immutable_launches
+            .lock()
+            .unwrap()
+            .is_empty());
+        let retired_interaction = orchestrator
+            .interaction_store
+            .get("interaction-1")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut restored_interaction = retired_interaction.clone();
+        restored_interaction.status = InteractionStatus::Resolved;
+        restored_interaction.awaiting_resume = true;
+        orchestrator
+            .interaction_store
+            .restore_waiting_state_after_failed_transition(
+                &retired_interaction,
+                &restored_interaction,
+            )
+            .await
+            .unwrap();
+        // Restore the blocked owner for the remaining absence/visibility cases.
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, None);
+            state.add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                interaction_request_id: "interaction-1".to_string(),
+                step_name: "build".to_string(),
+                kind: InteractionKind::Question,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: None,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: Some("run-1".to_string()),
+                issue: Some(issue.clone()),
+            });
+            let run = state.get_pipeline_run_mut(&issue.id).unwrap();
+            run.step_blocked_on_human("build", "interaction-1".to_string());
+        }
+        orchestrator
+            .pipeline_journal
+            .transaction_latest_record_match_error = false;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = None;
+        orchestrator.reconcile_pending_immutable_launches().await;
+        assert!(observed_commands.read().await.is_empty());
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("interaction-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        orchestrator.state.write().await.remove_running(&issue.id);
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_late_error_kind = Some(PipelineTransitionKind::StepLaunched);
+        orchestrator
+            .resume_blocked_issue(&issue)
+            .await
+            .expect("an exact visible launch record releases the worker gate once");
         tokio::task::yield_now().await;
 
         assert_eq!(observed_commands.read().await.len(), 1);
@@ -22104,6 +23566,16 @@ agent:
         assert!(state.is_running(&issue.id));
         assert!(!state.is_waiting_on_human(&issue.id));
         assert!(!state.is_resume_requested(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .artifact_access_evidence,
+            vec![artifact::ArtifactAccessEvidence {
+                consumer_step: "build".to_string(),
+                enforcement: artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+            }]
+        );
         drop(state);
         assert!(
             !orchestrator
@@ -22114,6 +23586,9 @@ agent:
                 .unwrap()
                 .awaiting_resume
         );
+        orchestrator
+            .pipeline_journal
+            .transaction_append_late_error_kind = None;
     }
 
     #[tokio::test]
@@ -22220,7 +23695,13 @@ agent:
         )
         .unwrap();
         assert_eq!(metadata["branch_name"], "ensemble/issue-1");
-        assert!(!observed_commands.read().await.is_empty());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while observed_commands.read().await.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("journaled dispatch should launch its agent");
     }
 
     fn selected_test_config() -> EnsembleConfig {
@@ -24427,6 +25908,10 @@ agent:
                 },
             );
         }
+        run.record_artifact_access_evidence(artifact::ArtifactAccessEvidence {
+            consumer_step: "a-review".to_string(),
+            enforcement: artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+        });
         let mut state = orchestrator.state.write().await;
         state.add_running(&test_issue("1", "Todo"), None);
         let entry = state.running.get("1").unwrap().clone();
@@ -24441,15 +25926,21 @@ agent:
             artifacts: None,
         });
 
+        let artifacts = record.artifacts.unwrap();
         assert_eq!(
-            record
-                .artifacts
-                .unwrap()
+            artifacts
                 .artifact_snapshots
                 .iter()
                 .map(|snapshot| snapshot.producer_step.as_str())
                 .collect::<Vec<_>>(),
             vec!["a-review", "z-build"]
+        );
+        assert_eq!(
+            artifacts.artifact_access_evidence,
+            vec![artifact::ArtifactAccessEvidence {
+                consumer_step: "a-review".to_string(),
+                enforcement: artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+            }]
         );
     }
 
@@ -24573,6 +26064,7 @@ agent:
             .worker_tx
             .send(OrchestratorWorkerEvent {
                 identity: sibling_identity.clone(),
+                workspace_capture: None,
                 event: WorkerEvent::WorkerExited {
                     issue_id: issue.id.clone(),
                     step_name: sibling_identity.step_name.clone(),
@@ -24615,6 +26107,34 @@ agent:
         assert!(output.status.success());
         sibling_complete.send(true).unwrap();
         capture_reached_rx.await.unwrap();
+        assert!(remove_completed_worker(
+            &orchestrator.cancellation_registry,
+            &sibling_identity
+        ));
+        let writer_identity = WorkerIdentity {
+            issue_id: issue.id.clone(),
+            run_id: run_id.clone(),
+            cycle: 1,
+            step_name: "new-writer".to_string(),
+            started_at: Utc::now(),
+        };
+        let (_, writer_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &orchestrator.cancellation_registry,
+                writer_identity,
+                tokio_util::sync::CancellationToken::new(),
+                writer_completion,
+                config.concurrency.max_concurrent_agents,
+                config.concurrency.max_step_parallelism,
+                WorkerCapacity::new(&issue.state, &config.agent.max_concurrent_agents_by_state,),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                false,
+            ),
+            Err(WorkerReservationError::IssueWorkspaceExclusive),
+            "a freed sibling slot must not admit a new same-issue writer during producer capture"
+        );
         capture_resume.add_permits(1);
         producer.await.unwrap();
 
@@ -24643,6 +26163,800 @@ agent:
         assert_ne!(captured.identity, before.identity);
         assert_eq!(captured.identity, expected.identity);
 
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn immutable_postcheck_excludes_new_same_issue_writers_until_verification_finishes() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_snapshot = None;
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        config.steps.push(review);
+        let issue = test_issue("immutable-postcheck-capture", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Arc::new(Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        ));
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree)]),
+        )
+        .await
+        .unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        {
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config.clone()));
+        }
+        let sibling_identity = WorkerIdentity {
+            issue_id: issue.id.clone(),
+            run_id: "run-1".to_string(),
+            cycle: 1,
+            step_name: "sibling-writer".to_string(),
+            started_at: Utc::now(),
+        };
+        let (sibling_done, sibling_completion) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            sibling_identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            sibling_completion,
+        );
+
+        let postcheck = {
+            let orchestrator = Arc::clone(&orchestrator);
+            let issue_id = issue.id.clone();
+            tokio::spawn(async move {
+                orchestrator
+                    .verify_immutable_inputs_after_worker_exit(
+                        &issue_id,
+                        "review",
+                        succeeded_step_output(),
+                        false,
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !issue_workspace_capture_is_active(&orchestrator.cancellation_registry, &issue.id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("immutable postcheck reserves the workspace before draining siblings");
+
+        let (_, writer_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &orchestrator.cancellation_registry,
+                WorkerIdentity {
+                    issue_id: issue.id.clone(),
+                    run_id: "run-1".to_string(),
+                    cycle: 1,
+                    step_name: "new-writer".to_string(),
+                    started_at: Utc::now(),
+                },
+                tokio_util::sync::CancellationToken::new(),
+                writer_completion,
+                config.concurrency.max_concurrent_agents,
+                config.concurrency.max_step_parallelism,
+                WorkerCapacity::new(&issue.state, &config.agent.max_concurrent_agents_by_state),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                false,
+            ),
+            Err(WorkerReservationError::IssueWorkspaceExclusive),
+            "the postcheck must keep a stable workspace after its sibling set is collected"
+        );
+
+        sibling_done.send(true).unwrap();
+        let (_output, deferred_exits, integrity_failed) = postcheck.await.unwrap();
+        assert!(!integrity_failed);
+        assert!(deferred_exits.is_empty());
+        assert!(remove_completed_worker(
+            &orchestrator.cancellation_registry,
+            &sibling_identity
+        ));
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn immutable_consumer_blocked_on_human_postcheck_halts_and_discards_dual_role_snapshot() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_snapshot = config.steps[0].artifact_snapshot.clone();
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        review.on_failure = OnFailure::RetryIssue;
+        config.steps.push(review);
+        let issue = test_issue("immutable-postcheck", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree.clone())]),
+        )
+        .await
+        .unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        run.mark_running("review", "review-session".to_string());
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config));
+        }
+        let transferred_capture =
+            acquire_issue_workspace_capture(&orchestrator.cancellation_registry, &issue.id).await;
+        let clean_dual_role = tokio::time::timeout(
+            Duration::from_secs(1),
+            orchestrator.process_artifacts_after_worker_exit(
+                &issue.id,
+                "review",
+                succeeded_step_output(),
+                true,
+                true,
+            ),
+        )
+        .await
+        .expect("an immutable producer reuses its transferred exit capture");
+        assert!(clean_dual_role.captured_snapshot.is_some());
+        assert!(!clean_dual_role.integrity_failed);
+        drop(transferred_capture);
+        tokio::fs::write(worktree.join("README.md"), "post-run mutation\n")
+            .await
+            .unwrap();
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "review",
+                WorkerResult::BlockedOnHuman {
+                    request: InteractionRequestDraft {
+                        schema_version: 1,
+                        kind: InteractionKind::BrainstormPrompt,
+                        blocking: true,
+                        title: "Need review input".to_string(),
+                        body: "Choose an option".to_string(),
+                        options: vec!["continue".to_string()],
+                        artifacts: Vec::new(),
+                    },
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let halted_interaction_id = state
+            .waiting_on_human
+            .get(&issue.id)
+            .expect("integrity failure becomes a durable halt")
+            .interaction_request_id
+            .clone();
+        assert!(!state.retry_attempts.contains_key(&issue.id));
+        assert_eq!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .artifact_integrity_violations
+                .len(),
+            1
+        );
+        assert!(!state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .artifact_snapshots
+            .contains_key("review"));
+        drop(state);
+        assert!(orchestrator
+            .interaction_store
+            .get(&halted_interaction_id)
+            .await
+            .unwrap()
+            .is_none());
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .expect("postcheck halt is journaled for restart");
+        assert_eq!(latest.kind, PipelineTransitionKind::PipelineHalted);
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn immutable_consumer_blocked_on_human_postcheck_preserves_clean_interaction() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        config.steps.push(review);
+        let issue = test_issue("immutable-clean-block", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree)]),
+        )
+        .await
+        .unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        run.mark_running("review", "review-session".to_string());
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config));
+        }
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "review",
+                WorkerResult::BlockedOnHuman {
+                    request: InteractionRequestDraft {
+                        schema_version: 1,
+                        kind: InteractionKind::BrainstormPrompt,
+                        blocking: true,
+                        title: "Need review input".to_string(),
+                        body: "Choose an option".to_string(),
+                        options: vec!["continue".to_string()],
+                        artifacts: Vec::new(),
+                    },
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.retry_attempts.contains_key(&issue.id));
+        let interaction_id = state
+            .waiting_on_human
+            .get(&issue.id)
+            .expect("clean immutable consumer preserves its interaction")
+            .interaction_request_id
+            .clone();
+        assert!(!interaction_id.starts_with("halted:"));
+        assert!(state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .artifact_integrity_violations
+            .is_empty());
+        drop(state);
+        let interaction = orchestrator
+            .interaction_store
+            .get(&interaction_id)
+            .await
+            .unwrap()
+            .expect("clean blocked request is persisted");
+        assert_eq!(interaction.title, "Need review input");
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn immutable_consumer_unobservable_preflight_halts_before_agent_starts() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_snapshot = None;
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        config.steps.push(review);
+        let issue = test_issue("immutable-preflight", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            Arc::new(BlockingDrainRunner {
+                started: std::sync::Mutex::new(Some(started_tx)),
+                cancellation_observed: std::sync::Mutex::new(None),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree.clone())]),
+        )
+        .await
+        .unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config.clone()));
+        }
+        tokio::fs::remove_dir_all(&worktree).await.unwrap();
+        let permit = orchestrator.quiescing.begin_dispatch().unwrap();
+        let error = orchestrator
+            .dispatch_step(
+                &issue,
+                Arc::new(config.clone()),
+                StepDispatchContext {
+                    step_name: "review",
+                    agent_name: "builder",
+                    step_kind: StepKind::Agent,
+                    tracker_state: None,
+                    attempt: None,
+                    timeout_ms: config.agent.turn_timeout_ms,
+                    interaction_response: None,
+                    interaction_resume_id: None,
+                    interaction_to_retire: None,
+                    interaction_retirement_rollback: None,
+                    workspace_path: worktree.clone(),
+                    step_outputs: StepOutputTemplateContext::default(),
+                },
+                &permit,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, StepDispatchFailureKind::ImmutableIntegrity);
+        orchestrator
+            .handle_step_dispatch_error(&issue, "review", &Arc::new(config), &error)
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut started_rx)
+                .await
+                .is_err()
+        );
+        let state = orchestrator.state.read().await;
+        assert!(state.waiting_on_human.contains_key(&issue.id));
+        assert!(!state.retry_attempts.contains_key(&issue.id));
+        assert!(!worktree.exists());
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn resumed_immutable_consumer_unobservable_preflight_halts_without_retry() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_snapshot = None;
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        review.on_failure = OnFailure::RetryIssue;
+        config.steps.push(review);
+        let issue = test_issue("immutable-resume-preflight", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            Arc::new(MockRunner {
+                delay_ms: 0,
+                observed_commands: None,
+                observed_timeouts: None,
+                cancellation_probe: None,
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let interaction_id = "immutable-resume-interaction".to_string();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree.clone())]),
+        )
+        .await
+        .unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        run.step_blocked_on_human("review", interaction_id.clone());
+        {
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config));
+            state.add_claimed(&issue.id);
+            state.add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                interaction_request_id: interaction_id.clone(),
+                step_name: "review".to_string(),
+                kind: InteractionKind::BrainstormPrompt,
+                prompt: "Need input".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt: Some(1),
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id: Some("run-1".to_string()),
+                issue: Some(issue.clone()),
+            });
+        }
+        orchestrator
+            .interaction_store
+            .create(InteractionRequest {
+                id: interaction_id,
+                schema_version: 1,
+                issue_id: issue.id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                pipeline_cycle: 1,
+                completed_steps: vec!["build".to_string()],
+                step_name: "review".to_string(),
+                agent_name: "builder".to_string(),
+                step_depends: vec!["build".to_string()],
+                step_tracker_state: None,
+                kind: InteractionKind::BrainstormPrompt,
+                status: InteractionStatus::Resolved,
+                blocking: true,
+                awaiting_resume: true,
+                resume_strategy: InteractionResumeStrategy::RerunStep,
+                title: "Need input".to_string(),
+                body: "Continue".to_string(),
+                options: vec![],
+                artifacts: vec![],
+                response: Some(InteractionResponse::Question {
+                    response_schema_version: 1,
+                    text: "continue".to_string(),
+                    selected_option: None,
+                }),
+                waiting_started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                resolved_at: Some(Utc::now()),
+                thread_root_comment_id: None,
+                thread_root_comment_url: None,
+                last_processed_comment_id: None,
+                accepted_command: None,
+                ignored_commands: vec![],
+            })
+            .await
+            .unwrap();
+        tokio::fs::remove_dir_all(&worktree).await.unwrap();
+
+        let error = orchestrator.resume_blocked_issue(&issue).await.unwrap_err();
+
+        assert!(error.to_string().contains("immutable Artifact input"));
+        let state = orchestrator.state.read().await;
+        assert!(!state.retry_attempts.contains_key(&issue.id));
+        assert!(state
+            .waiting_on_human
+            .get(&issue.id)
+            .is_some_and(|waiting| waiting.interaction_request_id.starts_with("halted:")));
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn immutable_consumer_defers_for_a_same_issue_writer_then_launches_without_a_false_violation(
+    ) {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_snapshot = None;
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        config.steps.push(review);
+        let issue = test_issue("immutable-deferred", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (started_tx, mut started_rx) = tokio::sync::oneshot::channel();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            Arc::new(BlockingDrainRunner {
+                started: std::sync::Mutex::new(Some(started_tx)),
+                cancellation_observed: std::sync::Mutex::new(None),
+                release: Arc::new(tokio::sync::Semaphore::new(0)),
+            }),
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree.clone())]),
+        )
+        .await
+        .unwrap();
+        let original_readme = tokio::fs::read(&worktree.join("README.md")).await.unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config.clone()));
+        }
+        let sibling_identity = WorkerIdentity {
+            issue_id: issue.id.clone(),
+            run_id: "run-1".to_string(),
+            cycle: 1,
+            step_name: "sibling-writer".to_string(),
+            started_at: Utc::now(),
+        };
+        let sibling_token = tokio_util::sync::CancellationToken::new();
+        let (sibling_done, sibling_completion) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            sibling_identity.clone(),
+            sibling_token.clone(),
+            sibling_completion,
+        );
+        tokio::fs::write(worktree.join("README.md"), "sibling writer mutation\n")
+            .await
+            .unwrap();
+        let permit = orchestrator.quiescing.begin_dispatch().unwrap();
+        let dispatch = || StepDispatchContext {
+            step_name: "review",
+            agent_name: "builder",
+            step_kind: StepKind::Agent,
+            tracker_state: None,
+            attempt: None,
+            timeout_ms: config.agent.turn_timeout_ms,
+            interaction_response: None,
+            interaction_resume_id: None,
+            interaction_to_retire: None,
+            interaction_retirement_rollback: None,
+            workspace_path: worktree.clone(),
+            step_outputs: StepOutputTemplateContext::default(),
+        };
+
+        assert_eq!(
+            orchestrator
+                .dispatch_step(&issue, Arc::new(config.clone()), dispatch(), &permit)
+                .await
+                .unwrap(),
+            StepDispatchOutcome::Deferred
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), &mut started_rx)
+                .await
+                .is_err()
+        );
+        assert!(!sibling_token.is_cancelled());
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .artifact_integrity_violations
+            .is_empty());
+
+        tokio::fs::write(worktree.join("README.md"), original_readme)
+            .await
+            .unwrap();
+        sibling_done.send(true).unwrap();
+        assert!(remove_completed_worker(
+            &orchestrator.cancellation_registry,
+            &sibling_identity
+        ));
+        assert_eq!(
+            orchestrator
+                .dispatch_step(&issue, Arc::new(config.clone()), dispatch(), &permit)
+                .await
+                .unwrap(),
+            StepDispatchOutcome::Spawned
+        );
+        tokio::time::timeout(Duration::from_secs(1), &mut started_rx)
+            .await
+            .expect("immutable consumer launches after same-issue writer quiesces")
+            .unwrap();
+        assert!(orchestrator
+            .state
+            .read()
+            .await
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .artifact_integrity_violations
+            .is_empty());
         drop(repo_temp);
     }
 
@@ -24692,6 +27006,8 @@ agent:
                 record_count: 3,
             }],
             artifact_snapshots: Vec::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
         };
         let mut state = orchestrator.state.write().await;
         state.add_running(&test_issue("1", "Todo"), None);
@@ -26142,6 +28458,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity: stale_identity.clone(),
+                workspace_capture: None,
                 event: WorkerEvent::AgentUpdate {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),
@@ -26157,6 +28474,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity: stale_identity.clone(),
+                workspace_capture: None,
                 event: WorkerEvent::AgentUpdate {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),
@@ -26175,6 +28493,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity: stale_identity.clone(),
+                workspace_capture: None,
                 event: WorkerEvent::WorkerExited {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),
@@ -26190,6 +28509,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity: stale_identity,
+                workspace_capture: None,
                 event: WorkerEvent::WorkerExited {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),
@@ -26245,6 +28565,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity,
+                workspace_capture: None,
                 event: WorkerEvent::AgentUpdate {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),
@@ -26316,6 +28637,117 @@ agent:
         assert!(crate::agent::cancellation::contains_worker(
             &registry, &identity
         ));
+    }
+
+    #[tokio::test]
+    async fn immutable_exit_transfers_workspace_exclusivity_before_event_visibility() {
+        let registry = crate::agent::cancellation::new_cancellation_registry();
+        let identity = WorkerIdentity {
+            issue_id: "issue-1".to_string(),
+            run_id: "run-1".to_string(),
+            cycle: 1,
+            step_name: "review".to_string(),
+            started_at: Utc::now(),
+        };
+        let (completion_tx, completion_rx) = watch::channel(false);
+        try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            completion_rx,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            true,
+        )
+        .unwrap();
+        let (local_tx, local_rx) = mpsc::channel(1);
+        let (orchestrator_tx, mut orchestrator_rx) = mpsc::channel(1);
+        let bridge = tokio::spawn(bridge_worker_events(
+            local_rx,
+            orchestrator_tx,
+            registry.clone(),
+            identity.clone(),
+            completion_tx,
+        ));
+        local_tx
+            .send(WorkerEvent::WorkerExited {
+                issue_id: identity.issue_id.clone(),
+                step_name: identity.step_name.clone(),
+                result: WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+                timestamp: Utc::now(),
+            })
+            .await
+            .unwrap();
+        drop(local_tx);
+        let mut exit = orchestrator_rx.recv().await.unwrap();
+        bridge.await.unwrap();
+        assert!(exit.workspace_capture.is_some());
+        assert!(!crate::agent::cancellation::contains_worker(
+            &registry, &identity
+        ));
+
+        let same_issue = WorkerIdentity {
+            step_name: "writer".to_string(),
+            started_at: Utc::now(),
+            ..identity.clone()
+        };
+        let (_, same_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &registry,
+                same_issue.clone(),
+                tokio_util::sync::CancellationToken::new(),
+                same_completion,
+                4,
+                4,
+                WorkerCapacity::lane("default", None),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                false,
+            ),
+            Err(WorkerReservationError::IssueWorkspaceExclusive)
+        );
+        let other_issue = WorkerIdentity {
+            issue_id: "issue-2".to_string(),
+            started_at: Utc::now(),
+            ..same_issue.clone()
+        };
+        let (_, other_completion) = watch::channel(false);
+        assert!(try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            other_issue,
+            tokio_util::sync::CancellationToken::new(),
+            other_completion,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .is_ok());
+
+        drop(exit.workspace_capture.take());
+        let (_, restored_completion) = watch::channel(false);
+        assert!(try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            same_issue,
+            tokio_util::sync::CancellationToken::new(),
+            restored_completion,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .is_ok());
     }
 
     #[tokio::test]
@@ -26505,6 +28937,7 @@ agent:
             .worker_tx
             .send(OrchestratorWorkerEvent {
                 identity,
+                workspace_capture: None,
                 event: WorkerEvent::AgentUpdate {
                     issue_id: "2".to_string(),
                     step_name: "build".to_string(),
@@ -26617,6 +29050,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity: identity.clone(),
+                workspace_capture: None,
                 event: WorkerEvent::WorkerExited {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),
@@ -28259,6 +30693,7 @@ agent:
         orchestrator
             .handle_worker_event(OrchestratorWorkerEvent {
                 identity: stale,
+                workspace_capture: None,
                 event: WorkerEvent::WorkerExited {
                     issue_id: "1".to_string(),
                     step_name: "build".to_string(),

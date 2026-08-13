@@ -1,10 +1,11 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 #[cfg(test)]
 use chrono::{TimeZone, Utc};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::events::WorkerIdentity;
@@ -16,6 +17,7 @@ struct ActiveWorker {
     completion: watch::Receiver<bool>,
     capacity_bucket: String,
     scheduler_reservation: SchedulerReservation,
+    exclusive_issue_workspace: bool,
     reconciliation_owned: bool,
     launched: bool,
 }
@@ -26,7 +28,53 @@ pub struct WorkerDrainHandle {
 }
 
 #[derive(Clone, Default)]
-pub struct CancellationRegistry(Arc<Mutex<HashMap<WorkerIdentity, ActiveWorker>>>);
+pub struct CancellationRegistry {
+    state: Arc<Mutex<RegistryState>>,
+    workspace_capture_released: Arc<Notify>,
+}
+
+#[derive(Default)]
+struct RegistryState {
+    workers: HashMap<WorkerIdentity, ActiveWorker>,
+    workspace_captures: HashSet<String>,
+}
+
+impl Deref for RegistryState {
+    type Target = HashMap<WorkerIdentity, ActiveWorker>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.workers
+    }
+}
+
+impl DerefMut for RegistryState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.workers
+    }
+}
+
+pub(crate) struct IssueWorkspaceCaptureGuard {
+    registry: CancellationRegistry,
+    issue_id: String,
+}
+
+impl std::fmt::Debug for IssueWorkspaceCaptureGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("IssueWorkspaceCaptureGuard")
+            .field("issue_id", &self.issue_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for IssueWorkspaceCaptureGuard {
+    fn drop(&mut self) {
+        let mut state = registry_guard(&self.registry);
+        state.workspace_captures.remove(&self.issue_id);
+        drop(state);
+        self.registry.workspace_capture_released.notify_waiters();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorkerReservationError {
@@ -36,6 +84,7 @@ pub(crate) enum WorkerReservationError {
     CapacityBucketExhausted,
     ResourceExhausted,
     PathConflict,
+    IssueWorkspaceExclusive,
 }
 
 pub(crate) struct WorkerCapacity<'a> {
@@ -94,6 +143,52 @@ pub fn new_cancellation_registry() -> CancellationRegistry {
     CancellationRegistry::default()
 }
 
+/// Prevent new same-issue workers from starting while a producer captures a stable workspace.
+/// Existing workers remain registered so the caller can drain them before observing the snapshot.
+pub(crate) async fn acquire_issue_workspace_capture(
+    registry: &CancellationRegistry,
+    issue_id: &str,
+) -> IssueWorkspaceCaptureGuard {
+    loop {
+        let notified = registry.workspace_capture_released.notified();
+        tokio::pin!(notified);
+        let acquired = {
+            let mut state = registry_guard(registry);
+            // Arm the waiter while the release path is excluded by the same lock.
+            // A capture guard therefore cannot release after this check without
+            // waking this waiter.
+            notified.as_mut().enable();
+            state.workspace_captures.insert(issue_id.to_string())
+        };
+        if acquired {
+            return IssueWorkspaceCaptureGuard {
+                registry: registry.clone(),
+                issue_id: issue_id.to_string(),
+            };
+        }
+        notified.await;
+    }
+}
+
+pub(crate) fn worker_uses_exclusive_issue_workspace(
+    registry: &CancellationRegistry,
+    identity: &WorkerIdentity,
+) -> bool {
+    registry_guard(registry)
+        .get(identity)
+        .is_some_and(|worker| worker.exclusive_issue_workspace)
+}
+
+#[cfg(test)]
+pub(crate) fn issue_workspace_capture_is_active(
+    registry: &CancellationRegistry,
+    issue_id: &str,
+) -> bool {
+    registry_guard(registry)
+        .workspace_captures
+        .contains(issue_id)
+}
+
 #[cfg(test)]
 pub fn register_worker(
     registry: &CancellationRegistry,
@@ -108,6 +203,7 @@ pub fn register_worker(
             completion,
             capacity_bucket: String::new(),
             scheduler_reservation: SchedulerReservation::default(),
+            exclusive_issue_workspace: false,
             reconciliation_owned: false,
             launched: true,
         },
@@ -124,7 +220,7 @@ pub(crate) fn try_reserve_worker(
     max_issue_workers: u32,
     capacity: WorkerCapacity<'_>,
 ) -> Result<(), WorkerReservationError> {
-    try_reserve_scheduler_worker(
+    try_reserve_scheduler_worker_with_workspace_exclusivity(
         registry,
         identity,
         cancellation,
@@ -134,11 +230,12 @@ pub(crate) fn try_reserve_worker(
         capacity,
         &BTreeMap::new(),
         SchedulerReservation::default(),
+        false,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_reserve_scheduler_worker(
+pub(crate) fn try_reserve_scheduler_worker_with_workspace_exclusivity(
     registry: &CancellationRegistry,
     identity: WorkerIdentity,
     cancellation: CancellationToken,
@@ -148,8 +245,12 @@ pub(crate) fn try_reserve_scheduler_worker(
     capacity: WorkerCapacity<'_>,
     resource_capacities: &BTreeMap<String, u32>,
     scheduler_reservation: SchedulerReservation,
+    exclusive_issue_workspace: bool,
 ) -> Result<(), WorkerReservationError> {
     let mut workers = registry_guard(registry);
+    if workers.workspace_captures.contains(&identity.issue_id) {
+        return Err(WorkerReservationError::IssueWorkspaceExclusive);
+    }
     if workers.contains_key(&identity) {
         return Err(WorkerReservationError::DuplicateIdentity);
     }
@@ -163,6 +264,12 @@ pub(crate) fn try_reserve_scheduler_worker(
         >= max_issue_workers as usize
     {
         return Err(WorkerReservationError::IssueCapacityExhausted);
+    }
+    if workers.iter().any(|(active, worker)| {
+        active.issue_id == identity.issue_id
+            && (worker.exclusive_issue_workspace || exclusive_issue_workspace)
+    }) {
+        return Err(WorkerReservationError::IssueWorkspaceExclusive);
     }
     let (capacity_bucket, limit) = capacity.bucket_and_limit();
     if !capacity_available(&workers, &capacity_bucket, limit) {
@@ -200,6 +307,7 @@ pub(crate) fn try_reserve_scheduler_worker(
             completion,
             capacity_bucket,
             scheduler_reservation,
+            exclusive_issue_workspace,
             reconciliation_owned: false,
             launched: false,
         },
@@ -453,11 +561,9 @@ fn issue_tokens(registry: &CancellationRegistry, issue_id: &str) -> Vec<Cancella
         .collect()
 }
 
-fn registry_guard(
-    registry: &CancellationRegistry,
-) -> MutexGuard<'_, HashMap<WorkerIdentity, ActiveWorker>> {
+fn registry_guard(registry: &CancellationRegistry) -> MutexGuard<'_, RegistryState> {
     registry
-        .0
+        .state
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -766,6 +872,191 @@ mod tests {
             .filter(|outcome| outcome.is_err())
             .all(|outcome| *outcome == Err(WorkerReservationError::GlobalCapacityExhausted)));
         assert_eq!(live_worker_count(&racing_registry), 1);
+    }
+
+    #[test]
+    fn issue_workspace_exclusive_reservation_defers_same_issue_workers_without_blocking_others() {
+        let registry = new_cancellation_registry();
+        let ordinary = identity("build", 1);
+        let immutable = identity("review", 2);
+        let other_issue = WorkerIdentity {
+            issue_id: "issue-2".to_string(),
+            ..identity("build", 3)
+        };
+        let (_, ordinary_completion) = watch::channel(false);
+        let (_, immutable_completion) = watch::channel(false);
+        let (_, other_completion) = watch::channel(false);
+
+        try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            ordinary.clone(),
+            CancellationToken::new(),
+            ordinary_completion,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &registry,
+                immutable.clone(),
+                CancellationToken::new(),
+                immutable_completion,
+                4,
+                4,
+                WorkerCapacity::lane("default", None),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                true,
+            ),
+            Err(WorkerReservationError::IssueWorkspaceExclusive)
+        );
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &registry,
+                other_issue,
+                CancellationToken::new(),
+                other_completion,
+                4,
+                4,
+                WorkerCapacity::lane("default", None),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                true,
+            ),
+            Ok(())
+        );
+
+        assert!(rollback_worker_reservation(&registry, &ordinary));
+        let (_, immutable_completion) = watch::channel(false);
+        try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            immutable.clone(),
+            CancellationToken::new(),
+            immutable_completion,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            true,
+        )
+        .unwrap();
+        let (_, ordinary_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &registry,
+                ordinary.clone(),
+                CancellationToken::new(),
+                ordinary_completion,
+                4,
+                4,
+                WorkerCapacity::lane("default", None),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                false,
+            ),
+            Err(WorkerReservationError::IssueWorkspaceExclusive)
+        );
+
+        assert!(rollback_worker_reservation(&registry, &immutable));
+        let (_, restored_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &registry,
+                ordinary,
+                CancellationToken::new(),
+                restored_completion,
+                4,
+                4,
+                WorkerCapacity::lane("default", None),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                false,
+            ),
+            Ok(())
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_capture_excludes_new_same_issue_workers_until_released() {
+        let registry = new_cancellation_registry();
+        let capture = acquire_issue_workspace_capture(&registry, "issue-1").await;
+        let same_issue = identity("writer", 1);
+        let other_issue = WorkerIdentity {
+            issue_id: "issue-2".to_string(),
+            ..identity("writer", 2)
+        };
+        let (_, same_completion) = watch::channel(false);
+        assert_eq!(
+            try_reserve_scheduler_worker_with_workspace_exclusivity(
+                &registry,
+                same_issue.clone(),
+                CancellationToken::new(),
+                same_completion,
+                4,
+                4,
+                WorkerCapacity::lane("default", None),
+                &BTreeMap::new(),
+                SchedulerReservation::default(),
+                false,
+            ),
+            Err(WorkerReservationError::IssueWorkspaceExclusive)
+        );
+        let (_, other_completion) = watch::channel(false);
+        assert!(try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            other_issue.clone(),
+            CancellationToken::new(),
+            other_completion,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .is_ok());
+
+        drop(capture);
+        let (_, same_completion) = watch::channel(false);
+        assert!(try_reserve_scheduler_worker_with_workspace_exclusivity(
+            &registry,
+            same_issue,
+            CancellationToken::new(),
+            same_completion,
+            4,
+            4,
+            WorkerCapacity::lane("default", None),
+            &BTreeMap::new(),
+            SchedulerReservation::default(),
+            false,
+        )
+        .is_ok());
+        assert!(rollback_worker_reservation(&registry, &other_issue));
+    }
+
+    #[tokio::test]
+    async fn waiting_producer_capture_acquires_after_the_holder_releases() {
+        let registry = new_cancellation_registry();
+        let first_capture = acquire_issue_workspace_capture(&registry, "issue-1").await;
+        let waiting_registry = registry.clone();
+        let waiting_capture = tokio::spawn(async move {
+            acquire_issue_workspace_capture(&waiting_registry, "issue-1").await
+        });
+
+        tokio::task::yield_now().await;
+        drop(first_capture);
+
+        let second_capture = tokio::time::timeout(Duration::from_secs(1), waiting_capture)
+            .await
+            .expect("the released capture wakes its armed waiter")
+            .unwrap();
+        drop(second_capture);
     }
 
     #[tokio::test]

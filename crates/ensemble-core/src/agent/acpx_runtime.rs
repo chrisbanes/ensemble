@@ -14,7 +14,7 @@ use crate::observability::events_contract::{
 use super::acpx_cli::{AcpxCli, AcpxCommandOptions, AcpxPromptRequest, PromptVisibility};
 use super::events::{AgentEvent, WorkerEvent, WorkerResult};
 use super::{detect_worker_result_with_output, AgentRunRequest};
-use crate::config::ensemble::PermissionMode;
+use crate::config::ensemble::{ArtifactAccess, PermissionMode};
 
 /// Agent runtime backed by the `acpx` CLI tool.
 ///
@@ -88,6 +88,14 @@ impl AcpxRuntime {
                 })
             })
             .transpose()?;
+        let permission_mode = if request.artifact_access == ArtifactAccess::Immutable {
+            match permission_mode {
+                Some(PermissionMode::DenyAll) => Some(PermissionMode::DenyAll),
+                _ => Some(PermissionMode::ApproveReads),
+            }
+        } else {
+            permission_mode
+        };
         const MAX_SESSION_NAME_LEN: usize = 128;
 
         let id_comp = sanitize_session_component(&request.issue.id);
@@ -597,13 +605,35 @@ on_failure: Failed
     #[tokio::test]
     async fn acpx_runtime_passes_permission_mode_to_every_lifecycle_command() {
         let cases = [
-            (Some("approve_all"), Some("--approve-all")),
-            (Some("approve_reads"), Some("--approve-reads")),
-            (Some("deny_all"), Some("--deny-all")),
-            (None, None),
+            (
+                Some("approve_all"),
+                ArtifactAccess::Mutable,
+                Some("--approve-all"),
+            ),
+            (
+                Some("approve_reads"),
+                ArtifactAccess::Mutable,
+                Some("--approve-reads"),
+            ),
+            (
+                Some("deny_all"),
+                ArtifactAccess::Mutable,
+                Some("--deny-all"),
+            ),
+            (None, ArtifactAccess::Mutable, None),
+            (
+                Some("approve_all"),
+                ArtifactAccess::Immutable,
+                Some("--approve-reads"),
+            ),
+            (
+                Some("deny_all"),
+                ArtifactAccess::Immutable,
+                Some("--deny-all"),
+            ),
         ];
 
-        for (permission_mode, expected_flag) in cases {
+        for (permission_mode, artifact_access, expected_flag) in cases {
             let workspace = tempfile::TempDir::new().unwrap();
             let args_path = workspace.path().join("args.txt");
             let script_path = write_mock_acpx_script(
@@ -634,6 +664,7 @@ exit 1
                 agent_name: "builder",
                 step_name: "build",
                 step_kind: StepKind::Agent,
+                artifact_access,
                 attempt: None,
                 timeout_ms: TEST_TIMEOUT_MS,
                 interaction_response: None,
@@ -686,6 +717,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -745,6 +777,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -841,6 +874,7 @@ exit 1
             agent_name: "builder",
             step_name: "build-a",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(1),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -855,6 +889,7 @@ exit 1
             agent_name: "builder",
             step_name: "build-b",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(2),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -869,6 +904,7 @@ exit 1
             agent_name: "builder",
             step_name: "build-c",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(3),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -995,6 +1031,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(1),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1009,6 +1046,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(2),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1023,6 +1061,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(3),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1134,6 +1173,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1202,6 +1242,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1281,6 +1322,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1376,6 +1418,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1471,6 +1514,7 @@ on_failure: Failed
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1530,6 +1574,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1587,6 +1632,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1646,6 +1692,7 @@ exit 1
             agent_name: "builder",
             step_name: "build/review",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(2),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1705,6 +1752,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -1787,6 +1835,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -1874,6 +1923,7 @@ exit 1
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             interaction_response: None,
             workspace_path: workspace.path(),
@@ -1983,6 +2033,7 @@ exit 1
             agent_name: "builder",
             step_name: &long_step,
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(99),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -2055,6 +2106,7 @@ exit 1
             agent_name: "builder",
             step_name: "$%^",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,
@@ -2118,6 +2170,7 @@ exit 1
             agent_name: "builder",
             step_name: &bad_chars,
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: Some(1),
             timeout_ms: TEST_TIMEOUT_MS,
             interaction_response: None,

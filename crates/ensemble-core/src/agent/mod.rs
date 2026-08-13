@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use crate::config::draft::ConfigDocumentState;
 use crate::config::ensemble::{
-    DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode, PermissionMode, StepKind,
+    ArtifactAccess, DiscoveredCapabilities, EnsembleConfig, InteractionPolicyOverrideMode,
+    PermissionMode, StepKind,
 };
 use crate::config::template::render_prompt_with_context;
 use crate::error::AgentError;
@@ -94,6 +95,7 @@ pub struct AgentRunRequest<'a> {
     pub agent_name: &'a str,
     pub step_name: &'a str,
     pub step_kind: StepKind,
+    pub artifact_access: ArtifactAccess,
     pub attempt: Option<u32>,
     /// Effective per-step turn timeout in milliseconds.
     pub timeout_ms: u64,
@@ -735,7 +737,15 @@ impl AgentRunner for AcpAgentRunner {
                 }
                 AcpxRuntime::new().run_step(&request, &prompt).await
             }
-            runtime::RuntimeKind::Direct => self.run_direct_step(request).await,
+            runtime::RuntimeKind::Direct => {
+                if request.artifact_access == ArtifactAccess::Immutable {
+                    tracing::warn!(
+                        step = request.step_name,
+                        "direct ACP cannot enforce immutable Artifact runtime permissions; integrity verification remains authoritative"
+                    );
+                }
+                self.run_direct_step(request).await
+            }
         };
 
         if let Some(ref script) = config.hooks.after_run {
@@ -1038,6 +1048,7 @@ on_failure: Todo
             agent_name: "builder",
             step_name: "build",
             step_kind: StepKind::Agent,
+            artifact_access: ArtifactAccess::Mutable,
             attempt: None,
             interaction_response: None,
             workspace_path: Path::new("."),
@@ -1197,6 +1208,7 @@ on_failure: Todo
                 agent_name: "builder",
                 step_name: "build",
                 step_kind: StepKind::Agent,
+                artifact_access: ArtifactAccess::Mutable,
                 attempt: None,
                 timeout_ms: 100,
                 interaction_response: None,
@@ -1245,6 +1257,7 @@ on_failure: Todo
                 agent_name: "builder",
                 step_name: "build",
                 step_kind: StepKind::Agent,
+                artifact_access: ArtifactAccess::Mutable,
                 attempt: None,
                 timeout_ms: 100,
                 interaction_response: None,
@@ -1309,6 +1322,7 @@ exit 1
                 agent_name: "builder",
                 step_name: "build",
                 step_kind: StepKind::Agent,
+                artifact_access: ArtifactAccess::Mutable,
                 attempt: None,
                 timeout_ms: 100,
                 interaction_response: None,
@@ -1381,6 +1395,7 @@ exit 0
                 agent_name: "builder",
                 step_name: "build",
                 step_kind: StepKind::Agent,
+                artifact_access: ArtifactAccess::Mutable,
                 attempt: None,
                 timeout_ms: 100,
                 interaction_response: None,

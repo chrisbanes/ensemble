@@ -470,6 +470,8 @@ mod tests {
                 record_count: 2,
             }],
             artifact_snapshots: Vec::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
         });
 
         store.append_history_record("run-1", &record).await.unwrap();

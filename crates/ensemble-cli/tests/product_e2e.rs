@@ -248,6 +248,90 @@ async fn missing_file_and_handoff_are_durable_acceptance_failures() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immutable_artifact_postattempt_mutation_halts() {
+    let fixture = TestFixture::new_with_immutable_consumer().expect("fixture setup");
+    let port = reserve_local_port().expect("reserve local port");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_MUTATE_IMMUTABLE_INPUT", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let child = command.spawn().expect("spawn ensemble web");
+    let _guard = ChildGuard::new(child);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+
+    let detail = wait_for_halted_immutable_issue(&client, &base_url)
+        .await
+        .expect("post-attempt mutation should halt the pipeline");
+    assert_eq!(detail["status"], "waiting_on_human");
+    assert_eq!(detail["retry"], Value::Null);
+    assert_eq!(detail["current_interaction"]["step_name"], "review");
+    let steps = detail["workflow_steps"]
+        .as_array()
+        .expect("workflow steps should be public");
+    assert!(steps
+        .iter()
+        .any(|step| step["name"] == "produce" && step["state"] == "passed"));
+    assert!(steps
+        .iter()
+        .any(|step| step["name"] == "review" && step["state"] == "failed"));
+    assert!(steps
+        .iter()
+        .any(|step| step["name"] == "publish" && step["state"] == "pending"));
+
+    let workspace = PathBuf::from(detail["workspace"]["path"].as_str().unwrap());
+    let source = fs::read_dir(workspace.join("source"))
+        .expect("preserved source worktree directory")
+        .next()
+        .expect("one source worktree")
+        .expect("source worktree entry")
+        .path();
+    assert_eq!(
+        fs::read_to_string(source.join("README.md")).expect("mutated tracked file"),
+        "mutated after capture\n"
+    );
+
+    let journal = read_halted_pipeline_journal(fixture.config_dir.path())
+        .expect("halted pipeline journal should be durable");
+    let violation = &journal["snapshot"]["artifact_integrity_violations"][0];
+    assert_eq!(violation["consumer_step"], "review");
+    assert_eq!(violation["producer_step"], "produce");
+    assert_eq!(violation["repository"], "source");
+    assert!(violation["expected_digest"].as_str().is_some());
+    assert!(violation["observed_digest"].as_str().is_some());
+    assert_ne!(violation["expected_digest"], violation["observed_digest"]);
+    assert!(
+        violation["changed_paths"]
+            .as_array()
+            .is_some_and(|paths| paths.contains(&serde_json::json!("README.md"))),
+        "the durable evidence must identify the consumer mutation: {violation:#?}"
+    );
+    assert_eq!(violation["omitted_changed_path_count"], 0);
+    assert!(
+        !journal.to_string().contains("mutated after capture"),
+        "durable violation evidence must remain content-free: {journal:#?}"
+    );
+
+    let acpx_log = fs::read_to_string(&fixture.acpx_log_path).expect("read mock acpx log");
+    assert!(acpx_log.contains("Immutable consumer"));
+    assert!(
+        !acpx_log.contains("Downstream publisher"),
+        "the downstream step must not launch after an immutable input violation: {acpx_log}"
+    );
+}
+
 struct TestFixture {
     config_dir: TempDir,
     todo_path: PathBuf,
@@ -277,6 +361,40 @@ impl TestFixture {
         fs::write(
             root.join("config.yaml"),
             config_yaml(&todo_path, &workspace_root, &repo_path, acceptance_run),
+        )?;
+        fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(mock_bin_dir.join("acpx"), fs::Permissions::from_mode(0o755))?;
+        }
+
+        Ok(Self {
+            config_dir,
+            todo_path,
+            workspace_root,
+            acpx_log_path,
+            mock_bin_dir,
+        })
+    }
+
+    fn new_with_immutable_consumer() -> io::Result<Self> {
+        let config_dir = TempDir::new()?;
+        let root = config_dir.path();
+        let todo_path = root.join("TODO.md");
+        let workspace_root = root.join("workspaces");
+        let repo_path = root.join("source");
+        let mock_bin_dir = root.join("bin");
+        let acpx_log_path = root.join("mock-acpx.log");
+
+        fs::create_dir_all(&workspace_root)?;
+        fs::create_dir_all(&mock_bin_dir)?;
+        init_git_repo(&repo_path)?;
+        fs::write(&todo_path, todo_fixture())?;
+        fs::write(
+            root.join("config.yaml"),
+            immutable_consumer_config_yaml(&todo_path, &workspace_root, &repo_path),
         )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
 
@@ -378,6 +496,74 @@ agent:
     )
 }
 
+fn immutable_consumer_config_yaml(
+    todo_path: &Path,
+    workspace_root: &Path,
+    repo_path: &Path,
+) -> String {
+    format!(
+        r#"
+tracker:
+  kind: todo_file
+  path: {}
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+workspace:
+  root: {}
+repos:
+  - path: {}
+    branch: main
+agents:
+  producer:
+    acpx_agent: builder
+    prompt: "Produce immutable artifact for {{{{ issue.identifier }}}}"
+  consumer:
+    acpx_agent: builder
+    prompt: "Immutable consumer for {{{{ issue.identifier }}}}"
+  publisher:
+    acpx_agent: builder
+    prompt: "Downstream publisher for {{{{ issue.identifier }}}}"
+steps:
+  - name: produce
+    agent: producer
+    tracker_state: In Progress
+    artifact_snapshot:
+      repositories:
+        - source
+  - name: review
+    agent: consumer
+    depends:
+      - produce
+    artifact_inputs:
+      - produce
+    artifact_access: immutable
+    on_failure: retry_issue
+  - name: publish
+    agent: publisher
+    depends:
+      - review
+on_success: Done
+on_failure: Failed
+max_cycles: 3
+polling:
+  interval_ms: 100
+concurrency:
+  max_concurrent_agents: 1
+  max_step_parallelism: 1
+agent:
+  read_timeout_ms: 5000
+  turn_timeout_ms: 10000
+  max_retry_backoff_ms: 100
+"#,
+        yaml_quote(&todo_path.display().to_string()),
+        yaml_quote(&workspace_root.display().to_string()),
+        yaml_quote(&repo_path.display().to_string()),
+    )
+}
+
 fn init_git_repo(repo_path: &Path) -> io::Result<()> {
     fs::create_dir_all(repo_path)?;
     let run = |args: &[&str]| -> io::Result<()> {
@@ -435,6 +621,59 @@ async fn wait_for_failed_history_record(
     }
 }
 
+async fn wait_for_halted_immutable_issue(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let url = format!("{base_url}/api/v1/{ISSUE_ID}");
+    loop {
+        let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
+        if response.status().is_success() {
+            let detail = response.json::<Value>().await.map_err(|e| e.to_string())?;
+            if detail["status"] == "waiting_on_human"
+                && detail["current_interaction"]["step_name"] == "review"
+            {
+                return Ok(detail);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "immutable consumer did not halt before timeout: {detail:#?}"
+                ));
+            }
+        } else if Instant::now() >= deadline {
+            return Err(format!(
+                "issue detail endpoint returned {}",
+                response.status()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn read_halted_pipeline_journal(config_dir: &Path) -> Result<Value, String> {
+    let journal_dir = config_dir.join("state").join("pipeline-runs");
+    let entries = fs::read_dir(&journal_dir).map_err(|error| error.to_string())?;
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        let contents = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+        let record = contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .last();
+        if record
+            .as_ref()
+            .is_some_and(|record| record["kind"] == "pipeline_halted")
+        {
+            return Ok(record.expect("checked above"));
+        }
+    }
+    Err(format!(
+        "no durable pipeline_halted record under {}",
+        journal_dir.display()
+    ))
+}
+
 fn yaml_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -469,6 +708,8 @@ if [[ " $* " == *" prompt "* ]]; then
     exit 2
   fi
 
+  prompt="$(cat)"
+  printf ' prompt-input=%s\n' "$prompt" >> "$log"
   mkdir -p "$cwd/.ensemble"
   cat > "$cwd/.ensemble/mock-prompt.txt"
   if [[ "${ENSEMBLE_E2E_MISSING_HANDOFF:-}" == "1" ]]; then
@@ -479,6 +720,9 @@ if [[ " $* " == *" prompt "* ]]; then
   if [[ "${ENSEMBLE_E2E_SKIP_REQUIRED_FILE:-}" != "1" ]]; then
     repo_worktree="$(find "$cwd/source" -mindepth 1 -maxdepth 1 -type d -print -quit)"
     printf 'artifact\n' > "$repo_worktree/acceptance.txt"
+  fi
+  if [[ "${ENSEMBLE_E2E_MUTATE_IMMUTABLE_INPUT:-}" == "1" && "$prompt" == *"Immutable consumer"* ]]; then
+    printf 'mutated after capture\n' > "$repo_worktree/README.md"
   fi
 
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mock agent completed"}}}}'
