@@ -469,6 +469,7 @@ mod tests {
                 run_id: "run-1".into(),
                 record_count: 2,
             }],
+            artifact_snapshots: Vec::new(),
         });
 
         store.append_history_record("run-1", &record).await.unwrap();

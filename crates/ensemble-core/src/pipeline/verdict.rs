@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::ensemble::ResolvedOutputSchema;
+
 /// The result returned by an agent at the end of a pipeline step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +72,13 @@ pub fn parse_step_output_json(text: &str) -> Result<StepOutput, StepOutputValida
 pub fn validate_step_output_value(
     value: &serde_json::Value,
 ) -> Result<StepOutput, StepOutputValidationError> {
+    validate_step_output_value_with_schema(value, None)
+}
+
+pub fn validate_step_output_value_with_schema(
+    value: &serde_json::Value,
+    output_schema: Option<&ResolvedOutputSchema>,
+) -> Result<StepOutput, StepOutputValidationError> {
     let payload: StrictStepOutputPayload =
         serde_json::from_value(value.clone()).map_err(|error| {
             StepOutputValidationError::new(format!("invalid StepOutput payload: {error}"))
@@ -99,6 +108,26 @@ pub fn validate_step_output_value(
             }
         }
     };
+
+    if let Some(output_schema) = output_schema {
+        let output = payload.output.as_ref().ok_or_else(|| {
+            StepOutputValidationError::new("declared output_schema requires an output value")
+        })?;
+        let validator = jsonschema::validator_for(&output_schema.schema).map_err(|error| {
+            StepOutputValidationError::new(format!("invalid resolved output_schema: {error}"))
+        })?;
+        let schema_error = validator.iter_errors(output).next().map(|error| {
+            let location = error.instance_path.as_str();
+            format!(
+                "output does not satisfy declared schema at {}: {}",
+                if location.is_empty() { "/" } else { location },
+                error
+            )
+        });
+        if let Some(schema_error) = schema_error {
+            return Err(StepOutputValidationError::new(schema_error));
+        }
+    }
 
     Ok(StepOutput {
         result,
@@ -182,5 +211,38 @@ mod tests {
             err.to_string().contains("invalid JSON step output"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn declared_schema_requires_and_validates_output_for_every_result() {
+        let schema = ResolvedOutputSchema {
+            schema: json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["branch"],
+                "properties": {"branch": {"type": "string"}}
+            }),
+        };
+
+        let missing = validate_step_output_value_with_schema(
+            &json!({"result": "failed", "summary": "blocked"}),
+            Some(&schema),
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("requires an output"));
+
+        let invalid = validate_step_output_value_with_schema(
+            &json!({"result": "concern", "summary": "check", "output": {"branch": 3}}),
+            Some(&schema),
+        )
+        .unwrap_err();
+        assert!(invalid.to_string().contains("/branch"));
+
+        let output = validate_step_output_value_with_schema(
+            &json!({"result": "succeeded", "output": {"branch": "issue-479"}}),
+            Some(&schema),
+        )
+        .unwrap();
+        assert_eq!(output.output, Some(json!({"branch": "issue-479"})));
     }
 }

@@ -41,6 +41,8 @@ fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         fixup_agent: None,
         resource_requests: Default::default(),
         affected_paths: None,
+        output_schema: None,
+        artifact_snapshot: None,
     }
 }
 

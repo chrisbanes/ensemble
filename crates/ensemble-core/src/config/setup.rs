@@ -857,8 +857,10 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 approval: None,
                 on_failure: OnFailure::RetryIssue,
                 fixup_agent: None,
-            resource_requests: Default::default(),
-            affected_paths: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
 })
         })
         .collect::<Result<Vec<_>, _>>()?;

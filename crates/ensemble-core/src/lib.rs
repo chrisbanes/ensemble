@@ -1,6 +1,7 @@
 pub mod acceptance;
 pub mod agent;
 pub mod api;
+pub mod artifact;
 pub mod attention;
 pub mod config;
 pub mod config_watcher;

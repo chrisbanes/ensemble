@@ -36,6 +36,7 @@ notify = { workspace = true }
 pulldown-cmark = { workspace = true }
 tempfile = { workspace = true }
 shell-words = { workspace = true }
+jsonschema = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

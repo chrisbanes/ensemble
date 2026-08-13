@@ -194,9 +194,9 @@ impl AcpxRuntime {
         let count = event_count.load(Ordering::Relaxed);
         let duration = elapsed_ms(prompt_start);
 
-        let step_result = match prompt_result {
-            Ok(visible_outcome) => {
-                async {
+        let step_result =
+            match prompt_result {
+                Ok(visible_outcome) => async {
                     info!(
                         event = ACPX_PROMPT_COMPLETED,
                         issue_id = %request.issue.id,
@@ -212,6 +212,7 @@ impl AcpxRuntime {
                         &request.issue.identifier,
                         prompt,
                         &visible_outcome.output_text,
+                        request.step_outputs.output_schema.as_ref(),
                     );
                     let extraction_outcome = self
                         .run_prompt_with_cancellation(
@@ -226,45 +227,50 @@ impl AcpxRuntime {
                             |_| async {},
                         )
                         .await?;
-                    let output = match crate::agent::extraction::validate_extraction_payload(
-                        extraction_outcome.runtime_verdict.as_ref(),
-                        &extraction_outcome.output_text,
-                    ) {
-                        Ok(output) => output,
-                        Err(error) => {
-                            let previous_payload = extraction_outcome
-                                .runtime_verdict
-                                .as_ref()
-                                .map(serde_json::Value::to_string)
-                                .unwrap_or_else(|| extraction_outcome.output_text.clone());
-                            let repair_prompt = crate::agent::extraction::build_repair_prompt(
-                                &error.to_string(),
-                                &previous_payload,
-                            );
-                            let repair_outcome = self
-                                .run_prompt_with_cancellation(
-                                    request,
-                                    RuntimePromptRequest {
-                                        acpx_agent,
-                                        session_name: &session_name,
-                                        prompt: &repair_prompt,
-                                        command_options,
-                                        visibility: PromptVisibility::Hidden,
-                                    },
-                                    |_| async {},
+                    let output_schema = request.step_outputs.output_schema.clone();
+                    let output =
+                        match crate::agent::extraction::validate_extraction_payload_with_schema(
+                            extraction_outcome.runtime_verdict.as_ref(),
+                            &extraction_outcome.output_text,
+                            output_schema.as_ref(),
+                        ) {
+                            Ok(output) => output,
+                            Err(error) => {
+                                let previous_payload = extraction_outcome
+                                    .runtime_verdict
+                                    .as_ref()
+                                    .map(serde_json::Value::to_string)
+                                    .unwrap_or_else(|| extraction_outcome.output_text.clone());
+                                let repair_prompt = crate::agent::extraction::build_repair_prompt(
+                                    &error.to_string(),
+                                    &previous_payload,
+                                    output_schema.as_ref(),
+                                );
+                                let repair_outcome = self
+                                    .run_prompt_with_cancellation(
+                                        request,
+                                        RuntimePromptRequest {
+                                            acpx_agent,
+                                            session_name: &session_name,
+                                            prompt: &repair_prompt,
+                                            command_options,
+                                            visibility: PromptVisibility::Hidden,
+                                        },
+                                        |_| async {},
+                                    )
+                                    .await?;
+                                crate::agent::extraction::validate_extraction_payload_with_schema(
+                                    repair_outcome.runtime_verdict.as_ref(),
+                                    &repair_outcome.output_text,
+                                    output_schema.as_ref(),
                                 )
-                                .await?;
-                            crate::agent::extraction::validate_extraction_payload(
-                                repair_outcome.runtime_verdict.as_ref(),
-                                &repair_outcome.output_text,
-                            )
-                            .map_err(|error| {
-                                AgentError::ResponseError {
-                                    reason: format!("verdict extraction failed: {error}"),
-                                }
-                            })?
-                        }
-                    };
+                                .map_err(|error| {
+                                    AgentError::ResponseError {
+                                        reason: format!("verdict extraction failed: {error}"),
+                                    }
+                                })?
+                            }
+                        };
 
                     Ok(detect_worker_result_with_output(
                         request.workspace_path,
@@ -273,34 +279,33 @@ impl AcpxRuntime {
                     )
                     .await)
                 }
-                .await
-            }
-            Err(e) => {
-                if matches!(e, AgentError::TurnCancelled) {
-                    info!(
-                        event = ACPX_PROMPT_CANCELLED,
-                        issue_id = %request.issue.id,
-                        step = request.step_name,
-                        session_name,
-                        event_count = count,
-                        duration_ms = duration,
-                        "acpx prompt cancelled"
-                    );
-                } else {
-                    warn!(
-                        event = ACPX_PROMPT_FAILED,
-                        issue_id = %request.issue.id,
-                        step = request.step_name,
-                        session_name,
-                        event_count = count,
-                        duration_ms = duration,
-                        error = %e,
-                        "acpx prompt failed"
-                    );
+                .await,
+                Err(e) => {
+                    if matches!(e, AgentError::TurnCancelled) {
+                        info!(
+                            event = ACPX_PROMPT_CANCELLED,
+                            issue_id = %request.issue.id,
+                            step = request.step_name,
+                            session_name,
+                            event_count = count,
+                            duration_ms = duration,
+                            "acpx prompt cancelled"
+                        );
+                    } else {
+                        warn!(
+                            event = ACPX_PROMPT_FAILED,
+                            issue_id = %request.issue.id,
+                            step = request.step_name,
+                            session_name,
+                            event_count = count,
+                            duration_ms = duration,
+                            error = %e,
+                            "acpx prompt failed"
+                        );
+                    }
+                    Err(e)
                 }
-                Err(e)
-            }
-        };
+            };
 
         close_session(
             &self.cli,

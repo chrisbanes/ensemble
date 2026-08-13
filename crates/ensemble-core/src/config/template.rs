@@ -249,11 +249,13 @@ mod tests {
                 result: "succeeded".to_string(),
                 summary: Some("looks good".to_string()),
                 output: Some(json!({"risk":"low"})),
+                artifact_snapshot: None,
             },
         );
         let context = StepOutputTemplateContext {
             steps: steps.clone(),
             dependency_outputs: vec![steps["review-a"].clone()],
+            output_schema: None,
         };
 
         let rendered = render_prompt_with_context(

@@ -1273,6 +1273,7 @@ on_failure: Failed
                         run_id: "run-77".into(),
                         record_count: 5,
                     }],
+                    artifact_snapshots: Vec::new(),
                 }),
             })
             .await
@@ -1330,6 +1331,7 @@ on_failure: Failed
                         run_id: "run-77".into(),
                         record_count: 5,
                     }],
+                    artifact_snapshots: Vec::new(),
                 }),
             })
             .await

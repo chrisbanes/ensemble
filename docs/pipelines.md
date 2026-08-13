@@ -73,6 +73,22 @@ When a step runs, Ensemble:
 3. Waits for the agent to finish
 4. Collects a structured `StepOutput` result (`succeeded`, `failed`, or `concern`)
 
+## Artifact snapshot producers
+
+A step may declare `output_schema` and `artifact_snapshot` in configuration. The schema is read
+at configuration activation, restricted to Draft 2020-12, and frozen into the live pipeline
+snapshot. All result variants then require a present, schema-valid `output`; the existing hidden
+extraction repair turn is the only repair opportunity.
+
+After validation and before a producer becomes passed, Ensemble waits for concurrently running
+siblings of that issue to finish, then records a content-free Artifact snapshot identity for each
+selected repository. It covers the run, cycle, producer, attempt,
+validated-output digest, repository HEAD/index/tracked state, and non-ignored untracked relative
+paths. Source contents, absolute paths, ignored files, workspace copies, consumer mutation rules,
+assessment gates, and automatic cleanup are deliberately out of scope. The identity is journaled,
+appears beside direct dependency output and completed history, and is restored rather than
+recaptured after restart.
+
 ## Clarification request style (batched by default)
 
 Ensemble now injects interaction-policy guidance into prompts by default. Agents are expected to:
