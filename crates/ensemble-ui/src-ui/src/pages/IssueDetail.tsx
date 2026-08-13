@@ -127,6 +127,7 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
         identifier={identifier}
         workspacePath={data.workspace.path}
         artifacts={data.artifacts ?? null}
+        workflowSteps={data.workflow_steps}
       />
       {data.issue ? <IssueInfoSection issue={data.issue} /> : null}
     </div>

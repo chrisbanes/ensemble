@@ -221,6 +221,37 @@ function renderPanel(
 }
 
 describe("IssueCommandPanel", () => {
+  it("provides a keyboard-navigable Review gate tab without deriving a finalize action", async () => {
+    function ControlledPanel() {
+      const [activeTab, setActiveTab] = useState<IssueCommandPanelTab>("overview");
+      return (
+        <IssueCommandPanel
+          identifier="repo#1"
+          activeTab={activeTab}
+          onActiveTabChange={setActiveTab}
+          onClose={() => {}}
+        />
+      );
+    }
+
+    render(
+      <MemoryRouter>
+        <ControlledPanel />
+      </MemoryRouter>,
+    );
+
+    const reviewGate = screen.getByRole("tab", { name: "Review gate" });
+    reviewGate.focus();
+    await userEvent.keyboard("{Enter}");
+
+    expect(screen.getByRole("tab", { name: "Review gate" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByText("Delivery observation is unavailable. No readiness outcome is implied.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Approve finalize:/ })).toBeDisabled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     actions.submitReply.mockResolvedValue(true);
@@ -251,7 +282,7 @@ describe("IssueCommandPanel", () => {
       "aria-selected",
       "true",
     );
-    expect(screen.getAllByRole("tab")).toHaveLength(7);
+    expect(screen.getAllByRole("tab")).toHaveLength(8);
   });
 
   it("uses server capability reasons instead of inferring a disabled action locally", () => {
@@ -302,6 +333,7 @@ describe("IssueCommandPanel", () => {
       "Transcript",
       "Logs",
       "Acceptance",
+      "Review gate",
       "Artifacts",
     ]);
     const controlledPanelIds = screen
@@ -330,6 +362,8 @@ describe("IssueCommandPanel", () => {
     expect(screen.getByRole("tab", { name: "Overview" })).toHaveFocus();
     await user.keyboard("{ArrowLeft}");
     expect(screen.getByRole("tab", { name: "Artifacts" })).toHaveFocus();
+    await user.keyboard("{ArrowLeft}");
+    expect(screen.getByRole("tab", { name: "Review gate" })).toHaveFocus();
     await user.keyboard("{ArrowLeft}");
     expect(screen.getByRole("tab", { name: "Acceptance" })).toHaveFocus();
   });

@@ -2639,6 +2639,11 @@ Minimum endpoints:
     validate their authoritative state again when invoked, so a concurrent transition can still
     reject a previously enabled operation. When durable interaction lookup is absent, stale, or
     unavailable, `reply`, `cancel`, and `resume` are disabled without exposing interaction content.
+  - Mission Control's read-only review gate composes the persisted workflow verdict links,
+    `acceptance_attempts`, content-free artifact snapshots, and per-repository delivery observation.
+    It labels stale, unavailable, unknown, and divergent delivery evidence without inferring a
+    readiness outcome or triggering reconciliation. Finalization controls remain capability-driven,
+    and raw transcripts remain available only through their separate inspection views.
   - Suggested response shape:
 
     ```json
