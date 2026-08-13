@@ -13,6 +13,13 @@ function waitingInteraction(
     issue_identifier: "my-repo#42",
     requested_at: "2026-04-04T10:00:00Z",
     step_name: "review",
+    capabilities: {
+      inspect: { enabled: true }, reply: { enabled: false, disabled_reason: "Unavailable." },
+      guide: { enabled: false, disabled_reason: "Unavailable." }, cancel: { enabled: false, disabled_reason: "Unavailable." },
+      stop: { enabled: false, disabled_reason: "Unavailable." }, retry: { enabled: false, disabled_reason: "Unavailable." },
+      resume: { enabled: false, disabled_reason: "Unavailable." }, finalize_approve: { enabled: false, disabled_reason: "Unavailable." },
+      finalize_retry: { enabled: false, disabled_reason: "Unavailable." }, cleanup: { enabled: false, disabled_reason: "Unavailable." },
+    },
     ...overrides,
   };
 }

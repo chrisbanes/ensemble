@@ -2,6 +2,7 @@ use crate::acceptance::AcceptanceAttempt;
 use crate::attention::AttentionItem;
 use crate::history::artifacts::{RunArtifacts, StepTranscriptArtifact};
 use crate::interaction::store::InteractionStore;
+use crate::observability::capabilities::{IssueActionCapabilities, StepActionCapabilities};
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
 use crate::pipeline::engine::{PipelineRun, StepState};
 use crate::tracker::model::{RetryEntry, RunningEntry};
@@ -42,6 +43,7 @@ pub struct CompletedRow {
     pub issue_identifier: String,
     pub status: String,
     pub completed_at: DateTime<Utc>,
+    pub capabilities: IssueActionCapabilities,
 }
 
 /// A compact row for an issue currently waiting on human input.
@@ -52,6 +54,7 @@ pub struct WaitingInteractionRow {
     pub interaction_request_id: String,
     pub step_name: String,
     pub requested_at: DateTime<Utc>,
+    pub capabilities: IssueActionCapabilities,
 }
 
 /// Compact issue-detail summary for the current waiting interaction.
@@ -88,6 +91,7 @@ pub struct RunningSessionRow {
     pub started_at: DateTime<Utc>,
     pub last_event_at: Option<DateTime<Utc>>,
     pub tokens: TokenSnapshot,
+    pub capabilities: IssueActionCapabilities,
 }
 
 /// Token counts for a single session.
@@ -106,6 +110,7 @@ pub struct RetryRow {
     pub attempt: u32,
     pub due_at_ms: u64,
     pub error: Option<String>,
+    pub capabilities: IssueActionCapabilities,
 }
 
 /// Aggregate token and runtime totals for the snapshot.
@@ -137,6 +142,7 @@ pub struct IssueDetailSnapshot {
     pub issue: IssueSummary,
     pub artifacts: Option<RunArtifacts>,
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
+    pub capabilities: IssueActionCapabilities,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -164,6 +170,7 @@ pub struct WorkflowStepInfo {
     pub dependencies: Vec<String>,
     pub state: String,
     pub can_navigate: bool,
+    pub capabilities: StepActionCapabilities,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -186,6 +193,7 @@ pub struct StepDetailSnapshot {
     pub kind: String,
     pub dependencies: Vec<String>,
     pub can_navigate: bool,
+    pub capabilities: StepActionCapabilities,
     pub verdict: Option<String>,
     pub run_id: Option<String>,
     pub transcript: Option<StepTranscriptArtifact>,
@@ -264,6 +272,7 @@ pub fn build_state_snapshot(state: &OrchestratorState) -> RuntimeSnapshot {
             issue_identifier: entry.identifier.clone(),
             status: entry.status.clone(),
             completed_at: entry.completed_at,
+            capabilities: IssueActionCapabilities::for_issue(false, false, false, None),
         })
         .collect();
     completed_rows.sort_by_key(|row| std::cmp::Reverse(row.completed_at));
@@ -477,6 +486,7 @@ pub fn build_step_detail_snapshot(
         kind: detail_state.kind,
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
+        capabilities: StepActionCapabilities::for_step(detail_state.can_navigate),
         verdict: detail_state.verdict,
         run_id: detail_state.run_id,
         transcript: None,
@@ -596,16 +606,18 @@ pub async fn build_issue_snapshot(
 
     let retry_detail = retry_entry.map(retry_entry_to_row);
 
-    let pending_input = if let (Some(entry), Some(store)) = (waiting_entry, interaction_store) {
-        let interaction = store
+    let interaction = if let (Some(entry), Some(store)) = (waiting_entry, interaction_store) {
+        store
             .get(&entry.interaction_request_id)
             .await
             .ok()
-            .flatten();
-        interaction.map(|i| pending_input_summary(entry, &i))
+            .flatten()
     } else {
         None
     };
+    let pending_input = waiting_entry
+        .zip(interaction.as_ref())
+        .map(|(entry, interaction)| pending_input_summary(entry, interaction));
     // Note: store errors are intentionally ignored for best-effort snapshot generation
     let current_interaction = waiting_entry.map(current_interaction_summary);
 
@@ -664,6 +676,11 @@ pub async fn build_issue_snapshot(
                     can_navigate: pipeline_run
                         .map(|r| r.step_states.contains_key(&step.name))
                         .unwrap_or(false),
+                    capabilities: StepActionCapabilities::for_step(
+                        pipeline_run
+                            .map(|r| r.step_states.contains_key(&step.name))
+                            .unwrap_or(false),
+                    ),
                 }
             })
             .collect()
@@ -678,6 +695,7 @@ pub async fn build_issue_snapshot(
                 dependencies: step.dependencies.clone(),
                 state: step.state.clone(),
                 can_navigate: step.can_navigate,
+                capabilities: StepActionCapabilities::for_step(step.can_navigate),
             })
             .collect()
     } else {
@@ -710,6 +728,16 @@ pub async fn build_issue_snapshot(
             url: None,
         });
 
+    let mut capabilities = IssueActionCapabilities::for_issue(
+        running_entry.is_some(),
+        retry_entry.is_some(),
+        waiting_entry.is_some(),
+        finalize_entry.map(|(_, finalize)| &finalize.status),
+    );
+    if waiting_entry.is_some() && interaction_store.is_some() {
+        capabilities.apply_interaction(interaction.as_ref());
+    }
+
     Some(IssueDetailSnapshot {
         issue_identifier,
         issue_id,
@@ -734,6 +762,7 @@ pub async fn build_issue_snapshot(
         acceptance_attempts: pipeline_run
             .map(|run| run.acceptance_attempts.clone())
             .unwrap_or_default(),
+        capabilities,
     })
 }
 
@@ -743,10 +772,6 @@ pub async fn enrich_issue_snapshot_pending_input(
     detail: &mut IssueDetailSnapshot,
     interaction_store: &InteractionStore,
 ) {
-    if detail.pending_input.is_some() {
-        return;
-    }
-
     let Some(current) = detail.current_interaction.as_ref() else {
         return;
     };
@@ -757,8 +782,26 @@ pub async fn enrich_issue_snapshot_pending_input(
         .ok()
         .flatten();
 
-    if let Some(interaction) = interaction {
-        detail.pending_input = Some(pending_input_from_current(current, &interaction));
+    detail.capabilities.apply_interaction(interaction.as_ref());
+    if detail.pending_input.is_none() {
+        if let Some(interaction) = interaction {
+            detail.pending_input = Some(pending_input_from_current(current, &interaction));
+        }
+    }
+}
+
+/// Enrich waiting runtime rows from their durable interaction records after the state lock is released.
+pub async fn enrich_runtime_snapshot_interactions(
+    snapshot: &mut RuntimeSnapshot,
+    interaction_store: &InteractionStore,
+) {
+    for row in &mut snapshot.waiting_on_human {
+        let interaction = interaction_store
+            .get(&row.interaction_request_id)
+            .await
+            .ok()
+            .flatten();
+        row.capabilities.apply_interaction(interaction.as_ref());
     }
 }
 
@@ -792,6 +835,7 @@ fn running_entry_to_row(
             output_tokens: entry.agent_output_tokens,
             total_tokens: entry.agent_total_tokens,
         },
+        capabilities: IssueActionCapabilities::for_issue(true, false, false, None),
     }
 }
 
@@ -803,6 +847,7 @@ fn retry_entry_to_row(entry: &RetryEntry) -> RetryRow {
         attempt: entry.attempt,
         due_at_ms: entry.due_at_ms,
         error: entry.error.clone(),
+        capabilities: IssueActionCapabilities::for_issue(false, true, false, None),
     }
 }
 
@@ -815,6 +860,7 @@ fn waiting_entry_to_row(
         interaction_request_id: entry.interaction_request_id.clone(),
         step_name: entry.step_name.clone(),
         requested_at: entry.requested_at,
+        capabilities: IssueActionCapabilities::for_issue(false, false, true, None),
     }
 }
 
@@ -1102,6 +1148,25 @@ mod tests {
         assert_eq!(row.tokens.input_tokens, 1200);
         assert_eq!(row.tokens.output_tokens, 800);
         assert_eq!(row.tokens.total_tokens, 2000);
+    }
+
+    #[test]
+    fn running_rows_expose_only_stop_and_inspect_as_enabled_actions() {
+        let snapshot = build_state_snapshot(&build_test_state());
+        let capabilities = &snapshot.running[0].capabilities;
+
+        assert!(capabilities.inspect().is_enabled());
+        assert!(capabilities.stop().is_enabled());
+        assert!(!capabilities.retry().is_enabled());
+        assert_eq!(
+            capabilities.retry().disabled_reason(),
+            Some("This issue is not retrying.")
+        );
+        assert!(!capabilities.guide().is_enabled());
+        assert_eq!(
+            capabilities.guide().disabled_reason(),
+            Some("Guidance is not supported in Mission Control."),
+        );
     }
 
     #[test]

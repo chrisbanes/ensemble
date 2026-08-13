@@ -41,6 +41,9 @@ use utoipa::OpenApi;
     components(schemas(
         // Snapshot types
         crate::observability::snapshot::RuntimeSnapshot,
+        crate::observability::capabilities::ActionCapability,
+        crate::observability::capabilities::IssueActionCapabilities,
+        crate::observability::capabilities::StepActionCapabilities,
         crate::observability::snapshot::SnapshotCounts,
         crate::observability::snapshot::RunningSessionRow,
         crate::observability::snapshot::TokenSnapshot,
@@ -193,6 +196,22 @@ mod tests {
         assert!(spec["paths"]["/api/v1/attention"]["get"].is_object());
         assert!(spec["paths"]["/api/v1/attention"].get("post").is_none());
         assert!(spec["components"]["schemas"]["AttentionHistoryResponse"].is_object());
+    }
+
+    #[test]
+    fn test_openapi_documents_snapshot_action_capabilities() {
+        let spec: serde_json::Value =
+            serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+
+        assert_eq!(
+            spec["components"]["schemas"]["RunningSessionRow"]["properties"]["capabilities"]
+                ["$ref"],
+            "#/components/schemas/IssueActionCapabilities"
+        );
+        assert_eq!(
+            spec["components"]["schemas"]["ActionCapability"]["properties"]["enabled"]["type"],
+            "boolean"
+        );
     }
 
     #[test]

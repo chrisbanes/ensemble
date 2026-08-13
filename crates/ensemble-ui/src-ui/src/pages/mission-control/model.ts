@@ -1,6 +1,7 @@
 import type {
   AttentionItem,
   CompletedRow,
+  IssueActionCapabilities,
   RetryRow,
   RunningSessionRow,
   RuntimeSnapshot,
@@ -29,6 +30,7 @@ export interface MissionIssueSummary {
   tokenTotal: number | null;
   turnCount: number | null;
   attention: boolean;
+  capabilities: IssueActionCapabilities;
   source: RunningSessionRow | RetryRow | WaitingInteractionRow | CompletedRow;
 }
 
@@ -127,6 +129,7 @@ function runningIssue(row: RunningSessionRow): MissionIssueSummary {
     turnCount: row.turn_count,
     attention: false,
     source: row,
+    capabilities: row.capabilities,
   };
 }
 
@@ -146,6 +149,7 @@ function retryIssue(row: RetryRow): MissionIssueSummary {
     turnCount: null,
     attention: false,
     source: row,
+    capabilities: row.capabilities,
   };
 }
 
@@ -166,6 +170,7 @@ function waitingIssue(row: WaitingInteractionRow): MissionIssueSummary {
     turnCount: null,
     attention: false,
     source: row,
+    capabilities: row.capabilities,
   };
 }
 
@@ -186,6 +191,7 @@ function completedIssue(row: CompletedRow): MissionIssueSummary {
     turnCount: null,
     attention: false,
     source: row,
+    capabilities: row.capabilities,
   };
 }
 
@@ -207,12 +213,16 @@ export function deriveMissionControlState(snapshot: RuntimeSnapshot): MissionCon
     ...issue,
     attention: attentionBySubject.has(issue.identifier),
   }));
-  const issueIdentifiers = new Set(issues.map((issue) => issue.identifier));
+  const inspectByIssueIdentifier = new Map(
+    issues.map((issue) => [issue.identifier, issue.capabilities.inspect.enabled]),
+  );
 
   return {
     issues: issuesWithAttention,
     groups: regroupMissionControlIssues(issuesWithAttention),
-    attentionItems: snapshot.attention_items.map((item) => missionAttentionItem(item, issueIdentifiers)),
+    attentionItems: snapshot.attention_items.map((item) =>
+      missionAttentionItem(item, inspectByIssueIdentifier),
+    ),
     stats: {
       running: snapshot.counts.running,
       retrying: snapshot.counts.retrying,
@@ -231,7 +241,7 @@ export function deriveMissionControlState(snapshot: RuntimeSnapshot): MissionCon
 
 function missionAttentionItem(
   item: AttentionItem,
-  issueIdentifiers: Set<string>,
+  inspectByIssueIdentifier: Map<string, boolean>,
 ): MissionAttentionItem {
   return {
     id: JSON.stringify([
@@ -245,7 +255,7 @@ function missionAttentionItem(
     detail: item.presentation.remedy,
     references: item.presentation.references,
     requestedAt: item.opened_at,
-    canNavigate: issueIdentifiers.has(item.identity.subject_ref),
+    canNavigate: inspectByIssueIdentifier.get(item.identity.subject_ref) === true,
   };
 }
 

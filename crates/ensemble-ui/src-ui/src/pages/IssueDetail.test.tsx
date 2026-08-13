@@ -59,6 +59,18 @@ const hooksMock = vi.hoisted(() => {
         ],
         pending_input: { ask_id: "ask-1" },
         current_interaction: { interaction_request_id: "ask-1" },
+        capabilities: {
+          inspect: { enabled: true },
+          reply: { enabled: true },
+          guide: { enabled: false, disabled_reason: "Guidance is not supported." },
+          cancel: { enabled: true },
+          stop: { enabled: true },
+          retry: { enabled: false, disabled_reason: "This issue is not retrying." },
+          resume: { enabled: false, disabled_reason: "Resolve the interaction before resuming." },
+          finalize_approve: { enabled: false, disabled_reason: "Finalize approval is not required." },
+          finalize_retry: { enabled: false, disabled_reason: "Finalize retry is not required." },
+          cleanup: { enabled: false, disabled_reason: "Manual cleanup is not supported." },
+        },
       },
       isLoading: false,
       isError: false,
@@ -1195,6 +1207,7 @@ describe("useIssueRuntime lifecycle", () => {
             dependencies: [],
             state: "passed",
             can_navigate: true,
+            capabilities: { inspect: { enabled: true } },
           },
           {
             name: "review",
@@ -1203,6 +1216,7 @@ describe("useIssueRuntime lifecycle", () => {
             dependencies: ["build"],
             state: terminalStepState,
             can_navigate: true,
+            capabilities: { inspect: { enabled: true } },
           },
           {
             name: "publish",
@@ -1211,8 +1225,21 @@ describe("useIssueRuntime lifecycle", () => {
             dependencies: ["review"],
             state: "pending",
             can_navigate: false,
+            capabilities: { inspect: { enabled: false, disabled_reason: "No step details are available yet." } },
           },
         ],
+        capabilities: {
+          inspect: { enabled: true },
+          reply: { enabled: false, disabled_reason: "Unavailable." },
+          guide: { enabled: false, disabled_reason: "Unavailable." },
+          cancel: { enabled: false, disabled_reason: "Unavailable." },
+          stop: { enabled: false, disabled_reason: "Unavailable." },
+          retry: { enabled: false, disabled_reason: "Unavailable." },
+          resume: { enabled: false, disabled_reason: "Unavailable." },
+          finalize_approve: { enabled: false, disabled_reason: "Unavailable." },
+          finalize_retry: { enabled: false, disabled_reason: "Unavailable." },
+          cleanup: { enabled: false, disabled_reason: "Unavailable." },
+        },
       } satisfies IssueDetailSnapshot;
       hooksMock.useIssueDetailQuery.mockReturnValue({
         data: terminalDetail,
@@ -1309,6 +1336,19 @@ describe("useIssueRuntime lifecycle", () => {
 });
 
 describe("IssueDetail", () => {
+  const capabilities = {
+    inspect: { enabled: true },
+    reply: { enabled: true },
+    guide: { enabled: false, disabled_reason: "Guidance is not supported." },
+    cancel: { enabled: true },
+    stop: { enabled: true },
+    retry: { enabled: false, disabled_reason: "This issue is not retrying." },
+    resume: { enabled: false, disabled_reason: "Resolve the interaction before resuming." },
+    finalize_approve: { enabled: false, disabled_reason: "Finalize approval is not required." },
+    finalize_retry: { enabled: false, disabled_reason: "Finalize retry is not required." },
+    cleanup: { enabled: false, disabled_reason: "Manual cleanup is not supported." },
+  };
+
   beforeEach(() => {
     hooksMock.stopMutate.mockClear();
     hooksMock.retryMutate.mockClear();
@@ -1363,6 +1403,7 @@ describe("IssueDetail", () => {
         ],
         pending_input: { ask_id: "ask-1" },
         current_interaction: { interaction_request_id: "ask-1" },
+        capabilities,
       },
       isLoading: false,
       isError: false,
@@ -1613,6 +1654,7 @@ describe("IssueDetail", () => {
         workflow_steps: [],
         pending_input: { ask_id: `ask-${identifier}` },
         current_interaction: { interaction_request_id: `ask-${identifier}` },
+        capabilities,
       },
       isLoading: false,
       isError: false,
@@ -2277,7 +2319,7 @@ describe("IssueDetail", () => {
     expect(screen.getByText("completed build record")).toBeInTheDocument();
   });
 
-  it("renders durable artifacts and keeps workflow steps clickable when can_navigate is false", async () => {
+  it("renders durable artifacts and disables unavailable workflow step inspection", async () => {
     const user = userEvent.setup();
 
     hooksMock.useIssueDetailQuery.mockReturnValue({
@@ -2322,6 +2364,9 @@ describe("IssueDetail", () => {
             dependencies: [],
             state: "passed",
             can_navigate: false,
+            capabilities: {
+              inspect: { enabled: false, disabled_reason: "No step details are available yet." },
+            },
           },
         ],
       } as any,
@@ -2348,10 +2393,8 @@ describe("IssueDetail", () => {
       { wrapper },
     );
 
-    expect(screen.getByRole("link", { name: "deploy" })).toHaveAttribute(
-      "href",
-      "/issue/todo-1/step/deploy",
-    );
+    expect(screen.queryByRole("link", { name: "deploy" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("deploy: No step details are available yet.")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: "Artifacts" }));
 
@@ -2392,6 +2435,7 @@ describe("IssueDetail", () => {
           ],
         },
         workflow_steps: [],
+        capabilities: { ...capabilities, finalize_approve: { enabled: true } },
       } as any,
       isLoading: false,
       isError: false,
@@ -2439,7 +2483,17 @@ describe("IssueDetail", () => {
     let finalize = { status: "pending_approval", repos: [pendingRepo] };
     hooksMock.useIssueDetailQuery.mockImplementation(() => ({
       ...current,
-      data: { ...current.data, finalize },
+      data: {
+        ...current.data,
+        finalize,
+        capabilities: {
+          ...capabilities,
+          finalize_approve:
+            finalize.status === "pending_approval"
+              ? { enabled: true }
+              : { enabled: false, disabled_reason: "Finalize approval is not required." },
+        },
+      },
     }));
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -2490,6 +2544,7 @@ describe("IssueDetail", () => {
         workspace: { path: "/tmp/workspace" },
         finalize: { status: "failed", repos: [] },
         workflow_steps: [],
+        capabilities: { ...capabilities, finalize_retry: { enabled: true } },
       } as any,
       isLoading: false,
       isError: false,

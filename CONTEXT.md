@@ -59,6 +59,12 @@ _Avoid_: Step result, execution result
 A durable question, approval, or handoff that blocks a run until a human resolves it.
 _Avoid_: Prompt, comment
 
+**Action capability**:
+A server-derived snapshot-time statement of whether one named Mission Control operation is currently
+available. Disabled capabilities include an operator-facing reason; enabled capability does not
+reserve the operation, whose endpoint remains authoritative at execution time.
+_Avoid_: Client-side lifecycle inference, permission, reservation
+
 **Operator-attention item**:
 A durable, non-authoritative report from a producer that fresh evidence says a subject needs an operator.
 _Avoid_: Interaction request, action, command

@@ -128,6 +128,13 @@ function issueDetail(finalizeStatus: string, approvalRequired = false): IssueDet
     running: null,
     status: "completed_succeeded",
     workflow_steps: [],
+    capabilities: {
+      inspect: { enabled: true }, reply: { enabled: false, disabled_reason: "Unavailable." },
+      guide: { enabled: false, disabled_reason: "Unavailable." }, cancel: { enabled: false, disabled_reason: "Unavailable." },
+      stop: { enabled: false, disabled_reason: "Unavailable." }, retry: { enabled: false, disabled_reason: "Unavailable." },
+      resume: { enabled: false, disabled_reason: "Unavailable." }, finalize_approve: { enabled: false, disabled_reason: "Unavailable." },
+      finalize_retry: { enabled: false, disabled_reason: "Unavailable." }, cleanup: { enabled: false, disabled_reason: "Unavailable." },
+    },
     workspace: { path: "/tmp/workspace" },
   };
 }
