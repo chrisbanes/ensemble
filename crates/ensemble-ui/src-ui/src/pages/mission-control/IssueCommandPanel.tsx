@@ -11,6 +11,7 @@ import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
 import { IssueComposer } from "@/components/issue-detail/IssueComposer";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
 import { Button } from "@/components/ui/button";
+import type { ActionCapability } from "@/generated/models";
 import { cn } from "@/lib/utils";
 import { useIssueRuntime } from "./useIssueRuntime";
 
@@ -57,6 +58,18 @@ function PanelCloseButton({ onClose }: { onClose: () => void }) {
       <X className="h-4 w-4" />
     </Button>
   );
+}
+
+function capabilityDisabled(capability: ActionCapability | undefined, isPending = false) {
+  return isPending || capability?.enabled !== true;
+}
+
+function capabilityReason(capability: ActionCapability | undefined) {
+  return capability?.disabled_reason ?? "Action availability is unavailable; refresh and try again.";
+}
+
+function actionAriaLabel(label: string, capability: ActionCapability | undefined) {
+  return capability?.enabled !== true ? `${label}: ${capabilityReason(capability)}` : undefined;
 }
 
 export function IssueCommandPanel({
@@ -175,6 +188,7 @@ function IssueCommandPanelContent({
   }
 
   const finalizeStatus = data.finalize.status;
+  const capabilities = data.capabilities;
   const actionError = [
     stopMutation,
     retryMutation,
@@ -323,15 +337,25 @@ function IssueCommandPanelContent({
                 <p className="mt-1 text-muted-foreground">{errorMessage(interactionError)}</p>
               </div>
             ) : pendingQuestion ? (
+              <div className="space-y-2">
               <IssueComposer
                 key={`${identifier}:${pendingQuestion.interactionId}`}
                 pendingQuestion={pendingQuestion}
                 onSubmitReply={submitInteractionReply}
                 onSubmitFollowUp={() => false}
                 onResumeInteraction={resumeInteraction}
-                isSubmitting={interactionSubmitting}
+                isSubmitting={
+                  interactionSubmitting ||
+                  capabilityDisabled(capabilities?.reply) && capabilityDisabled(capabilities?.resume)
+                }
                 error={composerError}
               />
+              {capabilityDisabled(capabilities?.reply) && capabilityDisabled(capabilities?.resume) ? (
+                <p className="text-sm text-muted-foreground">
+                  {capabilityReason(capabilities?.reply)}
+                </p>
+              ) : null}
+              </div>
             ) : (
               <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">
                 No response is currently available. Use Transcript or Steps to inspect the issue.
@@ -342,7 +366,9 @@ function IssueCommandPanelContent({
                 variant="outline"
                 size="sm"
                 onClick={() => cancelMutation.mutate({ id: interaction.id })}
-                disabled={cancelMutation.isPending}
+              disabled={capabilityDisabled(capabilities?.cancel, cancelMutation.isPending)}
+                aria-label={actionAriaLabel("Cancel Request", capabilities?.cancel)}
+                title={capabilityDisabled(capabilities?.cancel) ? capabilityReason(capabilities?.cancel) : undefined}
               >
                 Cancel Request
               </Button>
@@ -436,38 +462,47 @@ function IssueCommandPanelContent({
         </div>
 
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          {isLiveRun ? (
+          {capabilities ? (
             <Button
               variant="destructive"
               size="sm"
               onClick={() => setStopConfirmationIdentifier(identifier)}
+              disabled={capabilityDisabled(capabilities?.stop)}
+              aria-label={actionAriaLabel("Stop", capabilities?.stop)}
+              title={capabilityDisabled(capabilities?.stop) ? capabilityReason(capabilities?.stop) : undefined}
             >
               Stop
             </Button>
           ) : null}
-          {data.retry ? (
+          {capabilities ? (
             <Button
               size="sm"
               onClick={() => retryMutation.mutate({ identifier })}
-              disabled={retryMutation.isPending}
+              disabled={capabilityDisabled(capabilities?.retry, retryMutation.isPending)}
+              aria-label={actionAriaLabel("Retry", capabilities?.retry)}
+              title={capabilityDisabled(capabilities?.retry) ? capabilityReason(capabilities?.retry) : undefined}
             >
               Retry
             </Button>
           ) : null}
-          {finalizeStatus === "pending_approval" ? (
+          {capabilities ? (
             <Button
               size="sm"
               onClick={() => setShowFinalizeConfirm(true)}
-              disabled={finalizeApproveMutation.isPending}
+              disabled={capabilityDisabled(capabilities?.finalize_approve, finalizeApproveMutation.isPending)}
+              aria-label={actionAriaLabel("Approve finalize", capabilities?.finalize_approve)}
+              title={capabilityDisabled(capabilities?.finalize_approve) ? capabilityReason(capabilities?.finalize_approve) : undefined}
             >
               Approve finalize
             </Button>
           ) : null}
-          {finalizeStatus === "failed" ? (
+          {capabilities ? (
             <Button
               size="sm"
               onClick={() => finalizeRetryMutation.mutate({ identifier })}
-              disabled={finalizeRetryMutation.isPending}
+              disabled={capabilityDisabled(capabilities?.finalize_retry, finalizeRetryMutation.isPending)}
+              aria-label={actionAriaLabel("Retry finalize", capabilities?.finalize_retry)}
+              title={capabilityDisabled(capabilities?.finalize_retry) ? capabilityReason(capabilities?.finalize_retry) : undefined}
             >
               Retry finalize
             </Button>

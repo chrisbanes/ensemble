@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { postRefresh } from "@/generated/api/controls/controls";
 import { getState } from "@/generated/api/state/state";
-import type { IssueDetailSnapshot, RuntimeSnapshot } from "@/generated/models";
+import type { IssueActionCapabilities, IssueDetailSnapshot, RuntimeSnapshot } from "@/generated/models";
 import { AttentionQueue } from "./AttentionQueue";
 import MissionControl from "./MissionControl";
 import { MissionControlToolbar } from "./MissionControlToolbar";
@@ -100,6 +100,19 @@ const attentionItems: MissionAttentionItem[] = [
   },
 ];
 
+const capabilities: IssueActionCapabilities = {
+  inspect: { enabled: true },
+  reply: { enabled: false, disabled_reason: "No interaction is awaiting input." },
+  guide: { enabled: false, disabled_reason: "Guidance is not supported." },
+  cancel: { enabled: false, disabled_reason: "No interaction is awaiting input." },
+  stop: { enabled: false, disabled_reason: "This issue is not running." },
+  retry: { enabled: false, disabled_reason: "This issue is not retrying." },
+  resume: { enabled: false, disabled_reason: "No interaction is awaiting input." },
+  finalize_approve: { enabled: false, disabled_reason: "Finalize approval is not required." },
+  finalize_retry: { enabled: false, disabled_reason: "Finalize retry is not required." },
+  cleanup: { enabled: false, disabled_reason: "Manual cleanup is not supported." },
+};
+
 function issue(overrides: Partial<MissionIssueSummary> = {}): MissionIssueSummary {
   return {
     id: "issue-1",
@@ -115,6 +128,7 @@ function issue(overrides: Partial<MissionIssueSummary> = {}): MissionIssueSummar
     tokenTotal: 150,
     turnCount: 3,
     attention: false,
+    capabilities,
     source: {} as MissionIssueSummary["source"],
     ...overrides,
   };
@@ -174,6 +188,7 @@ function runtimeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnaps
         step_name: "build",
         tokens: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
         turn_count: 3,
+        capabilities: { ...capabilities, stop: { enabled: true } },
       },
     ],
     retrying: [
@@ -183,6 +198,7 @@ function runtimeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnaps
         attempt: 2,
         due_at_ms: 1000,
         error: "clippy failed",
+        capabilities: { ...capabilities, retry: { enabled: true } },
       },
     ],
     waiting_on_human: [
@@ -192,6 +208,7 @@ function runtimeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnaps
         issue_identifier: "repo#3",
         requested_at: "2026-07-09T09:10:00Z",
         step_name: "review",
+        capabilities: { ...capabilities, reply: { enabled: true }, cancel: { enabled: true } },
       },
     ],
     completed: [
@@ -200,6 +217,7 @@ function runtimeSnapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnaps
         issue_identifier: "repo#4",
         completed_at: "2026-07-09T09:20:00Z",
         status: "completed_succeeded",
+        capabilities,
       },
     ],
     ...overrides,
@@ -234,6 +252,7 @@ function runtimeFixture(identifier: string): IssueRuntimeState {
     last_error: null,
     pending_input: null,
     current_interaction: null,
+    capabilities,
   } satisfies IssueDetailSnapshot;
 
   return {
@@ -929,12 +948,14 @@ describe("Mission Control page", () => {
           issue_identifier: "repo#halted",
           requested_at: "2026-07-09T09:15:00Z",
           step_name: "review",
+          capabilities,
         }],
         completed: [{
           issue_id: "issue-failed",
           issue_identifier: "repo#failed",
           completed_at: "2026-07-09T09:25:00Z",
           status: "completed_failed",
+          capabilities,
         }],
       }),
     );

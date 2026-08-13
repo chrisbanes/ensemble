@@ -2609,6 +2609,10 @@ Minimum endpoints:
     ```
 
   - Includes `attention_items`, containing only open records read from the shared history database.
+  - Every issue row includes `capabilities`: a fixed, server-derived set of `inspect`, `reply`,
+    `guide`, `cancel`, `stop`, `retry`, `resume`, `finalize_approve`, `finalize_retry`, and
+    `cleanup` operation states. Each state has `enabled`; a disabled state also carries a nonempty
+    `disabled_reason`. Clients use these states rather than inferring lifecycle predicates locally.
 
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information
@@ -2628,6 +2632,13 @@ Minimum endpoints:
     artifacts and the `delivery_observation_updated` WebSocket event expose the same repository-
     keyed schema; neither endpoint performs GitHub reconciliation on demand.
   - Includes matching open `attention_items` from the same shared history database.
+  - Includes the same issue `capabilities` as state rows and a separate step `capabilities.inspect`
+    state. `workflow_steps[].can_navigate` remains the compatibility/navigation fact for the
+    existing step-detail link; it does not determine issue actions.
+  - Capability availability is advisory and snapshot-time only. Control and interaction endpoints
+    validate their authoritative state again when invoked, so a concurrent transition can still
+    reject a previously enabled operation. When durable interaction lookup is absent, stale, or
+    unavailable, `reply`, `cancel`, and `resume` are disabled without exposing interaction content.
   - Suggested response shape:
 
     ```json
@@ -2707,7 +2718,7 @@ Minimum endpoints:
   - Returns bounded, read-only operator-attention lifecycle history with optional `subject_ref`,
     lifecycle `state`, cursor, and limit filters. Terminal evidence is included only when requested.
   - It has no action or mutation counterpart; selecting an attention item may navigate only to
-    existing issue detail.
+    existing issue detail when that issue row's `capabilities.inspect` is enabled.
 
 - `POST /api/v1/interactions/{id}/respond`
   - Attempts to resolve a specific open human interaction. The body is typed by interaction kind and

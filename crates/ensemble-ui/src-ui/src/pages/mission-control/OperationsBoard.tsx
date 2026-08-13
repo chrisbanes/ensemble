@@ -31,12 +31,18 @@ function IssueTile({
   onSelect: () => void;
 }) {
   const updatedText = formatUpdatedAt(issue.updatedAt);
+  const inspect = issue.capabilities.inspect;
+  const disabled = !inspect.enabled;
+  const disabledReason = inspect.disabled_reason ?? "Inspection is unavailable; refresh and try again.";
 
   return (
     <button
       type="button"
       aria-current={selected ? "true" : undefined}
       onClick={onSelect}
+      disabled={disabled}
+      aria-label={disabled ? `${issue.identifier}: ${disabledReason}` : undefined}
+      title={disabled ? disabledReason : undefined}
       className={cn(
         "w-full rounded-lg border bg-background p-3 text-left shadow-sm transition hover:border-primary/50 hover:bg-muted/30",
         issue.attention && "border-amber-400/70 bg-amber-50/50 dark:bg-amber-950/15",

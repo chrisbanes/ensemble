@@ -42,6 +42,9 @@ export function OperationsList({ issues, selectedIssueIdentifier, onSelectIssue 
             {issues.map((issue) => {
               const selected = selectedIssueIdentifier === issue.identifier;
               const updatedText = formatUpdatedAt(issue.updatedAt);
+              const inspect = issue.capabilities.inspect;
+              const disabled = !inspect.enabled;
+              const disabledReason = inspect.disabled_reason ?? "Inspection is unavailable; refresh and try again.";
 
               return (
                 <button
@@ -49,6 +52,9 @@ export function OperationsList({ issues, selectedIssueIdentifier, onSelectIssue 
                   type="button"
                   aria-current={selected ? "true" : undefined}
                   onClick={() => onSelectIssue(issue.identifier)}
+                  disabled={disabled}
+                  aria-label={disabled ? `${issue.identifier}: ${disabledReason}` : undefined}
+                  title={disabled ? disabledReason : undefined}
                   className={cn(
                     "grid w-full grid-cols-[minmax(10rem,1.1fr)_8rem_minmax(10rem,1fr)_8rem] items-center gap-3 px-4 py-3 text-left text-sm transition hover:bg-muted/30",
                     selected && "bg-primary/5 ring-1 ring-primary/30 ring-inset",

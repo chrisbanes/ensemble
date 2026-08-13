@@ -14,6 +14,7 @@ import { IssueComposer } from "@/components/issue-detail/IssueComposer";
 import { IssueContextPanel } from "@/components/issue-detail/IssueContextPanel";
 import { RunTranscript } from "@/components/transcript/RunTranscript";
 import { useIssueRuntime } from "./mission-control/useIssueRuntime";
+import type { ActionCapability } from "@/generated/models";
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -23,6 +24,18 @@ function formatTokens(n: number): string {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Request failed";
+}
+
+function actionEnabled(capability: ActionCapability | undefined) {
+  return capability?.enabled === true;
+}
+
+function actionReason(capability: ActionCapability | undefined) {
+  return capability?.disabled_reason ?? "Action availability is unavailable; refresh and try again.";
+}
+
+function actionAriaLabel(label: string, capability: ActionCapability | undefined) {
+  return capability?.enabled !== true ? `${label}: ${actionReason(capability)}` : undefined;
 }
 
 export default function IssueDetail() {
@@ -120,6 +133,9 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
   );
 
   const finalizeStatus = data.finalize?.status;
+  const capabilities = data.capabilities;
+  const canApproveFinalize = actionEnabled(capabilities?.finalize_approve);
+  const canRetryFinalize = actionEnabled(capabilities?.finalize_retry);
   const actionError = [
     stopMutation,
     retryMutation,
@@ -129,7 +145,7 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
   ].find((mutation) => mutation.isError)?.error;
   const finalizePanel = finalizeStatus ? (
     <div className="rounded-lg border bg-card p-4 text-sm">
-      {finalizeStatus === "pending_approval" ? (
+      {canApproveFinalize ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="font-medium">Finalize approval required</div>
@@ -138,12 +154,12 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
           <Button
             size="sm"
             onClick={() => setShowFinalizeConfirm(true)}
-            disabled={finalizeApproveMutation.isPending}
+            disabled={finalizeApproveMutation.isPending || !canApproveFinalize}
           >
             Approve finalize
           </Button>
         </div>
-      ) : finalizeStatus === "failed" ? (
+      ) : canRetryFinalize ? (
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="font-medium">Finalize failed</div>
@@ -152,7 +168,7 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
           <Button
             size="sm"
             onClick={() => finalizeRetryMutation.mutate({ identifier })}
-            disabled={finalizeRetryMutation.isPending}
+            disabled={finalizeRetryMutation.isPending || !canRetryFinalize}
           >
             Retry finalize
           </Button>
@@ -202,7 +218,10 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
       onSubmitReply={submitInteractionReply}
       onSubmitFollowUp={() => false}
       onResumeInteraction={resumeInteraction}
-      isSubmitting={interactionSubmitting}
+      isSubmitting={
+        interactionSubmitting ||
+        (!actionEnabled(capabilities?.reply) && !actionEnabled(capabilities?.resume))
+      }
       error={composerError}
     />
   ) : (
@@ -242,16 +261,25 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
           </div>
         </div>
         <div className="flex gap-2">
-          {isLiveRun ? (
-            <Button variant="destructive" size="sm" onClick={() => setShowStopConfirm(true)}>
+          {capabilities ? (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setShowStopConfirm(true)}
+              disabled={!actionEnabled(capabilities.stop)}
+              aria-label={actionAriaLabel("Stop Agent", capabilities.stop)}
+              title={!actionEnabled(capabilities.stop) ? actionReason(capabilities.stop) : undefined}
+            >
               Stop Agent
             </Button>
           ) : null}
-          {data.retry ? (
+          {capabilities ? (
             <Button
               size="sm"
               onClick={() => retryMutation.mutate({ identifier })}
-              disabled={retryMutation.isPending}
+              disabled={retryMutation.isPending || !actionEnabled(capabilities.retry)}
+              aria-label={actionAriaLabel("Retry Now", capabilities.retry)}
+              title={!actionEnabled(capabilities.retry) ? actionReason(capabilities.retry) : undefined}
             >
               Retry Now
             </Button>
@@ -327,7 +355,9 @@ function IssueDetailContent({ identifier }: { identifier: string }) {
                   variant="outline"
                   size="sm"
                   onClick={() => cancelMutation.mutate({ id: interaction.id })}
-                  disabled={cancelMutation.isPending}
+                  disabled={cancelMutation.isPending || !actionEnabled(capabilities?.cancel)}
+                  aria-label={actionAriaLabel("Cancel Request", capabilities?.cancel)}
+                  title={!actionEnabled(capabilities?.cancel) ? actionReason(capabilities?.cancel) : undefined}
                 >
                   Cancel Request
                 </Button>

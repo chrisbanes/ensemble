@@ -6,6 +6,14 @@ import { describe, expect, it } from "vitest";
 import type { RuntimeSnapshot } from "@/generated/models";
 import Dashboard from "./Dashboard";
 
+const capabilities = {
+  inspect: { enabled: true }, reply: { enabled: false, disabled_reason: "Unavailable." },
+  guide: { enabled: false, disabled_reason: "Unavailable." }, cancel: { enabled: false, disabled_reason: "Unavailable." },
+  stop: { enabled: false, disabled_reason: "Unavailable." }, retry: { enabled: false, disabled_reason: "Unavailable." },
+  resume: { enabled: false, disabled_reason: "Unavailable." }, finalize_approve: { enabled: false, disabled_reason: "Unavailable." },
+  finalize_retry: { enabled: false, disabled_reason: "Unavailable." }, cleanup: { enabled: false, disabled_reason: "Unavailable." },
+};
+
 function mockSnapshot(): RuntimeSnapshot {
   return {
     agent_totals: { input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0 },
@@ -42,6 +50,7 @@ function mockSnapshot(): RuntimeSnapshot {
         step_name: "build",
         tokens: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
         turn_count: 3,
+        capabilities: { ...capabilities, stop: { enabled: true } },
       },
     ],
     retrying: [],
@@ -52,6 +61,7 @@ function mockSnapshot(): RuntimeSnapshot {
         issue_identifier: "repo#2",
         requested_at: "2026-07-09T09:10:00Z",
         step_name: "review",
+        capabilities: { ...capabilities, reply: { enabled: true }, cancel: { enabled: true } },
       },
     ],
     completed: [],

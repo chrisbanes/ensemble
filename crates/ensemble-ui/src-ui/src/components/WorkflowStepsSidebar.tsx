@@ -1,17 +1,10 @@
 import { Link } from "react-router-dom";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-
-interface WorkflowStep {
-  name: string;
-  agent: string;
-  dependencies: string[];
-  state: string;
-  can_navigate: boolean;
-}
+import type { WorkflowStepInfo } from "@/generated/models";
 
 interface WorkflowStepsSidebarProps {
-  steps: WorkflowStep[];
+  steps: WorkflowStepInfo[];
   issueIdentifier: string;
   currentStep?: string;
 }
@@ -50,15 +43,29 @@ export default function WorkflowStepsSidebar({
           const icon = stateIcons[step.state] ?? "○";
           const color = stateColors[step.state] ?? "text-gray-400";
           
+          const inspect = step.capabilities?.inspect;
+          const disabledReason = inspect?.disabled_reason ?? "Inspection is unavailable; refresh and try again.";
+          const canInspect = inspect?.enabled === true;
+
           return (
             <div key={step.name} className="flex items-center gap-2">
               <span className={`text-lg ${color}`}>{icon}</span>
-              <Link
-                to={`/issue/${encodeURIComponent(issueIdentifier)}/step/${encodeURIComponent(step.name)}`}
-                className={`text-sm hover:underline ${isActive ? 'font-semibold text-primary' : 'text-muted-foreground'}`}
-              >
-                {step.name}
-              </Link>
+              {canInspect ? (
+                <Link
+                  to={`/issue/${encodeURIComponent(issueIdentifier)}/step/${encodeURIComponent(step.name)}`}
+                  className={`text-sm hover:underline ${isActive ? "font-semibold text-primary" : "text-muted-foreground"}`}
+                >
+                  {step.name}
+                </Link>
+              ) : (
+                <span
+                  aria-label={`${step.name}: ${disabledReason}`}
+                  className="text-sm text-muted-foreground"
+                  title={disabledReason}
+                >
+                  {step.name}
+                </span>
+              )}
               <Badge variant="outline" className="text-xs ml-auto">
                 {step.agent}
               </Badge>

@@ -7,9 +7,9 @@ use crate::history::model::HistoryRecord;
 use crate::interaction::store::InteractionStore;
 use crate::observability::snapshot::{
     build_issue_snapshot, build_state_snapshot, enrich_issue_snapshot_pending_input,
-    extract_step_detail_state, AttemptInfo, FinalizeSnapshot, IssueDetailSnapshot, IssueSummary,
-    RepoFinalizeSnapshot, RetryRow, RunningDetail, RuntimeSnapshot, StepDetailSnapshot,
-    WorkflowStepInfo, WorkspaceInfo,
+    enrich_runtime_snapshot_interactions, extract_step_detail_state, AttemptInfo, FinalizeSnapshot,
+    IssueDetailSnapshot, IssueSummary, RepoFinalizeSnapshot, RetryRow, RunningDetail,
+    RuntimeSnapshot, StepDetailSnapshot, WorkflowStepInfo, WorkspaceInfo,
 };
 use crate::workspace::key::issue_workspace_key;
 use axum::extract::{Extension, Path, State};
@@ -74,6 +74,14 @@ pub async fn get_state(
     let lock = state.orchestrator_state.read().await;
     let mut snapshot = build_state_snapshot(&lock);
     drop(lock);
+
+    let config_dir = state
+        .config_runtime
+        .config_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    enrich_runtime_snapshot_interactions(&mut snapshot, &InteractionStore::new(config_dir)).await;
 
     if exposure == ApiExposure::TrustedLocal {
         let Some(store) = state.history_store.as_ref() else {
@@ -304,6 +312,9 @@ fn issue_snapshot_from_history_record(
                     "passed".to_string()
                 },
                 can_navigate: true,
+                capabilities: crate::observability::capabilities::StepActionCapabilities::for_step(
+                    true,
+                ),
             })
             .collect()
     };
@@ -340,6 +351,9 @@ fn issue_snapshot_from_history_record(
         },
         artifacts,
         acceptance_attempts: record.acceptance_attempts.clone(),
+        capabilities: crate::observability::capabilities::IssueActionCapabilities::for_issue(
+            false, false, false, None,
+        ),
     })
 }
 
@@ -417,6 +431,7 @@ async fn build_step_detail_from_history(
             .to_string(),
         dependencies: Vec::new(),
         can_navigate: true,
+        capabilities: crate::observability::capabilities::StepActionCapabilities::for_step(true),
         verdict: if step_idx == Some(last_idx) {
             record.verdict
         } else {
@@ -550,6 +565,9 @@ pub async fn get_step_detail(
         kind: detail_state.kind,
         dependencies: detail_state.dependencies,
         can_navigate: detail_state.can_navigate,
+        capabilities: crate::observability::capabilities::StepActionCapabilities::for_step(
+            detail_state.can_navigate,
+        ),
         verdict: detail_state.verdict,
         run_id: detail_state.run_id,
         transcript,
@@ -805,6 +823,20 @@ mod tests {
         assert_eq!(json["agent_totals"]["input_tokens"], 5000);
         assert_eq!(json["agent_totals"]["output_tokens"], 2400);
         assert_eq!(json["agent_totals"]["total_tokens"], 7400);
+        assert_eq!(
+            json["running"][0]["capabilities"]["inspect"]["enabled"],
+            true
+        );
+        assert_eq!(json["running"][0]["capabilities"]["stop"]["enabled"], true);
+        assert_eq!(
+            json["running"][0]["capabilities"]["retry"]["enabled"],
+            false
+        );
+        assert!(
+            json["running"][0]["capabilities"]["retry"]["disabled_reason"]
+                .as_str()
+                .is_some_and(|reason| !reason.is_empty())
+        );
     }
 
     #[tokio::test]
@@ -832,6 +864,9 @@ mod tests {
 
         let response = response.into_response();
         assert_eq!(response.status(), StatusCode::OK);
+        let json = response_json(response).await;
+        assert_eq!(json["capabilities"]["inspect"]["enabled"], true);
+        assert_eq!(json["capabilities"]["stop"]["enabled"], true);
     }
 
     #[tokio::test]

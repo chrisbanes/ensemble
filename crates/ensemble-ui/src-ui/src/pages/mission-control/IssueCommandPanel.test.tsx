@@ -6,6 +6,7 @@ import { useState } from "react";
 import type {
   InteractionDetail,
   InteractionStatus,
+  IssueActionCapabilities,
   IssueDetailSnapshot,
 } from "@/generated/models";
 import { IssueCommandPanel, type IssueCommandPanelTab } from "./IssueCommandPanel";
@@ -25,6 +26,30 @@ const actions = {
   setActiveEntry: vi.fn(),
   setActiveEntryForConversation: vi.fn(),
 };
+
+function capability(enabled: boolean, disabledReason = "Unavailable for this test.") {
+  return enabled ? { enabled } : { enabled, disabled_reason: disabledReason };
+}
+
+function capabilitiesFor(
+  data: Pick<IssueDetailSnapshot, "running" | "retry" | "finalize">,
+  interaction?: InteractionDetail,
+): IssueActionCapabilities {
+  const interactionOpen = interaction?.status === "open";
+  const canResume = interaction?.status === "resolved" && interaction.awaiting_resume;
+  return {
+    inspect: capability(true),
+    reply: capability(interactionOpen ?? true),
+    guide: capability(false),
+    cancel: capability(interactionOpen ?? true),
+    stop: capability(data.running != null),
+    retry: capability(data.retry != null),
+    resume: capability(canResume),
+    finalize_approve: capability(data.finalize.status === "pending_approval"),
+    finalize_retry: capability(data.finalize.status === "failed"),
+    cleanup: capability(false),
+  };
+}
 
 function mockMutation<T>(mutate: ReturnType<typeof vi.fn>, overrides: Record<string, unknown> = {}) {
   return {
@@ -73,6 +98,7 @@ const issue = {
       dependencies: [],
       state: "running",
       can_navigate: true,
+      capabilities: { inspect: { enabled: true } },
     },
   ],
   artifacts: null,
@@ -101,6 +127,11 @@ const issue = {
       ],
     },
   ],
+  capabilities: capabilitiesFor({
+    running: {} as IssueDetailSnapshot["running"],
+    retry: null,
+    finalize: { status: "not_required", repos: [] },
+  }),
 } satisfies IssueDetailSnapshot;
 
 const openInteraction = {
@@ -119,13 +150,23 @@ const openInteraction = {
 } satisfies InteractionDetail;
 
 function runtimeFixture(overrides: Partial<IssueRuntimeState> = {}): IssueRuntimeState {
+  const { data: dataOverride, interaction, ...runtimeOverrides } = overrides;
+  const data = dataOverride
+    ? {
+        ...dataOverride,
+        capabilities:
+          dataOverride.capabilities && dataOverride.capabilities !== issue.capabilities
+            ? dataOverride.capabilities
+            : capabilitiesFor(dataOverride, interaction),
+      }
+    : { ...issue, capabilities: capabilitiesFor(issue, interaction) };
   return {
     identifier: "repo#1",
-    data: issue,
+    data,
     isLoading: false,
     isError: false,
     error: null,
-    interaction: undefined,
+    interaction: interaction ?? undefined,
     interactionIsLoading: false,
     interactionIsError: false,
     interactionError: null,
@@ -158,7 +199,7 @@ function runtimeFixture(overrides: Partial<IssueRuntimeState> = {}): IssueRuntim
     submitFollowUpInput: vi.fn(),
     setActiveEntryIdForConversationIndex: actions.setActiveEntryForConversation,
     setActiveEntryId: actions.setActiveEntry,
-    ...overrides,
+    ...runtimeOverrides,
   };
 }
 
@@ -211,6 +252,25 @@ describe("IssueCommandPanel", () => {
       "true",
     );
     expect(screen.getAllByRole("tab")).toHaveLength(7);
+  });
+
+  it("uses server capability reasons instead of inferring a disabled action locally", () => {
+    vi.mocked(useIssueRuntime).mockReturnValue(
+      runtimeFixture({
+        data: {
+          ...issue,
+          capabilities: {
+            ...issue.capabilities,
+            stop: { enabled: false, disabled_reason: "The run has already stopped." },
+          },
+        },
+      }),
+    );
+    renderPanel();
+
+    const stop = screen.getByRole("button", { name: "Stop: The run has already stopped." });
+    expect(stop).toBeDisabled();
+    expect(stop).toHaveAttribute("title", "The run has already stopped.");
   });
 
   it("renders tabs in contract order and activates them with roving keyboard focus", async () => {
@@ -455,6 +515,7 @@ describe("IssueCommandPanel", () => {
             error: "step failed",
             issue_id: "issue-1",
             issue_identifier: "repo#1",
+            capabilities: capabilitiesFor({ running: null, retry: {} as IssueDetailSnapshot["retry"], finalize: issue.finalize }),
           },
         },
         isLiveRun: false,
@@ -649,7 +710,9 @@ describe("IssueCommandPanel", () => {
       renderPanel();
 
       expect(screen.getByText(finalizeStatus)).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: /finalize/i })).not.toBeInTheDocument();
+      for (const button of screen.getAllByRole("button", { name: /finalize/i })) {
+        expect(button).toBeDisabled();
+      }
     },
   );
 

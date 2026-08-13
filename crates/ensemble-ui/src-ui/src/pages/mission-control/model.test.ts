@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { AttentionItem, RuntimeSnapshot } from "@/generated/models";
+import type { AttentionItem, IssueActionCapabilities, RuntimeSnapshot } from "@/generated/models";
 import {
   deriveMissionControlState,
   filterMissionControlIssues,
@@ -30,6 +30,19 @@ function attentionItem(overrides: Partial<AttentionItem> = {}): AttentionItem {
   };
 }
 
+const capabilities: IssueActionCapabilities = {
+  inspect: { enabled: true },
+  reply: { enabled: false, disabled_reason: "No interaction is awaiting input." },
+  guide: { enabled: false, disabled_reason: "Guidance is not supported." },
+  cancel: { enabled: false, disabled_reason: "No interaction is awaiting input." },
+  stop: { enabled: false, disabled_reason: "This issue is not running." },
+  retry: { enabled: false, disabled_reason: "This issue is not retrying." },
+  resume: { enabled: false, disabled_reason: "No interaction is awaiting input." },
+  finalize_approve: { enabled: false, disabled_reason: "Finalize approval is not required." },
+  finalize_retry: { enabled: false, disabled_reason: "Finalize retry is not required." },
+  cleanup: { enabled: false, disabled_reason: "Manual cleanup is not supported." },
+};
+
 function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
   return {
     agent_totals: {
@@ -57,6 +70,7 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
         step_name: "build",
         tokens: { input_tokens: 100, output_tokens: 50, total_tokens: 150 },
         turn_count: 3,
+        capabilities: { ...capabilities, stop: { enabled: true } },
       },
     ],
     retrying: [
@@ -66,6 +80,7 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
         attempt: 2,
         due_at_ms: 1000,
         error: "clippy failed",
+        capabilities: { ...capabilities, retry: { enabled: true } },
       },
     ],
     waiting_on_human: [
@@ -75,6 +90,7 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
         issue_identifier: "repo#3",
         requested_at: "2026-07-09T09:10:00Z",
         step_name: "review",
+        capabilities: { ...capabilities, reply: { enabled: true }, cancel: { enabled: true } },
       },
     ],
     completed: [
@@ -83,6 +99,7 @@ function snapshot(overrides: Partial<RuntimeSnapshot> = {}): RuntimeSnapshot {
         issue_identifier: "repo#4",
         completed_at: "2026-07-09T09:20:00Z",
         status: "completed_succeeded",
+        capabilities,
       },
     ],
     ...overrides,
@@ -167,6 +184,36 @@ describe("mission-control model", () => {
     });
   });
 
+  it("uses the matching issue inspect capability for attention navigation", () => {
+    const state = deriveMissionControlState(
+      snapshot({
+        attention_items: [
+          attentionItem({
+            identity: {
+              producer_key: "runtime.interaction",
+              subject_ref: "repo#1",
+              kind: "runtime.interaction.awaiting_input",
+            },
+          }),
+        ],
+        running: [
+          {
+            ...snapshot().running[0]!,
+            capabilities: {
+              ...capabilities,
+              inspect: { enabled: false, disabled_reason: "Issue inspection is unavailable." },
+            },
+          },
+        ],
+      }),
+    );
+
+    expect(state.attentionItems[0]).toMatchObject({
+      issueIdentifier: "repo#1",
+      canNavigate: false,
+    });
+  });
+
   it("classifies synthetic halted waits as blocked failures instead of human input", () => {
     const state = deriveMissionControlState(
       snapshot({
@@ -180,6 +227,7 @@ describe("mission-control model", () => {
             issue_identifier: "repo#halted",
             requested_at: "2026-07-09T09:15:00Z",
             step_name: "review",
+            capabilities,
           },
         ],
         completed: [],
@@ -308,12 +356,14 @@ describe("mission-control model", () => {
             issue_identifier: "repo#failed",
             completed_at: "2026-07-09T09:25:00Z",
             status: "completed_failed",
+            capabilities,
           },
           {
             issue_id: "issue-succeeded",
             issue_identifier: "repo#succeeded",
             completed_at: "2026-07-09T09:20:00Z",
             status: "completed_succeeded",
+            capabilities,
           },
         ],
       }),
@@ -342,6 +392,7 @@ describe("mission-control model", () => {
             issue_identifier: "repo#failed",
             completed_at: "2026-07-09T09:25:00Z",
             status: "completed_failed",
+            capabilities,
           },
         ],
       }),
@@ -370,6 +421,7 @@ describe("mission-control model", () => {
             issue_identifier: "repo#unknown",
             completed_at: "2026-07-09T09:25:00Z",
             status: "retry_exhausted",
+            capabilities,
           },
         ],
       }),

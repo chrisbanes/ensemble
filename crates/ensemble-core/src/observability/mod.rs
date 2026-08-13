@@ -1,3 +1,4 @@
+pub mod capabilities;
 pub mod events;
 pub mod events_contract;
 pub mod logging;
