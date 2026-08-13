@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { useState } from "react";
@@ -24,6 +24,9 @@ vi.mock("./useIssueRuntime", () => ({ useIssueRuntime: vi.fn() }));
 const VIEW_MODE_KEY = "ensemble.mission-control.view-mode";
 const ACTIVE_TAB_KEY = "ensemble.mission-control.active-tab";
 const ATTENTION_ONLY_KEY = "ensemble.mission-control.attention-only";
+const QUERY_KEY = "ensemble.mission-control.query";
+const STATUS_KEY = "ensemble.mission-control.status";
+const DETAIL_PANEL_WIDTH_KEY = "ensemble.mission-control.detail-panel-width-rem";
 const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
 const originalScrollIntoView = Object.getOwnPropertyDescriptor(
   HTMLElement.prototype,
@@ -1065,6 +1068,62 @@ describe("Mission Control page", () => {
       }),
     );
     expect(screen.getByRole("tab", { name: "Acceptance" })).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("restores persisted filters and a supported detail-panel width", () => {
+    window.localStorage.setItem(QUERY_KEY, "clippy");
+    window.localStorage.setItem(STATUS_KEY, "retrying");
+    window.localStorage.setItem(ATTENTION_ONLY_KEY, "true");
+    window.localStorage.setItem(DETAIL_PANEL_WIDTH_KEY, "42");
+
+    renderMissionControl(runtimeSnapshot());
+
+    expect(screen.getByRole("textbox", { name: "Search issues" })).toHaveValue("clippy");
+    expect(screen.getByRole("combobox", { name: "Status" })).toHaveValue("retrying");
+    expect(screen.getByRole("button", { name: "Attention only" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText("Detail panel width")).toHaveValue("42");
+    expect(screen.getByRole("region", { name: "Issue command panel" }).parentElement).toHaveStyle(
+      "--mission-control-panel-width: 42rem",
+    );
+  });
+
+  it.each(["34.5", "27", "49", "not-a-width"])(
+    "falls back safely from obsolete filter status and invalid panel width %s",
+    (storedWidth) => {
+      window.localStorage.setItem(QUERY_KEY, "saved query");
+      window.localStorage.setItem(STATUS_KEY, "obsolete-status");
+      window.localStorage.setItem(DETAIL_PANEL_WIDTH_KEY, storedWidth);
+
+      renderMissionControl(runtimeSnapshot());
+
+      expect(screen.getByRole("textbox", { name: "Search issues" })).toHaveValue("saved query");
+      expect(screen.getByRole("combobox", { name: "Status" })).toHaveValue("all");
+      expect(screen.getByLabelText("Detail panel width")).toHaveValue("34");
+    },
+  );
+
+  it("persists filters and detail-panel width through a reload", async () => {
+    const user = userEvent.setup();
+    const first = renderMissionControl(runtimeSnapshot());
+    const search = screen.getByRole("textbox", { name: "Search issues" });
+    const width = screen.getByLabelText("Detail panel width");
+
+    await user.type(search, "repo#2");
+    await user.selectOptions(screen.getByRole("combobox", { name: "Status" }), "retrying");
+    fireEvent.change(width, { target: { value: "36" } });
+
+    await waitFor(() => {
+      expect(window.localStorage.getItem(QUERY_KEY)).toBe("repo#2");
+      expect(window.localStorage.getItem(STATUS_KEY)).toBe("retrying");
+      expect(window.localStorage.getItem(DETAIL_PANEL_WIDTH_KEY)).toBe("36");
+    });
+
+    first.unmount();
+    renderMissionControl(runtimeSnapshot());
+
+    expect(screen.getByRole("textbox", { name: "Search issues" })).toHaveValue("repo#2");
+    expect(screen.getByRole("combobox", { name: "Status" })).toHaveValue("retrying");
+    expect(screen.getByLabelText("Detail panel width")).toHaveValue("36");
   });
 
   it("renders when localStorage access is unavailable", () => {

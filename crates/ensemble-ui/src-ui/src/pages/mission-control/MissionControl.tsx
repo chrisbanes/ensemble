@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 import { Button } from "@/components/ui/button";
 import { useRefreshMutation, useStateQuery } from "@/hooks";
@@ -25,6 +25,20 @@ import {
 const VIEW_MODE_KEY = "ensemble.mission-control.view-mode";
 const ACTIVE_TAB_KEY = "ensemble.mission-control.active-tab";
 const ATTENTION_ONLY_KEY = "ensemble.mission-control.attention-only";
+const QUERY_KEY = "ensemble.mission-control.query";
+const STATUS_KEY = "ensemble.mission-control.status";
+const DETAIL_PANEL_WIDTH_KEY = "ensemble.mission-control.detail-panel-width-rem";
+const DETAIL_PANEL_WIDTH_MIN_REM = 28;
+const DETAIL_PANEL_WIDTH_MAX_REM = 48;
+const DEFAULT_DETAIL_PANEL_WIDTH_REM = 34;
+const FILTER_STATUSES: Array<MissionIssueStatus | "all"> = [
+  "all",
+  "running",
+  "retrying",
+  "waiting_on_human",
+  "failed_or_blocked",
+  "completed_recently",
+];
 
 const PANEL_TABS: IssueCommandPanelTab[] = [
   "overview",
@@ -67,6 +81,26 @@ function readAttentionOnly(): boolean {
   return readPreference(ATTENTION_ONLY_KEY) === "true";
 }
 
+function readQuery(): string {
+  return readPreference(QUERY_KEY) ?? "";
+}
+
+function readStatus(): MissionIssueStatus | "all" {
+  const value = readPreference(STATUS_KEY);
+  return FILTER_STATUSES.includes(value as MissionIssueStatus | "all")
+    ? (value as MissionIssueStatus | "all")
+    : "all";
+}
+
+function readDetailPanelWidthRem(): number {
+  const value = Number(readPreference(DETAIL_PANEL_WIDTH_KEY));
+  return Number.isInteger(value) &&
+    value >= DETAIL_PANEL_WIDTH_MIN_REM &&
+    value <= DETAIL_PANEL_WIDTH_MAX_REM
+    ? value
+    : DEFAULT_DETAIL_PANEL_WIDTH_REM;
+}
+
 export default function MissionControl() {
   const { data, isLoading, isError, error } = useStateQuery();
   const refreshMutation = useRefreshMutation();
@@ -79,9 +113,10 @@ export default function MissionControl() {
   const [viewMode, setViewMode] = useState<MissionControlViewMode>(readViewMode);
   const [activeTab, setActiveTab] = useState<IssueCommandPanelTab>(readActiveTab);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
+  const [detailPanelWidthRem, setDetailPanelWidthRem] = useState(readDetailPanelWidthRem);
   const [filters, setFilters] = useState<MissionControlFilters>(() => ({
-    query: "",
-    status: "all",
+    query: readQuery(),
+    status: readStatus(),
     attentionOnly: readAttentionOnly(),
   }));
 
@@ -90,6 +125,12 @@ export default function MissionControl() {
   useEffect(
     () => writePreference(ATTENTION_ONLY_KEY, String(filters.attentionOnly)),
     [filters.attentionOnly],
+  );
+  useEffect(() => writePreference(QUERY_KEY, filters.query), [filters.query]);
+  useEffect(() => writePreference(STATUS_KEY, filters.status), [filters.status]);
+  useEffect(
+    () => writePreference(DETAIL_PANEL_WIDTH_KEY, String(detailPanelWidthRem)),
+    [detailPanelWidthRem],
   );
 
   const missionState = useMemo(() => (data ? deriveMissionControlState(data) : null), [data]);
@@ -319,7 +360,10 @@ export default function MissionControl() {
         onSelectIssue={selectIssue}
       />
 
-      <div className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_34rem]">
+      <div
+        className="grid min-h-0 flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_var(--mission-control-panel-width)]"
+        style={{ "--mission-control-panel-width": `${detailPanelWidthRem}rem` } as CSSProperties}
+      >
         <section
           ref={operationsRegionRef}
           aria-label="Operations"
@@ -354,6 +398,23 @@ export default function MissionControl() {
           tabIndex={-1}
           className="min-w-0 scroll-mt-4 outline-none [&>aside]:!w-full"
         >
+          <div className="mb-2 hidden items-center gap-2 xl:flex">
+            <label htmlFor="detail-panel-width" className="text-sm text-muted-foreground">
+              Detail panel width
+            </label>
+            <input
+              id="detail-panel-width"
+              type="range"
+              min={DETAIL_PANEL_WIDTH_MIN_REM}
+              max={DETAIL_PANEL_WIDTH_MAX_REM}
+              step="1"
+              value={detailPanelWidthRem}
+              onChange={(event) => setDetailPanelWidthRem(Number(event.target.value))}
+            />
+            <output className="text-sm tabular-nums text-muted-foreground">
+              {detailPanelWidthRem} rem
+            </output>
+          </div>
           <IssueCommandPanel
             identifier={selectedIssueIdentifier}
             activeTab={activeTab}

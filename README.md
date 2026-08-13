@@ -124,6 +124,13 @@ non-destructive keyboard shortcuts outside editable controls:
 a reply field. Shortcuts do not run while focus is in an input, textarea, select, or editable-content
 surface; `Esc` is the scoped exception for closing the selected panel.
 
+### Mission Control preferences
+
+Mission Control stores its view mode, selected detail tab, query, status, Attention only filter,
+and desktop detail-panel width in browser-local storage. The desktop width control supports whole
+values from 28 to 48 rem (34 rem by default) and applies only at the `xl` layout; selected issues
+and reply drafts remain transient.
+
 ## Web dashboard security
 
 The web and desktop dashboards control an unauthenticated, single-operator service. `ensemble web`
