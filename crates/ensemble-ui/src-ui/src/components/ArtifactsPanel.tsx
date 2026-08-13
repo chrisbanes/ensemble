@@ -3,22 +3,25 @@ import { Link } from "react-router-dom";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { RunArtifacts } from "@/generated/models";
+import type { RunArtifacts, WorkflowStepInfo } from "@/generated/models";
 
 interface ArtifactsPanelProps {
   identifier: string;
   workspacePath: string;
   artifacts?: RunArtifacts | null;
+  workflowSteps: WorkflowStepInfo[];
 }
 
 export default function ArtifactsPanel({
   identifier,
   workspacePath,
   artifacts,
+  workflowSteps,
 }: ArtifactsPanelProps) {
   const effectiveWorkspace = artifacts?.workspace_path ?? workspacePath;
   const repos = artifacts?.repos ?? [];
   const transcripts = artifacts?.transcripts ?? [];
+  const snapshots = artifacts?.artifact_snapshots ?? [];
 
   return (
     <div className="space-y-3 text-sm">
@@ -83,6 +86,53 @@ export default function ArtifactsPanel({
           ) : null}
         </div>
       ))}
+
+      {snapshots.length > 0 ? (
+        <div className="rounded-lg border bg-muted/20 p-3">
+          <div className="font-medium">Artifact snapshots</div>
+          <div className="mt-2 space-y-3">
+            {snapshots.map((snapshot) => {
+              const inspect = workflowSteps.find(
+                (step) => step.name === snapshot.producer_step,
+              )?.capabilities.inspect;
+              return (
+                <section key={snapshot.identity} className="rounded border bg-background p-2 text-xs">
+                  {inspect?.enabled ? (
+                    <Link
+                      to={`/issue/${encodeURIComponent(identifier)}/step/${encodeURIComponent(snapshot.producer_step)}`}
+                      aria-label={`Producer step: ${snapshot.producer_step}`}
+                      className="font-medium text-primary underline"
+                    >
+                      {snapshot.producer_step}
+                    </Link>
+                  ) : (
+                    <div className="font-medium text-muted-foreground">
+                      {snapshot.producer_step}: {inspect?.disabled_reason ?? "Step inspection is unavailable."}
+                    </div>
+                  )}
+                  <dl className="mt-2 grid gap-1 text-muted-foreground">
+                    <div>Identity: <code className="text-foreground">{snapshot.identity}</code></div>
+                    <div>Output digest: <code className="text-foreground">{snapshot.output_digest}</code></div>
+                    <div>Cycle {snapshot.cycle}, attempt {snapshot.attempt}</div>
+                    {snapshot.repositories.map((repository) => (
+                      <div key={repository.repository} className="rounded bg-muted/30 p-1">
+                        <div>
+                          {repository.repository}: <span className="text-foreground">{repository.head}</span>
+                        </div>
+                        <div>Index digest: <code className="text-foreground">{repository.index_digest}</code></div>
+                        <div>Worktree digest: <code className="text-foreground">{repository.tracked_worktree_digest}</code></div>
+                        {repository.untracked_paths.length > 0 ? (
+                          <div>Untracked: {repository.untracked_paths.join(", ")}</div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </dl>
+                </section>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       {transcripts.length > 0 ? (
         <div className="rounded-lg border bg-muted/20 p-3">

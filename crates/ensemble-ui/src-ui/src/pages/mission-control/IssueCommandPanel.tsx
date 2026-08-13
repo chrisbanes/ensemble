@@ -6,6 +6,7 @@ import ConfirmDialog from "@/components/ConfirmDialog";
 import FinalizeApprovalDialog from "@/components/FinalizeApprovalDialog";
 import EventTimeline from "@/components/EventTimeline";
 import IssueInfoSection from "@/components/IssueInfoSection";
+import { ReviewGatePanel } from "@/components/ReviewGatePanel";
 import StatusBadge from "@/components/StatusBadge";
 import WorkflowStepsSidebar from "@/components/WorkflowStepsSidebar";
 import { IssueComposer } from "@/components/issue-detail/IssueComposer";
@@ -22,6 +23,7 @@ export type IssueCommandPanelTab =
   | "transcript"
   | "logs"
   | "acceptance"
+  | "review_gate"
   | "artifacts";
 
 interface IssueCommandPanelProps {
@@ -38,6 +40,7 @@ const TABS: Array<{ id: IssueCommandPanelTab; label: string }> = [
   { id: "transcript", label: "Transcript" },
   { id: "logs", label: "Logs" },
   { id: "acceptance", label: "Acceptance" },
+  { id: "review_gate", label: "Review gate" },
   { id: "artifacts", label: "Artifacts" },
 ];
 
@@ -427,6 +430,8 @@ function IssueCommandPanelContent({
         );
       case "acceptance":
         return <AcceptanceEvidencePanel attempts={data.acceptance_attempts} />;
+      case "review_gate":
+        return <ReviewGatePanel data={data} />;
       case "artifacts":
         return (
           <div className="space-y-3">
@@ -435,6 +440,7 @@ function IssueCommandPanelContent({
                 identifier={identifier}
                 workspacePath={data.workspace.path}
                 artifacts={data.artifacts}
+                workflowSteps={data.workflow_steps}
               />
             ) : (
               <div className="rounded-lg border bg-muted/20 p-3 text-sm text-muted-foreground">

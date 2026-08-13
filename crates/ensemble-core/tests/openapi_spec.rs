@@ -210,6 +210,39 @@ fn openapi_documents_versioned_delivery_observations() {
 }
 
 #[test]
+fn openapi_keeps_review_gate_evidence_on_issue_detail() {
+    let spec: serde_json::Value =
+        serde_json::from_str(&ApiDoc::openapi().to_pretty_json().unwrap()).unwrap();
+    let schemas = &spec["components"]["schemas"];
+    let issue_detail = &schemas["IssueDetailSnapshot"];
+
+    assert_eq!(
+        issue_detail["properties"]["acceptance_attempts"]["items"]["$ref"],
+        "#/components/schemas/AcceptanceAttempt"
+    );
+    assert_eq!(
+        issue_detail["properties"]["artifacts"]["oneOf"][1]["$ref"],
+        "#/components/schemas/RunArtifacts"
+    );
+    assert_eq!(
+        issue_detail["properties"]["capabilities"]["$ref"],
+        "#/components/schemas/IssueActionCapabilities"
+    );
+    assert_eq!(
+        issue_detail["properties"]["workflow_steps"]["items"]["$ref"],
+        "#/components/schemas/WorkflowStepInfo"
+    );
+    assert_eq!(
+        schemas["RunArtifacts"]["properties"]["artifact_snapshots"]["items"]["$ref"],
+        "#/components/schemas/ArtifactSnapshot"
+    );
+    assert_eq!(
+        schemas["RepoFinalizeSnapshot"]["properties"]["observation"]["oneOf"][1]["$ref"],
+        "#/components/schemas/DeliveryObservation"
+    );
+}
+
+#[test]
 #[ignore = "writes generated OpenAPI output for frontend codegen"]
 fn write_openapi_spec() {
     let spec = ApiDoc::openapi().to_pretty_json().unwrap();
