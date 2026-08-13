@@ -1,7 +1,14 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Ref } from "react";
 
 import {
   getSystemFreshness,
@@ -10,6 +17,7 @@ import {
   type MissionIssueStatus,
   type MissionSystemStats,
 } from "./model";
+import { keyboardShortcuts, shortcutAvailabilityLabel } from "./keyboardShortcuts";
 
 export type MissionControlViewMode = "board" | "list";
 
@@ -22,6 +30,9 @@ interface MissionControlToolbarProps extends MissionControlFilters {
   onAttentionOnlyChange: (value: boolean) => void;
   onViewModeChange: (value: MissionControlViewMode) => void;
   onRefresh: () => void;
+  searchInputRef?: Ref<HTMLInputElement>;
+  shortcutReferenceOpen?: boolean;
+  onShortcutReferenceOpenChange?: (open: boolean) => void;
 }
 
 const STATUS_OPTIONS: Array<{ value: MissionIssueStatus | "all"; label: string }> = [
@@ -57,6 +68,9 @@ export function MissionControlToolbar({
   onAttentionOnlyChange,
   onViewModeChange,
   onRefresh,
+  searchInputRef,
+  shortcutReferenceOpen,
+  onShortcutReferenceOpenChange,
 }: MissionControlToolbarProps) {
   const [clockMs, setClockMs] = useState(() => Date.now());
 
@@ -117,6 +131,7 @@ export function MissionControlToolbar({
 
         <div className="flex flex-col gap-2 lg:flex-row lg:items-center">
           <Input
+            ref={searchInputRef}
             aria-label="Search issues"
             value={query}
             onChange={(event) => onQueryChange(event.target.value)}
@@ -162,6 +177,33 @@ export function MissionControlToolbar({
           <Button size="sm" onClick={onRefresh} disabled={isRefreshing}>
             {isRefreshing ? "Refreshing..." : "Refresh"}
           </Button>
+          <Popover open={shortcutReferenceOpen} onOpenChange={onShortcutReferenceOpenChange}>
+            <PopoverTrigger
+              render={<Button variant="outline" size="sm" aria-label="Keyboard shortcuts" />}
+            >
+              Keyboard shortcuts
+            </PopoverTrigger>
+            <PopoverContent align="end" className="w-80 gap-3 p-4">
+              <PopoverHeader>
+                <PopoverTitle>Keyboard shortcuts</PopoverTitle>
+              </PopoverHeader>
+              <ul className="space-y-2">
+                {keyboardShortcuts.map((shortcut) => (
+                  <li key={shortcut.id} className="flex items-center justify-between gap-4">
+                    <span>
+                      <span className="block text-muted-foreground">{shortcut.description}</span>
+                      <span className="block text-xs text-muted-foreground">
+                        {shortcutAvailabilityLabel(shortcut)}
+                      </span>
+                    </span>
+                    <kbd className="shrink-0 rounded border bg-muted px-1.5 py-0.5 text-xs font-medium">
+                      {shortcut.keys}
+                    </kbd>
+                  </li>
+                ))}
+              </ul>
+            </PopoverContent>
+          </Popover>
         </div>
       </div>
     </header>
