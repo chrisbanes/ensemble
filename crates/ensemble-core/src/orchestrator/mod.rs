@@ -8,7 +8,7 @@ pub mod scheduler;
 pub mod selection;
 pub mod state;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
@@ -36,14 +36,15 @@ use crate::agent::cancellation::{
     has_available_state_worker_capacity, is_reconciliation_owned, live_worker_count,
     mark_all_for_drain, mark_issue_for_drain, mark_worker_launched, new_cancellation_registry,
     pending_reconciliation_issue_ids, remove_completed_worker, remove_drained_workers,
-    rollback_worker_reservation, try_reserve_scheduler_worker, CancellationRegistry,
-    WorkerCapacity, WorkerDrainHandle, WorkerReservationError,
+    rollback_worker_reservation, sibling_worker_completion_handles, try_reserve_scheduler_worker,
+    CancellationRegistry, WorkerCapacity, WorkerDrainHandle, WorkerReservationError,
 };
 use crate::agent::events::{
     AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
     WorkerEvent, WorkerFailureKind, WorkerIdentity, WorkerResult,
 };
 use crate::agent::{AgentRunRequest, AgentRunner, InteractionResponseEnvelope};
+use crate::artifact;
 use crate::attention::{
     interaction::{
         awaiting_interaction_observation, interaction_attention_close_from_open,
@@ -4102,6 +4103,37 @@ impl Orchestrator {
         }
     }
 
+    /// Wait for sibling agents to stop mutating an issue workspace while retaining their terminal
+    /// events for normal pipeline processing after a producer snapshot is captured.
+    async fn await_sibling_workspace_writers(
+        &self,
+        issue_id: &str,
+        handles: &mut [WorkerDrainHandle],
+    ) -> Result<Vec<OrchestratorWorkerEvent>, String> {
+        let drain = await_worker_quiescence(handles);
+        tokio::pin!(drain);
+        let mut deferred_exits = Vec::new();
+
+        loop {
+            tokio::select! {
+                quiesced = &mut drain => {
+                    return quiesced
+                        .then_some(deferred_exits)
+                        .ok_or_else(|| "a concurrent workspace writer ended without reporting completion".to_string());
+                }
+                Some(event) = recv_worker_event(&self.worker_rx) => {
+                    if event.identity.issue_id == issue_id
+                        && matches!(event.event, WorkerEvent::WorkerExited { .. })
+                    {
+                        deferred_exits.push(event);
+                    } else {
+                        Box::pin(self.handle_worker_event(event)).await;
+                    }
+                }
+            }
+        }
+    }
+
     /// Handle an agent update event.
     async fn handle_agent_update(
         &self,
@@ -4293,9 +4325,92 @@ impl Orchestrator {
                     "worker exited successfully"
                 );
 
+                let capture_request = if matches!(output.result, StepResult::Failed { .. }) {
+                    None
+                } else {
+                    let state = self.state.read().await;
+                    state.get_pipeline_run(issue_id).and_then(|run| {
+                        run.artifact_snapshot_selection_for(step_name)
+                            .cloned()
+                            .map(|selection| {
+                                let running = state.running.get(issue_id);
+                                let run_id = running
+                                    .and_then(|entry| entry.run_id.clone())
+                                    .or_else(|| state.issue_run_ids.get(issue_id).cloned())
+                                    .unwrap_or_else(|| issue_id.to_string());
+                                let attempt =
+                                    running.and_then(|entry| entry.retry_attempt).unwrap_or(1);
+                                (run_id, run.cycle, attempt, selection)
+                            })
+                    })
+                };
+                let mut captured_snapshot = None;
+                let mut resolved_output = output;
+                let mut deferred_sibling_exits = Vec::new();
+                if let Some((run_id, cycle, attempt, selection)) = capture_request {
+                    let mut sibling_writers = sibling_worker_completion_handles(
+                        &self.cancellation_registry,
+                        issue_id,
+                        step_name,
+                    );
+                    let capture_result = self
+                        .await_sibling_workspace_writers(issue_id, &mut sibling_writers)
+                        .await
+                        .and_then(|deferred_exits| {
+                            deferred_sibling_exits = deferred_exits;
+                            self.workspace_mgr
+                                .owned_worktree_paths(issue_id)
+                                .map(|paths| paths.into_iter().collect::<BTreeMap<_, _>>())
+                                .map_err(|error| error.to_string())
+                        });
+                    match capture_result {
+                        Ok(repositories) => match artifact::capture(
+                            &run_id,
+                            cycle,
+                            step_name,
+                            attempt,
+                            resolved_output
+                                .output
+                                .as_ref()
+                                .unwrap_or(&serde_json::Value::Null),
+                            &selection,
+                            &repositories,
+                        )
+                        .await
+                        {
+                            Ok(snapshot) => captured_snapshot = Some(snapshot),
+                            Err(error) => {
+                                resolved_output = crate::pipeline::verdict::StepOutput {
+                                    result: StepResult::Failed {
+                                        summary: format!(
+                                            "artifact snapshot capture failed: {error}"
+                                        ),
+                                    },
+                                    summary: Some("artifact snapshot capture failed".to_string()),
+                                    output: None,
+                                };
+                            }
+                        },
+                        Err(error) => {
+                            resolved_output = crate::pipeline::verdict::StepOutput {
+                                result: StepResult::Failed {
+                                    summary: format!("artifact snapshot capture failed: {error}"),
+                                },
+                                summary: Some("artifact snapshot capture failed".to_string()),
+                                output: None,
+                            };
+                        }
+                    }
+                }
+
+                for event in deferred_sibling_exits {
+                    if self.worker_tx.send(event).await.is_err() {
+                        warn!(issue_id = %issue_id, "failed to restore deferred sibling worker exit");
+                    }
+                }
+
                 let mut state = self.state.write().await;
 
-                let resolved_output = output;
                 let verdict_value = match &resolved_output.result {
                     StepResult::Succeeded => "succeeded",
                     StepResult::Failed { .. } => "failed",
@@ -4310,6 +4425,9 @@ impl Orchestrator {
 
                 // Drive the pipeline
                 let pipeline_action = if let Some(run) = state.get_pipeline_run_mut(issue_id) {
+                    if let Some(snapshot) = captured_snapshot {
+                        run.record_artifact_snapshot(step_name, snapshot);
+                    }
                     Some((
                         run.step_completed(step_name, resolved_output, approval_request.is_some()),
                         state.get_pipeline_config(issue_id).cloned(),
@@ -7147,7 +7265,19 @@ impl Orchestrator {
         }
     }
 
-    async fn begin_terminal_transition(
+    // The terminal transition serializes the full durable run snapshot. Keep it out of the
+    // worker-exit future, which now also owns artifact snapshot state.
+    fn begin_terminal_transition<'a>(
+        &'a self,
+        issue: &'a Issue,
+        outcome: TerminalOutcome,
+        target_state: String,
+        history_record: Option<HistoryRecord>,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.begin_terminal_transition_inner(issue, outcome, target_state, history_record))
+    }
+
+    async fn begin_terminal_transition_inner(
         &self,
         issue: &Issue,
         outcome: TerminalOutcome,
@@ -8479,10 +8609,46 @@ impl Orchestrator {
             completed_at: input.completed_at,
             last_error: input.last_error,
             verdict: Self::history_verdict(input.run),
-            workspace_path,
+            workspace_path: workspace_path.clone(),
             acceptance_attempts: input.run.acceptance_attempts.clone(),
-            artifacts: input.artifacts,
+            artifacts: Self::history_artifacts_with_snapshots(
+                input.artifacts,
+                input.run,
+                input.running_entry,
+                &workspace_path,
+            ),
         }
+    }
+
+    // Keep snapshot projection out of the terminal worker-exit future's stack frame.
+    #[inline(never)]
+    fn history_artifacts_with_snapshots(
+        mut artifacts: Option<RunArtifacts>,
+        run: &PipelineRun,
+        running_entry: &RunningEntry,
+        workspace_path: &str,
+    ) -> Option<RunArtifacts> {
+        if run.artifact_snapshots.is_empty() {
+            return artifacts;
+        }
+        let mut snapshots = run.artifact_snapshots.values().cloned().collect::<Vec<_>>();
+        snapshots.sort_by(|left, right| left.producer_step.cmp(&right.producer_step));
+        match artifacts.as_mut() {
+            Some(artifacts) => artifacts.artifact_snapshots = snapshots,
+            None => {
+                artifacts = Some(RunArtifacts {
+                    run_id: running_entry
+                        .run_id
+                        .clone()
+                        .unwrap_or_else(|| running_entry.issue_id.clone()),
+                    workspace_path: workspace_path.to_string(),
+                    repos: Vec::new(),
+                    transcripts: Vec::new(),
+                    artifact_snapshots: snapshots,
+                });
+            }
+        }
+        artifacts
     }
 
     pub(super) fn build_owned_history_record(
@@ -10131,6 +10297,7 @@ mod tests {
         AgentEvent, InteractionRequestDraft, OrchestratorWorkerEvent, StepApprovalRequestDraft,
         WorkerEvent, WorkerIdentity, WorkerResult,
     };
+    use crate::artifact::ArtifactSnapshot;
     use crate::config::ensemble::{
         parse_config, ConcurrencyConfig, PipelineConfig, SchedulerConfig, SchedulerLaneConfig,
         StepConfig, WorkflowOrderKey, WorkflowSelectionRuleConfig,
@@ -12777,6 +12944,7 @@ mod tests {
                     ..Default::default()
                 }],
                 transcripts: Vec::new(),
+                artifact_snapshots: Vec::new(),
             });
         let snapshot = {
             let config = orchestrator.config.read().await;
@@ -12954,6 +13122,7 @@ mod tests {
                 ..Default::default()
             }],
             transcripts: Vec::new(),
+            artifact_snapshots: Vec::new(),
         });
         let snapshot = {
             let config = orchestrator.config.read().await;
@@ -16859,6 +17028,8 @@ agent:
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);
@@ -17720,6 +17891,7 @@ agent:
                         ..Default::default()
                     }],
                     transcripts: vec![],
+                    artifact_snapshots: Vec::new(),
                 },
             );
         }
@@ -19418,6 +19590,7 @@ agent:
                         ..Default::default()
                     }],
                     transcripts: vec![],
+                    artifact_snapshots: Vec::new(),
                 },
             );
         }
@@ -20642,6 +20815,7 @@ agent:
                 workspace_path: config_dir.path().display().to_string(),
                 repos: vec![],
                 transcripts: vec![],
+                artifact_snapshots: Vec::new(),
             },
         );
 
@@ -24215,6 +24389,264 @@ agent:
     }
 
     #[tokio::test]
+    async fn build_history_record_projects_artifact_snapshots_in_step_order() {
+        let config = Arc::new(RwLock::new(make_non_alphabetical_two_step_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let dag = build_dag(&config.read().await.steps).unwrap();
+        let mut run = PipelineRun::new("1".to_string(), 1, dag);
+        for producer_step in ["z-build", "a-review"] {
+            run.record_artifact_snapshot(
+                producer_step,
+                ArtifactSnapshot {
+                    identity: format!("snapshot-{producer_step}"),
+                    run_id: "run-1".to_string(),
+                    cycle: 1,
+                    producer_step: producer_step.to_string(),
+                    attempt: 1,
+                    output_digest: format!("output-{producer_step}"),
+                    repositories: Vec::new(),
+                },
+            );
+        }
+        let mut state = orchestrator.state.write().await;
+        state.add_running(&test_issue("1", "Todo"), None);
+        let entry = state.running.get("1").unwrap().clone();
+        drop(state);
+
+        let record = orchestrator.build_history_record(RunningHistoryRecordInput {
+            outcome: "succeeded",
+            last_error: None,
+            running_entry: &entry,
+            run: &run,
+            completed_at: Utc::now(),
+            artifacts: None,
+        });
+
+        assert_eq!(
+            record
+                .artifacts
+                .unwrap()
+                .artifact_snapshots
+                .iter()
+                .map(|snapshot| snapshot.producer_step.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a-review", "z-build"]
+        );
+    }
+
+    #[tokio::test]
+    async fn producer_snapshot_waits_for_a_concurrent_workspace_writer() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut successor = config.steps[0].clone();
+        successor.name = "successor".to_string();
+        successor.depends = Some(vec!["build".to_string()]);
+        successor.artifact_snapshot = None;
+        config.steps.push(successor);
+
+        let issue = test_issue("producer-snapshot", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), Some(config.repos.clone())).unwrap();
+        let worktree = workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Arc::new(Orchestrator::new(
+            Arc::new(RwLock::new(config.clone())),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        ));
+        let run_id = {
+            let mut state = orchestrator.state.write().await;
+            let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+            run.start();
+            run.mark_running("build", "producer-session".to_string());
+            state.add_running(&issue, Some(1));
+            let run_id = state.running[&issue.id].run_id.clone().unwrap();
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config.clone()));
+            run_id
+        };
+        let selection = config.steps[0].artifact_snapshot.clone().unwrap();
+        let repositories = BTreeMap::from([(repo_key.clone(), worktree.clone())]);
+        let before = artifact::capture(
+            &run_id,
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            &selection,
+            &repositories,
+        )
+        .await
+        .unwrap();
+
+        let sibling_identity = WorkerIdentity {
+            issue_id: issue.id.clone(),
+            run_id: run_id.clone(),
+            cycle: 1,
+            step_name: "sibling".to_string(),
+            started_at: Utc::now(),
+        };
+        let (sibling_complete, sibling_completion) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            sibling_identity.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            sibling_completion,
+        );
+        let (capture_reached, mut capture_reached_rx) = tokio::sync::oneshot::channel();
+        let capture_resume = Arc::new(tokio::sync::Semaphore::new(0));
+        artifact::pause_capture_after_head(
+            worktree.clone(),
+            capture_reached,
+            Arc::clone(&capture_resume),
+        );
+
+        let producer = {
+            let orchestrator = Arc::clone(&orchestrator);
+            let issue_id = issue.id.clone();
+            tokio::spawn(async move {
+                orchestrator
+                    .handle_worker_exit(
+                        &issue_id,
+                        "build",
+                        WorkerResult::Success {
+                            output: succeeded_step_output(),
+                            approval_request: None,
+                        },
+                    )
+                    .await;
+            })
+        };
+        if tokio::time::timeout(Duration::from_millis(50), &mut capture_reached_rx)
+            .await
+            .is_ok()
+        {
+            capture_resume.add_permits(1);
+            producer.await.unwrap();
+            panic!("producer capture started before its concurrent workspace writer completed");
+        }
+
+        orchestrator
+            .worker_tx
+            .send(OrchestratorWorkerEvent {
+                identity: sibling_identity.clone(),
+                event: WorkerEvent::WorkerExited {
+                    issue_id: issue.id.clone(),
+                    step_name: sibling_identity.step_name.clone(),
+                    result: WorkerResult::Success {
+                        output: succeeded_step_output(),
+                        approval_request: None,
+                    },
+                    timestamp: Utc::now(),
+                },
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                if orchestrator.worker_rx.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("producer should defer its sibling worker exit while waiting to capture");
+
+        tokio::fs::write(worktree.join("README.md"), "# sibling mutation\n")
+            .await
+            .unwrap();
+        let output = tokio::process::Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(&worktree)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        let output = tokio::process::Command::new("git")
+            .args(["commit", "-m", "sibling mutation"])
+            .current_dir(&worktree)
+            .output()
+            .await
+            .unwrap();
+        assert!(output.status.success());
+        sibling_complete.send(true).unwrap();
+        capture_reached_rx.await.unwrap();
+        capture_resume.add_permits(1);
+        producer.await.unwrap();
+
+        let deferred = orchestrator.worker_rx.lock().await.try_recv().unwrap();
+        assert_eq!(deferred.identity, sibling_identity);
+        assert!(matches!(deferred.event, WorkerEvent::WorkerExited { .. }));
+
+        let expected = artifact::capture(
+            &run_id,
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            &selection,
+            &repositories,
+        )
+        .await
+        .unwrap();
+        let state = orchestrator.state.read().await;
+        let captured = state
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .artifact_snapshots
+            .get("build")
+            .unwrap();
+        assert_ne!(captured.identity, before.identity);
+        assert_eq!(captured.identity, expected.identity);
+
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
     async fn workspace_identity_path_history_and_artifacts_use_canonical_owner() {
         let config = Arc::new(RwLock::new(make_config()));
         let issues = Arc::new(RwLock::new(vec![]));
@@ -24259,6 +24691,7 @@ agent:
                 run_id: "run-1".to_string(),
                 record_count: 3,
             }],
+            artifact_snapshots: Vec::new(),
         };
         let mut state = orchestrator.state.write().await;
         state.add_running(&test_issue("1", "Todo"), None);

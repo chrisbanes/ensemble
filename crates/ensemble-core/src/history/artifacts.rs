@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::artifact::ArtifactSnapshot;
 use crate::workspace::finalize::FinalizeMode;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -9,6 +10,8 @@ pub struct RunArtifacts {
     pub workspace_path: String,
     pub repos: Vec<RepoArtifact>,
     pub transcripts: Vec<StepTranscriptArtifact>,
+    #[serde(default)]
+    pub artifact_snapshots: Vec<ArtifactSnapshot>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -66,10 +69,13 @@ pub async fn collect_repo_artifact(
         repo: repo.to_string(),
         worktree_path: worktree_path.display().to_string(),
         base_branch: base_branch.to_string(),
-        branch: git_stdout(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        branch: crate::artifact::git_stdout(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
             .await
+            .ok()
             .unwrap_or_default(),
-        head_sha: git_stdout(worktree_path, &["rev-parse", "HEAD"]).await,
+        head_sha: crate::artifact::git_stdout(worktree_path, &["rev-parse", "HEAD"])
+            .await
+            .ok(),
         changed_files: collect_changed_files(worktree_path).await,
         finalize_mode: finalize_mode_name(finalize_mode).to_string(),
         finalize_status: finalize_status.to_string(),
@@ -84,7 +90,9 @@ pub async fn collect_repo_artifact(
 }
 
 async fn collect_changed_files(worktree_path: &Path) -> Vec<String> {
-    let Some(output) = git_stdout(worktree_path, &["status", "--porcelain=v1"]).await else {
+    let Ok(output) =
+        crate::artifact::git_stdout(worktree_path, &["status", "--porcelain=v1"]).await
+    else {
         return Vec::new();
     };
 
@@ -97,19 +105,6 @@ async fn collect_changed_files(worktree_path: &Path) -> Vec<String> {
     files.sort();
     files.dedup();
     files
-}
-
-async fn git_stdout(worktree_path: &Path, args: &[&str]) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .args(args)
-        .current_dir(worktree_path)
-        .output()
-        .await
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

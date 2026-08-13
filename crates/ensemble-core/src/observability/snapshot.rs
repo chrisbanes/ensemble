@@ -1009,6 +1009,8 @@ mod tests {
                     fixup_agent: None,
                     resource_requests: Default::default(),
                     affected_paths: None,
+                    output_schema: None,
+                    artifact_snapshot: None,
                 },
                 StepConfig {
                     name: "review".to_string(),
@@ -1022,6 +1024,8 @@ mod tests {
                     fixup_agent: None,
                     resource_requests: Default::default(),
                     affected_paths: None,
+                    output_schema: None,
+                    artifact_snapshot: None,
                 },
             ],
             on_success: "finalize".to_string(),

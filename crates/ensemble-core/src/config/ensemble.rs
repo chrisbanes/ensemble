@@ -644,6 +644,37 @@ pub struct StepConfig {
     pub resource_requests: BTreeMap<String, u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub affected_paths: Option<AffectedPathSource>,
+    /// Optional config-relative JSON Schema applied to this step's structured output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_schema: Option<OutputSchemaConfig>,
+    /// Optional selection of repository state captured after this step's output validates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_snapshot: Option<ArtifactSnapshotConfig>,
+}
+
+/// One config-relative Draft 2020-12 JSON Schema used to validate a step output.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct OutputSchemaConfig {
+    #[schema(value_type = String)]
+    pub path: PathBuf,
+    /// The parsed schema is activation-only state and is never serialized back to YAML.
+    #[serde(skip)]
+    #[schema(value_type = Option<serde_json::Value>)]
+    pub(crate) schema: Option<serde_json::Value>,
+}
+
+/// Immutable output-schema contract frozen into a live pipeline run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResolvedOutputSchema {
+    pub schema: serde_json::Value,
+}
+
+/// Repository state selected for one producer's Artifact snapshot.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ArtifactSnapshotConfig {
+    pub repositories: Vec<String>,
 }
 
 /// A validated string-array selected from one direct dependency's step output.
@@ -1139,6 +1170,96 @@ impl EnsembleConfig {
             }
         }
 
+        self.resolve_producer_schemas(config_dir)?;
+
+        Ok(())
+    }
+
+    fn resolve_producer_schemas(
+        &mut self,
+        config_dir: &Path,
+    ) -> Result<(), crate::error::ConfigError> {
+        let has_declared_schema = self
+            .steps
+            .iter()
+            .chain(
+                self.pipelines
+                    .values()
+                    .flat_map(|pipeline| pipeline.steps.iter()),
+            )
+            .any(|step| step.output_schema.is_some());
+        if !has_declared_schema {
+            return Ok(());
+        }
+        let canonical_base = config_dir.canonicalize().map_err(|error| {
+            crate::error::ConfigError::ConfigReadError {
+                path: config_dir.display().to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+
+        let resolve = |step: &mut StepConfig| -> Result<(), crate::error::ConfigError> {
+            let Some(output_schema) = step.output_schema.as_mut() else {
+                return Ok(());
+            };
+            let candidate = resolve_relative_to_base(&output_schema.path, &canonical_base);
+            let canonical = candidate.canonicalize().map_err(|error| {
+                crate::error::ConfigError::ConfigReadError {
+                    path: output_schema.path.display().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            if !canonical.starts_with(&canonical_base) {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason: format!(
+                        "step '{}' output_schema path must remain beneath the config directory",
+                        step.name
+                    ),
+                });
+            }
+            let contents = std::fs::read_to_string(&canonical).map_err(|error| {
+                crate::error::ConfigError::ConfigReadError {
+                    path: output_schema.path.display().to_string(),
+                    reason: error.to_string(),
+                }
+            })?;
+            let schema: serde_json::Value = serde_json::from_str(&contents).map_err(|error| {
+                crate::error::ConfigError::ConfigParseError {
+                    reason: format!(
+                        "step '{}' output_schema is invalid JSON: {error}",
+                        step.name
+                    ),
+                }
+            })?;
+            if schema
+                .get("$schema")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|dialect| dialect != "https://json-schema.org/draft/2020-12/schema")
+            {
+                return Err(crate::error::ConfigError::ConfigParseError {
+                    reason: format!(
+                        "step '{}' output_schema must use JSON Schema Draft 2020-12",
+                        step.name
+                    ),
+                });
+            }
+            jsonschema::validator_for(&schema).map_err(|error| {
+                crate::error::ConfigError::ConfigParseError {
+                    reason: format!("step '{}' output_schema is invalid: {error}", step.name),
+                }
+            })?;
+            output_schema.schema = Some(schema);
+            Ok(())
+        };
+
+        for step in &mut self.steps {
+            resolve(step)?;
+        }
+        for pipeline in self.pipelines.values_mut() {
+            for step in &mut pipeline.steps {
+                resolve(step)?;
+            }
+        }
         Ok(())
     }
 }
@@ -1183,7 +1304,58 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
             reason: e.to_string(),
         })?;
     validate_github_project_config(&config)?;
+    validate_producer_declarations(&config).map_err(|error| {
+        crate::error::ConfigError::ConfigParseError {
+            reason: error.to_string(),
+        }
+    })?;
     Ok(config)
+}
+
+fn validate_producer_declarations(config: &EnsembleConfig) -> Result<(), PipelineError> {
+    let mut repository_keys = std::collections::HashMap::new();
+    for (index, repo) in config.repos.iter().enumerate() {
+        let key = repository_key(repo, index);
+        *repository_keys.entry(key).or_insert(0usize) += 1;
+    }
+    let pipelines = std::iter::once(config.steps.as_slice()).chain(
+        config
+            .pipelines
+            .values()
+            .map(|pipeline| pipeline.steps.as_slice()),
+    );
+    for steps in pipelines {
+        for step in steps {
+            let repositories = step
+                .artifact_snapshot
+                .as_ref()
+                .map(|snapshot| &snapshot.repositories);
+            if repositories.is_some_and(Vec::is_empty) {
+                return Err(PipelineError::InvalidStepConfig {
+                    step: step.name.clone(),
+                    reason: "artifact_snapshot must select at least one repository".to_string(),
+                });
+            }
+            let Some(repositories) = repositories else {
+                continue;
+            };
+            let mut selected = std::collections::HashSet::new();
+            for repository in repositories {
+                if repository.trim().is_empty()
+                    || repository_keys.get(repository) != Some(&1)
+                    || !selected.insert(repository)
+                {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: step.name.clone(),
+                        reason: format!(
+                            "artifact_snapshot repositories must be non-blank, configured, and unique ('{repository}')"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_github_project_config(
@@ -1394,6 +1566,7 @@ fn reject_legacy_agent_permission_policy(
 
 /// Validate the config for consistency: prompt config, agent references, step name uniqueness, etc.
 pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
+    validate_producer_declarations(config)?;
     let selected_mode = !config.workflow_selection.is_empty();
     if selected_mode {
         if !config.steps.is_empty()
@@ -2110,6 +2283,43 @@ on_failure: Failed
         assert!(config.acceptance.required_files.is_empty());
         assert!(config.acceptance.required_handoff_sections.is_empty());
         assert!(config.acceptance.required_pull_requests.is_empty());
+    }
+
+    #[test]
+    fn load_config_freezes_a_config_relative_draft_2020_12_output_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("schema.json"),
+            r#"{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object"}"#,
+        )
+        .unwrap();
+        let config = minimal_yaml().replace(
+            "    agent: build\n",
+            "    agent: build\n    output_schema:\n      path: schema.json\n",
+        );
+        std::fs::write(dir.path().join("config.yaml"), config).unwrap();
+
+        let loaded = load_config(&dir.path().join("config.yaml")).unwrap();
+
+        assert!(loaded.steps[0]
+            .output_schema
+            .as_ref()
+            .and_then(|schema| schema.schema.as_ref())
+            .is_some());
+    }
+
+    #[test]
+    fn producer_declarations_reject_an_empty_snapshot_even_with_an_output_schema() {
+        let config = minimal_yaml().replace(
+            "    agent: build\n",
+            "    agent: build\n    output_schema:\n      path: schema.json\n    artifact_snapshot:\n      repositories: []\n",
+        );
+
+        let error = parse_config(&config).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("artifact_snapshot must select at least one repository"));
     }
 
     #[test]

@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{
-    AffectedPathSource, OnFailure, StepApprovalConfig, StepConfig, StepKind,
+    AffectedPathSource, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
+    StepApprovalConfig, StepConfig, StepKind,
 };
 use crate::error::PipelineError;
 
@@ -23,6 +24,10 @@ pub struct DagStep {
     pub resource_requests: BTreeMap<String, u32>,
     #[serde(default)]
     pub affected_paths: Option<AffectedPathSource>,
+    #[serde(default)]
+    pub output_schema: Option<ResolvedOutputSchema>,
+    #[serde(default)]
+    pub artifact_snapshot: Option<ArtifactSnapshotConfig>,
     pub depends: Vec<String>,
 }
 
@@ -124,6 +129,24 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             fixup_agent: step.fixup_agent.clone(),
             resource_requests: step.resource_requests.clone(),
             affected_paths: step.affected_paths.clone(),
+            output_schema: step
+                .output_schema
+                .as_ref()
+                .map(|config| {
+                    let schema =
+                        config
+                            .schema
+                            .clone()
+                            .ok_or_else(|| PipelineError::InvalidStepConfig {
+                                step: step.name.clone(),
+                                reason:
+                                    "output_schema was not resolved during configuration activation"
+                                        .to_string(),
+                            })?;
+                    Ok(ResolvedOutputSchema { schema })
+                })
+                .transpose()?,
+            artifact_snapshot: step.artifact_snapshot.clone(),
             depends: deps,
         });
     }
@@ -219,6 +242,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 
@@ -235,6 +260,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 
@@ -392,6 +419,8 @@ mod tests {
                 fixup_agent: None,
                 resource_requests: Default::default(),
                 affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -405,6 +434,8 @@ mod tests {
                 fixup_agent: None,
                 resource_requests: Default::default(),
                 affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
             },
         ];
 
@@ -432,6 +463,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -456,6 +489,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -486,6 +521,8 @@ mod tests {
             fixup_agent: Some("fixer".to_string()),
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }];
 
         let dag = build_dag(&steps).unwrap();

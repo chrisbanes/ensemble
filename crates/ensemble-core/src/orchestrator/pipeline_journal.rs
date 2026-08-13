@@ -639,6 +639,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 

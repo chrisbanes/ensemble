@@ -649,8 +649,15 @@ Pipeline step definitions. Each step invokes one agent.
 | `approval.state` | string | — | Optional tracker state to mirror while waiting for approval |
 | `resource_requests` | map of string to integer | `{}` | Named scheduler resource units required atomically before the step starts |
 | `affected_paths` | object | — | Output path source with `step` (direct dependency) and JSON `pointer`; normalized repository-relative paths are leased while the worker is live |
+| `output_schema` | object | — | Config-relative JSON Schema declaration, with `path` naming a Draft 2020-12 schema file; every result variant must provide a matching `output` |
+| `artifact_snapshot` | object | — | Producer declaration with a non-empty `repositories` list of configured repository keys to observe after output validation |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
+
+`output_schema.path` must resolve beneath the configuration directory and must be valid JSON
+Schema Draft 2020-12 (an omitted `$schema` uses that dialect). `artifact_snapshot.repositories`
+must contain unique configured repository keys. A step may declare either or both; an empty
+snapshot declaration is rejected during configuration activation.
 
 Approval behavior:
 

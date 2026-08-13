@@ -3,7 +3,10 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::acceptance::AcceptanceAttempt;
-use crate::config::ensemble::{AffectedPathSource, OnFailure, StepKind};
+use crate::artifact::ArtifactSnapshot;
+use crate::config::ensemble::{
+    AffectedPathSource, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema, StepKind,
+};
 use crate::orchestrator::resources::SchedulerReservation;
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
@@ -100,12 +103,16 @@ pub struct StepOutputTemplateEntry {
     pub result: String,
     pub summary: Option<String>,
     pub output: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_snapshot: Option<ArtifactSnapshot>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct StepOutputTemplateContext {
     pub steps: HashMap<String, StepOutputTemplateEntry>,
     pub dependency_outputs: Vec<StepOutputTemplateEntry>,
+    #[serde(skip_serializing)]
+    pub output_schema: Option<ResolvedOutputSchema>,
 }
 
 /// Per-issue pipeline execution state machine.
@@ -122,6 +129,8 @@ pub struct PipelineRun {
     pub step_states: HashMap<String, StepState>,
     /// Stored outputs from completed steps.
     pub step_outputs: HashMap<String, StepOutput>,
+    /// Captured producer identities, keyed by producer step.
+    pub artifact_snapshots: HashMap<String, ArtifactSnapshot>,
     /// Durable acceptance evidence retained across whole-issue cycles.
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     /// Acceptance descriptors frozen from the configuration that created this run.
@@ -154,6 +163,8 @@ pub struct PipelineRunSnapshot {
     pub step_states: HashMap<String, StepState>,
     pub step_outputs: HashMap<String, StepOutput>,
     #[serde(default)]
+    pub artifact_snapshots: HashMap<String, ArtifactSnapshot>,
+    #[serde(default)]
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     #[serde(default)]
     pub resolved_acceptance_plan: Option<crate::acceptance::ResolvedAcceptancePlan>,
@@ -183,6 +194,7 @@ impl PipelineRun {
             cycle,
             step_states,
             step_outputs: HashMap::new(),
+            artifact_snapshots: HashMap::new(),
             acceptance_attempts: Vec::new(),
             resolved_acceptance_plan: None,
             dag,
@@ -200,6 +212,7 @@ impl PipelineRun {
             cycle: self.cycle,
             step_states: self.step_states.clone(),
             step_outputs: self.step_outputs.clone(),
+            artifact_snapshots: self.artifact_snapshots.clone(),
             acceptance_attempts: self.acceptance_attempts.clone(),
             resolved_acceptance_plan: self.resolved_acceptance_plan.clone(),
             dag_steps: self.dag.steps.clone(),
@@ -238,6 +251,22 @@ impl PipelineRun {
         self.active_scheduler_reservations.remove(step_name);
     }
 
+    pub(crate) fn artifact_snapshot_selection_for(
+        &self,
+        step_name: &str,
+    ) -> Option<&ArtifactSnapshotConfig> {
+        self.dag
+            .steps
+            .iter()
+            .find(|step| step.name == step_name)
+            .and_then(|step| step.artifact_snapshot.as_ref())
+    }
+
+    pub(crate) fn record_artifact_snapshot(&mut self, step_name: &str, snapshot: ArtifactSnapshot) {
+        self.artifact_snapshots
+            .insert(step_name.to_string(), snapshot);
+    }
+
     pub fn from_snapshot(
         snapshot: PipelineRunSnapshot,
     ) -> Result<Self, crate::error::PipelineError> {
@@ -247,6 +276,7 @@ impl PipelineRun {
             cycle: snapshot.cycle,
             step_states: snapshot.step_states,
             step_outputs: snapshot.step_outputs,
+            artifact_snapshots: snapshot.artifact_snapshots,
             acceptance_attempts: snapshot.acceptance_attempts,
             resolved_acceptance_plan: snapshot.resolved_acceptance_plan,
             dag: StepDag {
@@ -516,6 +546,7 @@ impl PipelineRun {
         for step in &reset_steps {
             self.step_states.insert(step.clone(), StepState::Pending);
             self.step_outputs.remove(step);
+            self.artifact_snapshots.remove(step);
         }
         reset_steps
     }
@@ -570,6 +601,8 @@ impl PipelineRun {
                         fixup_agent: None,
                         resource_requests: Default::default(),
                         affected_paths: None,
+                        output_schema: None,
+                        artifact_snapshot: None,
                         depends: original_deps,
                     },
                 );
@@ -675,21 +708,27 @@ impl PipelineRun {
         let steps = self
             .step_outputs
             .iter()
-            .map(|(name, output)| (name.clone(), template_entry(name, output)))
+            .map(|(name, output)| {
+                (
+                    name.clone(),
+                    template_entry(name, output, self.artifact_snapshots.get(name).cloned()),
+                )
+            })
             .collect();
         let dependency_outputs = step
             .depends
             .iter()
             .filter_map(|dep| {
-                self.step_outputs
-                    .get(dep)
-                    .map(|output| template_entry(dep, output))
+                self.step_outputs.get(dep).map(|output| {
+                    template_entry(dep, output, self.artifact_snapshots.get(dep).cloned())
+                })
             })
             .collect();
 
         Some(StepOutputTemplateContext {
             steps,
             dependency_outputs,
+            output_schema: step.output_schema.clone(),
         })
     }
 
@@ -842,7 +881,11 @@ fn validate_snapshot_acyclic(
     Ok(())
 }
 
-fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
+fn template_entry(
+    step: &str,
+    output: &StepOutput,
+    artifact_snapshot: Option<ArtifactSnapshot>,
+) -> StepOutputTemplateEntry {
     StepOutputTemplateEntry {
         step: step.to_string(),
         result: match &output.result {
@@ -852,14 +895,17 @@ fn template_entry(step: &str, output: &StepOutput) -> StepOutputTemplateEntry {
         },
         summary: output.summary.clone(),
         output: output.output.clone(),
+        artifact_snapshot,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::artifact::{ArtifactRepositoryObservation, ArtifactSnapshot};
     use crate::config::ensemble::{
-        OnFailure, StepApprovalConfig, StepApprovalMode, StepConfig, StepKind,
+        ArtifactSnapshotConfig, OnFailure, OutputSchemaConfig, StepApprovalConfig,
+        StepApprovalMode, StepConfig, StepKind,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::verdict::StepOutput;
@@ -883,6 +929,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 
@@ -899,6 +947,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 
@@ -935,6 +985,78 @@ mod tests {
         assert_eq!(
             restored.step("review").unwrap().depends,
             vec!["fixup-review".to_string()]
+        );
+    }
+
+    #[test]
+    fn producer_snapshot_and_schema_survive_restart_for_downstream_context() {
+        let mut build = test_step("build", "builder", Some(vec![]));
+        build.output_schema = Some(OutputSchemaConfig {
+            path: "schemas/build.json".into(),
+            schema: Some(json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "required": ["artifact"]
+            })),
+        });
+        build.artifact_snapshot = Some(ArtifactSnapshotConfig {
+            repositories: vec!["app".to_string()],
+        });
+        let steps = vec![
+            build,
+            test_step("review", "reviewer", Some(vec!["build".to_string()])),
+        ];
+        let mut run = PipelineRun::new("issue-1".to_string(), 2, build_dag(&steps).unwrap());
+        run.record_artifact_snapshot(
+            "build",
+            ArtifactSnapshot {
+                identity: "snapshot-1".to_string(),
+                run_id: "run-1".to_string(),
+                cycle: 2,
+                producer_step: "build".to_string(),
+                attempt: 1,
+                output_digest: "output-1".to_string(),
+                repositories: vec![ArtifactRepositoryObservation {
+                    repository: "app".to_string(),
+                    head: "abc123".to_string(),
+                    index_digest: "index-1".to_string(),
+                    tracked_worktree_digest: "worktree-1".to_string(),
+                    untracked_paths: vec!["report.json".to_string()],
+                }],
+            },
+        );
+        run.step_completed(
+            "build",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: Some("built".to_string()),
+                output: Some(json!({"artifact": "branch"})),
+            },
+            false,
+        );
+
+        let encoded = serde_json::to_string(&run.to_snapshot()).unwrap();
+        let restored = PipelineRun::from_snapshot(serde_json::from_str(&encoded).unwrap()).unwrap();
+        let build_context = restored.output_context_for("build").unwrap();
+        let review_context = restored.output_context_for("review").unwrap();
+
+        assert_eq!(
+            build_context.output_schema.unwrap().schema["required"],
+            json!(["artifact"])
+        );
+        assert_eq!(
+            review_context.dependency_outputs[0]
+                .artifact_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.identity.as_str()),
+            Some("snapshot-1")
+        );
+        assert_eq!(
+            review_context.dependency_outputs[0]
+                .artifact_snapshot
+                .as_ref()
+                .map(|snapshot| (snapshot.run_id.as_str(), snapshot.cycle)),
+            Some(("run-1", 2))
         );
     }
 
@@ -1151,6 +1273,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }];
         let run = make_run(&steps);
 
@@ -1184,6 +1308,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 
@@ -1214,6 +1340,8 @@ mod tests {
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
         }
     }
 
@@ -1960,6 +2088,8 @@ mod tests {
                 fixup_agent: None,
                 resource_requests: Default::default(),
                 affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -1973,6 +2103,8 @@ mod tests {
                 fixup_agent: None,
                 resource_requests: Default::default(),
                 affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
             },
         ];
         let mut run = make_run(&steps);
@@ -2099,6 +2231,33 @@ mod tests {
         assert!(reset
             .iter()
             .all(|step| !run.step_outputs.contains_key(step)));
+    }
+
+    #[test]
+    fn retry_from_step_clears_artifact_snapshots_for_reset_producers() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+        ];
+        let mut run = make_run(&steps);
+        for producer_step in ["build", "review"] {
+            run.record_artifact_snapshot(
+                producer_step,
+                ArtifactSnapshot {
+                    identity: format!("snapshot-{producer_step}"),
+                    run_id: "run-1".to_string(),
+                    cycle: 1,
+                    producer_step: producer_step.to_string(),
+                    attempt: 1,
+                    output_digest: format!("output-{producer_step}"),
+                    repositories: Vec::new(),
+                },
+            );
+        }
+
+        run.retry_from_step("build");
+
+        assert!(run.artifact_snapshots.is_empty());
     }
 
     #[test]

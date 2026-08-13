@@ -339,6 +339,23 @@ pub fn mark_all_for_drain(registry: &CancellationRegistry) -> Vec<WorkerDrainHan
     mark_workers_for_drain(registry, |_| true)
 }
 
+/// Completion watches for other active workers in one issue without changing their ownership or
+/// cancellation state.
+pub(crate) fn sibling_worker_completion_handles(
+    registry: &CancellationRegistry,
+    issue_id: &str,
+    step_name: &str,
+) -> Vec<WorkerDrainHandle> {
+    registry_guard(registry)
+        .iter()
+        .filter(|(identity, _)| identity.issue_id == issue_id && identity.step_name != step_name)
+        .map(|(identity, worker)| WorkerDrainHandle {
+            identity: identity.clone(),
+            completion: worker.completion.clone(),
+        })
+        .collect()
+}
+
 fn mark_workers_for_drain(
     registry: &CancellationRegistry,
     matches: impl Fn(&WorkerIdentity) -> bool,
@@ -561,6 +578,34 @@ mod tests {
 
         assert!(!remove_completed_worker(&registry, &drained));
         assert!(contains_worker(&registry, &drained));
+    }
+
+    #[test]
+    fn sibling_completion_handles_leave_worker_ownership_unchanged() {
+        let registry = new_cancellation_registry();
+        let (first_complete_tx, first_complete_rx) = watch::channel(false);
+        let (_, sibling_complete_rx) = watch::channel(false);
+        let first = identity("build", 1);
+        let sibling = identity("review", 1);
+        register_worker(
+            &registry,
+            first.clone(),
+            CancellationToken::new(),
+            first_complete_rx,
+        );
+        register_worker(
+            &registry,
+            sibling.clone(),
+            CancellationToken::new(),
+            sibling_complete_rx,
+        );
+
+        let handles = sibling_worker_completion_handles(&registry, "issue-1", "build");
+
+        assert_eq!(handles.len(), 1);
+        assert!(contains_worker(&registry, &first));
+        assert!(contains_worker(&registry, &sibling));
+        first_complete_tx.send(true).unwrap();
     }
 
     #[tokio::test]

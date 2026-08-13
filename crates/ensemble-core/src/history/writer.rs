@@ -267,6 +267,7 @@ mod tests {
                 run_id: "run-1".into(),
                 record_count: 3,
             }],
+            artifact_snapshots: Vec::new(),
         });
 
         writer.append(&record).await.unwrap();

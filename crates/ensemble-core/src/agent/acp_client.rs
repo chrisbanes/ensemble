@@ -94,6 +94,7 @@ pub struct ExtractionContext {
     pub step_name: String,
     pub issue_identifier: String,
     pub original_prompt: String,
+    pub output_schema: Option<crate::config::ensemble::ResolvedOutputSchema>,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +331,7 @@ fn handle_completed_turn(
                 &extraction_context.issue_identifier,
                 &extraction_context.original_prompt,
                 output_text,
+                extraction_context.output_schema.as_ref(),
             );
             CompletedTurnAction::Queue(SessionTurn {
                 prompt: extraction_prompt,
@@ -338,9 +340,10 @@ fn handle_completed_turn(
             })
         }
         TurnPurpose::Extraction | TurnPurpose::Repair => {
-            match crate::agent::extraction::validate_extraction_payload(
+            match crate::agent::extraction::validate_extraction_payload_with_schema(
                 runtime_verdict,
                 output_text,
+                extraction_context.output_schema.as_ref(),
             ) {
                 Ok(output) => CompletedTurnAction::Finished(output),
                 Err(error) if turn.purpose == TurnPurpose::Extraction && !*repair_attempted => {
@@ -352,6 +355,7 @@ fn handle_completed_turn(
                         prompt: crate::agent::extraction::build_repair_prompt(
                             &error.to_string(),
                             &previous_payload,
+                            extraction_context.output_schema.as_ref(),
                         ),
                         visibility: TurnVisibility::Hidden,
                         purpose: TurnPurpose::Repair,
@@ -1381,6 +1385,7 @@ mod tests {
             step_name: "build".to_string(),
             issue_identifier: "repo#1".to_string(),
             original_prompt: "Build it".to_string(),
+            output_schema: None,
         }
     }
 
@@ -1580,6 +1585,7 @@ mod tests {
                     step_name: "build".to_string(),
                     issue_identifier: "repo#1".to_string(),
                     original_prompt: "hello".to_string(),
+                    output_schema: None,
                 },
                 "issue-1",
                 "build",

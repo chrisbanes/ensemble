@@ -796,6 +796,7 @@ impl AcpAgentRunner {
             step_name: request.step_name.to_string(),
             issue_identifier: request.issue.identifier.clone(),
             original_prompt: working_prompt,
+            output_schema: request.step_outputs.output_schema.clone(),
         };
 
         let outcome = run_acp_session(
@@ -2364,11 +2365,13 @@ on_failure: Todo
                 result: "succeeded".to_string(),
                 summary: None,
                 output: Some(json!({"risk":"low"})),
+                artifact_snapshot: None,
             },
         );
         let context = StepOutputTemplateContext {
             steps,
             dependency_outputs: vec![],
+            output_schema: None,
         };
         let workspace = tempfile::TempDir::new().unwrap();
 
@@ -2428,6 +2431,7 @@ on_failure: Todo
                     result: "succeeded".to_string(),
                     summary: Some("risk is low".to_string()),
                     output: Some(serde_json::json!({"risk": "low"})),
+                    artifact_snapshot: None,
                 },
             )]),
             dependency_outputs: vec![StepOutputTemplateEntry {
@@ -2435,7 +2439,9 @@ on_failure: Todo
                 result: "succeeded".to_string(),
                 summary: Some("risk is low".to_string()),
                 output: Some(serde_json::json!({"risk": "low"})),
+                artifact_snapshot: None,
             }],
+            output_schema: None,
         };
 
         let prompt = runner

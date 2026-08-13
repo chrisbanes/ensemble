@@ -357,6 +357,11 @@ Pipeline run recovery:
   digest drift retains the run for recovery rather than executing changed configuration. File and
   handoff recovery uses the frozen descriptors. Legacy snapshots without a plan retain historical
   command-only prefix behavior and do not gain newly configured rules.
+- A step may declare a config-relative Draft 2020-12 output schema and selected repository keys
+  for an Artifact snapshot. The resolved schema and completed snapshot identities are part of the
+  live snapshot. Each declared result validates its output through the existing one-repair
+  extraction lifecycle; after validation, a producer captures content-free Git observations before
+  becoming passed. Recovery restores the identity and never recaptures completed producer state.
 - Pre-final results must be a declaration-order prefix of commands, required files, then required
   handoff sections. Ensemble resumes at the first missing check; only a check interrupted before its
   result became durable may run again. All pre-final checks run, and any non-passing result takes the
