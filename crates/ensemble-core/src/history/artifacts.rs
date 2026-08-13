@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-use crate::artifact::ArtifactSnapshot;
+use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
 use crate::workspace::finalize::FinalizeMode;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -12,6 +12,10 @@ pub struct RunArtifacts {
     pub transcripts: Vec<StepTranscriptArtifact>,
     #[serde(default)]
     pub artifact_snapshots: Vec<ArtifactSnapshot>,
+    #[serde(default)]
+    pub artifact_integrity_violations: Vec<ArtifactIntegrityViolation>,
+    #[serde(default)]
+    pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

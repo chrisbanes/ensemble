@@ -268,6 +268,8 @@ mod tests {
                 record_count: 3,
             }],
             artifact_snapshots: Vec::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
         });
 
         writer.append(&record).await.unwrap();

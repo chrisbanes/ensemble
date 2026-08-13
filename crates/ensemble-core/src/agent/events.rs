@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::cancellation::IssueWorkspaceCaptureGuard;
 use crate::agent::protocol::TranscriptBlockKind;
 use crate::interaction::InteractionKind;
 use crate::pipeline::verdict::StepOutput;
@@ -19,9 +20,10 @@ pub struct WorkerIdentity {
 
 /// Orchestrator-only envelope that stamps a runner event with its exact owner.
 #[derive(Debug)]
-pub struct OrchestratorWorkerEvent {
-    pub identity: WorkerIdentity,
-    pub event: WorkerEvent,
+pub(crate) struct OrchestratorWorkerEvent {
+    pub(crate) identity: WorkerIdentity,
+    pub(crate) event: WorkerEvent,
+    pub(crate) workspace_capture: Option<IssueWorkspaceCaptureGuard>,
 }
 
 /// Token usage reported by the ACP agent.

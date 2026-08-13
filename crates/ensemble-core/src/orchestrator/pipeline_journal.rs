@@ -68,9 +68,13 @@ impl PipelineIssueJournalTransaction<'_> {
                 )));
             }
         }
+        #[cfg(test)]
+        let kind = input.kind;
         let record = self.journal.append_unlocked(input).await?;
         #[cfg(test)]
-        if self.journal.transaction_append_late_error {
+        if self.journal.transaction_append_late_error
+            || self.journal.transaction_append_late_error_kind == Some(kind)
+        {
             return Err(std::io::Error::other(
                 "injected error after a valid record became visible",
             ));
@@ -103,6 +107,8 @@ impl PipelineIssueJournalTransaction<'_> {
 pub enum PipelineTransitionKind {
     RunStarted,
     StepRunning,
+    /// A worker launch was durably committed; this authorizes gate delivery.
+    StepLaunched,
     StepCompleted,
     StepFailed,
     StepBlockedOnHuman,
@@ -215,6 +221,8 @@ pub struct PipelineRunJournal {
     #[cfg(test)]
     pub(super) transaction_append_late_error: bool,
     #[cfg(test)]
+    pub(super) transaction_append_late_error_kind: Option<PipelineTransitionKind>,
+    #[cfg(test)]
     pub(super) transaction_latest_record_match_error: bool,
     #[cfg(test)]
     pub(super) transaction_append_error_on_call: Option<(Arc<AtomicUsize>, usize)>,
@@ -230,6 +238,8 @@ impl PipelineRunJournal {
             transaction_append_test_barriers: None,
             #[cfg(test)]
             transaction_append_late_error: false,
+            #[cfg(test)]
+            transaction_append_late_error_kind: None,
             #[cfg(test)]
             transaction_latest_record_match_error: false,
             #[cfg(test)]
@@ -641,6 +651,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 

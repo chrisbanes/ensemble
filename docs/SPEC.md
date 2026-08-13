@@ -362,6 +362,21 @@ Pipeline run recovery:
   live snapshot. Each declared result validates its output through the existing one-repair
   extraction lifecycle; after validation, a producer captures content-free Git observations before
   becoming passed. Recovery restores the identity and never recaptures completed producer state.
+- A consumer may declare unique direct producer dependencies in `artifact_inputs`. Immutable
+  consumers must select disjoint producer repository sets, because one workspace cannot
+  simultaneously represent sequential producer states. With
+  `artifact_access: immutable`, Ensemble re-observes the selected repositories before the
+  consumer begins and holds an exclusive per-issue workspace reservation until it completes;
+  other same-issue writers defer while it runs, while unrelated issues remain concurrent. A
+  mismatch drains siblings and halts the issue instead of taking a normal
+  failure retry. Its durable content-free evidence reports a deterministic bounded prefix of
+  repository-relative changed paths and an omitted-path count. ACPX uses read approval unless
+  configured `deny_all`; direct ACP does not expose an equivalent launch-time permission
+  classification, so this is not sandboxing.
+- Immutable access evidence is provisional in `step_running`. Ensemble appends
+  `step_launched` before opening the runtime gate; it is durable authorization to launch, not
+  proof that the child executed instructions. Recovery drops provisional stale evidence and
+  retains evidence from a durably committed launch.
 - Pre-final results must be a declaration-order prefix of commands, required files, then required
   handoff sections. Ensemble resumes at the first missing check; only a check interrupted before its
   result became durable may run again. All pre-final checks run, and any non-passing result takes the

@@ -862,6 +862,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }])
         .unwrap();
         state.pipeline_runs.insert(

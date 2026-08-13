@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{
-    AffectedPathSource, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
+    AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
     StepApprovalConfig, StepConfig, StepKind,
 };
 use crate::error::PipelineError;
@@ -28,6 +28,10 @@ pub struct DagStep {
     pub output_schema: Option<ResolvedOutputSchema>,
     #[serde(default)]
     pub artifact_snapshot: Option<ArtifactSnapshotConfig>,
+    #[serde(default)]
+    pub artifact_inputs: Vec<String>,
+    #[serde(default)]
+    pub artifact_access: ArtifactAccess,
     pub depends: Vec<String>,
 }
 
@@ -147,6 +151,8 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
                 })
                 .transpose()?,
             artifact_snapshot: step.artifact_snapshot.clone(),
+            artifact_inputs: step.artifact_inputs.clone(),
+            artifact_access: step.artifact_access,
             depends: deps,
         });
     }
@@ -244,6 +250,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 
@@ -262,6 +270,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 
@@ -421,6 +431,8 @@ mod tests {
                 affected_paths: None,
                 output_schema: None,
                 artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -436,6 +448,8 @@ mod tests {
                 affected_paths: None,
                 output_schema: None,
                 artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
             },
         ];
 
@@ -465,6 +479,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -491,6 +507,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -523,6 +541,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }];
 
         let dag = build_dag(&steps).unwrap();

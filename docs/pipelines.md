@@ -84,8 +84,24 @@ After validation and before a producer becomes passed, Ensemble waits for concur
 siblings of that issue to finish, then records a content-free Artifact snapshot identity for each
 selected repository. It covers the run, cycle, producer, attempt,
 validated-output digest, repository HEAD/index/tracked state, and non-ignored untracked relative
-paths. Source contents, absolute paths, ignored files, workspace copies, consumer mutation rules,
-assessment gates, and automatic cleanup are deliberately out of scope. The identity is journaled,
+paths with content-free per-path digests. A direct dependent may list those producer names in
+`artifact_inputs`. Immutable consumers must select disjoint repositories across those producer
+snapshots. With
+`artifact_access: immutable`, Ensemble compares the producer observations immediately before the
+consumer starts; a mismatch drains sibling workers and leaves the issue halted for manual
+intervention rather than retrying automatically. A `step_launched` journal commitment opens the
+runtime gate; it authorizes launch, rather than proving the child executed instructions. ACPX
+receives read approval for such a consumer
+unless its configured mode is `deny_all`; direct ACP cannot offer an equivalent runtime guarantee.
+The durable violation records a sorted, bounded list of repository-relative changed paths plus an
+omitted-path count, never contents or absolute paths. Source contents, absolute paths, ignored
+files, workspace copies, assessment gates, and automatic cleanup are deliberately out of scope.
+Tracked Gitlinks and untracked embedded Git repositories use their nested repository's ignore
+rules when the host can bind Git observation to an already opened directory; hosts without that
+descriptor-bound facility fail closed rather than observe a mutable external path. Self-contained
+Git metadata contributes `info/exclude`. Standard tracked Gitfiles are never followed: worktree
+`.gitignore` rules apply, while metadata-local excludes outside the opened worktree are deliberately
+not observed and therefore remain part of the captured identity. The identity is journaled,
 appears beside direct dependency output and completed history, and is restored rather than
 recaptured after restart.
 

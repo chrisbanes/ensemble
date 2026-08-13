@@ -1057,6 +1057,8 @@ mod tests {
                     affected_paths: None,
                     output_schema: None,
                     artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
                 },
                 StepConfig {
                     name: "review".to_string(),
@@ -1072,6 +1074,8 @@ mod tests {
                     affected_paths: None,
                     output_schema: None,
                     artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
                 },
             ],
             on_success: "finalize".to_string(),

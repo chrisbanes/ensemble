@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::acceptance::AcceptanceAttempt;
-use crate::artifact::ArtifactSnapshot;
+use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
 use crate::config::ensemble::{
-    AffectedPathSource, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema, StepKind,
+    AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
+    StepKind,
 };
 use crate::orchestrator::resources::SchedulerReservation;
 use crate::pipeline::dag::{DagStep, StepDag};
@@ -131,6 +132,12 @@ pub struct PipelineRun {
     pub step_outputs: HashMap<String, StepOutput>,
     /// Captured producer identities, keyed by producer step.
     pub artifact_snapshots: HashMap<String, ArtifactSnapshot>,
+    /// Content-free immutable Artifact evidence retained for restart recovery.
+    pub artifact_integrity_violations: Vec<ArtifactIntegrityViolation>,
+    pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
+    /// Immutable consumers whose launch was durably committed. This authorizes
+    /// launch; it does not claim that the child processed any instructions.
+    launched_immutable_consumers: HashSet<String>,
     /// Durable acceptance evidence retained across whole-issue cycles.
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     /// Acceptance descriptors frozen from the configuration that created this run.
@@ -164,6 +171,11 @@ pub struct PipelineRunSnapshot {
     pub step_outputs: HashMap<String, StepOutput>,
     #[serde(default)]
     pub artifact_snapshots: HashMap<String, ArtifactSnapshot>,
+    #[serde(flatten)]
+    pub artifact_integrity_evidence: Box<ArtifactIntegrityEvidence>,
+    /// Consumers whose launches were durably committed before a crash.
+    #[serde(default)]
+    pub launched_immutable_consumers: HashSet<String>,
     #[serde(default)]
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     #[serde(default)]
@@ -178,6 +190,16 @@ pub struct PipelineRunSnapshot {
     pub selected_workflow: Option<SelectedWorkflowSnapshot>,
     #[serde(default)]
     pub active_scheduler_reservations: HashMap<String, SchedulerReservation>,
+}
+
+/// Heap-backed durable evidence so empty immutable Artifact support does not enlarge every
+/// journal snapshot carried through ordinary acceptance and terminal lifecycle futures.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArtifactIntegrityEvidence {
+    #[serde(default)]
+    pub artifact_integrity_violations: Vec<ArtifactIntegrityViolation>,
+    #[serde(default)]
+    pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
 }
 
 impl PipelineRun {
@@ -195,6 +217,9 @@ impl PipelineRun {
             step_states,
             step_outputs: HashMap::new(),
             artifact_snapshots: HashMap::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
+            launched_immutable_consumers: HashSet::new(),
             acceptance_attempts: Vec::new(),
             resolved_acceptance_plan: None,
             dag,
@@ -213,6 +238,11 @@ impl PipelineRun {
             step_states: self.step_states.clone(),
             step_outputs: self.step_outputs.clone(),
             artifact_snapshots: self.artifact_snapshots.clone(),
+            artifact_integrity_evidence: Box::new(ArtifactIntegrityEvidence {
+                artifact_integrity_violations: self.artifact_integrity_violations.clone(),
+                artifact_access_evidence: self.artifact_access_evidence.clone(),
+            }),
+            launched_immutable_consumers: self.launched_immutable_consumers.clone(),
             acceptance_attempts: self.acceptance_attempts.clone(),
             resolved_acceptance_plan: self.resolved_acceptance_plan.clone(),
             dag_steps: self.dag.steps.clone(),
@@ -262,9 +292,71 @@ impl PipelineRun {
             .and_then(|step| step.artifact_snapshot.as_ref())
     }
 
+    pub(crate) fn artifact_inputs_for(
+        &self,
+        step_name: &str,
+    ) -> Option<(&[String], ArtifactAccess)> {
+        self.dag
+            .steps
+            .iter()
+            .find(|step| step.name == step_name)
+            .map(|step| (step.artifact_inputs.as_slice(), step.artifact_access))
+    }
+
     pub(crate) fn record_artifact_snapshot(&mut self, step_name: &str, snapshot: ArtifactSnapshot) {
         self.artifact_snapshots
             .insert(step_name.to_string(), snapshot);
+    }
+
+    pub(crate) fn record_artifact_integrity_violations(
+        &mut self,
+        violations: impl IntoIterator<Item = ArtifactIntegrityViolation>,
+    ) {
+        self.artifact_integrity_violations.extend(violations);
+    }
+
+    pub(crate) fn record_artifact_access_evidence(
+        &mut self,
+        evidence: ArtifactAccessEvidence,
+    ) -> Option<ArtifactAccessEvidence> {
+        if let Some(existing) = self
+            .artifact_access_evidence
+            .iter_mut()
+            .find(|existing| existing.consumer_step == evidence.consumer_step)
+        {
+            return Some(std::mem::replace(existing, evidence));
+        }
+        self.artifact_access_evidence.push(evidence);
+        None
+    }
+
+    pub(crate) fn restore_artifact_access_evidence(
+        &mut self,
+        evidence: &ArtifactAccessEvidence,
+        previous: Option<ArtifactAccessEvidence>,
+    ) {
+        if let Some(index) = self
+            .artifact_access_evidence
+            .iter()
+            .position(|current| current == evidence)
+        {
+            if let Some(previous) = previous {
+                self.artifact_access_evidence[index] = previous;
+            } else {
+                self.artifact_access_evidence.remove(index);
+            }
+        }
+    }
+
+    /// Marks an immutable consumer launch as durably committed. The marker is
+    /// authority to release the worker gate, not evidence that the child ran.
+    pub(crate) fn mark_immutable_consumer_launch_committed(&mut self, step_name: &str) {
+        self.launched_immutable_consumers
+            .insert(step_name.to_string());
+    }
+
+    pub(crate) fn clear_immutable_consumer_launch_commitment(&mut self, step_name: &str) {
+        self.launched_immutable_consumers.remove(step_name);
     }
 
     pub fn from_snapshot(
@@ -277,6 +369,13 @@ impl PipelineRun {
             step_states: snapshot.step_states,
             step_outputs: snapshot.step_outputs,
             artifact_snapshots: snapshot.artifact_snapshots,
+            artifact_integrity_violations: snapshot
+                .artifact_integrity_evidence
+                .artifact_integrity_violations,
+            artifact_access_evidence: snapshot
+                .artifact_integrity_evidence
+                .artifact_access_evidence,
+            launched_immutable_consumers: snapshot.launched_immutable_consumers,
             acceptance_attempts: snapshot.acceptance_attempts,
             resolved_acceptance_plan: snapshot.resolved_acceptance_plan,
             dag: StepDag {
@@ -320,14 +419,26 @@ impl PipelineRun {
     }
 
     pub fn normalize_stale_running_steps(&mut self) {
-        let mut normalized = false;
-        for state in self.step_states.values_mut() {
-            if matches!(state, StepState::Running { .. }) {
-                *state = StepState::Pending;
-                normalized = true;
-            }
+        let stale_steps = self
+            .step_states
+            .iter()
+            .filter_map(|(step_name, state)| {
+                matches!(state, StepState::Running { .. }).then_some(step_name.clone())
+            })
+            .collect::<std::collections::HashSet<_>>();
+        let provisional_steps = stale_steps
+            .iter()
+            .filter(|step_name| !self.launched_immutable_consumers.contains(*step_name))
+            .collect::<std::collections::HashSet<_>>();
+        for step_name in &stale_steps {
+            self.step_states
+                .insert(step_name.clone(), StepState::Pending);
         }
-        if normalized {
+        if !stale_steps.is_empty() {
+            self.artifact_access_evidence
+                .retain(|evidence| !provisional_steps.contains(&evidence.consumer_step));
+            self.launched_immutable_consumers
+                .retain(|step_name| !stale_steps.contains(step_name));
             self.active_scheduler_reservations.clear();
         }
     }
@@ -363,6 +474,7 @@ impl PipelineRun {
         approval_requested: bool,
     ) -> PipelineAction {
         self.clear_active_scheduler_reservation(step_name);
+        self.clear_immutable_consumer_launch_commitment(step_name);
         let result = output.result.clone();
         self.step_outputs.insert(step_name.to_string(), output);
         match result {
@@ -498,6 +610,7 @@ impl PipelineRun {
         step_name: &str,
         interaction_request_id: String,
     ) -> PipelineAction {
+        self.clear_immutable_consumer_launch_commitment(step_name);
         self.step_states.insert(
             step_name.to_string(),
             StepState::BlockedOnHuman {
@@ -515,6 +628,7 @@ impl PipelineRun {
     /// Marks the step as [`StepState::Errored`] and returns
     /// [`PipelineAction::Failed`].
     pub fn step_failed(&mut self, step_name: &str, error: String) -> PipelineAction {
+        self.clear_immutable_consumer_launch_commitment(step_name);
         self.step_states.insert(
             step_name.to_string(),
             StepState::Errored {
@@ -547,6 +661,7 @@ impl PipelineRun {
             self.step_states.insert(step.clone(), StepState::Pending);
             self.step_outputs.remove(step);
             self.artifact_snapshots.remove(step);
+            self.clear_immutable_consumer_launch_commitment(step);
         }
         reset_steps
     }
@@ -603,6 +718,8 @@ impl PipelineRun {
                         affected_paths: None,
                         output_schema: None,
                         artifact_snapshot: None,
+                        artifact_inputs: Vec::new(),
+                        artifact_access: Default::default(),
                         depends: original_deps,
                     },
                 );
@@ -902,7 +1019,9 @@ fn template_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::artifact::{ArtifactRepositoryObservation, ArtifactSnapshot};
+    use crate::artifact::{
+        ArtifactAccessEnforcement, ArtifactRepositoryObservation, ArtifactSnapshot,
+    };
     use crate::config::ensemble::{
         ArtifactSnapshotConfig, OnFailure, OutputSchemaConfig, StepApprovalConfig,
         StepApprovalMode, StepConfig, StepKind,
@@ -931,6 +1050,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 
@@ -949,6 +1070,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 
@@ -1020,8 +1143,13 @@ mod tests {
                     repository: "app".to_string(),
                     head: "abc123".to_string(),
                     index_digest: "index-1".to_string(),
+                    tracked_index_entries: std::collections::BTreeMap::new(),
                     tracked_worktree_digest: "worktree-1".to_string(),
+                    tracked_paths: Vec::new(),
+                    tracked_path_digests: std::collections::BTreeMap::new(),
                     untracked_paths: vec!["report.json".to_string()],
+                    untracked_digest: "untracked-1".to_string(),
+                    untracked_path_digests: std::collections::BTreeMap::new(),
                 }],
             },
         );
@@ -1116,6 +1244,68 @@ mod tests {
 
         assert!(restored.active_scheduler_reservations.is_empty());
         assert_eq!(restored.step_states["build"], StepState::Pending);
+    }
+
+    #[test]
+    fn stale_running_snapshot_discards_only_the_stale_consumer_evidence() {
+        let mut run = make_run(&[
+            make_step("build", "builder", &[]),
+            make_step("review", "reviewer", &["build"]),
+        ]);
+        run.record_artifact_access_evidence(ArtifactAccessEvidence {
+            consumer_step: "build".to_string(),
+            enforcement: ArtifactAccessEnforcement::DirectAcpUnsupported,
+        });
+        run.record_artifact_access_evidence(ArtifactAccessEvidence {
+            consumer_step: "review".to_string(),
+            enforcement: ArtifactAccessEnforcement::AcpxApproveReads,
+        });
+        run.mark_running("review", "session-review".to_string());
+
+        run.normalize_stale_running_steps();
+
+        assert_eq!(
+            run.artifact_access_evidence,
+            vec![ArtifactAccessEvidence {
+                consumer_step: "build".to_string(),
+                enforcement: ArtifactAccessEnforcement::DirectAcpUnsupported,
+            }]
+        );
+        run.record_artifact_access_evidence(ArtifactAccessEvidence {
+            consumer_step: "review".to_string(),
+            enforcement: ArtifactAccessEnforcement::AcpxDenyAll,
+        });
+        assert_eq!(
+            run.artifact_access_evidence,
+            vec![
+                ArtifactAccessEvidence {
+                    consumer_step: "build".to_string(),
+                    enforcement: ArtifactAccessEnforcement::DirectAcpUnsupported,
+                },
+                ArtifactAccessEvidence {
+                    consumer_step: "review".to_string(),
+                    enforcement: ArtifactAccessEnforcement::AcpxDenyAll,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_running_snapshot_retains_durably_committed_consumer_evidence() {
+        let mut run = make_run(&[make_step("review", "reviewer", &[])]);
+        run.record_artifact_access_evidence(ArtifactAccessEvidence {
+            consumer_step: "review".to_string(),
+            enforcement: ArtifactAccessEnforcement::AcpxApproveReads,
+        });
+        run.mark_running("review", "session-review".to_string());
+        run.mark_immutable_consumer_launch_committed("review");
+
+        let mut restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+        restored.normalize_stale_running_steps();
+
+        assert_eq!(restored.step_states["review"], StepState::Pending);
+        assert_eq!(restored.artifact_access_evidence.len(), 1);
+        assert!(restored.launched_immutable_consumers.is_empty());
     }
 
     #[test]
@@ -1275,6 +1465,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }];
         let run = make_run(&steps);
 
@@ -1310,6 +1502,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 
@@ -1342,6 +1536,8 @@ mod tests {
             affected_paths: None,
             output_schema: None,
             artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
         }
     }
 
@@ -2090,6 +2286,8 @@ mod tests {
                 affected_paths: None,
                 output_schema: None,
                 artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -2105,6 +2303,8 @@ mod tests {
                 affected_paths: None,
                 output_schema: None,
                 artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
             },
         ];
         let mut run = make_run(&steps);
@@ -2258,6 +2458,60 @@ mod tests {
         run.retry_from_step("build");
 
         assert!(run.artifact_snapshots.is_empty());
+        run.record_artifact_integrity_violations([ArtifactIntegrityViolation {
+            consumer_step: "review".to_string(),
+            producer_step: "build".to_string(),
+            artifact_identity: "artifact-1".to_string(),
+            repository: "repo".to_string(),
+            expected_digest: "expected".to_string(),
+            observed_digest: "observed".to_string(),
+            changed_paths: vec!["src/lib.rs".to_string()],
+            omitted_changed_path_count: 0,
+        }]);
+        run.retry_from_step("build");
+        assert_eq!(run.artifact_integrity_violations.len(), 1);
+    }
+
+    #[test]
+    fn immutable_artifact_violations_survive_snapshot_restore() {
+        let mut run = make_run(&[make_step("review", "reviewer", &[])]);
+        run.record_artifact_integrity_violations([ArtifactIntegrityViolation {
+            consumer_step: "review".to_string(),
+            producer_step: "build".to_string(),
+            artifact_identity: "artifact-1".to_string(),
+            repository: "repo".to_string(),
+            expected_digest: "expected".to_string(),
+            observed_digest: "observed".to_string(),
+            changed_paths: vec!["src/lib.rs".to_string()],
+            omitted_changed_path_count: 0,
+        }]);
+
+        let restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+
+        assert_eq!(restored.artifact_integrity_violations.len(), 1);
+        assert_eq!(
+            restored.artifact_integrity_violations[0].artifact_identity,
+            "artifact-1"
+        );
+    }
+
+    #[test]
+    fn immutable_artifact_access_enforcement_survives_snapshot_restore() {
+        let mut run = make_run(&[make_step("review", "reviewer", &[])]);
+        run.record_artifact_access_evidence(ArtifactAccessEvidence {
+            consumer_step: "review".to_string(),
+            enforcement: crate::artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+        });
+
+        let restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+
+        assert_eq!(
+            restored.artifact_access_evidence,
+            vec![ArtifactAccessEvidence {
+                consumer_step: "review".to_string(),
+                enforcement: crate::artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
+            }]
+        );
     }
 
     #[test]
