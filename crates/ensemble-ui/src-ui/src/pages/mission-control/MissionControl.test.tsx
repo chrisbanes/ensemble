@@ -287,6 +287,12 @@ function renderMissionControl(snapshot?: RuntimeSnapshot) {
   };
 }
 
+function dispatchShortcut(key: string, options: KeyboardEventInit = {}) {
+  const event = new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key, ...options });
+  act(() => window.dispatchEvent(event));
+  return event;
+}
+
 function missionGroups(overrides: Partial<Record<MissionGroup["id"], MissionIssueSummary[]>> = {}): MissionGroup[] {
   return [
     { id: "running", title: "Running", issues: overrides.running ?? [issue()] },
@@ -729,6 +735,104 @@ describe("Mission Control page", () => {
     expect(within(operations).getByText("Activity")).toBeInTheDocument();
     expect(within(operations).getByText("repo#4")).toBeInTheDocument();
     expect(within(operations).queryByText("repo#1")).not.toBeInTheDocument();
+  });
+
+  it("focuses search and cycles filtered issue selection from the keyboard", async () => {
+    renderMissionControl(runtimeSnapshot());
+    const search = screen.getByRole("textbox", { name: "Search issues" });
+
+    const focusSearch = dispatchShortcut("/");
+    expect(focusSearch.defaultPrevented).toBe(true);
+    expect(search).toHaveFocus();
+
+    search.blur();
+    const next = dispatchShortcut("j");
+    expect(next.defaultPrevented).toBe(true);
+    expect(await screen.findByRole("heading", { name: "repo#1" })).toBeInTheDocument();
+
+    dispatchShortcut("j");
+    expect(await screen.findByRole("heading", { name: "repo#2" })).toBeInTheDocument();
+
+    dispatchShortcut("k");
+    expect(await screen.findByRole("heading", { name: "repo#1" })).toBeInTheDocument();
+  });
+
+  it("handles non-destructive toolbar shortcuts and renders their shared reference", async () => {
+    renderMissionControl(runtimeSnapshot());
+
+    dispatchShortcut("l");
+    expect(screen.getByRole("button", { name: "List" })).toHaveAttribute("aria-pressed", "true");
+    dispatchShortcut("b");
+    expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute("aria-pressed", "true");
+    dispatchShortcut("a");
+    expect(screen.getByRole("button", { name: "Attention only" })).toHaveAttribute("aria-pressed", "true");
+
+    const refresh = dispatchShortcut("R", { shiftKey: true });
+    expect(refresh.defaultPrevented).toBe(true);
+    await waitFor(() => expect(postRefresh).toHaveBeenCalledTimes(1));
+
+    const reference = dispatchShortcut("?", { shiftKey: true });
+    expect(reference.defaultPrevented).toBe(true);
+    expect(await screen.findByText("Focus issue search")).toBeInTheDocument();
+    expect(screen.getByText("Shift + R")).toBeInTheDocument();
+    expect(screen.getByText("Reply field required")).toBeInTheDocument();
+  });
+
+  it("does not steal editable input or unavailable shortcuts, but closes a selected panel with Escape", async () => {
+    renderMissionControl(runtimeSnapshot());
+    const search = screen.getByRole("textbox", { name: "Search issues" });
+    search.focus();
+
+    const typedShortcut = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "j",
+    });
+    act(() => search.dispatchEvent(typedShortcut));
+    expect(typedShortcut.defaultPrevented).toBe(false);
+    expect(screen.getByText("Select an issue")).toBeInTheDocument();
+
+    const unavailableReply = dispatchShortcut("r");
+    expect(unavailableReply.defaultPrevented).toBe(false);
+
+    const composing = dispatchShortcut("j", { isComposing: true });
+    expect(composing.defaultPrevented).toBe(false);
+    expect(screen.getByText("Select an issue")).toBeInTheDocument();
+
+    dispatchShortcut("j");
+    expect(await screen.findByRole("heading", { name: "repo#1" })).toBeInTheDocument();
+    const close = dispatchShortcut("Escape");
+    expect(close.defaultPrevented).toBe(true);
+    expect(await screen.findByText("Select an issue")).toBeInTheDocument();
+  });
+
+  it("focuses an already rendered reply surface without changing the active tab", async () => {
+    vi.mocked(useIssueRuntime).mockImplementation((identifier) => ({
+      ...runtimeFixture(identifier || "unselected"),
+      pendingQuestion: {
+        interactionId: "ask-1",
+        kind: "question",
+        status: "open",
+        awaitingResume: false,
+        question: "Proceed?",
+        whyBlocked: "A decision is required.",
+        suggestedAnswer: null,
+        stepName: "review",
+      },
+    }));
+    const user = userEvent.setup();
+    renderMissionControl(runtimeSnapshot());
+
+    dispatchShortcut("j");
+    expect(await screen.findByRole("heading", { name: "repo#1" })).toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "Respond" }));
+    const composer = screen.getByRole("textbox", { name: "Reply" });
+    expect(composer).not.toHaveFocus();
+
+    const focusReply = dispatchShortcut("r");
+    expect(focusReply.defaultPrevented).toBe(true);
+    expect(composer).toHaveFocus();
+    expect(screen.getByRole("tab", { name: "Respond" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("exposes operations as a named section without adding a nested main landmark", () => {

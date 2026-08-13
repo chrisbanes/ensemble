@@ -273,3 +273,8 @@ export function regroupMissionControlIssues(issues: MissionIssueSummary[]): Miss
     issues: issues.filter((issue) => issue.status === id),
   }));
 }
+
+/** Returns issues in the same left-to-right, top-to-bottom order as the rendered board. */
+export function issuesInGroupOrder(groups: MissionGroup[]): MissionIssueSummary[] {
+  return groups.flatMap((group) => group.issues);
+}

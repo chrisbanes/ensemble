@@ -4,6 +4,7 @@ import {
   deriveMissionControlState,
   filterMissionControlIssues,
   getSystemFreshness,
+  issuesInGroupOrder,
   isRateLimitLow,
   regroupMissionControlIssues,
   type MissionControlFilters,
@@ -280,6 +281,17 @@ describe("mission-control model", () => {
       ["waiting_on_human", 0],
       ["failed_or_blocked", 0],
       ["completed_recently", 0],
+    ]);
+  });
+
+  it("uses the rendered group order for board navigation", () => {
+    const state = deriveMissionControlState(snapshot());
+    const [running, retrying, waiting] = state.groups;
+
+    expect(issuesInGroupOrder([running!, waiting!, retrying!]).map((issue) => issue.identifier)).toEqual([
+      "repo#1",
+      "repo#3",
+      "repo#2",
     ]);
   });
 

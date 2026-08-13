@@ -104,6 +104,26 @@ The `web` subcommand is available in release builds and source builds installed 
 
 Then open `http://localhost:3000` in your browser.
 
+### Mission Control keyboard shortcuts
+
+Mission Control keeps its pointer and touch controls available while also supporting these
+non-destructive keyboard shortcuts outside editable controls:
+
+| Shortcut | Action |
+| --- | --- |
+| `/` | Focus issue search |
+| `j` / `k` | Select the next / previous issue in the visible view order (board columns left-to-right, then top-to-bottom) |
+| `Esc` | Close the selected issue panel |
+| `r` | Focus the rendered reply field |
+| `b` / `l` | Show Board / List |
+| `a` | Toggle Attention only |
+| `Shift` + `R` | Refresh Mission Control |
+| `?` | Show the in-product shortcut reference |
+
+`Esc` only closes a selected issue panel, and `r` is available only when that panel already renders
+a reply field. Shortcuts do not run while focus is in an input, textarea, select, or editable-content
+surface; `Esc` is the scoped exception for closing the selected panel.
+
 ## Web dashboard security
 
 The web and desktop dashboards control an unauthenticated, single-operator service. `ensemble web`

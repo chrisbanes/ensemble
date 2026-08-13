@@ -4,12 +4,19 @@ import { Button } from "@/components/ui/button";
 import { useRefreshMutation, useStateQuery } from "@/hooks";
 import { AttentionQueue } from "./AttentionQueue";
 import { IssueCommandPanel, type IssueCommandPanelTab } from "./IssueCommandPanel";
+import {
+  isEditableTarget,
+  isShortcutAvailable,
+  keyboardShortcuts,
+  matchesShortcut,
+} from "./keyboardShortcuts";
 import { MissionControlToolbar, type MissionControlViewMode } from "./MissionControlToolbar";
 import { OperationsBoard } from "./OperationsBoard";
 import { OperationsList } from "./OperationsList";
 import {
   deriveMissionControlState,
   filterMissionControlIssues,
+  issuesInGroupOrder,
   regroupMissionControlIssues,
   type MissionControlFilters,
   type MissionIssueStatus,
@@ -65,11 +72,13 @@ export default function MissionControl() {
   const refreshMutation = useRefreshMutation();
   const operationsRegionRef = useRef<HTMLElement>(null);
   const panelRegionRef = useRef<HTMLElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const selectionTriggerRef = useRef<HTMLElement | null>(null);
   const restoreSelectionFocusRef = useRef(false);
   const [selectedIssueIdentifier, setSelectedIssueIdentifier] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<MissionControlViewMode>(readViewMode);
   const [activeTab, setActiveTab] = useState<IssueCommandPanelTab>(readActiveTab);
+  const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   const [filters, setFilters] = useState<MissionControlFilters>(() => ({
     query: "",
     status: "all",
@@ -91,6 +100,10 @@ export default function MissionControl() {
   const filteredGroups = useMemo(
     () => regroupMissionControlIssues(filteredIssues),
     [filteredIssues],
+  );
+  const navigationIssues = useMemo(
+    () => (viewMode === "board" ? issuesInGroupOrder(filteredGroups) : filteredIssues),
+    [filteredGroups, filteredIssues, viewMode],
   );
 
   useEffect(() => {
@@ -124,6 +137,87 @@ export default function MissionControl() {
     panelRegionRef.current?.focus({ preventScroll: true });
     panelRegionRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [selectedIssueIdentifier]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+
+      const shortcut = keyboardShortcuts.find((candidate) => matchesShortcut(event, candidate));
+      if (!shortcut) return;
+      if (isEditableTarget(event.target) && shortcut.id !== "close-panel") return;
+
+      const replySurface = document.getElementById("issue-composer");
+      const hasReplySurface = replySurface instanceof HTMLTextAreaElement;
+      if (
+        !isShortcutAvailable(shortcut, {
+          hasSelectedIssue: selectedIssueIdentifier !== null,
+          hasReplySurface,
+        })
+      ) {
+        return;
+      }
+
+      let handled = false;
+      switch (shortcut.id) {
+        case "focus-search":
+          searchInputRef.current?.focus({ preventScroll: true });
+          handled = searchInputRef.current !== null;
+          break;
+        case "next-issue":
+        case "previous-issue": {
+          if (navigationIssues.length === 0) break;
+          const selectedIndex = navigationIssues.findIndex(
+            (issue) => issue.identifier === selectedIssueIdentifier,
+          );
+          const offset = shortcut.id === "next-issue" ? 1 : -1;
+          const index =
+            selectedIndex === -1
+              ? (offset === 1 ? 0 : navigationIssues.length - 1)
+              : (selectedIndex + offset + navigationIssues.length) % navigationIssues.length;
+          selectIssue(navigationIssues[index]!.identifier);
+          handled = true;
+          break;
+        }
+        case "close-panel":
+          closePanel();
+          handled = true;
+          break;
+        case "focus-reply":
+          if (replySurface instanceof HTMLTextAreaElement) {
+            replySurface.focus({ preventScroll: true });
+            handled = true;
+          }
+          break;
+        case "board":
+          setViewMode("board");
+          handled = true;
+          break;
+        case "list":
+          setViewMode("list");
+          handled = true;
+          break;
+        case "toggle-attention":
+          setFilters((current) => ({ ...current, attentionOnly: !current.attentionOnly }));
+          handled = true;
+          break;
+        case "refresh":
+          if (!refreshMutation.isPending) {
+            refreshMutation.mutate();
+            handled = true;
+          }
+          break;
+        case "show-shortcuts":
+          setShortcutReferenceOpen(true);
+          handled = true;
+          break;
+      }
+
+      if (handled) event.preventDefault();
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [navigationIssues, refreshMutation, selectedIssueIdentifier]);
 
   function selectIssue(identifier: string) {
     selectionTriggerRef.current =
@@ -176,6 +270,9 @@ export default function MissionControl() {
         }
         onViewModeChange={setViewMode}
         onRefresh={() => refreshMutation.mutate()}
+        searchInputRef={searchInputRef}
+        shortcutReferenceOpen={shortcutReferenceOpen}
+        onShortcutReferenceOpenChange={setShortcutReferenceOpen}
       />
 
       {isError ? (
