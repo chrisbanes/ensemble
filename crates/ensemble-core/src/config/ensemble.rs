@@ -588,11 +588,17 @@ pub enum StepKind {
     #[default]
     Agent,
     Synthesis,
+    /// A deterministic, non-agent step that adjudicates completed assessment evidence.
+    Gate,
 }
 
 impl StepKind {
     pub fn is_agent(&self) -> bool {
         matches!(self, Self::Agent)
+    }
+
+    pub fn requires_agent(&self) -> bool {
+        !matches!(self, Self::Gate)
     }
 }
 
@@ -601,6 +607,7 @@ impl std::fmt::Display for StepKind {
         match self {
             Self::Agent => write!(f, "agent"),
             Self::Synthesis => write!(f, "synthesis"),
+            Self::Gate => write!(f, "gate"),
         }
     }
 }
@@ -627,6 +634,7 @@ pub struct StepConfig {
     pub name: String,
     #[serde(default, skip_serializing_if = "StepKind::is_agent")]
     pub kind: StepKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub agent: String,
     /// Explicit dependencies. `None` means "use implicit sequential rule" (depend on
     /// previous step). `Some(vec![])` means "no dependencies" (explicit root).
@@ -656,6 +664,18 @@ pub struct StepConfig {
     /// Whether this step may mutate its Artifact inputs.
     #[serde(default, skip_serializing_if = "ArtifactAccess::is_default")]
     pub artifact_access: ArtifactAccess,
+    /// Required only for a non-agent gate. It names the completed assessment
+    /// sources and their ordinary-synthesis adjudicator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateConfig>,
+}
+
+/// Static evidence sources consumed by a deterministic gate.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GateConfig {
+    pub assessment_steps: Vec<String>,
+    pub adjudication_step: String,
 }
 
 /// Access requested by a consumer of one or more Artifact snapshots.
@@ -2121,7 +2141,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                     name: step.name.clone(),
                 });
             }
-            if !config.agents.contains_key(&step.agent) {
+            if step.kind.requires_agent() && !config.agents.contains_key(&step.agent) {
                 return Err(PipelineError::UnknownAgent {
                     name: step.agent.clone(),
                 });
@@ -2248,6 +2268,164 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
                     }
                 }
             }
+        }
+        validate_gate_configs(steps, &dag)?;
+    }
+    Ok(())
+}
+
+fn validate_gate_configs(
+    steps: &[StepConfig],
+    dag: &crate::pipeline::dag::StepDag,
+) -> Result<(), PipelineError> {
+    for gate in steps.iter().filter(|step| step.kind == StepKind::Gate) {
+        if !gate.agent.trim().is_empty() {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate steps must not declare an agent".to_string(),
+            });
+        }
+        if gate.artifact_snapshot.is_some() {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate steps must not declare artifact_snapshot".to_string(),
+            });
+        }
+        if !gate.artifact_inputs.is_empty() {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate steps must not declare artifact_inputs".to_string(),
+            });
+        }
+        if gate.artifact_access != ArtifactAccess::Mutable {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate steps must use mutable artifact_access".to_string(),
+            });
+        }
+        if !matches!(gate.on_failure, OnFailure::RetryIssue | OnFailure::Halt)
+            || gate.fixup_agent.is_some()
+        {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate steps permit only on_failure: retry_issue or halt and no fixup_agent"
+                    .to_string(),
+            });
+        }
+        let Some(gate_config) = gate.gate.as_ref() else {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate steps require gate assessment_steps and adjudication_step"
+                    .to_string(),
+            });
+        };
+        if gate_config.assessment_steps.is_empty() {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate assessment_steps must not be empty".to_string(),
+            });
+        }
+        let mut sources = std::collections::HashSet::new();
+        if gate_config
+            .assessment_steps
+            .iter()
+            .any(|source| source.trim().is_empty() || !sources.insert(source.as_str()))
+        {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate assessment_steps must be non-blank and unique".to_string(),
+            });
+        }
+        let adjudicator = steps
+            .iter()
+            .find(|step| step.name == gate_config.adjudication_step)
+            .ok_or_else(|| PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: format!(
+                    "gate adjudication_step '{}' is unknown",
+                    gate_config.adjudication_step
+                ),
+            })?;
+        if adjudicator.kind != StepKind::Synthesis {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: "gate adjudication_step must name a synthesis step".to_string(),
+            });
+        }
+
+        let mut shared_producer: Option<&str> = None;
+        for source_name in &gate_config.assessment_steps {
+            let source = steps
+                .iter()
+                .find(|step| step.name == *source_name)
+                .ok_or_else(|| PipelineError::InvalidStepConfig {
+                    step: gate.name.clone(),
+                    reason: format!("gate assessment step '{source_name}' is unknown"),
+                })?;
+            if source.kind != StepKind::Agent
+                || source.artifact_access != ArtifactAccess::Immutable
+                || source.artifact_inputs.len() != 1
+            {
+                return Err(PipelineError::InvalidStepConfig {
+                    step: gate.name.clone(),
+                    reason: format!(
+                        "gate assessment step '{source_name}' must be an immutable agent consumer of one Artifact snapshot"
+                    ),
+                });
+            }
+            let producer = source.artifact_inputs[0].as_str();
+            if let Some(previous) = shared_producer {
+                if previous != producer {
+                    return Err(PipelineError::InvalidStepConfig {
+                        step: gate.name.clone(),
+                        reason: "all gate assessment steps must bind the same immutable Artifact producer"
+                            .to_string(),
+                    });
+                }
+            } else {
+                shared_producer = Some(producer);
+            }
+            if !adjudicator
+                .depends
+                .as_ref()
+                .is_some_and(|deps| deps.contains(source_name))
+            {
+                return Err(PipelineError::InvalidStepConfig {
+                    step: gate.name.clone(),
+                    reason: format!(
+                        "gate adjudication step '{}' must directly depend on assessment step '{source_name}'",
+                        adjudicator.name
+                    ),
+                });
+            }
+            if !dag.downstream_steps(source_name).contains(&gate.name) {
+                return Err(PipelineError::InvalidStepConfig {
+                    step: gate.name.clone(),
+                    reason: format!(
+                        "gate assessment step '{source_name}' must be a reachable ancestor"
+                    ),
+                });
+            }
+        }
+        if !dag
+            .downstream_steps(&gate_config.adjudication_step)
+            .contains(&gate.name)
+        {
+            return Err(PipelineError::InvalidStepConfig {
+                step: gate.name.clone(),
+                reason: format!(
+                    "gate adjudication step '{}' must be a reachable ancestor",
+                    gate_config.adjudication_step
+                ),
+            });
+        }
+    }
+    for step in steps.iter().filter(|step| step.kind != StepKind::Gate) {
+        if step.gate.is_some() {
+            return Err(PipelineError::InvalidStepConfig {
+                step: step.name.clone(),
+                reason: "gate configuration is valid only for kind: gate".to_string(),
+            });
         }
     }
     Ok(())
@@ -2511,6 +2689,127 @@ on_failure: Failed
         .unwrap();
 
         assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn gate_requires_immutable_sibling_assessments_and_synthesis_adjudication() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build
+steps:
+  - name: build
+    agent: build
+    artifact_snapshot:
+      repositories: [repo]
+  - name: security
+    agent: build
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+  - name: maintainability
+    agent: build
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+  - name: adjudicate
+    kind: synthesis
+    agent: build
+    depends: [security, maintainability]
+  - name: gate
+    kind: gate
+    depends: [adjudicate]
+    gate:
+      assessment_steps: [security, maintainability]
+      adjudication_step: adjudicate
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_config(&config).is_ok());
+    }
+
+    #[test]
+    fn gate_rejects_runner_and_gate_local_retry() {
+        let config = parse_config(
+            &minimal_yaml().replace(
+                "    agent: build\n",
+                "    kind: gate\n    agent: build\n    depends: []\n    on_failure: retry_step\n    gate:\n      assessment_steps: [build]\n      adjudication_step: build\n",
+            ),
+        )
+        .unwrap();
+
+        let error = validate_config(&config).unwrap_err();
+        assert!(error.to_string().contains("gate"), "{error}");
+    }
+
+    #[test]
+    fn gate_rejects_agent_artifact_configuration() {
+        let valid = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build
+steps:
+  - name: build
+    agent: build
+    artifact_snapshot:
+      repositories: [repo]
+  - name: review
+    agent: build
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+  - name: adjudicate
+    kind: synthesis
+    agent: build
+    depends: [review]
+  - name: gate
+    kind: gate
+    depends: [adjudicate]
+    gate:
+      assessment_steps: [review]
+      adjudication_step: adjudicate
+on_success: Done
+on_failure: Failed
+"#;
+
+        for (field, configuration) in [
+            (
+                "artifact_snapshot",
+                "    artifact_snapshot:\n      repositories: [repo]\n",
+            ),
+            ("artifact_inputs", "    artifact_inputs: [build]\n"),
+            ("artifact_access", "    artifact_access: immutable\n"),
+        ] {
+            let config =
+                parse_config(&valid.replace("    gate:\n", &format!("{configuration}    gate:\n")))
+                    .unwrap();
+
+            let error = validate_config(&config).unwrap_err();
+            assert!(
+                error.to_string().contains(field),
+                "expected gate {field} configuration to be rejected: {error}"
+            );
+        }
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
@@ -16,6 +17,8 @@ pub struct RunArtifacts {
     pub artifact_integrity_violations: Vec<ArtifactIntegrityViolation>,
     #[serde(default)]
     pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
+    #[serde(default)]
+    pub gate_evidence: BTreeMap<String, crate::pipeline::assessment::GateEvidence>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

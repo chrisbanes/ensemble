@@ -87,6 +87,7 @@ use crate::orchestrator::pipeline_journal::{
     PipelineTransitionRecord, TerminalOutcome,
 };
 use crate::orchestrator::resources::{resolve_output_paths, SchedulerReservation};
+use crate::pipeline::assessment::{DispositionKind, GateEvidence};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
     DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, SelectedWorkflowSnapshot,
@@ -150,6 +151,47 @@ fn worker_failure_output(error: String) -> StepOutput {
         },
         summary: Some(error),
         output: None,
+    }
+}
+
+fn gate_approval_request(step_name: &str, evidence: &GateEvidence) -> StepApprovalRequestDraft {
+    let mut body = format!(
+        "Assessment gate '{step_name}' requires a human decision for the unresolved evidence below.\n"
+    );
+    for disposition in evidence
+        .adjudication
+        .dispositions
+        .iter()
+        .filter(|disposition| disposition.disposition == DispositionKind::Unresolved)
+    {
+        let finding = evidence
+            .assessments
+            .get(&disposition.source_step)
+            .and_then(|assessment| {
+                assessment
+                    .findings
+                    .iter()
+                    .find(|finding| finding.id == disposition.finding_id)
+            });
+        body.push_str(&format!(
+            "\n- `{}:{}`\n  - Finding: {}\n  - Rationale: {}\n  - Assessment evidence: `{}`\n  - Adjudication evidence: `{}`\n",
+            disposition.source_step,
+            disposition.finding_id,
+            finding
+                .map(|finding| finding.summary.as_str())
+                .unwrap_or("Unavailable"),
+            disposition.rationale,
+            finding
+                .map(|finding| finding.evidence.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            disposition.evidence,
+        ));
+    }
+    StepApprovalRequestDraft {
+        schema_version: 1,
+        title: format!("Resolve assessment gate '{step_name}'"),
+        body,
+        state: None,
     }
 }
 
@@ -363,6 +405,20 @@ enum WholeIssueFailureRetry {
         reason: String,
     },
     Exhausted(Box<ExhaustedRetryTerminal>),
+}
+
+enum RejectedGatePostCommit {
+    None,
+    Parked {
+        identifier: String,
+        attempt: u32,
+        reason: String,
+    },
+    Terminal {
+        identifier: String,
+        run_id: Option<String>,
+        transition: Box<PendingTerminalTransition>,
+    },
 }
 
 enum AcceptancePhaseOutcome {
@@ -726,6 +782,15 @@ struct WaitingHistoryRecordInput<'a> {
     run: &'a PipelineRun,
     completed_at: chrono::DateTime<Utc>,
     artifacts: Option<RunArtifacts>,
+}
+
+struct RejectedGateOwnerSnapshot {
+    run: PipelineRun,
+    waiting: WaitingOnHumanEntry,
+    retry: Option<RetryEntry>,
+    running: Option<RunningEntry>,
+    claimed: bool,
+    resume_requested: bool,
 }
 
 impl Orchestrator {
@@ -2702,19 +2767,14 @@ impl Orchestrator {
 
     async fn dispatch_ready_steps_for_issue(&self, issue_id: &str, permit: &DispatchPermit) {
         let Some((issue, config_snapshot, attempt, requests)) = ({
-            let state = self.state.read().await;
-            match (
-                state.get_running(issue_id),
-                state.get_pipeline_config(issue_id),
-                state.get_pipeline_run(issue_id),
-            ) {
-                (Some(entry), Some(config), Some(run)) => match run.start() {
-                    PipelineAction::Dispatch(requests) => Some((
-                        entry.issue.clone(),
-                        config.clone(),
-                        entry.retry_attempt,
-                        requests,
-                    )),
+            let mut state = self.state.write().await;
+            let context = state
+                .get_running(issue_id)
+                .zip(state.get_pipeline_config(issue_id))
+                .map(|(entry, config)| (entry.issue.clone(), config.clone(), entry.retry_attempt));
+            match (context, state.get_pipeline_run_mut(issue_id)) {
+                (Some((issue, config, attempt)), Some(run)) => match run.start() {
+                    PipelineAction::Dispatch(requests) => Some((issue, config, attempt, requests)),
                     _ => None,
                 },
                 _ => None,
@@ -3450,31 +3510,11 @@ impl Orchestrator {
                 warn!(issue_id = %issue.id, "acceptance failure belongs to a stale owner");
                 return;
             }
+            let fallback_run_id = state.issue_run_ids.get(&issue.id).cloned();
             let entry = state.remove_running(&issue.id).or_else(|| {
-                state
-                    .remove_waiting_on_human(&issue.id)
-                    .map(|waiting| RunningEntry {
-                        issue_id: issue.id.clone(),
-                        identifier: issue.identifier.clone(),
-                        run_id: waiting
-                            .run_id
-                            .or_else(|| state.issue_run_ids.get(&issue.id).cloned()),
-                        issue: issue.clone(),
-                        session_id: None,
-                        agent_pid: None,
-                        last_agent_event: None,
-                        last_agent_timestamp: None,
-                        last_agent_message: None,
-                        agent_input_tokens: waiting.agent_input_tokens,
-                        agent_output_tokens: waiting.agent_output_tokens,
-                        agent_total_tokens: waiting.agent_total_tokens,
-                        last_reported_input_tokens: waiting.agent_input_tokens,
-                        last_reported_output_tokens: waiting.agent_output_tokens,
-                        last_reported_total_tokens: waiting.agent_total_tokens,
-                        turn_count: 0,
-                        retry_attempt: waiting.retry_attempt,
-                        started_at: waiting.started_at.unwrap_or(waiting.requested_at),
-                    })
+                state.remove_waiting_on_human(&issue.id).map(|waiting| {
+                    Self::running_entry_from_waiting(waiting, issue, fallback_run_id)
+                })
             });
             entry.map(|entry| {
                 self.schedule_whole_issue_failure_retry(
@@ -5194,13 +5234,17 @@ impl Orchestrator {
             run.record_artifact_snapshot(step_name, snapshot);
         }
         let action = run.step_completed(step_name, output, has_approval_request);
+        let transition_step = match &action {
+            PipelineAction::AwaitingApproval { step, .. } => step,
+            _ => step_name,
+        };
         let config_snapshot = state.get_pipeline_config(issue_id).cloned();
         let step_transition = Self::transition_input_for_run(
             &state,
             issue_id,
             issue_identifier.unwrap_or(issue_id),
             Self::transition_kind_for_action(&action),
-            Some(step_name.to_string()),
+            Some(transition_step.to_string()),
             Some(verdict_value.to_string()),
             None,
         );
@@ -6757,6 +6801,383 @@ impl Orchestrator {
         }
     }
 
+    fn running_entry_from_waiting(
+        waiting: WaitingOnHumanEntry,
+        issue: &Issue,
+        fallback_run_id: Option<String>,
+    ) -> RunningEntry {
+        RunningEntry {
+            issue_id: issue.id.clone(),
+            identifier: issue.identifier.clone(),
+            run_id: waiting.run_id.or(fallback_run_id),
+            issue: waiting.issue.unwrap_or_else(|| issue.clone()),
+            session_id: None,
+            agent_pid: None,
+            last_agent_event: None,
+            last_agent_timestamp: None,
+            last_agent_message: None,
+            agent_input_tokens: waiting.agent_input_tokens,
+            agent_output_tokens: waiting.agent_output_tokens,
+            agent_total_tokens: waiting.agent_total_tokens,
+            last_reported_input_tokens: waiting.agent_input_tokens,
+            last_reported_output_tokens: waiting.agent_output_tokens,
+            last_reported_total_tokens: waiting.agent_total_tokens,
+            turn_count: 0,
+            retry_attempt: waiting.retry_attempt,
+            started_at: waiting.started_at.unwrap_or(waiting.requested_at),
+        }
+    }
+
+    fn restore_rejected_gate_owner(
+        state: &mut OrchestratorState,
+        issue_id: &str,
+        previous: &RejectedGateOwnerSnapshot,
+    ) {
+        state.remove_retry(issue_id);
+        state.remove_running(issue_id);
+        state.remove_waiting_on_human(issue_id);
+        state
+            .pipeline_runs
+            .insert(issue_id.to_string(), previous.run.clone());
+        state
+            .waiting_on_human
+            .insert(issue_id.to_string(), previous.waiting.clone());
+        if let Some(retry) = &previous.retry {
+            state
+                .retry_attempts
+                .insert(issue_id.to_string(), retry.clone());
+        }
+        if let Some(running) = &previous.running {
+            state.running.insert(issue_id.to_string(), running.clone());
+        }
+        if previous.claimed {
+            state.add_claimed(issue_id);
+        } else {
+            state.remove_claimed(issue_id);
+        }
+        if previous.resume_requested {
+            state.queue_resume(issue_id);
+        } else {
+            state.clear_resume_request(issue_id);
+        }
+    }
+
+    async fn commit_rejected_gate_failure(
+        &self,
+        issue: &Issue,
+        config: &EnsembleConfig,
+        step: &crate::pipeline::dag::DagStep,
+        reason: String,
+        previous_run: PipelineRun,
+        interaction_id: &str,
+    ) -> Result<bool, EnsembleError> {
+        let transaction = self
+            .pipeline_journal
+            .begin_issue_transition(&issue.id)
+            .await;
+        let (previous_owner, transition, preserves_waiting_owner, post_commit) = {
+            let mut state = self.state.write().await;
+            let previous_waiting =
+                state
+                    .waiting_on_human
+                    .get(&issue.id)
+                    .cloned()
+                    .ok_or_else(|| AgentError::PromptError {
+                        reason: format!(
+                            "issue '{}' lost its waiting owner during gate rejection",
+                            issue.identifier
+                        ),
+                    })?;
+            let previous_retry = state.retry_attempts.get(&issue.id).cloned();
+            let previous_running = state.running.get(&issue.id).cloned();
+            let was_claimed = state.is_claimed(&issue.id);
+            let resume_was_requested = state.is_resume_requested(&issue.id);
+            let previous_owner = RejectedGateOwnerSnapshot {
+                run: previous_run,
+                waiting: previous_waiting,
+                retry: previous_retry,
+                running: previous_running,
+                claimed: was_claimed,
+                resume_requested: resume_was_requested,
+            };
+            let fallback_run_id = state.issue_run_ids.get(&issue.id).cloned();
+            let waiting = state
+                .remove_waiting_on_human(&issue.id)
+                .expect("waiting owner was read while holding the same state lock");
+            let running = Self::running_entry_from_waiting(waiting, issue, fallback_run_id);
+
+            let (transition, preserves_waiting_owner, post_commit) = match step.on_failure {
+                OnFailure::RetryIssue => {
+                    let retry = schedule_failure_retry(
+                        &mut state,
+                        FailureRetryRequest {
+                            issue_id: &issue.id,
+                            identifier: &running.identifier,
+                            attempt: next_attempt(running.retry_attempt),
+                            max_backoff_ms: config.agent.max_retry_backoff_ms,
+                            max_cycles: Self::automatic_recovery_max_attempts(config),
+                            error: &reason,
+                            retry_from_step: None,
+                            with_fixup: false,
+                        },
+                    );
+                    match retry {
+                        FailureRetryDisposition::Scheduled(retry_entry) => {
+                            state.add_runtime_seconds(&running);
+                            let Some(mut transition) = Self::prepare_whole_issue_retry(
+                                &mut state,
+                                config,
+                                &issue.id,
+                                &running.identifier,
+                                &reason,
+                                retry_entry,
+                            ) else {
+                                Self::restore_rejected_gate_owner(
+                                    &mut state,
+                                    &issue.id,
+                                    &previous_owner,
+                                );
+                                return Err(AgentError::PromptError {
+                                    reason: format!(
+                                        "gate rejection retry could not prepare a durable disposition for '{}'",
+                                        issue.identifier
+                                    ),
+                                }
+                                .into());
+                            };
+                            transition.step = Some(step.name.clone());
+                            (transition, false, RejectedGatePostCommit::None)
+                        }
+                        FailureRetryDisposition::Exhausted => {
+                            let attempt = next_attempt(running.retry_attempt);
+                            let mut parked_transitions = Vec::new();
+                            if let Some((identifier, attempt, parked_reason)) =
+                                Self::park_exhausted_recovery(
+                                    &mut state,
+                                    config,
+                                    ParkedRecoveryRequest {
+                                        issue_id: &issue.id,
+                                        entry: &running,
+                                        step: &step.name,
+                                        attempt,
+                                        reason: &reason,
+                                    },
+                                    &mut parked_transitions,
+                                )
+                            {
+                                let transition = parked_transitions.pop().ok_or_else(|| {
+                                    AgentError::PromptError {
+                                        reason: format!(
+                                            "gate rejection could not prepare parked recovery for '{}'",
+                                            issue.identifier
+                                        ),
+                                    }
+                                })?;
+                                (
+                                    transition,
+                                    false,
+                                    RejectedGatePostCommit::Parked {
+                                        identifier,
+                                        attempt,
+                                        reason: parked_reason,
+                                    },
+                                )
+                            } else {
+                                state.add_runtime_seconds(&running);
+                                let history_record = state.get_pipeline_run(&issue.id).map(|run| {
+                                    self.build_history_record(RunningHistoryRecordInput {
+                                        outcome: HISTORY_OUTCOME_FAILED,
+                                        last_error: Some(reason.clone()),
+                                        running_entry: &running,
+                                        run,
+                                        completed_at: Utc::now(),
+                                        artifacts: state.artifacts.get(&issue.id).cloned(),
+                                    })
+                                });
+                                let terminal = PendingTerminalTransition {
+                                    target_state: config.on_failure.clone(),
+                                    outcome: TerminalOutcome::Failed,
+                                    attempt: 0,
+                                    last_error: None,
+                                    last_attempted_at: None,
+                                    tracker_write_confirmed: false,
+                                    history_record,
+                                };
+                                let run = state.get_pipeline_run(&issue.id).ok_or_else(|| {
+                                    AgentError::PromptError {
+                                        reason: format!(
+                                            "gate rejection lost its pipeline run for '{}'",
+                                            issue.identifier
+                                        ),
+                                    }
+                                })?;
+                                let transition = PipelineTransitionInput {
+                                    kind: PipelineTransitionKind::PendingTerminalTransition,
+                                    issue_id: issue.id.clone(),
+                                    identifier: running.identifier.clone(),
+                                    run_id: running.run_id.clone(),
+                                    cycle: run.cycle,
+                                    step: Some(step.name.clone()),
+                                    reason: Some(reason.clone()),
+                                    retry: None,
+                                    snapshot: Some(run.to_snapshot()),
+                                    terminal_transition: Some(terminal.clone()),
+                                    delivery: None,
+                                };
+                                (
+                                    transition,
+                                    false,
+                                    RejectedGatePostCommit::Terminal {
+                                        identifier: running.identifier.clone(),
+                                        run_id: running.run_id.clone(),
+                                        transition: Box::new(terminal),
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                OnFailure::Halt => {
+                    state.add_runtime_seconds(&running);
+                    state.add_waiting_on_human(WaitingOnHumanEntry {
+                        issue_id: issue.id.clone(),
+                        identifier: running.identifier.clone(),
+                        interaction_request_id: format!("halted:{}:{}", issue.id, step.name),
+                        step_name: step.name.clone(),
+                        kind: InteractionKind::Handoff,
+                        prompt: reason.clone(),
+                        agent_name: String::new(),
+                        retry_attempt: running.retry_attempt,
+                        started_at: Some(running.started_at),
+                        agent_input_tokens: running.agent_input_tokens,
+                        agent_output_tokens: running.agent_output_tokens,
+                        agent_total_tokens: running.agent_total_tokens,
+                        requested_at: Utc::now(),
+                        run_id: running.run_id.clone(),
+                        issue: Some(running.issue.clone()),
+                    });
+                    let transition = Self::transition_input_for_run(
+                        &state,
+                        &issue.id,
+                        &running.identifier,
+                        PipelineTransitionKind::PipelineHalted,
+                        Some(step.name.clone()),
+                        Some(reason.clone()),
+                        None,
+                    )
+                    .ok_or_else(|| AgentError::PromptError {
+                        reason: format!(
+                            "gate rejection halt could not prepare a durable disposition for '{}'",
+                            issue.identifier
+                        ),
+                    })?;
+                    (transition, true, RejectedGatePostCommit::None)
+                }
+                _ => {
+                    Self::restore_rejected_gate_owner(&mut state, &issue.id, &previous_owner);
+                    return Err(AgentError::PromptError {
+                        reason: format!(
+                            "gate '{}' has unsupported rejection policy {:?}",
+                            step.name, step.on_failure
+                        ),
+                    }
+                    .into());
+                }
+            };
+
+            (
+                previous_owner,
+                transition,
+                preserves_waiting_owner,
+                post_commit,
+            )
+        };
+
+        let expected = transition.clone();
+        let disposition_is_durable = match transaction.append(transition).await {
+            Ok(_) => true,
+            Err(append_error) => match transaction.latest_record_matches(&expected).await {
+                Ok(true) => true,
+                Ok(false) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        error = %append_error,
+                        "gate rejection disposition was not persisted"
+                    );
+                    false
+                }
+                Err(reconciliation_error) => {
+                    warn!(
+                        issue_id = %issue.id,
+                        append_error = %append_error,
+                        reconciliation_error = %reconciliation_error,
+                        "gate rejection disposition is ambiguous"
+                    );
+                    false
+                }
+            },
+        };
+        drop(transaction);
+
+        if !disposition_is_durable {
+            let mut state = self.state.write().await;
+            Self::restore_rejected_gate_owner(&mut state, &issue.id, &previous_owner);
+            return Err(AgentError::PromptError {
+                reason: format!(
+                    "gate rejection for '{}' was not durably persisted",
+                    issue.identifier
+                ),
+            }
+            .into());
+        }
+
+        if let RejectedGatePostCommit::Terminal {
+            identifier,
+            run_id,
+            transition,
+        } = &post_commit
+        {
+            let mut state = self.state.write().await;
+            state.add_claimed(&issue.id);
+            state.pending_terminal_transitions.insert(
+                issue.id.clone(),
+                PendingTerminalEntry {
+                    identifier: identifier.clone(),
+                    run_id: run_id.clone(),
+                    issue: Some(issue.clone()),
+                    transition: (**transition).clone(),
+                },
+            );
+        }
+
+        self.interaction_store.mark_resumed(interaction_id).await?;
+        match post_commit {
+            RejectedGatePostCommit::None => {}
+            RejectedGatePostCommit::Parked {
+                identifier,
+                attempt,
+                reason,
+            } => {
+                self.report_recovery_exhausted_attention(&issue.id, &identifier, attempt, &reason)
+                    .await;
+            }
+            RejectedGatePostCommit::Terminal {
+                identifier,
+                run_id: _,
+                transition,
+            } => {
+                self.begin_persisted_terminal_transition(
+                    &issue.id,
+                    &identifier,
+                    Some(issue.clone()),
+                    *transition,
+                )
+                .await;
+            }
+        }
+        Ok(preserves_waiting_owner)
+    }
+
     async fn post_rejection_summary_comment(&self, issue_id: &str, step_name: &str, summary: &str) {
         let body = format!("{REJECTION_COMMENT_PREFIX} at step `{step_name}`:\n\n{summary}");
         match self.tracker.add_comment(issue_id, &body).await {
@@ -7017,7 +7438,7 @@ impl Orchestrator {
             reason: format!("missing running issue snapshot for approval-gated issue {issue_id}"),
         })?;
 
-        let interaction_context = {
+        let (interaction_context, gate_evidence) = {
             let state = self.state.read().await;
             let config =
                 state
@@ -7048,18 +7469,28 @@ impl Orchestrator {
                 })
                 .map(|candidate| candidate.name.clone())
                 .collect();
-            InteractionRequestContext {
-                step_name: step_name.to_string(),
-                agent_name: step.agent.clone(),
-                pipeline_cycle: run.cycle,
-                completed_steps,
-                step_depends: step.depends.clone().unwrap_or_default(),
-                step_tracker_state: step.tracker_state.clone(),
-            }
+            (
+                InteractionRequestContext {
+                    step_name: step_name.to_string(),
+                    agent_name: step.agent.clone(),
+                    pipeline_cycle: run.cycle,
+                    completed_steps,
+                    step_depends: step.depends.clone().unwrap_or_default(),
+                    step_tracker_state: step.tracker_state.clone(),
+                },
+                (step.kind == StepKind::Gate)
+                    .then(|| run.gate_evidence.get(step_name).cloned())
+                    .flatten(),
+            )
         };
 
         let request = approval_request
             .cloned()
+            .or_else(|| {
+                gate_evidence
+                    .as_ref()
+                    .map(|evidence| gate_approval_request(step_name, evidence))
+            })
             .unwrap_or_else(|| StepApprovalRequestDraft {
                 schema_version: 1,
                 title: format!("Approve step '{step_name}'"),
@@ -7780,7 +8211,79 @@ impl Orchestrator {
         true
     }
 
+    async fn reconcile_unbound_approval_checkpoints(&self) {
+        let interactions = match self.interaction_store.list_all().await {
+            Ok(interactions) => interactions,
+            Err(error) => {
+                warn!(error = %error, "failed to inspect interactions while reconciling unbound approvals");
+                return;
+            }
+        };
+        let existing = interactions
+            .into_iter()
+            .filter(|interaction| interaction.blocking && interaction.awaiting_resume)
+            .map(|interaction| {
+                (
+                    interaction.issue_id,
+                    interaction.pipeline_cycle,
+                    interaction.step_name,
+                )
+            })
+            .collect::<HashSet<_>>();
+        let candidates = {
+            let state = self.state.read().await;
+            state
+                .pipeline_runs
+                .iter()
+                .flat_map(|(issue_id, run)| {
+                    run.step_states
+                        .iter()
+                        .filter(|(_, step_state)| {
+                            matches!(
+                                step_state,
+                                StepState::AwaitingApproval {
+                                    interaction_request_id: None
+                                }
+                            )
+                        })
+                        .map(|(step_name, _)| (issue_id.clone(), run.cycle, step_name.clone()))
+                })
+                .filter(|candidate| !existing.contains(candidate))
+                .collect::<Vec<_>>()
+        };
+        if candidates.is_empty() {
+            return;
+        }
+        let issue_ids = candidates
+            .iter()
+            .map(|(issue_id, _, _)| issue_id.clone())
+            .collect::<Vec<_>>();
+        let issues = match self.tracker.fetch_issue_states_by_ids(&issue_ids).await {
+            Ok(issues) => issues
+                .into_iter()
+                .map(|issue| (issue.id.clone(), issue))
+                .collect::<HashMap<_, _>>(),
+            Err(error) => {
+                warn!(error = %error, "failed to load issues while reconciling unbound approvals");
+                return;
+            }
+        };
+        for (issue_id, _, step_name) in candidates {
+            let Some(issue) = issues.get(&issue_id) else {
+                warn!(issue_id, step = %step_name, "cannot reconcile unbound approval without its issue snapshot");
+                continue;
+            };
+            if let Err(error) = self
+                .handle_post_step_approval(&issue_id, &step_name, None, None, Some(issue))
+                .await
+            {
+                warn!(issue_id, step = %step_name, error = %error, "failed to reconcile unbound approval checkpoint");
+            }
+        }
+    }
+
     async fn hydrate_waiting_on_human_from_store(&self) {
+        self.reconcile_unbound_approval_checkpoints().await;
         let reconcile_all = !self.attention_reconciled_on_startup.load(Ordering::Acquire);
         let mut interactions = match if reconcile_all {
             self.interaction_store.list_all().await
@@ -7856,6 +8359,68 @@ impl Orchestrator {
                                 interaction_id = %interaction.id,
                                 error = %error,
                                 "failed to reconcile interaction after durable step dispatch"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                let superseded_by_later_approval = interaction.status
+                    == InteractionStatus::Resolved
+                    && live_records
+                        .get(&interaction.issue_id)
+                        .is_some_and(|record| {
+                            record.kind == PipelineTransitionKind::StepAwaitingApproval
+                                && record.cycle == interaction.pipeline_cycle
+                                && record.step.as_deref() != Some(interaction.step_name.as_str())
+                                && record.step.as_ref().is_some_and(|step_name| {
+                                    record.snapshot.as_ref().is_some_and(|snapshot| {
+                                        matches!(
+                                            snapshot.step_states.get(step_name),
+                                            Some(StepState::AwaitingApproval { .. })
+                                        )
+                                    })
+                                })
+                        });
+                let interaction_step_is_gate = self
+                    .state
+                    .read()
+                    .await
+                    .get_pipeline_run(&interaction.issue_id)
+                    .and_then(|run| run.step(&interaction.step_name))
+                    .is_some_and(|step| step.kind == StepKind::Gate);
+                let resolved_gate_disposition_is_durable = interaction.status
+                    == InteractionStatus::Resolved
+                    && interaction.resume_strategy == InteractionResumeStrategy::AdvanceAfterStep
+                    && interaction_step_is_gate
+                    && live_records
+                        .get(&interaction.issue_id)
+                        .is_some_and(|record| {
+                            record.step.as_deref() == Some(interaction.step_name.as_str())
+                                && matches!(
+                                    record.kind,
+                                    PipelineTransitionKind::StepRetryScheduled
+                                        | PipelineTransitionKind::PipelineHalted
+                                        | PipelineTransitionKind::RunParked
+                                        | PipelineTransitionKind::PendingTerminalTransition
+                                )
+                                && record.cycle >= interaction.pipeline_cycle
+                        });
+                if superseded_by_later_approval || resolved_gate_disposition_is_durable {
+                    match self
+                        .interaction_store
+                        .retire_waiting_state(&interaction.id)
+                        .await
+                    {
+                        Ok((_, retired)) => {
+                            self.reconcile_interaction_attention(&retired).await;
+                            continue;
+                        }
+                        Err(error) => {
+                            warn!(
+                                issue_id = %interaction.issue_id,
+                                interaction_id = %interaction.id,
+                                error = %error,
+                                "failed to retire interaction superseded by a later pipeline checkpoint"
                             );
                             continue;
                         }
@@ -9542,7 +10107,8 @@ impl Orchestrator {
             artifacts: Self::history_artifacts_with_snapshots(
                 input.artifacts,
                 input.run,
-                input.running_entry,
+                input.running_entry.run_id.as_deref(),
+                &input.running_entry.issue_id,
                 &workspace_path,
             ),
         }
@@ -9553,12 +10119,14 @@ impl Orchestrator {
     fn history_artifacts_with_snapshots(
         mut artifacts: Option<RunArtifacts>,
         run: &PipelineRun,
-        running_entry: &RunningEntry,
+        run_id: Option<&str>,
+        issue_id: &str,
         workspace_path: &str,
     ) -> Option<RunArtifacts> {
         if run.artifact_snapshots.is_empty()
             && run.artifact_integrity_violations.is_empty()
             && run.artifact_access_evidence.is_empty()
+            && run.gate_evidence.is_empty()
         {
             return artifacts;
         }
@@ -9566,24 +10134,28 @@ impl Orchestrator {
         snapshots.sort_by(|left, right| left.producer_step.cmp(&right.producer_step));
         let violations = run.artifact_integrity_violations.clone();
         let access_evidence = run.artifact_access_evidence.clone();
+        let gate_evidence = run
+            .gate_evidence
+            .iter()
+            .map(|(step, evidence)| (step.clone(), evidence.clone()))
+            .collect();
         match artifacts.as_mut() {
             Some(artifacts) => {
                 artifacts.artifact_snapshots = snapshots;
                 artifacts.artifact_integrity_violations = violations;
                 artifacts.artifact_access_evidence = access_evidence;
+                artifacts.gate_evidence = gate_evidence;
             }
             None => {
                 artifacts = Some(RunArtifacts {
-                    run_id: running_entry
-                        .run_id
-                        .clone()
-                        .unwrap_or_else(|| running_entry.issue_id.clone()),
+                    run_id: run_id.unwrap_or(issue_id).to_string(),
                     workspace_path: workspace_path.to_string(),
                     repos: Vec::new(),
                     transcripts: Vec::new(),
                     artifact_snapshots: snapshots,
                     artifact_integrity_violations: violations,
                     artifact_access_evidence: access_evidence,
+                    gate_evidence,
                 });
             }
         }
@@ -9663,9 +10235,15 @@ impl Orchestrator {
             completed_at: input.completed_at,
             last_error: input.last_error,
             verdict: Self::history_verdict(input.run),
+            artifacts: Self::history_artifacts_with_snapshots(
+                input.artifacts,
+                input.run,
+                input.waiting_entry.run_id.as_deref(),
+                &input.waiting_entry.issue_id,
+                &workspace_path,
+            ),
             workspace_path,
             acceptance_attempts: input.run.acceptance_attempts.clone(),
-            artifacts: input.artifacts,
         }
     }
 
@@ -9934,7 +10512,9 @@ impl Orchestrator {
             (config, step)
         };
 
-        if !pipeline_config.agents.contains_key(&pipeline_step.agent) {
+        if pipeline_step.kind.requires_agent()
+            && !pipeline_config.agents.contains_key(&pipeline_step.agent)
+        {
             return Err(AgentError::PromptError {
                 reason: format!(
                     "blocked step agent '{}' no longer exists",
@@ -9965,6 +10545,8 @@ impl Orchestrator {
         };
 
         let mut interaction_was_retired = false;
+        let mut nested_approval = None;
+        let mut preserves_waiting_owner = false;
         match interaction.resume_strategy {
             InteractionResumeStrategy::RerunStep => {
                 let response =
@@ -10404,38 +10986,67 @@ impl Orchestrator {
                         }
                     }
                     PipelineAction::Failed { reason, .. } => {
-                        let completed_at = Utc::now();
-                        let history_record = {
-                            let state = self.state.read().await;
-                            state.waiting_on_human.get(&issue.id).and_then(|entry| {
-                                state.get_pipeline_run(&issue.id).map(|run| {
-                                    self.build_history_record_from_waiting(
-                                        WaitingHistoryRecordInput {
-                                            outcome: HISTORY_OUTCOME_FAILED,
-                                            last_error: Some(reason.clone()),
-                                            waiting_entry: entry,
-                                            run,
-                                            completed_at,
-                                            artifacts: state.artifacts.get(&issue.id).cloned(),
-                                        },
-                                    )
+                        if pipeline_step.kind == StepKind::Gate {
+                            preserves_waiting_owner = self
+                                .commit_rejected_gate_failure(
+                                    issue,
+                                    &pipeline_config,
+                                    &pipeline_step,
+                                    reason,
+                                    previous_run,
+                                    &interaction.id,
+                                )
+                                .await?;
+                            interaction_was_retired = true;
+                        } else {
+                            let completed_at = Utc::now();
+                            let history_record = {
+                                let state = self.state.read().await;
+                                state.waiting_on_human.get(&issue.id).and_then(|entry| {
+                                    state.get_pipeline_run(&issue.id).map(|run| {
+                                        self.build_history_record_from_waiting(
+                                            WaitingHistoryRecordInput {
+                                                outcome: HISTORY_OUTCOME_FAILED,
+                                                last_error: Some(reason.clone()),
+                                                waiting_entry: entry,
+                                                run,
+                                                completed_at,
+                                                artifacts: state.artifacts.get(&issue.id).cloned(),
+                                            },
+                                        )
+                                    })
                                 })
-                            })
-                        };
+                            };
 
-                        self.begin_terminal_transition(
-                            issue,
-                            TerminalOutcome::Failed,
-                            pipeline_config.on_failure.clone(),
-                            history_record,
-                        )
-                        .await;
+                            self.begin_terminal_transition(
+                                issue,
+                                TerminalOutcome::Failed,
+                                pipeline_config.on_failure.clone(),
+                                history_record,
+                            )
+                            .await;
+                        }
                     }
-                    PipelineAction::Waiting
-                    | PipelineAction::BlockedOnHuman { .. }
-                    | PipelineAction::AwaitingApproval { .. } => {}
+                    PipelineAction::AwaitingApproval {
+                        step,
+                        approval_state,
+                    } => {
+                        nested_approval = Some((step, approval_state));
+                    }
+                    PipelineAction::Waiting | PipelineAction::BlockedOnHuman { .. } => {}
                 }
             }
+        }
+
+        if let Some((step_name, approval_state)) = nested_approval.as_ref() {
+            self.handle_post_step_approval(
+                &issue.id,
+                step_name,
+                approval_state.clone(),
+                None,
+                Some(issue),
+            )
+            .await?;
         }
 
         if !interaction_was_retired {
@@ -10443,7 +11054,9 @@ impl Orchestrator {
         }
 
         let mut state = self.state.write().await;
-        state.remove_waiting_on_human(&issue.id);
+        if nested_approval.is_none() && !preserves_waiting_owner {
+            state.remove_waiting_on_human(&issue.id);
+        }
         let (run_id, sequence, attempt) = Self::run_context_for_issue(&mut state, &issue.id);
         let follow_up_sequence = run_id
             .as_ref()
@@ -12272,6 +12885,117 @@ mod tests {
         state.add_claimed("1");
     }
 
+    async fn install_unresolved_gate_waiting_run(
+        orchestrator: &Orchestrator,
+        config: &Arc<RwLock<EnsembleConfig>>,
+        interaction_id: &str,
+    ) {
+        let cfg = config.read().await;
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new("1".to_string(), 1, dag);
+        run.start();
+        for step in ["build", "review", "adjudicate", "approval"] {
+            run.step_states.insert(step.to_string(), StepState::Passed);
+        }
+        run.step_states.insert(
+            "assess".to_string(),
+            StepState::AwaitingApproval {
+                interaction_request_id: Some(interaction_id.to_string()),
+            },
+        );
+        run.step_outputs.insert(
+            "review".to_string(),
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"assessment": {"findings": [{
+                    "id": "finding-1", "severity": "non_blocking", "summary": "Needs a decision",
+                    "evidence": {"source": "test"}
+                }]}})),
+            },
+        );
+        run.step_outputs.insert(
+            "adjudicate".to_string(),
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"adjudication": {"dispositions": [{
+                    "source_step": "review", "finding_id": "finding-1", "disposition": "unresolved",
+                    "rationale": "Needs human input", "evidence": {"source": "test"}
+                }]}})),
+            },
+        );
+        let mut state = orchestrator.state.write().await;
+        state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+        state.add_claimed("1");
+    }
+
+    async fn write_rejected_gate_interaction(config_dir: &std::path::Path, interaction_id: &str) {
+        write_raw_interaction(
+            config_dir,
+            interaction_id,
+            serde_json::json!({
+                "id": interaction_id,
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": ["build", "review", "adjudicate", "approval"],
+                "step_name": "assess",
+                "agent_name": "",
+                "step_depends": ["approval"],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Resolve assessment gate",
+                "body": "Review the evidence.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": false,
+                    "reason": "needs more work"
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+    }
+
+    async fn rejected_gate_orchestrator(
+        raw_config: EnsembleConfig,
+    ) -> (tempfile::TempDir, Orchestrator) {
+        let config = Arc::new(RwLock::new(raw_config));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        install_unresolved_gate_waiting_run(&orchestrator, &config, "gate-approval").await;
+        write_rejected_gate_interaction(config_dir.path(), "gate-approval").await;
+        (config_dir, orchestrator)
+    }
+
     #[tokio::test]
     async fn worker_identity_quiescing_latch_blocks_dispatch_from_in_progress_tick() {
         let config = Arc::new(RwLock::new(make_config()));
@@ -14027,11 +14751,12 @@ mod tests {
                 artifact_snapshots: Vec::new(),
                 artifact_integrity_violations: Vec::new(),
                 artifact_access_evidence: Vec::new(),
+                gate_evidence: Default::default(),
             });
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14107,7 +14832,7 @@ mod tests {
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14207,11 +14932,12 @@ mod tests {
             artifact_snapshots: Vec::new(),
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
+            gate_evidence: Default::default(),
         });
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14300,7 +15026,7 @@ mod tests {
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14369,7 +15095,7 @@ mod tests {
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14426,7 +15152,7 @@ mod tests {
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14499,7 +15225,7 @@ mod tests {
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -14614,7 +15340,7 @@ mod tests {
         let snapshot = {
             let config = orchestrator.config.read().await;
             let dag = build_dag(&config.steps).unwrap();
-            let run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
+            let mut run = PipelineRun::new(delivery.issue_id.clone(), 1, dag);
             run.start();
             run.to_snapshot()
         };
@@ -17388,6 +18114,212 @@ agent:
     }
 
     #[tokio::test]
+    async fn restart_creates_missing_interaction_for_unbound_gate_approval() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_approval_then_unresolved_gate_config();
+        let issue = test_issue("1", "Todo");
+        let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        for step in ["build", "review", "adjudicate", "approval"] {
+            run.step_states.insert(step.to_string(), StepState::Passed);
+        }
+        run.step_states.insert(
+            "assess".to_string(),
+            StepState::AwaitingApproval {
+                interaction_request_id: None,
+            },
+        );
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepAwaitingApproval,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("assess".to_string()),
+                reason: Some("awaiting gate decision".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        assert!(orchestrator
+            .interaction_store
+            .latest_blocking_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .is_none());
+
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let state = state.read().await;
+        let waiting = state
+            .waiting_on_human
+            .get(&issue.id)
+            .expect("startup should create a durable gate approval interaction");
+        assert_eq!(waiting.step_name, "assess");
+        let interaction_id = waiting.interaction_request_id.clone();
+        assert!(matches!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("assess"),
+            Some(StepState::AwaitingApproval {
+                interaction_request_id: Some(id),
+            }) if id == &interaction_id
+        ));
+        drop(state);
+        let interaction = orchestrator
+            .interaction_store
+            .get(&interaction_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(interaction.step_name, "assess");
+        assert_eq!(interaction.status, InteractionStatus::Open);
+        let latest = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue(&issue.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.kind, PipelineTransitionKind::StepAwaitingApproval);
+        assert_eq!(latest.step.as_deref(), Some("assess"));
+        assert_eq!(latest.reason.as_deref(), Some(interaction_id.as_str()));
+    }
+
+    #[tokio::test]
+    async fn restart_retires_resolved_interaction_superseded_by_a_later_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = make_approval_then_unresolved_gate_config();
+        let issue = test_issue("1", "Todo");
+        let (orchestrator, state) = make_restart_test_orchestrator(&temp, &cfg, &issue);
+        let dag = build_dag(&cfg.steps).unwrap();
+        let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+        for step in ["build", "review", "adjudicate", "approval"] {
+            run.step_states.insert(step.to_string(), StepState::Passed);
+        }
+        run.step_states.insert(
+            "assess".to_string(),
+            StepState::AwaitingApproval {
+                interaction_request_id: Some("assess-1".to_string()),
+            },
+        );
+        orchestrator
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepAwaitingApproval,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("assess".to_string()),
+                reason: Some("assess-1".to_string()),
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+        let requested_at = Utc::now();
+        write_raw_interaction(
+            temp.path(),
+            "approval-1",
+            serde_json::json!({
+                "id": "approval-1",
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": ["build", "review", "adjudicate"],
+                "step_name": "approval",
+                "agent_name": "builder",
+                "step_depends": ["adjudicate"],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve",
+                "body": "Continue.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true
+                },
+                "requested_at": requested_at,
+                "resolved_at": requested_at,
+            }),
+        )
+        .await;
+        write_raw_interaction(
+            temp.path(),
+            "assess-1",
+            serde_json::json!({
+                "id": "assess-1",
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": ["build", "review", "adjudicate", "approval"],
+                "step_name": "assess",
+                "agent_name": "",
+                "step_depends": ["approval"],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "open",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve gate 'assess'",
+                "body": "Continue.",
+                "options": ["approve", "reject"],
+                "artifacts": [],
+                "response": null,
+                "requested_at": requested_at + chrono::Duration::milliseconds(1),
+                "resolved_at": null,
+            }),
+        )
+        .await;
+
+        orchestrator.restore_pipeline_runs_from_journal().await;
+        orchestrator.hydrate_waiting_on_human_from_store().await;
+
+        let old = orchestrator
+            .interaction_store
+            .get("approval-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!old.awaiting_resume);
+        let next = orchestrator
+            .interaction_store
+            .get("assess-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(next.awaiting_resume);
+        let state = state.read().await;
+        let waiting = state
+            .waiting_on_human
+            .get("1")
+            .expect("the later gate should remain the sole waiting owner");
+        assert_eq!(waiting.step_name, "assess");
+        assert_eq!(waiting.interaction_request_id, "assess-1");
+    }
+
+    #[tokio::test]
     async fn handle_tick_restores_question_from_step_tracker_state_once() {
         let temp = tempfile::tempdir().unwrap();
         let mut cfg = make_retry_step_config();
@@ -18195,6 +19127,7 @@ agent:
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);
@@ -18786,6 +19719,62 @@ agent:
         parse_config(&yaml).unwrap()
     }
 
+    fn make_approval_then_unresolved_gate_config() -> EnsembleConfig {
+        parse_config(
+            r#"
+tracker:
+  kind: todo_file
+  active_states: ["Todo", "In Progress", "Plan Review"]
+  terminal_states: ["Done", "Closed", "Failed"]
+repos:
+  - path: /tmp/ensemble-test
+    branch: main
+agents:
+  builder:
+    executor: claude
+    model: opus
+    prompt: "Work on {{ issue.identifier }}."
+steps:
+  - name: build
+    agent: builder
+    artifact_snapshot:
+      repositories: [ensemble-test]
+  - name: review
+    agent: builder
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+  - name: adjudicate
+    kind: synthesis
+    agent: builder
+    depends: [review]
+  - name: approval
+    agent: builder
+    depends: [adjudicate]
+    approval:
+      mode: always
+  - name: assess
+    kind: gate
+    depends: [approval]
+    gate:
+      assessment_steps: [review]
+      adjudication_step: adjudicate
+on_success: Done
+on_failure: Failed
+concurrency:
+  max_concurrent_agents: 5
+polling:
+  interval_ms: 100
+workspace:
+  root: /tmp/ensemble-test
+agent:
+  command: "echo test"
+  session_mode: code
+"#,
+        )
+        .unwrap()
+    }
+
     fn make_single_step_always_approval_config(max_cycles: u32) -> EnsembleConfig {
         let yaml = format!(
             r#"
@@ -19089,7 +20078,7 @@ agent:
         {
             let cfg = config.read().await;
             let dag = build_dag(&cfg.steps).unwrap();
-            let pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
 
             let mut state = orchestrator.state.write().await;
@@ -19171,6 +20160,7 @@ agent:
                     artifact_snapshots: Vec::new(),
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
+                    gate_evidence: Default::default(),
                 },
             );
         }
@@ -20924,6 +21914,7 @@ agent:
                     artifact_snapshots: Vec::new(),
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
+                    gate_evidence: Default::default(),
                 },
             );
         }
@@ -21265,6 +22256,479 @@ agent:
             run.step_states.get("review"),
             Some(crate::pipeline::engine::StepState::Running { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn approving_a_step_preserves_the_next_unresolved_gate_interaction() {
+        let config = Arc::new(RwLock::new(make_approval_then_unresolved_gate_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new("1".to_string(), 1, dag);
+            run.start();
+            run.step_states
+                .insert("build".to_string(), StepState::Passed);
+            run.step_states
+                .insert("review".to_string(), StepState::Passed);
+            run.step_states
+                .insert("adjudicate".to_string(), StepState::Passed);
+            run.step_states.insert(
+                "approval".to_string(),
+                StepState::AwaitingApproval {
+                    interaction_request_id: Some("approval-1".to_string()),
+                },
+            );
+            run.step_outputs.insert("review".to_string(), StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"assessment": {"findings": [{
+                    "id": "finding-1", "severity": "non_blocking", "summary": "Needs a decision",
+                    "evidence": {"source": "test"}
+                }]}})),
+            });
+            run.step_outputs.insert("adjudicate".to_string(), StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"adjudication": {"dispositions": [{
+                    "source_step": "review", "finding_id": "finding-1", "disposition": "unresolved",
+                    "rationale": "Needs human input", "evidence": {"source": "test"}
+                }]}})),
+            });
+            let mut state = orchestrator.state.write().await;
+            state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+            state.add_claimed("1");
+        }
+
+        write_raw_interaction(
+            config_dir.path(),
+            "approval-1",
+            serde_json::json!({
+                "id": "approval-1",
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": ["build", "review", "adjudicate"],
+                "step_name": "approval",
+                "agent_name": "builder",
+                "step_depends": ["adjudicate"],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve",
+                "body": "Continue.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("approval should create a durable interaction for the next gate");
+
+        let state = orchestrator.state.read().await;
+        let waiting = state
+            .waiting_on_human
+            .get("1")
+            .expect("the unresolved gate must retain a waiting owner");
+        assert_eq!(waiting.step_name, "assess");
+        assert_ne!(waiting.interaction_request_id, "approval-1");
+        let interaction_id = waiting.interaction_request_id.clone();
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("assess"),
+            Some(StepState::AwaitingApproval {
+                interaction_request_id: Some(id),
+            }) if id == &interaction_id
+        ));
+        drop(state);
+
+        let next = InteractionStore::new(config_dir.path().to_path_buf())
+            .get(&interaction_id)
+            .await
+            .unwrap()
+            .expect("next gate interaction should be persisted");
+        assert_eq!(next.status, InteractionStatus::Open);
+        assert!(next.title.contains("assessment gate 'assess'"));
+        assert!(next.body.contains("review:finding-1"));
+        assert!(next.body.contains("Needs a decision"));
+        assert!(next.body.contains("Needs human input"));
+        assert!(next.body.contains(r#"{"source":"test"}"#));
+
+        let store = InteractionStore::new(config_dir.path().to_path_buf());
+        store
+            .resolve(
+                &interaction_id,
+                InteractionResponse::Approval {
+                    response_schema_version: 1,
+                    approved: true,
+                    reason: None,
+                },
+            )
+            .await
+            .unwrap();
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("an agentless gate approval should resume");
+        assert!(
+            !store
+                .get(&interaction_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_assessment_gate_retries_the_issue_with_durable_ownership() {
+        let (_config_dir, orchestrator) =
+            rejected_gate_orchestrator(make_approval_then_unresolved_gate_config()).await;
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("rejected gate should schedule a whole-issue retry");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_claimed("1"));
+        assert!(!state.is_running("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(state.retry_attempts.contains_key("1"));
+        assert_eq!(state.get_pipeline_run("1").unwrap().cycle, 2);
+        drop(state);
+
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::StepRetryScheduled)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_assessment_gate_halts_with_a_durable_waiting_owner() {
+        let mut raw_config = make_approval_then_unresolved_gate_config();
+        raw_config
+            .steps
+            .iter_mut()
+            .find(|step| step.name == "assess")
+            .unwrap()
+            .on_failure = OnFailure::Halt;
+        let (_config_dir, orchestrator) = rejected_gate_orchestrator(raw_config).await;
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("rejected gate should halt for manual intervention");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_claimed("1"));
+        assert!(!state.is_running("1"));
+        assert!(!state.retry_attempts.contains_key("1"));
+        let waiting = state
+            .waiting_on_human
+            .get("1")
+            .expect("halt must retain a durable waiting owner");
+        assert_eq!(waiting.step_name, "assess");
+        assert_eq!(waiting.interaction_request_id, "halted:1:assess");
+        assert_eq!(waiting.kind, InteractionKind::Handoff);
+        drop(state);
+
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::PipelineHalted)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_assessment_gate_retry_journal_failure_retains_the_resolved_owner() {
+        let (config_dir, mut orchestrator) =
+            rejected_gate_orchestrator(make_approval_then_unresolved_gate_config()).await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("an absent retry transition must retain the resolved gate owner");
+        assert!(error.to_string().contains("gate rejection"), "{error}");
+        let state = orchestrator.state.read().await;
+        assert!(state.is_waiting_on_human("1"));
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("assess"),
+            Some(StepState::AwaitingApproval { .. })
+        ));
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        assert!(orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap()
+            .is_empty());
+        drop(config_dir);
+    }
+
+    #[tokio::test]
+    async fn rejected_assessment_gate_halt_journal_failure_retains_the_resolved_owner() {
+        let mut config = make_approval_then_unresolved_gate_config();
+        config
+            .steps
+            .iter_mut()
+            .find(|step| step.name == "assess")
+            .unwrap()
+            .on_failure = OnFailure::Halt;
+        let (config_dir, mut orchestrator) = rejected_gate_orchestrator(config).await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 1));
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("an absent halt transition must retain the resolved gate owner");
+        assert!(error.to_string().contains("gate rejection"), "{error}");
+        let state = orchestrator.state.read().await;
+        assert!(state.is_waiting_on_human("1"));
+        assert!(matches!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("assess"),
+            Some(StepState::AwaitingApproval { .. })
+        ));
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        assert!(orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap()
+            .is_empty());
+        drop(config_dir);
+    }
+
+    #[tokio::test]
+    async fn rejected_assessment_gate_retry_exhaustion_uses_the_terminal_failure_policy() {
+        let mut config = make_approval_then_unresolved_gate_config();
+        config.max_cycles = 1;
+        let (_config_dir, orchestrator) = rejected_gate_orchestrator(config).await;
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("exhaustion should enter the durable terminal failure path");
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_claimed("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(!state.retry_attempts.contains_key("1"));
+        assert!(state.get_pipeline_run("1").is_none());
+        drop(state);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(records
+            .iter()
+            .any(|record| record.kind == PipelineTransitionKind::PendingTerminalTransition));
+    }
+
+    #[tokio::test]
+    async fn rejected_gate_terminal_commit_survives_interaction_retirement_failure() {
+        let mut config = make_approval_then_unresolved_gate_config();
+        config.max_cycles = 1;
+        let (_config_dir, orchestrator) = rejected_gate_orchestrator(config).await;
+        orchestrator.interaction_store.fail_next_writes(1);
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("interaction retirement should fail after the terminal commit");
+
+        let state = orchestrator.state.read().await;
+        let pending = state
+            .pending_terminal_transitions
+            .get("1")
+            .expect("the durable terminal owner must remain live");
+        assert_eq!(pending.transition.outcome, TerminalOutcome::Failed);
+        assert_eq!(pending.transition.target_state, "Failed");
+        drop(state);
+        assert!(
+            orchestrator
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_retires_a_rejected_gate_after_a_durable_retry() {
+        let config = make_approval_then_unresolved_gate_config();
+        let (config_dir, orchestrator) = rejected_gate_orchestrator(config.clone()).await;
+        orchestrator.interaction_store.fail_next_writes(1);
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("a post-commit retirement failure should leave a repairable sidecar");
+        let mut interaction = orchestrator
+            .interaction_store
+            .get("gate-approval")
+            .await
+            .unwrap()
+            .unwrap();
+        interaction.agent_name = "legacy-gate-agent".to_string();
+        write_raw_interaction(
+            config_dir.path(),
+            "gate-approval",
+            serde_json::to_value(interaction).unwrap(),
+        )
+        .await;
+
+        let (restart, _) =
+            make_restart_test_orchestrator(&config_dir, &config, &test_issue("1", "Todo"));
+        restart.restore_pipeline_runs_from_journal().await;
+        restart.hydrate_waiting_on_human_from_store().await;
+
+        assert!(
+            !restart
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_retires_a_rejected_gate_after_a_durable_halt() {
+        let mut config = make_approval_then_unresolved_gate_config();
+        config
+            .steps
+            .iter_mut()
+            .find(|step| step.name == "assess")
+            .unwrap()
+            .on_failure = OnFailure::Halt;
+        let (config_dir, orchestrator) = rejected_gate_orchestrator(config.clone()).await;
+        orchestrator.interaction_store.fail_next_writes(1);
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("a post-commit retirement failure should leave a repairable sidecar");
+
+        let (restart, _) =
+            make_restart_test_orchestrator(&config_dir, &config, &test_issue("1", "Todo"));
+        restart.restore_pipeline_runs_from_journal().await;
+        restart.hydrate_waiting_on_human_from_store().await;
+
+        assert!(
+            !restart
+                .interaction_store
+                .get("gate-approval")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
     }
 
     #[tokio::test]
@@ -22156,6 +23620,7 @@ agent:
                 artifact_snapshots: Vec::new(),
                 artifact_integrity_violations: Vec::new(),
                 artifact_access_evidence: Vec::new(),
+                gate_evidence: Default::default(),
             },
         );
 
@@ -25173,7 +26638,7 @@ agent:
         {
             let cfg = config.read().await;
             let dag = build_dag(&cfg.steps).unwrap();
-            let pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
+            let mut pipeline_run = PipelineRun::new("1".to_string(), 1, dag);
             pipeline_run.start();
 
             let mut state = orchestrator.state.write().await;
@@ -25942,6 +27407,75 @@ agent:
                 enforcement: artifact::ArtifactAccessEnforcement::DirectAcpUnsupported,
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn waiting_history_record_projects_gate_evidence() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config.clone(),
+            tracker,
+            runner,
+            workspace_mgr,
+            dir.path(),
+            shutdown_rx,
+        );
+        let dag = build_dag(&config.read().await.steps).unwrap();
+        let mut run = PipelineRun::new("1".to_string(), 1, dag);
+        run.gate_evidence.insert(
+            "gate".to_string(),
+            crate::pipeline::assessment::GateEvidence {
+                assessments: BTreeMap::new(),
+                adjudication: crate::pipeline::assessment::Adjudication {
+                    dispositions: Vec::new(),
+                },
+                outcome: crate::pipeline::assessment::GateOutcome::AwaitingHuman,
+            },
+        );
+        let requested_at = Utc::now();
+        let waiting = WaitingOnHumanEntry {
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            interaction_request_id: "gate-approval".to_string(),
+            step_name: "gate".to_string(),
+            kind: InteractionKind::ApprovalGate,
+            prompt: "review gate".to_string(),
+            agent_name: String::new(),
+            retry_attempt: Some(1),
+            started_at: Some(requested_at),
+            agent_input_tokens: 0,
+            agent_output_tokens: 0,
+            agent_total_tokens: 0,
+            requested_at,
+            run_id: Some("run-1".to_string()),
+            issue: Some(test_issue("1", "Todo")),
+        };
+
+        let record = orchestrator.build_history_record_from_waiting(WaitingHistoryRecordInput {
+            outcome: "failed",
+            last_error: Some("rejected".to_string()),
+            waiting_entry: &waiting,
+            run: &run,
+            completed_at: Utc::now(),
+            artifacts: None,
+        });
+
+        assert!(record
+            .artifacts
+            .as_ref()
+            .is_some_and(|artifacts| artifacts.gate_evidence.contains_key("gate")));
     }
 
     #[tokio::test]
@@ -27008,6 +28542,7 @@ agent:
             artifact_snapshots: Vec::new(),
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
+            gate_evidence: Default::default(),
         };
         let mut state = orchestrator.state.write().await;
         state.add_running(&test_issue("1", "Todo"), None);

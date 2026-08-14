@@ -635,13 +635,13 @@ when it is omitted.
 
 ### steps
 
-Pipeline step definitions. Each step invokes one agent.
+Pipeline step definitions. Agent and synthesis steps invoke configured agents; gate steps evaluate evidence deterministically without launching one.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Unique step identifier |
-| `agent` | string | *required* | Name of an agent defined in `agents` |
-| `kind` | string | `agent` | Step kind. Use `agent` for normal steps and `synthesis` for steps that merge direct dependency outputs. |
+| `agent` | string | required for `agent` and `synthesis` | Name of an agent defined in `agents`; omit for `gate` |
+| `kind` | string | `agent` | Step kind. Use `agent` for normal steps, `synthesis` for direct-dependency adjudication, and `gate` for deterministic non-agent assessment evaluation. |
 | `depends` | list of strings | — | Steps this depends on. Omit for sequential order. Use `[]` for no dependencies (root step). |
 | `tracker_state` | string | — | Tracker state to write when this step starts |
 | `timeout_ms` | integer | inherits `agent.turn_timeout_ms` | Optional maximum time for each runtime prompt or turn in this step |
@@ -653,6 +653,7 @@ Pipeline step definitions. Each step invokes one agent.
 | `artifact_snapshot` | object | — | Producer declaration with a non-empty `repositories` list of configured repository keys to observe after output validation |
 | `artifact_inputs` | list of strings | `[]` | Direct producer dependencies whose completed Artifact snapshots this step consumes |
 | `artifact_access` | string | `mutable` | `immutable` verifies every declared input immediately before the step starts and halts on drift; `mutable` permits normal workspace mutation |
+| `gate` | object | — | Required only for `kind: gate`: ordered unique `assessment_steps` and one `adjudication_step`; a gate has no `agent` |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
 
@@ -668,7 +669,7 @@ permission classification, so snapshot verification remains the enforcement boun
 
 Approval behavior:
 
-- `approval.mode: always` pauses after the step succeeds and waits for explicit approval before any downstream step can start.
+- `approval.mode: always` pauses after a `succeeded` or `concern` step result and waits for explicit approval before any downstream step can start.
 - `approval.mode: when_requested_by_agent` pauses only when the agent requests approval by writing `.ensemble/approval-request.json`.
 - `approval.state` is only a tracker mirror for operators. The approval checkpoint inside Ensemble is the source of truth.
 - Approving the gate resumes the pipeline from the next step. Rejecting the gate ends the pipeline through `on_failure`.

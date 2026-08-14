@@ -776,6 +776,7 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
                 "kind": match step.kind {
                     crate::config::ensemble::StepKind::Agent => "agent",
                     crate::config::ensemble::StepKind::Synthesis => "synthesis",
+                    crate::config::ensemble::StepKind::Gate => "gate",
                 },
                 "tracker_state": step.tracker_state,
                 "approval": step.approval.as_ref().map(|approval| serde_json::json!({
@@ -785,6 +786,9 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
             });
             if let Some(depends) = &step.depends {
                 value["depends"] = serde_json::json!(depends);
+            }
+            if let Some(gate) = &step.gate {
+                value["gate"] = serde_json::json!(gate);
             }
             value
         })
@@ -1077,6 +1081,10 @@ mod tests {
                 kind: None,
                 depends: Some(vec![]),
                 tracker_state: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -1442,6 +1450,10 @@ on_failure: Failed
                     kind: None,
                     depends: Some(vec![]),
                     tracker_state: None,
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -1778,6 +1790,10 @@ custom_root:
                     kind: None,
                     depends: Some(vec![]),
                     tracker_state: Some("In Progress".to_string()),
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -1886,6 +1902,7 @@ on_failure: Failed
                 agent: "builder".to_string(),
                 depends: Some(vec![]),
                 tracker_state: None,
+                gate: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
                 max_cycles: 3,
@@ -2039,6 +2056,7 @@ on_failure: Failed
                 agent: "missing".to_string(),
                 depends: Some(vec![]),
                 tracker_state: None,
+                gate: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
                 max_cycles: 3,
@@ -2210,6 +2228,7 @@ on_failure: Failed
                 agent: "missing".to_string(),
                 depends: Some(vec![]),
                 tracker_state: None,
+                gate: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
                 max_cycles: 3,
@@ -2328,6 +2347,10 @@ on_failure: Failed
                     kind: None,
                     depends: Some(vec![]),
                     tracker_state: Some("In Progress".to_string()),
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -2806,6 +2829,10 @@ on_failure: Failed
                     kind: None,
                     depends: Some(vec![]),
                     tracker_state: None,
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -2904,6 +2931,10 @@ on_failure: Failed
                     kind: None,
                     depends: Some(vec![]),
                     tracker_state: None,
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),

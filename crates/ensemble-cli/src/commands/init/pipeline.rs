@@ -1,5 +1,7 @@
 use crate::commands::init::agents::AgentEntry;
-use ensemble_core::config::ensemble::EnsembleConfig;
+use ensemble_core::config::ensemble::{
+    ArtifactAccess, ArtifactSnapshotConfig, EnsembleConfig, GateConfig, StepConfig, StepKind,
+};
 
 #[derive(Debug)]
 pub struct PipelineStep {
@@ -8,6 +10,35 @@ pub struct PipelineStep {
     pub kind: Option<String>,
     pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
+    pub artifact_snapshot: Option<ArtifactSnapshotConfig>,
+    pub artifact_inputs: Vec<String>,
+    pub artifact_access: ArtifactAccess,
+    pub gate: Option<GateConfig>,
+}
+
+fn pipeline_step_from_config(step: &StepConfig) -> PipelineStep {
+    PipelineStep {
+        name: step.name.clone(),
+        agent_role: step.agent.clone(),
+        kind: match step.kind {
+            StepKind::Agent => None,
+            StepKind::Synthesis => Some("synthesis".to_string()),
+            StepKind::Gate => Some("gate".to_string()),
+        },
+        depends: step.depends.clone(),
+        tracker_state: step.tracker_state.clone(),
+        artifact_snapshot: step.artifact_snapshot.clone(),
+        artifact_inputs: step.artifact_inputs.clone(),
+        artifact_access: step.artifact_access,
+        gate: step.gate.clone(),
+    }
+}
+
+fn existing_pipeline_matches_roles(config: &EnsembleConfig, role_names: &[&str]) -> bool {
+    config
+        .steps
+        .iter()
+        .all(|step| step.kind == StepKind::Gate || role_names.contains(&step.agent.as_str()))
 }
 
 pub fn ask_pipeline(
@@ -17,6 +48,23 @@ pub fn ask_pipeline(
     let role_names: Vec<&str> = agents.iter().map(|a| a.role.as_str()).collect();
 
     if agents.len() == 1 {
+        if let Some(existing) = existing
+            .filter(|config| existing_pipeline_matches_roles(config, &role_names))
+            .filter(|config| !config.steps.is_empty())
+        {
+            let step_summary = existing
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ");
+            println!("\nPipeline: preserving existing ({step_summary})");
+            return Ok(existing
+                .steps
+                .iter()
+                .map(pipeline_step_from_config)
+                .collect());
+        }
         // Use existing config's first step only if its agent matches the current role
         let matching_step =
             existing.and_then(|c| c.steps.first().filter(|s| s.agent == role_names[0]));
@@ -33,22 +81,26 @@ pub fn ask_pipeline(
             "\nPipeline: single step ({}) using {}",
             step_name, role_names[0]
         );
-        return Ok(vec![PipelineStep {
-            name: step_name.to_string(),
-            agent_role: role_names[0].to_string(),
-            kind: None,
-            depends: None,
-            tracker_state: Some(tracker_state.to_string()),
-        }]);
+        let mut step = matching_step
+            .map(pipeline_step_from_config)
+            .unwrap_or(PipelineStep {
+                name: step_name.to_string(),
+                agent_role: role_names[0].to_string(),
+                kind: None,
+                depends: None,
+                tracker_state: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
+            });
+        step.tracker_state = Some(tracker_state.to_string());
+        return Ok(vec![step]);
     }
 
     // Check if existing pipeline matches current agent roles
-    let existing_matches = existing.is_some_and(|config| {
-        config
-            .steps
-            .iter()
-            .all(|step| role_names.contains(&step.agent.as_str()))
-    });
+    let existing_matches =
+        existing.is_some_and(|config| existing_pipeline_matches_roles(config, &role_names));
 
     if existing_matches {
         let existing_steps = &existing.unwrap().steps;
@@ -65,13 +117,7 @@ pub fn ask_pipeline(
         if choice.starts_with("Yes, use existing") {
             return Ok(existing_steps
                 .iter()
-                .map(|s| PipelineStep {
-                    name: s.name.clone(),
-                    agent_role: s.agent.clone(),
-                    kind: None,
-                    depends: s.depends.clone(),
-                    tracker_state: s.tracker_state.clone(),
-                })
+                .map(pipeline_step_from_config)
                 .collect());
         } else if choice.starts_with("Yes, use defaults") {
             return Ok(default_pipeline(&role_names));
@@ -100,6 +146,10 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
         kind: None,
         depends: None,
         tracker_state: Some("In Progress".to_string()),
+        artifact_snapshot: None,
+        artifact_inputs: Vec::new(),
+        artifact_access: Default::default(),
+        gate: None,
     }];
 
     if role_names.len() >= 2 {
@@ -109,6 +159,10 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
             kind: None,
             depends: Some(vec!["implement".to_string()]),
             tracker_state: Some("Review".to_string()),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         });
     }
 
@@ -146,6 +200,10 @@ fn custom_pipeline(role_names: &[&str]) -> Result<Vec<PipelineStep>, inquire::In
             kind: None,
             depends,
             tracker_state: None,
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         });
 
         let more = inquire::Confirm::new("Add another step?")
@@ -164,7 +222,9 @@ fn custom_pipeline(role_names: &[&str]) -> Result<Vec<PipelineStep>, inquire::In
 
 #[cfg(test)]
 mod tests {
-    use super::default_pipeline;
+    use super::{default_pipeline, existing_pipeline_matches_roles, pipeline_step_from_config};
+    use crate::commands::init::agents::AgentEntry;
+    use ensemble_core::config::ensemble::{parse_config, ArtifactAccess};
 
     #[test]
     fn default_pipeline_keeps_implicit_sequencing() {
@@ -172,5 +232,77 @@ mod tests {
 
         assert_eq!(steps[0].depends, None);
         assert_eq!(steps[1].depends, Some(vec!["implement".to_string()]));
+    }
+
+    #[test]
+    fn existing_pipeline_steps_preserve_gate_and_artifact_contracts() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Work.
+steps:
+  - name: build
+    agent: builder
+    artifact_snapshot:
+      repositories: [repo]
+  - name: review
+    agent: builder
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+  - name: adjudicate
+    kind: synthesis
+    agent: builder
+    depends: [review]
+  - name: assess
+    kind: gate
+    depends: [review, adjudicate]
+    gate:
+      assessment_steps: [review]
+      adjudication_step: adjudicate
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        let steps = config
+            .steps
+            .iter()
+            .map(pipeline_step_from_config)
+            .collect::<Vec<_>>();
+
+        assert!(existing_pipeline_matches_roles(&config, &["builder"]));
+        let selected = super::ask_pipeline(
+            &[AgentEntry {
+                role: "builder".to_string(),
+                acpx_agent: "claude".to_string(),
+                model: None,
+            }],
+            Some(&config),
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 4);
+        assert_eq!(selected[1].artifact_access, ArtifactAccess::Immutable);
+        assert_eq!(selected[3].kind.as_deref(), Some("gate"));
+
+        assert_eq!(
+            steps[0].artifact_snapshot.as_ref().unwrap().repositories,
+            ["repo".to_string()]
+        );
+        assert_eq!(steps[1].artifact_inputs, ["build".to_string()]);
+        assert_eq!(steps[1].artifact_access, ArtifactAccess::Immutable);
+        assert_eq!(steps[3].kind.as_deref(), Some("gate"));
+        assert_eq!(
+            steps[3].gate.as_ref().unwrap().adjudication_step,
+            "adjudicate"
+        );
     }
 }

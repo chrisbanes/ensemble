@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,7 @@ use crate::config::ensemble::{
     StepKind,
 };
 use crate::orchestrator::resources::SchedulerReservation;
+use crate::pipeline::assessment::{evaluate_gate, GateEvidence, GateOutcome};
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::tracker::OwnershipLease;
@@ -135,6 +136,8 @@ pub struct PipelineRun {
     /// Content-free immutable Artifact evidence retained for restart recovery.
     pub artifact_integrity_violations: Vec<ArtifactIntegrityViolation>,
     pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
+    /// Deterministic assessment and adjudication evidence retained for each gate.
+    pub gate_evidence: HashMap<String, GateEvidence>,
     /// Immutable consumers whose launch was durably committed. This authorizes
     /// launch; it does not claim that the child processed any instructions.
     launched_immutable_consumers: HashSet<String>,
@@ -176,6 +179,8 @@ pub struct PipelineRunSnapshot {
     /// Consumers whose launches were durably committed before a crash.
     #[serde(default)]
     pub launched_immutable_consumers: HashSet<String>,
+    #[serde(default)]
+    pub gate_evidence: Box<HashMap<String, GateEvidence>>,
     #[serde(default)]
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     #[serde(default)]
@@ -219,6 +224,7 @@ impl PipelineRun {
             artifact_snapshots: HashMap::new(),
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
+            gate_evidence: HashMap::new(),
             launched_immutable_consumers: HashSet::new(),
             acceptance_attempts: Vec::new(),
             resolved_acceptance_plan: None,
@@ -243,6 +249,7 @@ impl PipelineRun {
                 artifact_access_evidence: self.artifact_access_evidence.clone(),
             }),
             launched_immutable_consumers: self.launched_immutable_consumers.clone(),
+            gate_evidence: Box::new(self.gate_evidence.clone()),
             acceptance_attempts: self.acceptance_attempts.clone(),
             resolved_acceptance_plan: self.resolved_acceptance_plan.clone(),
             dag_steps: self.dag.steps.clone(),
@@ -376,6 +383,7 @@ impl PipelineRun {
                 .artifact_integrity_evidence
                 .artifact_access_evidence,
             launched_immutable_consumers: snapshot.launched_immutable_consumers,
+            gate_evidence: *snapshot.gate_evidence,
             acceptance_attempts: snapshot.acceptance_attempts,
             resolved_acceptance_plan: snapshot.resolved_acceptance_plan,
             dag: StepDag {
@@ -445,7 +453,7 @@ impl PipelineRun {
 
     /// Compute the initial dispatch action — all root steps (no dependencies)
     /// are ready to run immediately.
-    pub fn start(&self) -> PipelineAction {
+    pub fn start(&mut self) -> PipelineAction {
         if self.all_passed() {
             return PipelineAction::Succeeded;
         }
@@ -478,22 +486,23 @@ impl PipelineRun {
         let result = output.result.clone();
         self.step_outputs.insert(step_name.to_string(), output);
         match result {
-            StepResult::Succeeded => match self.gate_check(step_name, approval_requested) {
-                ApprovalGateCheck::EligibleGating => {
-                    let approval_state = self.approval_state_for(step_name);
-                    self.step_states.insert(
-                        step_name.to_string(),
-                        StepState::AwaitingApproval {
-                            interaction_request_id: None,
-                        },
-                    );
-                    PipelineAction::AwaitingApproval {
-                        step: step_name.to_string(),
-                        approval_state,
+            StepResult::Succeeded | StepResult::Concern { .. } => {
+                match self.gate_check(step_name, approval_requested) {
+                    ApprovalGateCheck::EligibleGating => {
+                        let approval_state = self.approval_state_for(step_name);
+                        self.step_states.insert(
+                            step_name.to_string(),
+                            StepState::AwaitingApproval {
+                                interaction_request_id: None,
+                            },
+                        );
+                        PipelineAction::AwaitingApproval {
+                            step: step_name.to_string(),
+                            approval_state,
+                        }
                     }
-                }
-                ApprovalGateCheck::UnconfiguredButRequested => {
-                    self.step_states.insert(
+                    ApprovalGateCheck::UnconfiguredButRequested => {
+                        self.step_states.insert(
                         step_name.to_string(),
                         StepState::Errored {
                             error: format!(
@@ -501,34 +510,22 @@ impl PipelineRun {
                             ),
                         },
                     );
-                    PipelineAction::Failed {
+                        PipelineAction::Failed {
                         step: step_name.to_string(),
                         reason: format!(
                             "step '{step_name}' has no approval configuration but the worker requested one"
                         ),
                     }
-                }
-                ApprovalGateCheck::NotRequested => {
-                    self.step_states
-                        .insert(step_name.to_string(), StepState::Passed);
-                    if self.all_passed() {
-                        PipelineAction::Succeeded
-                    } else {
-                        self.find_dispatchable()
                     }
-                }
-            },
-            StepResult::Concern { .. } => {
-                // Concern is a non-terminal-review signal for humans and
-                // downstream steps. It intentionally continues like success
-                // without applying approval gates or unconfigured approval
-                // request errors.
-                self.step_states
-                    .insert(step_name.to_string(), StepState::Passed);
-                if self.all_passed() {
-                    PipelineAction::Succeeded
-                } else {
-                    self.find_dispatchable()
+                    ApprovalGateCheck::NotRequested => {
+                        self.step_states
+                            .insert(step_name.to_string(), StepState::Passed);
+                        if self.all_passed() {
+                            PipelineAction::Succeeded
+                        } else {
+                            self.find_dispatchable()
+                        }
+                    }
                 }
             }
             StepResult::Failed { summary } => {
@@ -657,11 +654,21 @@ impl PipelineRun {
     /// to pending, clearing any stored outputs for those steps.
     pub fn retry_from_step(&mut self, step_name: &str) -> HashSet<String> {
         let reset_steps = self.dag.downstream_steps(step_name);
+        let reset_gates = self
+            .dag
+            .steps
+            .iter()
+            .filter(|step| step.kind == StepKind::Gate && reset_steps.contains(step.name.as_str()))
+            .map(|step| step.name.clone())
+            .collect::<Vec<_>>();
         for step in &reset_steps {
             self.step_states.insert(step.clone(), StepState::Pending);
             self.step_outputs.remove(step);
             self.artifact_snapshots.remove(step);
             self.clear_immutable_consumer_launch_commitment(step);
+        }
+        for gate in reset_gates {
+            self.gate_evidence.remove(&gate);
         }
         reset_steps
     }
@@ -720,6 +727,7 @@ impl PipelineRun {
                         artifact_snapshot: None,
                         artifact_inputs: Vec::new(),
                         artifact_access: Default::default(),
+                        gate: None,
                         depends: original_deps,
                     },
                 );
@@ -854,7 +862,98 @@ impl PipelineRun {
     ///
     /// Returns [`PipelineAction::Dispatch`] with the ready steps, or
     /// [`PipelineAction::Waiting`] if nothing is currently dispatchable.
-    fn find_dispatchable(&self) -> PipelineAction {
+    fn find_dispatchable(&mut self) -> PipelineAction {
+        loop {
+            let ready_gate = self.dag.steps.iter().find(|step| {
+                step.kind == StepKind::Gate
+                    && self.step_states.get(&step.name) == Some(&StepState::Pending)
+                    && step.depends.iter().all(|dependency| {
+                        self.step_states.get(dependency) == Some(&StepState::Passed)
+                    })
+            });
+            let Some(step) = ready_gate.cloned() else {
+                break;
+            };
+            let Some(config) = step.gate else {
+                let reason = format!(
+                    "gate step '{}' has no resolved gate configuration",
+                    step.name
+                );
+                self.step_states.insert(
+                    step.name.clone(),
+                    StepState::Errored {
+                        error: reason.clone(),
+                    },
+                );
+                return PipelineAction::Failed {
+                    step: step.name,
+                    reason,
+                };
+            };
+            let outputs = config
+                .assessment_steps
+                .iter()
+                .chain(std::iter::once(&config.adjudication_step))
+                .filter_map(|source| {
+                    self.step_outputs
+                        .get(source)
+                        .cloned()
+                        .map(|output| (source.clone(), output))
+                })
+                .collect::<BTreeMap<_, _>>();
+            let evidence = match evaluate_gate(
+                &config.assessment_steps,
+                &config.adjudication_step,
+                &outputs,
+            ) {
+                Ok(evidence) => evidence,
+                Err(reason) => {
+                    self.step_states.insert(
+                        step.name.clone(),
+                        StepState::Failed {
+                            summary: reason.clone(),
+                        },
+                    );
+                    return PipelineAction::Failed {
+                        step: step.name,
+                        reason,
+                    };
+                }
+            };
+            let outcome = evidence.outcome;
+            self.gate_evidence.insert(step.name.clone(), evidence);
+            match outcome {
+                GateOutcome::Passed => {
+                    self.step_states.insert(step.name, StepState::Passed);
+                }
+                GateOutcome::Failed => {
+                    let reason = "gate upheld a blocking finding".to_string();
+                    self.step_states.insert(
+                        step.name.clone(),
+                        StepState::Failed {
+                            summary: reason.clone(),
+                        },
+                    );
+                    return PipelineAction::Failed {
+                        step: step.name,
+                        reason,
+                    };
+                }
+                GateOutcome::AwaitingHuman => {
+                    self.step_states.insert(
+                        step.name.clone(),
+                        StepState::AwaitingApproval {
+                            interaction_request_id: None,
+                        },
+                    );
+                    return PipelineAction::AwaitingApproval {
+                        step: step.name,
+                        approval_state: None,
+                    };
+                }
+            }
+        }
+
         let passed: HashSet<String> = self
             .dag
             .steps
@@ -868,7 +967,8 @@ impl PipelineRun {
             .steps
             .iter()
             .filter(|s| {
-                self.step_states.get(&s.name) == Some(&StepState::Pending)
+                s.kind != StepKind::Gate
+                    && self.step_states.get(&s.name) == Some(&StepState::Pending)
                     && s.depends.iter().all(|dep| passed.contains(dep))
             })
             .map(|s| DispatchRequest {
@@ -1023,7 +1123,7 @@ mod tests {
         ArtifactAccessEnforcement, ArtifactRepositoryObservation, ArtifactSnapshot,
     };
     use crate::config::ensemble::{
-        ArtifactSnapshotConfig, OnFailure, OutputSchemaConfig, StepApprovalConfig,
+        ArtifactSnapshotConfig, GateConfig, OnFailure, OutputSchemaConfig, StepApprovalConfig,
         StepApprovalMode, StepConfig, StepKind,
     };
     use crate::pipeline::dag::build_dag;
@@ -1052,6 +1152,7 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }
     }
 
@@ -1072,6 +1173,53 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
+        }
+    }
+
+    fn assessment_gate() -> StepConfig {
+        StepConfig {
+            name: "gate".to_string(),
+            kind: StepKind::Gate,
+            agent: String::new(),
+            depends: Some(vec!["adjudicate".to_string()]),
+            tracker_state: None,
+            timeout_ms: None,
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+            resource_requests: Default::default(),
+            affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: Some(GateConfig {
+                assessment_steps: vec!["review".to_string()],
+                adjudication_step: "adjudicate".to_string(),
+            }),
+        }
+    }
+
+    fn assessment_output() -> StepOutput {
+        StepOutput {
+            result: StepResult::Succeeded,
+            summary: None,
+            output: Some(json!({"assessment": {"findings": [{
+                "id": "finding-1", "severity": "blocking", "summary": "A finding",
+                "evidence": {"source": "test"}
+            }]}})),
+        }
+    }
+
+    fn adjudication_output(disposition: &str) -> StepOutput {
+        StepOutput {
+            result: StepResult::Succeeded,
+            summary: None,
+            output: Some(json!({"adjudication": {"dispositions": [{
+                "source_step": "review", "finding_id": "finding-1", "disposition": disposition,
+                "rationale": "Checked", "evidence": {"source": "test"}
+            }]}})),
         }
     }
 
@@ -1467,8 +1615,9 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }];
-        let run = make_run(&steps);
+        let mut run = make_run(&steps);
 
         let PipelineAction::Dispatch(requests) = run.start() else {
             panic!("expected dispatch action");
@@ -1504,6 +1653,7 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }
     }
 
@@ -1538,6 +1688,7 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }
     }
 
@@ -2166,7 +2317,7 @@ mod tests {
     }
 
     #[test]
-    fn concern_with_unconfigured_approval_request_continues_and_enters_context() {
+    fn concern_with_unconfigured_approval_request_fails_like_success() {
         let steps = vec![
             make_step("review", "reviewer", &[]),
             make_step("synth", "synthesizer", &["review"]),
@@ -2186,25 +2337,15 @@ mod tests {
             true,
         );
 
-        assert!(
-            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "synth"),
-            "expected concern to continue and dispatch synth, got {action:?}"
-        );
-        assert_eq!(run.step_states["review"], StepState::Passed);
-
-        let context = run.output_context_for("synth").unwrap();
-        assert_eq!(context.dependency_outputs.len(), 1);
-        assert_eq!(context.dependency_outputs[0].step, "review");
-        assert_eq!(context.dependency_outputs[0].result, "concern");
-        assert_eq!(
-            context.dependency_outputs[0].summary.as_deref(),
-            Some("minor issue found")
-        );
-        assert_eq!(context.steps["review"].result, "concern");
+        assert!(matches!(action, PipelineAction::Failed { ref step, .. } if step == "review"));
+        assert!(matches!(
+            run.step_states["review"],
+            StepState::Errored { .. }
+        ));
     }
 
     #[test]
-    fn concern_result_on_always_approval_step_bypasses_gate_and_dispatches_downstream() {
+    fn concern_result_on_always_approval_step_waits_for_approval() {
         let steps = vec![
             make_step_with_approval(
                 "review",
@@ -2230,19 +2371,21 @@ mod tests {
             false,
         );
 
-        assert!(
-            matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "synth"),
-            "expected concern on approval-gated step to dispatch synth without gating, got {action:?}"
+        assert_eq!(
+            action,
+            PipelineAction::AwaitingApproval {
+                step: "review".to_string(),
+                approval_state: Some("Review gate".to_string()),
+            }
         );
-        assert_eq!(run.step_states["review"], StepState::Passed);
-        assert!(!matches!(
+        assert!(matches!(
             run.step_states["review"],
             StepState::AwaitingApproval { .. }
         ));
     }
 
     #[test]
-    fn concern_result_on_terminal_always_approval_step_bypasses_gate_and_succeeds() {
+    fn concern_result_on_terminal_always_approval_step_waits_for_approval() {
         let steps = vec![make_step_with_approval(
             "review",
             "reviewer",
@@ -2265,8 +2408,143 @@ mod tests {
             false,
         );
 
-        assert_eq!(action, PipelineAction::Succeeded);
-        assert_eq!(run.step_states["review"], StepState::Passed);
+        assert_eq!(
+            action,
+            PipelineAction::AwaitingApproval {
+                step: "review".to_string(),
+                approval_state: Some("Review gate".to_string()),
+            }
+        );
+        assert!(matches!(
+            run.step_states["review"],
+            StepState::AwaitingApproval { .. }
+        ));
+    }
+
+    #[test]
+    fn ready_gate_passes_without_dispatching_an_agent() {
+        let steps = vec![
+            make_step("review", "reviewer", &[]),
+            StepConfig {
+                kind: StepKind::Synthesis,
+                depends: Some(vec!["review".to_string()]),
+                name: "adjudicate".to_string(),
+                agent: "synthesizer".to_string(),
+                tracker_state: None,
+                timeout_ms: None,
+                approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
+            },
+            assessment_gate(),
+            make_step("publish", "publisher", &["gate"]),
+        ];
+        let mut run = make_run(&steps);
+
+        assert!(matches!(run.start(), PipelineAction::Dispatch(_)));
+        let action = run.step_completed("review", assessment_output(), false);
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(requests) if requests[0].step_name == "adjudicate")
+        );
+        let action = run.step_completed("adjudicate", adjudication_output("dismissed"), false);
+
+        assert!(
+            matches!(&action, PipelineAction::Dispatch(requests) if requests.len() == 1 && requests[0].step_name == "publish")
+        );
+        assert_eq!(run.step_states["gate"], StepState::Passed);
+        assert!(run.gate_evidence.contains_key("gate"));
+    }
+
+    #[test]
+    fn retry_from_step_clears_evidence_for_reset_gates() {
+        let steps = vec![
+            make_step("review", "reviewer", &[]),
+            StepConfig {
+                kind: StepKind::Synthesis,
+                depends: Some(vec!["review".to_string()]),
+                name: "adjudicate".to_string(),
+                agent: "synthesizer".to_string(),
+                tracker_state: None,
+                timeout_ms: None,
+                approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
+            },
+            assessment_gate(),
+        ];
+        let mut run = make_run(&steps);
+
+        assert!(matches!(run.start(), PipelineAction::Dispatch(_)));
+        let _ = run.step_completed("review", assessment_output(), false);
+        let _ = run.step_completed("adjudicate", adjudication_output("dismissed"), false);
+        assert!(run.gate_evidence.contains_key("gate"));
+
+        run.retry_from_step("review");
+
+        assert!(!run.gate_evidence.contains_key("gate"));
+    }
+
+    #[test]
+    fn ready_gate_blocks_once_or_fails_from_structured_evidence() {
+        let steps = vec![
+            make_step("review", "reviewer", &[]),
+            StepConfig {
+                kind: StepKind::Synthesis,
+                depends: Some(vec!["review".to_string()]),
+                name: "adjudicate".to_string(),
+                agent: "synthesizer".to_string(),
+                tracker_state: None,
+                timeout_ms: None,
+                approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
+                resource_requests: Default::default(),
+                affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
+            },
+            assessment_gate(),
+        ];
+        let mut unresolved = make_run(&steps);
+        unresolved.start();
+        unresolved.step_completed("review", assessment_output(), false);
+        let action =
+            unresolved.step_completed("adjudicate", adjudication_output("unresolved"), false);
+        assert!(
+            matches!(action, PipelineAction::AwaitingApproval { ref step, .. } if step == "gate")
+        );
+        assert!(matches!(
+            unresolved.step_states["gate"],
+            StepState::AwaitingApproval { .. }
+        ));
+        assert_eq!(unresolved.approve_gate("gate"), PipelineAction::Succeeded);
+
+        let mut blocking = make_run(&steps);
+        blocking.start();
+        blocking.step_completed("review", assessment_output(), false);
+        let action = blocking.step_completed("adjudicate", adjudication_output("upheld"), false);
+        assert!(matches!(action, PipelineAction::Failed { ref step, .. } if step == "gate"));
+        assert!(matches!(
+            blocking.step_states["gate"],
+            StepState::Failed { .. }
+        ));
     }
 
     #[test]
@@ -2288,6 +2566,7 @@ mod tests {
                 artifact_snapshot: None,
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
+                gate: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -2305,6 +2584,7 @@ mod tests {
                 artifact_snapshot: None,
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
+                gate: None,
             },
         ];
         let mut run = make_run(&steps);

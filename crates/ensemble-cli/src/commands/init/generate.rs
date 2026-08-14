@@ -270,6 +270,10 @@ mod tests {
             kind: None,
             depends: None,
             tracker_state: Some("In Progress".to_string()),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         }];
 
         let yaml = generate_yaml(&tracker, &repos, &agents, &steps, "Done", "Failed");
@@ -320,6 +324,10 @@ mod tests {
                 kind: None,
                 depends: None,
                 tracker_state: Some("In Progress".to_string()),
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
             },
             PipelineStep {
                 name: "review".to_string(),
@@ -327,6 +335,10 @@ mod tests {
                 kind: None,
                 depends: Some(vec!["implement".to_string()]),
                 tracker_state: Some("Review".to_string()),
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
             },
         ];
 
@@ -387,6 +399,10 @@ mod tests {
             kind: None,
             depends: None,
             tracker_state: Some("In Progress".to_string()),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         }];
 
         let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
@@ -410,6 +426,10 @@ mod tests {
             kind: None,
             depends: None,
             tracker_state: None,
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         }];
         let tracker = TrackerChoice::TodoFile {
             path: PathBuf::from("TODO.md"),
@@ -437,6 +457,10 @@ mod tests {
             kind: None,
             depends: None,
             tracker_state: Some("In Progress".to_string()),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         }];
 
         let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
@@ -483,6 +507,10 @@ mod tests {
                 kind: None,
                 depends: Some(vec![]),
                 tracker_state: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -524,6 +552,10 @@ mod tests {
                 kind: None,
                 depends: Some(vec![]),
                 tracker_state: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -558,6 +590,10 @@ mod tests {
                 kind: None,
                 depends: Some(vec![]),
                 tracker_state: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: Default::default(),
+                gate: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),

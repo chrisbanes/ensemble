@@ -6,7 +6,7 @@
 //! round-trip to support custom user extensions.
 
 use crate::config::ensemble::{
-    state_worker_caps_schema, ModeDefinition, ModelDefinition, PermissionRequestPolicy,
+    state_worker_caps_schema, GateConfig, ModeDefinition, ModelDefinition, PermissionRequestPolicy,
     PermissionRequestPolicyMode, StepKind,
 };
 use crate::config::secrets::{SecretDisplay, SecretEdit};
@@ -84,6 +84,8 @@ pub struct GuidedStepForm {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub depends: Option<Vec<String>>,
     pub tracker_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<GateConfig>,
 }
 
 /// Runtime configuration in guided form.
@@ -245,6 +247,7 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 agent: s.agent.clone(),
                 depends: s.depends.clone(),
                 tracker_state: s.tracker_state.clone(),
+                gate: s.gate.clone(),
             })
             .collect(),
         runtime: GuidedRuntimeForm {
@@ -484,13 +487,11 @@ pub fn apply_guided_form(
         .enumerate()
         .map(|(idx, s)| {
             let mut step_mapping = existing_sequence_mapping(mapping, "steps", idx);
-            replace_known_fields(
-                &mut step_mapping,
-                [
-                    ("name", s.name.clone().into()),
-                    ("agent", s.agent.clone().into()),
-                ],
-            );
+            replace_known_fields(&mut step_mapping, [("name", s.name.clone().into())]);
+            step_mapping.remove("agent");
+            if !s.agent.is_empty() {
+                step_mapping.insert("agent".into(), s.agent.clone().into());
+            }
             step_mapping.remove("kind");
             if let Some(ref kind) = s.kind {
                 if kind != "agent" {
@@ -504,6 +505,14 @@ pub fn apply_guided_form(
             step_mapping.remove("tracker_state");
             if let Some(ref tracker_state) = s.tracker_state {
                 step_mapping.insert("tracker_state".into(), tracker_state.clone().into());
+            }
+            step_mapping.remove("gate");
+            if let Some(gate) = &s.gate {
+                step_mapping.insert(
+                    "gate".into(),
+                    serde_yaml::to_value(gate)
+                        .unwrap_or_else(|error| panic!("failed to serialize gate config: {error}")),
+                );
             }
             step_mapping.into()
         })
@@ -1038,6 +1047,7 @@ on_failure: Failed
                 agent: "builder".to_string(),
                 depends: Some(vec![]),
                 tracker_state: None,
+                gate: None,
             }],
             runtime: GuidedRuntimeForm {
                 max_cycles: 3,
@@ -1489,5 +1499,67 @@ on_failure: Failed
 
         assert!(merged.contains("kind: synthesis"));
         assert!(merged.contains("depends:"));
+    }
+
+    #[test]
+    fn guided_form_round_trips_an_agentless_gate_and_its_payload() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: build
+    agent: builder
+    artifact_snapshot:
+      repositories: [repo]
+  - name: review
+    agent: builder
+    depends: [build]
+    artifact_inputs: [build]
+    artifact_access: immutable
+  - name: adjudicate
+    kind: synthesis
+    agent: builder
+    depends: [review]
+  - name: assess
+    kind: gate
+    depends: [adjudicate]
+    gate:
+      assessment_steps: [review]
+      adjudication_step: adjudicate
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = extract_guided_form(raw).unwrap();
+        let step = form
+            .steps
+            .iter()
+            .find(|step| step.name == "assess")
+            .unwrap();
+        assert_eq!(step.agent, "");
+        assert_eq!(step.kind.as_deref(), Some("gate"));
+        assert_eq!(step.gate.as_ref().unwrap().adjudication_step, "adjudicate");
+
+        let merged = apply_guided_form(raw, &form).unwrap();
+        let value: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        let step = value["steps"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "assess")
+            .unwrap();
+        assert!(step.get("agent").is_none());
+        assert_eq!(
+            step["gate"]["assessment_steps"],
+            serde_yaml::to_value(["review"]).unwrap()
+        );
     }
 }
