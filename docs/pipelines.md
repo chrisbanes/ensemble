@@ -95,7 +95,7 @@ receives read approval for such a consumer
 unless its configured mode is `deny_all`; direct ACP cannot offer an equivalent runtime guarantee.
 The durable violation records a sorted, bounded list of repository-relative changed paths plus an
 omitted-path count, never contents or absolute paths. Source contents, absolute paths, ignored
-files, workspace copies, assessment gates, and automatic cleanup are deliberately out of scope.
+files, workspace copies, and automatic cleanup are deliberately out of scope.
 Tracked Gitlinks and untracked embedded Git repositories use their nested repository's ignore
 rules when the host can bind Git observation to an already opened directory; hosts without that
 descriptor-bound facility fail closed rather than observe a mutable external path. Self-contained
@@ -104,6 +104,42 @@ Git metadata contributes `info/exclude`. Standard tracked Gitfiles are never fol
 not observed and therefore remain part of the captured identity. The identity is journaled,
 appears beside direct dependency output and completed history, and is restored rather than
 recaptured after restart.
+
+## Assessment gates
+
+A `kind: gate` step is a deterministic non-agent step. It names immutable sibling assessment
+steps and one ordinary `synthesis` adjudication step. Every assessment source must consume the
+same single immutable Artifact producer, and the synthesis step must directly depend on every
+source. The gate can run only after those completed outputs are available; it never starts an
+agent, reserves a scheduler slot, prepares a workspace, or reads transcripts.
+
+```yaml
+- name: security
+  agent: reviewer
+  depends: [build]
+  artifact_inputs: [build]
+  artifact_access: immutable
+- name: adjudicate
+  kind: synthesis
+  agent: reviewer
+  depends: [security]
+- name: quality-gate
+  kind: gate
+  depends: [adjudicate]
+  gate:
+    assessment_steps: [security]
+    adjudication_step: adjudicate
+```
+
+Assessment output is `{"assessment":{"findings":[...]}}`. Each finding has a source-local
+non-empty `id` and `summary`, a `blocking` or `non_blocking` severity, and a non-empty object
+`evidence`. The synthesis output is `{"adjudication":{"dispositions":[...]}}`; it must contain
+exactly one evidence-backed `upheld`, `dismissed`, or `unresolved` disposition for every
+`source_step`/`finding_id` pair. Missing, duplicate, unknown, incomplete, or malformed evidence
+fails closed. Upheld blocking findings fail; non-blocking upheld findings are retained as durable
+evidence; unresolved findings create one durable accept/reject approval request. Accept resumes
+only downstream steps and reject fails the gate. Gate failure permits whole-issue retry or halt,
+never gate-local retry or fixup.
 
 ## Clarification request style (batched by default)
 

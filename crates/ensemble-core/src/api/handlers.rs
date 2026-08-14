@@ -1311,6 +1311,7 @@ on_failure: Failed
                     artifact_snapshots: Vec::new(),
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
+                    gate_evidence: Default::default(),
                 }),
             })
             .await
@@ -1371,6 +1372,7 @@ on_failure: Failed
                     artifact_snapshots: Vec::new(),
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
+                    gate_evidence: Default::default(),
                 }),
             })
             .await

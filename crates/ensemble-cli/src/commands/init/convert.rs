@@ -71,9 +71,13 @@ impl From<&PipelineStep> for SetupStep {
         SetupStep {
             name: step.name.clone(),
             agent_role: step.agent_role.clone(),
-            kind: None,
+            kind: step.kind.clone(),
             depends: step.depends.clone(),
             tracker_state: step.tracker_state.clone(),
+            artifact_snapshot: step.artifact_snapshot.clone(),
+            artifact_inputs: step.artifact_inputs.clone(),
+            artifact_access: step.artifact_access,
+            gate: step.gate.clone(),
         }
     }
 }

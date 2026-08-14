@@ -303,7 +303,8 @@ async fn immutable_artifact_postattempt_mutation_halts() {
         "mutated after capture\n"
     );
 
-    let journal = read_halted_pipeline_journal(fixture.config_dir.path())
+    let journal = wait_for_halted_pipeline_journal(fixture.config_dir.path())
+        .await
         .expect("halted pipeline journal should be durable");
     let violation = &journal["snapshot"]["artifact_integrity_violations"][0];
     assert_eq!(violation["consumer_step"], "review");
@@ -672,6 +673,17 @@ fn read_halted_pipeline_journal(config_dir: &Path) -> Result<Value, String> {
         "no durable pipeline_halted record under {}",
         journal_dir.display()
     ))
+}
+
+async fn wait_for_halted_pipeline_journal(config_dir: &Path) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        match read_halted_pipeline_journal(config_dir) {
+            Ok(record) => return Ok(record),
+            Err(error) if Instant::now() >= deadline => return Err(error),
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
 }
 
 fn yaml_quote(value: &str) -> String {

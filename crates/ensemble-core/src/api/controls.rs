@@ -416,6 +416,13 @@ pub async fn post_retry(
                     ),
                 );
             }
+            Err(ManualStepRetryError::GateRetryForbidden) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "gate_retry_forbidden",
+                    "gates can be retried only through a whole-issue cycle",
+                );
+            }
             Err(ManualStepRetryError::MaxCyclesExhausted) => {
                 return issue_error_response(
                     StatusCode::CONFLICT,
@@ -510,6 +517,7 @@ pub async fn post_retry(
             Err(
                 ManualStepRetryError::NoPipelineRun
                 | ManualStepRetryError::StepNotFound
+                | ManualStepRetryError::GateRetryForbidden
                 | ManualStepRetryError::MaxCyclesExhausted,
             ) => {
                 return issue_error_response(
@@ -1025,6 +1033,7 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }])
         .unwrap();
 

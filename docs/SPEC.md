@@ -274,6 +274,8 @@ Pipeline step definition:
 - `kind` (string, optional, default `"agent"`)
   - `"agent"` — normal agent-backed step.
   - `"synthesis"` — agent-backed step intended to merge or adjudicate direct dependency outputs.
+  - `"gate"` — deterministic non-agent evaluation of completed Assessment and adjudication
+    evidence. It launches no worker and may only use completed declared dependencies.
   Synthesis steps must declare `depends` explicitly.
 - `depends` (list of strings, optional) — step names this step depends on. If omitted, the step
   implicitly depends on the step directly before it in the list. The first step has no implicit
@@ -283,7 +285,8 @@ Pipeline step definition:
   - Maximum time in milliseconds for each runtime prompt or turn associated with this step.
   - Defaults to `agent.turn_timeout_ms` when omitted.
   - Must be greater than `0` when present.
-- `approval` (StepApprovalConfig, optional) — post-step approval gate:
+- `approval` (StepApprovalConfig, optional) — post-step approval gate for `succeeded` and
+  `concern` completion:
 
   - `mode` (string) — `always` or `when_requested_by_agent`. The latter waits for the agent to
     request approval via `.ensemble/approval-request.json`.

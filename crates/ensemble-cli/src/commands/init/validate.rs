@@ -95,6 +95,10 @@ mod tests {
             kind: None,
             depends: None,
             tracker_state: Some("In Progress".to_string()),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: Default::default(),
+            gate: None,
         }];
 
         let request = validation_request(&tracker, &repos, &agents, &steps);

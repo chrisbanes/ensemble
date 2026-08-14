@@ -653,6 +653,7 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }
     }
 

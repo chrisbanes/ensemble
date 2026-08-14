@@ -41,6 +41,7 @@ pub(crate) enum ManualStepRetryError {
     RuntimeUnavailable,
     NoPipelineRun,
     StepNotFound,
+    GateRetryForbidden,
     MaxCyclesExhausted,
     OwnerChanged,
     Interaction(InteractionError),
@@ -74,6 +75,12 @@ pub(crate) async fn queue_manual_step_retry(
         };
         if !run.step_states.contains_key(request.step_name) {
             return Err(ManualStepRetryError::StepNotFound);
+        }
+        if run
+            .step(request.step_name)
+            .is_some_and(|step| step.kind == crate::config::ensemble::StepKind::Gate)
+        {
+            return Err(ManualStepRetryError::GateRetryForbidden);
         }
 
         let previous_retry = state.retry_attempts.get(request.issue_id).cloned();
@@ -864,6 +871,7 @@ mod tests {
             artifact_snapshot: None,
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
+            gate: None,
         }])
         .unwrap();
         state.pipeline_runs.insert(
