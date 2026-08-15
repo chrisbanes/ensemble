@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -26,6 +28,9 @@ fn requires_durable_sync(kind: PipelineTransitionKind, created: bool) -> bool {
             PipelineTransitionKind::DeliveryOwned
                 | PipelineTransitionKind::PendingTerminalTransition
                 | PipelineTransitionKind::TerminalTransitionApplied
+                | PipelineTransitionKind::AuthorizationEvidenceSelected
+                | PipelineTransitionKind::AutomaticTransitionPending
+                | PipelineTransitionKind::AutomaticTransitionApplied
         )
 }
 
@@ -107,6 +112,10 @@ impl PipelineIssueJournalTransaction<'_> {
 pub enum PipelineTransitionKind {
     RunStarted,
     StepRunning,
+    /// Immutable event and Artifact evidence selected before protected dispatch.
+    AuthorizationEvidenceSelected,
+    AutomaticTransitionPending,
+    AutomaticTransitionApplied,
     /// A worker launch was durably committed; this authorizes gate delivery.
     StepLaunched,
     StepCompleted,
@@ -277,7 +286,17 @@ impl PipelineRunJournal {
         }
     }
 
-    async fn append_unlocked(
+    // Serialization and durable I/O retain a complete transition snapshot. Keep that large
+    // future separate from transaction callers such as dispatch and acceptance recovery.
+    fn append_unlocked<'a>(
+        &'a self,
+        input: PipelineTransitionInput,
+    ) -> Pin<Box<dyn Future<Output = Result<PipelineTransitionRecord, std::io::Error>> + Send + 'a>>
+    {
+        Box::pin(self.append_unlocked_inner(input))
+    }
+
+    async fn append_unlocked_inner(
         &self,
         input: PipelineTransitionInput,
     ) -> Result<PipelineTransitionRecord, std::io::Error> {
@@ -629,6 +648,17 @@ mod tests {
     }
 
     #[test]
+    fn authorization_handoff_records_require_durable_sync() {
+        for kind in [
+            PipelineTransitionKind::AuthorizationEvidenceSelected,
+            PipelineTransitionKind::AutomaticTransitionPending,
+            PipelineTransitionKind::AutomaticTransitionApplied,
+        ] {
+            assert!(requires_durable_sync(kind, false));
+        }
+    }
+
+    #[test]
     fn newly_created_journal_requires_durable_sync() {
         assert!(requires_durable_sync(
             PipelineTransitionKind::RunStarted,
@@ -654,6 +684,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 

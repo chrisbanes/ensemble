@@ -93,6 +93,23 @@ intervention rather than retrying automatically. A `step_launched` journal commi
 runtime gate; it authorizes launch, rather than proving the child executed instructions. ACPX
 receives read approval for such a consumer
 unless its configured mode is `deny_all`; direct ACP cannot offer an equivalent runtime guarantee.
+
+### Tracker-event authorization
+
+An `authorization` declaration binds dispatch to a direct Artifact producer and a
+tracker-normalized opaque field/value/actor event. Ensemble selects the latest qualifying event
+by timestamp and immutable event identity, persists it with the exact Artifact identity and output
+digest, and re-reads both before launch. Missing, changed, unsupported, or legacy Artifact evidence
+keeps the protected step pending. `wait_for_event` writes nothing; `automatic_transition` reuses
+the protected step's configured tracker state. Its pending intent is journaled before the remote
+write, and dispatch stays closed until the applied acknowledgement is durable; recovery observes an
+already-applied remote state without repeating the write. No tracker or development-method
+vocabulary enters the pipeline contract.
+
+Authorization is valid only for dispatched agent or synthesis steps. It is rejected on synchronous
+`gate` steps, which evaluate durable assessment evidence directly rather than opening a dispatch
+boundary.
+
 The durable violation records a sorted, bounded list of repository-relative changed paths plus an
 omitted-path count, never contents or absolute paths. Source contents, absolute paths, ignored
 files, workspace copies, and automatic cleanup are deliberately out of scope.

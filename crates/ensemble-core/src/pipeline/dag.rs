@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, GateConfig, OnFailure,
-    ResolvedOutputSchema, StepApprovalConfig, StepConfig, StepKind,
+    ResolvedOutputSchema, StepApprovalConfig, StepAuthorizationConfig, StepConfig, StepKind,
 };
 use crate::error::PipelineError;
 
@@ -34,6 +34,8 @@ pub struct DagStep {
     pub artifact_access: ArtifactAccess,
     #[serde(default)]
     pub gate: Option<GateConfig>,
+    #[serde(default)]
+    pub authorization: Option<StepAuthorizationConfig>,
     pub depends: Vec<String>,
 }
 
@@ -156,6 +158,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             artifact_inputs: step.artifact_inputs.clone(),
             artifact_access: step.artifact_access,
             gate: step.gate.clone(),
+            authorization: step.authorization.clone(),
             depends: deps,
         });
     }
@@ -256,6 +259,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 
@@ -277,6 +281,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 
@@ -439,6 +444,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -457,6 +463,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
         ];
 
@@ -489,6 +496,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -518,6 +526,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -553,6 +562,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }];
 
         let dag = build_dag(&steps).unwrap();

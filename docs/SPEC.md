@@ -292,6 +292,19 @@ Pipeline step definition:
     request approval via `.ensemble/approval-request.json`.
   - `state` (string, optional) — tracker state to mirror while waiting for approval. If set, the
     issue's tracker state is updated to this value during the approval hold.
+- `authorization` (StepAuthorizationConfig, optional) — pre-dispatch binding to one direct
+  Artifact producer and an adapter-normalized immutable event predicate. It is valid only for
+  dispatched `agent` or `synthesis` steps, not synchronous `gate` steps. Fields are:
+  - `artifact_step` (string) — a direct dependency that declares `artifact_snapshot`.
+  - `event` (object) — opaque `field`, `value`, and non-empty unique `actors` matched against
+    normalized immutable tracker events.
+  - `after_artifact` (bool, default `false`) — when true, the event must occur after the producer
+    Artifact capture.
+  - `handoff` (required) — `wait_for_event`, which writes nothing and forbids `tracker_state`, or
+    `automatic_transition`, which requires the protected step's `tracker_state` and writes it.
+    The runtime persists the selected event and exact Artifact identity/digest, then revalidates
+    both immediately before launch. Automatic handoff journals pending intent before the remote
+    write and opens dispatch only after its applied acknowledgement is durable.
 
 #### 4.1.5 Workspace
 
@@ -963,8 +976,9 @@ Pipeline step definitions forming a DAG. Each step is an object:
   - Required. References a named agent from `agents`.
 - `kind` (string, optional)
   - Default: `"agent"`.
-  - Step kind: `"agent"` for normal steps or `"synthesis"` for steps that merge/adjudicate direct
-    dependency outputs. Synthesis steps must declare `depends` explicitly.
+  - Step kind: `"agent"` for normal steps, `"synthesis"` for steps that merge/adjudicate direct
+    dependency outputs, or `"gate"` for deterministic non-agent assessment evaluation. Synthesis
+    steps must declare `depends` explicitly.
 - `depends` (list of strings, optional)
   - Step names this step depends on. The syntax can describe branches, but it does not guarantee
     parallel execution in the first release.
@@ -974,6 +988,10 @@ Pipeline step definitions forming a DAG. Each step is an object:
 - `tracker_state` (string, optional)
   - Tracker state to write when entering this step. For deferred multi-branch execution, a shared
     `tracker_state` is written once.
+- `authorization` (StepAuthorizationConfig, optional)
+  - Pre-dispatch authorization as specified in Section 4.1.4: a direct snapshot-producing
+    dependency, opaque event predicate, and explicit `wait_for_event` or
+    `automatic_transition` handoff constraints.
 
 #### 5.3.5 `on_success` (string)
 
@@ -1254,6 +1272,12 @@ Validation checks:
 - `steps` list is non-empty, all agent references resolve, all dependencies resolve, no cycles.
 - If any step has `tracker_state` or `on_success`/`on_failure` are set, the tracker must support
   writes (`supports_writes()` returns true).
+- Every `authorization` is valid only on a dispatched agent or synthesis step; its Artifact
+  producer is a direct dependency with `artifact_snapshot`, event field/value/actors are valid,
+  and its handoff's `tracker_state` constraint holds.
+- Before the configuration generation activates, the tracker validates immutable event evidence for
+  every configured authorization field. An unsupported field or event-history adapter is an
+  activation failure, not a dispatch-time bypass.
 - `on_success` and `on_failure` are present.
 
 ### 6.5 Config Fields Summary (Cheat Sheet)
@@ -1289,9 +1313,14 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier
 - `steps[].agent`: string, required; references a key in `agents`
-- `steps[].kind`: string, optional, default `"agent"`; `"agent"` or `"synthesis"`
+- `steps[].kind`: string, optional, default `"agent"`; `"agent"`, `"synthesis"`, or `"gate"`
 - `steps[].depends`: list of strings, optional; step dependencies for DAG
 - `steps[].tracker_state`: string, optional; tracker state to write on step entry
+- `steps[].authorization`: optional pre-dispatch contract for agent/synthesis steps only:
+  `{ artifact_step, event: { field, value, actors }, after_artifact: false, handoff }`; the
+  Artifact step is a direct snapshot-producing dependency. `handoff` is `wait_for_event` (no
+  write, no `tracker_state`) or `automatic_transition` (requires and writes `tracker_state`).
+  Adapter event evidence for every configured field must be supported at activation.
 - `on_success`: string, required; terminal tracker state on pipeline success
 - `on_failure`: string, required; terminal tracker state on pipeline failure/rejection
 - `concurrency.max_concurrent_agents`: integer, default `4`; global cap
@@ -2218,21 +2247,27 @@ Read operations:
 3. `fetch_issue_states_by_ids(issue_ids)`
    - Used for active-run reconciliation.
 
+4. `validate_event_evidence(field)` and `fetch_tracker_events(issue_id)`
+   - Required when configuration declares `steps[].authorization`.
+   - Activation must fail closed when the adapter cannot prove immutable history for a configured
+     opaque field. Event reads return normalized immutable `{ item_id, field_id, value, actor_id,
+     event_id, occurred_at }` records scoped to the issue; field and value remain adapter-opaque.
+
 Write operations:
 
-4. `supports_writes()`
+5. `supports_writes()`
    - Returns whether this tracker backend supports write operations.
    - Required for pipeline execution with `tracker_state`, `on_success`, or `on_failure`.
    - Backends that do not support writes should return false; the pipeline engine will fail fast
      at startup.
 
-5. `set_issue_state(issue_id, state)`
+6. `set_issue_state(issue_id, state)`
    - Transition an issue to the given state in the tracker.
    - Used by the pipeline engine at step boundaries (`tracker_state`), on pipeline success
      (`on_success`), and on pipeline failure/rejection (`on_failure`).
    - Default implementation returns `WritesNotSupported` error.
 
-6. `add_comment(issue_id, body)`
+7. `add_comment(issue_id, body)`
    - Add a comment to an issue in the tracker.
    - Used to surface pipeline results (for example failure summaries, rejection reasons).
    - Default implementation returns `WritesNotSupported` error.
@@ -2240,12 +2275,12 @@ Write operations:
 
 Optional interaction-thread operations (recommended for trackers with comment threads):
 
-7. `create_interaction_thread_root(issue_id, body)`
+8. `create_interaction_thread_root(issue_id, body)`
    - Creates the root comment used as the interaction thread anchor.
    - Returns tracker metadata (comment ID + URL) for later polling.
    - Backends that do not support this should return `WritesNotSupported`.
 
-8. `list_comments_after(issue_id, after_comment_id)`
+9. `list_comments_after(issue_id, after_comment_id)`
    - Lists comments newer than a given anchor comment.
    - Used by orchestrator ticks to ingest slash commands for open interactions.
    - Backends that do not support this should return `WritesNotSupported`.
@@ -2342,12 +2377,16 @@ Recommended error categories:
 - `github_unknown_payload`
 - `github_missing_end_cursor` (pagination integrity error)
 - `writes_not_supported` (tracker does not support write operations)
+- `event_evidence_unsupported` (tracker cannot prove immutable history for a configured
+  authorization field)
 
 Orchestrator behavior on tracker errors:
 
 - Candidate fetch failure: log and skip dispatch for this tick.
 - Running-state refresh failure: log and keep active workers running.
 - Startup terminal cleanup failure: log warning and continue startup.
+- Authorization-evidence validation failure: fail configuration activation closed; do not run a
+  protected dispatch with unproved event history.
 
 ### 11.5 Tracker Writes (Hybrid Model)
 
@@ -2365,6 +2404,9 @@ Orchestrator-driven writes:
 - **Pipeline failure/rejection**: When any step fails or returns a failed result, the orchestrator
   writes `on_failure` (for example "Needs Rework"). This is a terminal state from the pipeline's
   perspective — a human must intervene.
+- **Automatic authorization handoff**: The orchestrator journals pending intent, writes the
+  protected step's configured `tracker_state`, and journals applied acknowledgement before
+  dispatch. Recovery re-reads current state and does not repeat an already-applied write.
 
 Agent-driven writes:
 
@@ -3362,6 +3404,9 @@ resources; API saves return `409 Conflict` and watcher diagnostics expose no can
   one root step
 - Pipeline write validation: if steps use `tracker_state` or `on_success`/`on_failure`, tracker
   must support writes
+- Authorization validation rejects non-dispatched gate steps, non-direct or non-Artifact
+  producers, blank/duplicate event predicate fields, invalid handoff/state combinations, and
+  unsupported adapter event evidence at activation
 - Config defaults apply when optional values are missing
 - `tracker.kind` validation enforces currently supported kind (`github`)
 - `tracker.api_key` works (including `$VAR` indirection)
@@ -3400,6 +3445,8 @@ resources; API saves return `409 Conflict` and watcher diagnostics expose no can
 - Issue state refresh by ID returns minimal normalized issues
 - Issue state refresh query uses GitHub node IDs as specified in Section 11.2
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
+- If authorization is configured, event-history validation fails closed for unsupported fields and
+  event reads normalize immutable item, field, value, actor, identity, and timestamp evidence
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -3433,6 +3480,12 @@ resources; API saves return `409 Conflict` and watcher diagnostics expose no can
 - If a snapshot API is implemented, it returns running rows, retry rows, token totals, and rate
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
+- Authorization selects and persists the exact qualifying event with its direct Artifact identity,
+  revalidates both before protected dispatch, and keeps dispatch pending on missing or changed
+  evidence
+- Automatic authorization journals pending before its remote state write, requires durable applied
+  acknowledgement before dispatch, and recovery does not duplicate a write already reflected by
+  the tracker
 
 ### 17.5 ACP Agent Client
 

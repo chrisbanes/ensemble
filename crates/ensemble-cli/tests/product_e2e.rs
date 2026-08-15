@@ -8,15 +8,60 @@ use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+use wiremock::matchers::{body_string_contains, method, path};
+use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const ISSUE_ID: &str = "E2E-1";
 const ISSUE_TITLE: &str = "Exercise product workflow";
 // Exercise acceptance-failure lifecycle boundaries below Tokio's 2 MiB worker default so future
 // growth cannot silently reintroduce platform-dependent stack overflows.
 const ACCEPTANCE_FAILURE_WORKER_STACK_BYTES: usize = 15 * 128 * 1024;
+
+struct GithubTimelineResponder {
+    visible: Arc<AtomicBool>,
+}
+
+impl Respond for GithubTimelineResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        let nodes = self.visible.load(Ordering::SeqCst).then(|| {
+            serde_json::json!({
+                "id": "E_status_ready",
+                // Deliberately after the test Artifact capture. The adapter must still
+                // reject it until the fixture exposes it as tracker history.
+                "createdAt": "2099-01-01T00:00:00Z",
+                "previousStatus": "Todo",
+                "status": "In Progress",
+                "project": { "id": "P_configured" },
+                "actor": { "id": "U_operator", "login": "operator" }
+            })
+        });
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "timelineItems": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": nodes.into_iter().collect::<Vec<_>>()
+            }}}
+        }))
+    }
+}
+
+struct GithubMutationResponder {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for GithubMutationResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "updateProjectV2ItemFieldValue": {
+                "projectV2Item": { "id": "PVT_item" }
+            }}
+        }))
+    }
+}
 
 struct ChildGuard {
     child: Child,
@@ -655,12 +700,127 @@ async fn producer_approval_pause_exposes_prelaunch_immutable_drift() {
         .contains("Evaluation reviewer"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_wait_for_event_survives_restart_without_replaying_the_artifact_producer() {
+    let fixture = GithubAuthorizationFixture::new(false).await.unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let first = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_acpx_text(&fixture.fixture.acpx_log_path, "GitHub producer").await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let prompts_before_restart = fs::read_to_string(&fixture.fixture.acpx_log_path).unwrap();
+    assert!(
+        !prompts_before_restart.contains("GitHub protected"),
+        "protected step ran before external tracker evidence: {prompts_before_restart}"
+    );
+    assert_eq!(fixture.mutations.load(Ordering::SeqCst), 0);
+
+    drop(first);
+    let restarted = spawn_web(&fixture.fixture, port);
+    wait_for_server(&client, &base_url).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    assert_eq!(
+        fs::read_to_string(&fixture.fixture.acpx_log_path).unwrap(),
+        prompts_before_restart,
+        "restart must retain the completed Artifact producer and pending handoff"
+    );
+    assert_eq!(fixture.mutations.load(Ordering::SeqCst), 0);
+
+    fixture.event_visible.store(true, Ordering::SeqCst);
+    let completed = wait_for_history_step(&client, &base_url, "protected").await;
+    assert_eq!(completed["outcome"], "succeeded");
+    wait_for_acpx_text(&fixture.fixture.acpx_log_path, "GitHub protected").await;
+    let records = read_pipeline_journal_records(fixture.fixture.config_dir.path()).unwrap();
+    assert_journal_evidence_precedes_step(&records, "protected");
+    drop(restarted);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn github_automatic_transition_waits_for_revalidated_event_before_dispatch() {
+    let fixture = GithubAuthorizationFixture::new(true).await.unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let guard = spawn_web(&fixture.fixture, port);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_acpx_text(&fixture.fixture.acpx_log_path, "GitHub producer").await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let before = fs::read_to_string(&fixture.fixture.acpx_log_path).unwrap();
+    assert!(
+        !before.contains("GitHub protected"),
+        "protected step ran before tracker evidence: {before}"
+    );
+    assert_eq!(
+        fixture.mutations.load(Ordering::SeqCst),
+        0,
+        "automatic transition must not write its configured tracker state early"
+    );
+
+    fixture.event_visible.store(true, Ordering::SeqCst);
+    let completed = wait_for_history_step(&client, &base_url, "protected").await;
+    assert_eq!(completed["outcome"], "succeeded");
+    wait_for_acpx_text(&fixture.fixture.acpx_log_path, "GitHub protected").await;
+    assert!(
+        fixture.mutations.load(Ordering::SeqCst) >= 1,
+        "automatic transition should reuse the protected step's tracker state"
+    );
+    let records = read_pipeline_journal_records(fixture.fixture.config_dir.path()).unwrap();
+    assert_journal_evidence_precedes_step(&records, "protected");
+    drop(guard);
+
+    let drift = GithubAuthorizationFixture::new(true).await.unwrap();
+    let drift_port = reserve_local_port().unwrap();
+    let drift_base_url = format!("http://127.0.0.1:{drift_port}");
+    let drift_guard = spawn_web(&drift.fixture, drift_port);
+    wait_for_server(&client, &drift_base_url).await.unwrap();
+    wait_for_acpx_text(&drift.fixture.acpx_log_path, "GitHub producer").await;
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    let readme = find_workspace_file(&drift.fixture.workspace_root, "README.md").unwrap();
+    fs::write(readme, "drift after authorization Artifact capture\n").unwrap();
+    drift.event_visible.store(true, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !fs::read_to_string(&drift.fixture.acpx_log_path)
+            .unwrap()
+            .contains("GitHub protected"),
+        "Artifact drift must stop dispatch even when the event matches"
+    );
+    assert_eq!(drift.mutations.load(Ordering::SeqCst), 0);
+    drop(drift_guard);
+}
+
 struct TestFixture {
     config_dir: TempDir,
     todo_path: PathBuf,
     workspace_root: PathBuf,
     acpx_log_path: PathBuf,
     mock_bin_dir: PathBuf,
+}
+
+struct GithubAuthorizationFixture {
+    fixture: TestFixture,
+    _server: MockServer,
+    event_visible: Arc<AtomicBool>,
+    mutations: Arc<AtomicUsize>,
+}
+
+impl GithubAuthorizationFixture {
+    async fn new(automatic_transition: bool) -> io::Result<Self> {
+        let server = MockServer::start().await;
+        let event_visible = Arc::new(AtomicBool::new(false));
+        let mutations = Arc::new(AtomicUsize::new(0));
+        mount_github_authorization_api(&server, event_visible.clone(), mutations.clone()).await;
+        let fixture =
+            TestFixture::new_with_github_authorization(&server.uri(), automatic_transition)?;
+        Ok(Self {
+            fixture,
+            _server: server,
+            event_visible,
+            mutations,
+        })
+    }
 }
 
 impl TestFixture {
@@ -751,6 +911,44 @@ impl TestFixture {
         fs::write(
             root.join("config.yaml"),
             evaluation_config_yaml(&todo_path, &workspace_root, &repo_path),
+        )?;
+        fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(mock_bin_dir.join("acpx"), fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(Self {
+            config_dir,
+            todo_path,
+            workspace_root,
+            acpx_log_path,
+            mock_bin_dir,
+        })
+    }
+
+    fn new_with_github_authorization(
+        endpoint: &str,
+        automatic_transition: bool,
+    ) -> io::Result<Self> {
+        let config_dir = TempDir::new()?;
+        let root = config_dir.path();
+        let todo_path = root.join("unused-TODO.md");
+        let workspace_root = root.join("workspaces");
+        let repo_path = root.join("source");
+        let mock_bin_dir = root.join("bin");
+        let acpx_log_path = root.join("mock-acpx.log");
+        fs::create_dir_all(&workspace_root)?;
+        fs::create_dir_all(&mock_bin_dir)?;
+        init_git_repo(&repo_path)?;
+        fs::write(
+            root.join("config.yaml"),
+            github_authorization_config_yaml(
+                endpoint,
+                &workspace_root,
+                &repo_path,
+                automatic_transition,
+            ),
         )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
         #[cfg(unix)]
@@ -998,6 +1196,152 @@ agent: {{ read_timeout_ms: 5000, turn_timeout_ms: 10000, max_retry_backoff_ms: 1
     )
 }
 
+fn github_authorization_config_yaml(
+    endpoint: &str,
+    workspace_root: &Path,
+    repo_path: &Path,
+    automatic_transition: bool,
+) -> String {
+    let handoff = if automatic_transition {
+        "automatic_transition"
+    } else {
+        "wait_for_event"
+    };
+    let tracker_state = automatic_transition.then_some("    tracker_state: In Progress\n");
+    format!(
+        r#"
+tracker:
+  kind: github
+  endpoint: {}
+  api_key: fixture-token
+  repository: acme/repo
+  project_number: 1
+  github:
+    status_field: Status
+  active_states: [Todo]
+  terminal_states: [Done]
+workspace:
+  root: {}
+repos:
+  - path: {}
+    branch: main
+agents:
+  producer: {{ acpx_agent: builder, prompt: "GitHub producer" }}
+  protected: {{ acpx_agent: builder, prompt: "GitHub protected" }}
+steps:
+  - name: produce
+    agent: producer
+    artifact_snapshot: {{ repositories: [source] }}
+  - name: protected
+    agent: protected
+    depends: [produce]
+{}    authorization:
+      artifact_step: produce
+      event:
+        field: F_status
+        value: In Progress
+        actors: [U_operator]
+      after_artifact: true
+      handoff: {}
+on_success: Done
+on_failure: Done
+max_cycles: 1
+polling: {{ interval_ms: 100 }}
+concurrency: {{ max_concurrent_agents: 1, max_step_parallelism: 1 }}
+agent: {{ read_timeout_ms: 5000, turn_timeout_ms: 10000, max_retry_backoff_ms: 100 }}
+"#,
+        yaml_quote(endpoint),
+        yaml_quote(&workspace_root.display().to_string()),
+        yaml_quote(&repo_path.display().to_string()),
+        tracker_state.unwrap_or_default(),
+        handoff,
+    )
+}
+
+async fn mount_github_authorization_api(
+    server: &MockServer,
+    event_visible: Arc<AtomicBool>,
+    mutations: Arc<AtomicUsize>,
+) {
+    let discovery = serde_json::json!({ "data": { "repository": { "projectV2": {
+        "id": "P_configured",
+        "fields": { "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": [{
+            "id": "F_status", "name": "Status", "options": [
+                { "id": "O_todo", "name": "Todo" },
+                { "id": "O_progress", "name": "In Progress" },
+                { "id": "O_done", "name": "Done" }
+            ]
+        }] }
+    }}}});
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("projectNumber"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(discovery))
+        .mount(server)
+        .await;
+
+    let project_items = serde_json::json!({ "data": { "node": { "items": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "edges": [{ "cursor": "item-1", "node": {
+            "fieldValues": { "nodes": [{
+                "name": "Todo", "optionId": "O_todo",
+                "field": { "id": "F_status", "name": "Status" }
+            }]},
+            "content": {
+                "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "body": "",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "url": "https://github.example/acme/repo/issues/1",
+                "labels": { "nodes": [] }, "assignees": { "totalCount": 0, "nodes": [] }
+            }
+        }}]
+    }}}});
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("orderBy: {field: POSITION"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(project_items))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("timelineItems(first:"))
+        .respond_with(GithubTimelineResponder {
+            visible: event_visible,
+        })
+        .mount(server)
+        .await;
+
+    let project_item = serde_json::json!({ "data": { "node": { "projectItems": {
+        "nodes": [{ "id": "PVT_item", "project": { "id": "P_configured" } }]
+    }}}});
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("projectItems(first: 100)"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(project_item))
+        .mount(server)
+        .await;
+
+    let states = serde_json::json!({ "data": { "nodes": [{
+        "id": ISSUE_ID, "number": 1, "title": ISSUE_TITLE, "state": "OPEN",
+        "url": "https://github.example/acme/repo/issues/1",
+        "labels": { "nodes": [{ "name": "Todo" }] },
+        "assignees": { "totalCount": 0, "nodes": [] }
+    }]}});
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("nodes(ids:"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(states))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("updateProjectV2ItemFieldValue"))
+        .respond_with(GithubMutationResponder { calls: mutations })
+        .mount(server)
+        .await;
+}
+
 fn init_git_repo(repo_path: &Path) -> io::Result<()> {
     fs::create_dir_all(repo_path)?;
     let run = |args: &[&str]| -> io::Result<()> {
@@ -1194,6 +1538,95 @@ fi
 echo "unexpected mock acpx invocation: $*" >&2
 exit 2
 "#
+}
+
+fn spawn_web(fixture: &TestFixture, port: u16) -> ChildGuard {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    ChildGuard::new(command.spawn().expect("spawn ensemble web"))
+}
+
+async fn wait_for_acpx_text(path: &Path, text: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if fs::read_to_string(path).unwrap_or_default().contains(text) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for '{text}' in {}",
+            path.display()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn find_workspace_file(root: &Path, name: &str) -> io::Result<PathBuf> {
+    fn visit(directory: &Path, name: &str) -> io::Result<Option<PathBuf>> {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.file_name() == Some(OsStr::new(".git")) {
+                continue;
+            }
+            if path.file_name() == Some(OsStr::new(name)) {
+                return Ok(Some(path));
+            }
+            if path.is_dir() {
+                if let Some(found) = visit(&path, name)? {
+                    return Ok(Some(found));
+                }
+            }
+        }
+        Ok(None)
+    }
+    visit(root, name)?.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, name))
+}
+
+fn read_pipeline_journal_records(config_dir: &Path) -> Result<Vec<Value>, String> {
+    let journal_dir = config_dir.join("state").join("pipeline-runs");
+    let entries = fs::read_dir(journal_dir).map_err(|error| error.to_string())?;
+    let mut records = Vec::new();
+    for entry in entries {
+        let contents = fs::read_to_string(entry.map_err(|error| error.to_string())?.path())
+            .map_err(|error| error.to_string())?;
+        records.extend(
+            contents
+                .lines()
+                .map(serde_json::from_str)
+                .collect::<Result<Vec<Value>, _>>()
+                .map_err(|error| error.to_string())?,
+        );
+    }
+    records.sort_by_key(|record| record["seq"].as_u64());
+    Ok(records)
+}
+
+fn assert_journal_evidence_precedes_step(records: &[Value], step: &str) {
+    let evidence = records
+        .iter()
+        .find(|record| {
+            record["kind"] == "authorization_evidence_selected" && record["step"] == step
+        })
+        .expect("authorization evidence should be durable");
+    let running = records
+        .iter()
+        .find(|record| record["kind"] == "step_running" && record["step"] == step)
+        .expect("protected step should be durably running");
+    assert!(
+        evidence["seq"].as_u64() < running["seq"].as_u64(),
+        "authorization evidence must be journaled before dispatch: {records:#?}"
+    );
 }
 
 async fn wait_for_server(client: &reqwest::Client, base_url: &str) -> Result<(), String> {
@@ -1440,6 +1873,28 @@ async fn wait_for_history_record(
                 "history record not found before timeout: {json:#?}\npersisted history:\n{persisted_history}"
             ));
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_history_step(client: &reqwest::Client, base_url: &str, step: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let url = format!("{base_url}/api/v1/history?outcome=succeeded&step={step}");
+    loop {
+        if let Ok(response) = client.get(&url).send().await {
+            if let Ok(json) = response.json::<Value>().await {
+                if let Some(record) = json["records"]
+                    .as_array()
+                    .and_then(|records| records.first())
+                {
+                    return record.clone();
+                }
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for completed {step} history"
+        );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
