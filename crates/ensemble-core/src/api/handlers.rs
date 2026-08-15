@@ -141,6 +141,24 @@ pub async fn get_issue_detail(
     }
 
     if let Some(mut detail) = live_detail {
+        if detail.status.starts_with("completed_") {
+            match latest_history_record(&state.history_path, &identifier).await {
+                Ok(Some(record)) => {
+                    if record.artifacts.is_some() {
+                        detail.artifacts = record.artifacts;
+                    }
+                    detail.acceptance_attempts = record.acceptance_attempts;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let error = ApiError::new(
+                        "history_read_error",
+                        &format!("failed to read history: {error}"),
+                    );
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(error)).into_response();
+                }
+            }
+        }
         if let Err(response) = enrich_issue_attention(&state, exposure, &mut detail).await {
             return response;
         }
@@ -636,7 +654,7 @@ mod tests {
     use crate::config::ensemble::ConcurrencyConfig;
     use crate::history::model::{HistoryRecord, TokenTotals};
     use crate::history::writer::HistoryWriter;
-    use crate::orchestrator::state::OrchestratorState;
+    use crate::orchestrator::state::{CompletedEntry, OrchestratorState};
     use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
     use chrono::{TimeZone, Utc};
     use tempfile::NamedTempFile;
@@ -1334,6 +1352,106 @@ on_failure: Failed
 
         assert_eq!(detail["artifacts"]["run_id"].as_str(), Some("run-77"));
         assert_eq!(detail["workflow_steps"][0]["can_navigate"], true);
+    }
+
+    #[tokio::test]
+    async fn completed_detail_uses_terminal_history_artifacts_when_state_artifacts_lack_gate_evidence(
+    ) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let history_path = tmp.path().join("ensemble_history.jsonl");
+        let mut history_artifacts = crate::history::artifacts::RunArtifacts {
+            run_id: "run-history".into(),
+            workspace_path: tmp.path().join("repo-77").display().to_string(),
+            repos: Vec::new(),
+            transcripts: Vec::new(),
+            artifact_snapshots: Vec::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
+            gate_evidence: Default::default(),
+        };
+        history_artifacts.gate_evidence.insert(
+            "gate".into(),
+            crate::pipeline::assessment::GateEvidence {
+                assessments: Default::default(),
+                adjudication: crate::pipeline::assessment::Adjudication {
+                    dispositions: Vec::new(),
+                },
+                outcome: crate::pipeline::assessment::GateOutcome::Failed,
+                human_resolution: None,
+            },
+        );
+        HistoryWriter::new(history_path.clone())
+            .append(&HistoryRecord {
+                issue_identifier: "repo#77".into(),
+                issue_id: "NODE_77".into(),
+                outcome: "failed".into(),
+                steps_traversed: vec!["gate".into()],
+                attempts: 1,
+                tokens: TokenTotals {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                },
+                duration_seconds: 1,
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                last_error: None,
+                verdict: Some("failed".into()),
+                workspace_path: tmp.path().join("repo-77").display().to_string(),
+                acceptance_attempts: vec![],
+                artifacts: Some(history_artifacts),
+            })
+            .await
+            .unwrap();
+
+        let mut app_state = build_empty_state();
+        app_state.history_path = history_path;
+        app_state.workspace_root = tmp.path().display().to_string();
+        let mut completed_issue = test_issue();
+        completed_issue.id = "NODE_77".into();
+        completed_issue.identifier = "repo#77".into();
+        let stale_artifacts = crate::history::artifacts::RunArtifacts {
+            run_id: "run-stale".into(),
+            workspace_path: tmp.path().join("repo-77").display().to_string(),
+            repos: Vec::new(),
+            transcripts: Vec::new(),
+            artifact_snapshots: Vec::new(),
+            artifact_integrity_violations: Vec::new(),
+            artifact_access_evidence: Vec::new(),
+            gate_evidence: Default::default(),
+        };
+        {
+            let mut state = app_state.orchestrator_state.write().await;
+            state.completed.insert(
+                "NODE_77".into(),
+                CompletedEntry {
+                    issue_id: "NODE_77".into(),
+                    identifier: "repo#77".into(),
+                    run_id: Some("run-stale".into()),
+                    issue: completed_issue,
+                    status: "completed_failed".into(),
+                    workflow_steps: Vec::new(),
+                    completed_at: Utc::now(),
+                    outcome_summary: None,
+                },
+            );
+            state.artifacts.insert("NODE_77".into(), stale_artifacts);
+        }
+
+        let response = get_issue_detail(
+            State(app_state),
+            trusted_local(),
+            Path("repo#77".to_string()),
+        )
+        .await
+        .into_response();
+        let detail = response_json(response).await;
+
+        assert_eq!(detail["artifacts"]["run_id"], "run-history");
+        assert_eq!(
+            detail["artifacts"]["gate_evidence"]["gate"]["outcome"],
+            "failed"
+        );
     }
 
     #[tokio::test]

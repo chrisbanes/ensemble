@@ -58,6 +58,10 @@ pub struct GateEvidence {
     pub assessments: BTreeMap<String, Assessment>,
     pub adjudication: Adjudication,
     pub outcome: GateOutcome,
+    /// The authoritative human response for an initially unresolved gate.
+    /// Its absence means the deterministic gate outcome has not been resolved.
+    #[serde(default)]
+    pub human_resolution: Option<GateHumanResolution>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -66,6 +70,21 @@ pub enum GateOutcome {
     Passed,
     Failed,
     AwaitingHuman,
+}
+
+/// The durable disposition selected by an operator for an unresolved gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct GateHumanResolution {
+    pub decision: GateHumanDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GateHumanDecision {
+    Approved,
+    Rejected,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +188,7 @@ pub fn evaluate_gate(
         assessments,
         adjudication,
         outcome,
+        human_resolution: None,
     })
 }
 

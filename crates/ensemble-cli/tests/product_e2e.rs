@@ -333,6 +333,328 @@ async fn immutable_artifact_postattempt_mutation_halts() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_evaluation_evidence_reaches_live_api_and_completed_history() {
+    let fixture = TestFixture::new_with_evaluation().expect("fixture setup");
+    let port = reserve_local_port().expect("reserve local port");
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let child = command.spawn().expect("spawn ensemble web");
+    let _guard = ChildGuard::new(child);
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+
+    let detail = wait_for_completed_evaluation(&client, &base_url)
+        .await
+        .unwrap();
+    let gate = &detail["artifacts"]["gate_evidence"]["gate"];
+    assert_eq!(gate["outcome"], "passed");
+    assert_eq!(
+        gate["assessments"]["review_a"]["findings"][0]["id"],
+        "finding-1"
+    );
+    assert_eq!(
+        gate["adjudication"]["dispositions"][0]["disposition"],
+        "upheld"
+    );
+    assert_eq!(
+        detail["artifacts"]["artifact_snapshots"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let history = wait_for_evaluation_history_record(&client, &base_url, &fixture.workspace_root)
+        .await
+        .unwrap();
+    assert_eq!(
+        history["artifacts"]["gate_evidence"],
+        detail["artifacts"]["gate_evidence"]
+    );
+    assert_eq!(
+        history["artifacts"]["artifact_snapshots"],
+        detail["artifacts"]["artifact_snapshots"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_gate_approval_retains_its_deterministic_outcome_and_human_decision() {
+    let fixture = TestFixture::new_with_evaluation().unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_UNRESOLVED_GATE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let guard = ChildGuard::new(command.spawn().unwrap());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    let waiting = wait_for_unresolved_evaluation(&client, &base_url)
+        .await
+        .unwrap();
+    let prompts_before_restart = fs::read_to_string(&fixture.acpx_log_path).unwrap();
+    drop(guard);
+    let mut restarted = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    restarted
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_UNRESOLVED_GATE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let _restarted_guard = ChildGuard::new(restarted.spawn().unwrap());
+    wait_for_server(&client, &base_url).await.unwrap();
+    let prompts_after_restart = fs::read_to_string(&fixture.acpx_log_path).unwrap();
+    assert_eq!(
+        prompts_after_restart, prompts_before_restart,
+        "restart must not replay completed steps"
+    );
+    let interaction_id = waiting["current_interaction"]["interaction_request_id"]
+        .as_str()
+        .unwrap();
+    let response = client
+        .post(format!(
+            "{base_url}/api/v1/interactions/{interaction_id}/respond"
+        ))
+        .json(&serde_json::json!({
+            "kind": "approval", "response_schema_version": 1, "approved": true,
+            "reason": "accepted residual risk"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let resume = client
+        .post(format!("{base_url}/api/v1/issues/{ISSUE_ID}/resume"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resume.status().is_success());
+    let completed = wait_for_completed_evaluation(&client, &base_url)
+        .await
+        .unwrap();
+    let gate = &completed["artifacts"]["gate_evidence"]["gate"];
+    assert_eq!(gate["outcome"], "awaiting_human");
+    assert_eq!(gate["human_resolution"]["decision"], "approved");
+    assert_eq!(gate["human_resolution"]["reason"], "accepted residual risk");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unresolved_gate_rejection_retains_its_deterministic_outcome_and_human_decision() {
+    let fixture = TestFixture::new_with_evaluation().unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_UNRESOLVED_GATE", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let _guard = ChildGuard::new(command.spawn().unwrap());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    let waiting = wait_for_unresolved_evaluation(&client, &base_url)
+        .await
+        .unwrap();
+    let interaction_id = waiting["current_interaction"]["interaction_request_id"]
+        .as_str()
+        .unwrap();
+    let response = client
+        .post(format!(
+            "{base_url}/api/v1/interactions/{interaction_id}/respond"
+        ))
+        .json(&serde_json::json!({
+            "kind": "approval", "response_schema_version": 1, "approved": false,
+            "reason": "blocking risk remains"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    let resume = client
+        .post(format!("{base_url}/api/v1/issues/{ISSUE_ID}/resume"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resume.status().is_success());
+    let failed = wait_for_completed_evaluation_with_status(&client, &base_url, "completed_failed")
+        .await
+        .unwrap();
+    let gate = &failed["artifacts"]["gate_evidence"]["gate"];
+    assert_eq!(gate["outcome"], "awaiting_human");
+    assert_eq!(gate["human_resolution"]["decision"], "rejected");
+    assert_eq!(gate["human_resolution"]["reason"], "blocking risk remains");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dismissed_and_non_blocking_upheld_findings_pass_the_gate() {
+    for (disposition, severity) in [("dismissed", "blocking"), ("upheld", "non_blocking")] {
+        let detail = run_evaluation_variant(disposition, severity, "completed_succeeded").await;
+        assert_eq!(
+            detail["artifacts"]["gate_evidence"]["gate"]["outcome"],
+            "passed"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upheld_blocking_finding_fails_the_gate() {
+    let detail = run_evaluation_variant("upheld", "blocking", "completed_failed").await;
+    assert_eq!(
+        detail["artifacts"]["gate_evidence"]["gate"]["outcome"],
+        "failed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concern_result_can_be_approved_through_the_public_interaction() {
+    let fixture = TestFixture::new_with_concern_approval().unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_CONCERN_PUBLISH", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let _guard = ChildGuard::new(command.spawn().unwrap());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    let waiting = wait_for_interaction_step(&client, &base_url, "publish")
+        .await
+        .unwrap();
+    let id = waiting["current_interaction"]["interaction_request_id"]
+        .as_str()
+        .unwrap();
+    assert!(client.post(format!("{base_url}/api/v1/interactions/{id}/respond"))
+        .json(&serde_json::json!({"kind":"approval","response_schema_version":1,"approved":true,"reason":"approved concern"}))
+        .send().await.unwrap().status().is_success());
+    assert!(client
+        .post(format!("{base_url}/api/v1/issues/{ISSUE_ID}/resume"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    let completed = wait_for_completed_evaluation(&client, &base_url)
+        .await
+        .unwrap();
+    assert_eq!(
+        completed["workflow_steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["name"] == "publish")
+            .unwrap()["state"],
+        "passed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hidden_extraction_repair_succeeds_once_and_exhaustion_fails() {
+    let repaired = run_repair_variant("1", "completed_succeeded").await;
+    assert_eq!(repaired["status"], "completed_succeeded");
+    let exhausted = run_repair_variant("exhaust", "completed_failed").await;
+    assert_eq!(exhausted["status"], "completed_failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producer_approval_pause_exposes_prelaunch_immutable_drift() {
+    let fixture = TestFixture::new_with_producer_approval().unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let _guard = ChildGuard::new(command.spawn().unwrap());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    let waiting = wait_for_interaction_step(&client, &base_url, "produce")
+        .await
+        .unwrap();
+    let workspace = PathBuf::from(waiting["workspace"]["path"].as_str().unwrap());
+    let source = fs::read_dir(workspace.join("source"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    fs::write(source.join("README.md"), "drift before evaluator launch\n").unwrap();
+    let id = waiting["current_interaction"]["interaction_request_id"]
+        .as_str()
+        .unwrap();
+    assert!(client.post(format!("{base_url}/api/v1/interactions/{id}/respond")).json(&serde_json::json!({"kind":"approval","response_schema_version":1,"approved":true,"reason":null})).send().await.unwrap().status().is_success());
+    assert!(client
+        .post(format!("{base_url}/api/v1/issues/{ISSUE_ID}/resume"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    let halted = wait_for_interaction_step(&client, &base_url, "review_a")
+        .await
+        .unwrap();
+    assert_eq!(halted["current_interaction"]["step_name"], "review_a");
+    assert!(!fs::read_to_string(&fixture.acpx_log_path)
+        .unwrap()
+        .contains("Evaluation reviewer"));
+}
+
 struct TestFixture {
     config_dir: TempDir,
     todo_path: PathBuf,
@@ -412,6 +734,59 @@ impl TestFixture {
             acpx_log_path,
             mock_bin_dir,
         })
+    }
+
+    fn new_with_evaluation() -> io::Result<Self> {
+        let config_dir = TempDir::new()?;
+        let root = config_dir.path();
+        let todo_path = root.join("TODO.md");
+        let workspace_root = root.join("workspaces");
+        let repo_path = root.join("source");
+        let mock_bin_dir = root.join("bin");
+        let acpx_log_path = root.join("mock-acpx.log");
+        fs::create_dir_all(&workspace_root)?;
+        fs::create_dir_all(&mock_bin_dir)?;
+        init_git_repo(&repo_path)?;
+        fs::write(&todo_path, todo_fixture())?;
+        fs::write(
+            root.join("config.yaml"),
+            evaluation_config_yaml(&todo_path, &workspace_root, &repo_path),
+        )?;
+        fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(mock_bin_dir.join("acpx"), fs::Permissions::from_mode(0o755))?;
+        }
+        Ok(Self {
+            config_dir,
+            todo_path,
+            workspace_root,
+            acpx_log_path,
+            mock_bin_dir,
+        })
+    }
+
+    fn new_with_concern_approval() -> io::Result<Self> {
+        let fixture = Self::new_with_evaluation()?;
+        let config_path = fixture.config_dir.path().join("config.yaml");
+        let config = fs::read_to_string(&config_path)?.replace(
+            "  - name: publish\n    agent: publisher\n    depends: [gate]",
+            "  - name: publish\n    agent: publisher\n    depends: [gate]\n    approval:\n      mode: always",
+        );
+        fs::write(config_path, config)?;
+        Ok(fixture)
+    }
+
+    fn new_with_producer_approval() -> io::Result<Self> {
+        let fixture = Self::new_with_evaluation()?;
+        let config_path = fixture.config_dir.path().join("config.yaml");
+        let config = fs::read_to_string(&config_path)?.replace(
+            "  - name: produce\n    agent: producer\n    artifact_snapshot: { repositories: [source] }",
+            "  - name: produce\n    agent: producer\n    artifact_snapshot: { repositories: [source] }\n    approval:\n      mode: always",
+        );
+        fs::write(config_path, config)?;
+        Ok(fixture)
     }
 
     fn path_with_mock_bin(&self) -> OsString {
@@ -565,6 +940,64 @@ agent:
     )
 }
 
+fn evaluation_config_yaml(todo_path: &Path, workspace_root: &Path, repo_path: &Path) -> String {
+    format!(
+        r#"
+tracker:
+  kind: todo_file
+  path: {}
+  active_states: [Todo, In Progress]
+  terminal_states: [Done]
+workspace:
+  root: {}
+repos:
+  - path: {}
+    branch: main
+agents:
+  producer: {{ acpx_agent: builder, prompt: "Evaluation producer" }}
+  publisher: {{ acpx_agent: builder, prompt: "Evaluation publish" }}
+  reviewer: {{ acpx_agent: builder, prompt: "Evaluation reviewer" }}
+  synthesizer: {{ acpx_agent: builder, prompt: "Evaluation synthesis" }}
+steps:
+  - name: produce
+    agent: producer
+    artifact_snapshot: {{ repositories: [source] }}
+  - name: review_a
+    agent: reviewer
+    depends: [produce]
+    artifact_inputs: [produce]
+    artifact_access: immutable
+  - name: review_b
+    agent: reviewer
+    depends: [produce]
+    artifact_inputs: [produce]
+    artifact_access: immutable
+  - name: adjudicate
+    kind: synthesis
+    agent: synthesizer
+    depends: [review_a, review_b]
+  - name: gate
+    kind: gate
+    depends: [adjudicate]
+    gate:
+      assessment_steps: [review_a, review_b]
+      adjudication_step: adjudicate
+  - name: publish
+    agent: publisher
+    depends: [gate]
+on_success: Done
+on_failure: Failed
+max_cycles: 1
+polling: {{ interval_ms: 100 }}
+concurrency: {{ max_concurrent_agents: 2, max_step_parallelism: 2 }}
+agent: {{ read_timeout_ms: 5000, turn_timeout_ms: 10000, max_retry_backoff_ms: 100 }}
+"#,
+        yaml_quote(&todo_path.display().to_string()),
+        yaml_quote(&workspace_root.display().to_string()),
+        yaml_quote(&repo_path.display().to_string()),
+    )
+}
+
 fn init_git_repo(repo_path: &Path) -> io::Result<()> {
     fs::create_dir_all(repo_path)?;
     let run = |args: &[&str]| -> io::Result<()> {
@@ -632,9 +1065,7 @@ async fn wait_for_halted_immutable_issue(
         let response = client.get(&url).send().await.map_err(|e| e.to_string())?;
         if response.status().is_success() {
             let detail = response.json::<Value>().await.map_err(|e| e.to_string())?;
-            if detail["status"] == "waiting_on_human"
-                && detail["current_interaction"]["step_name"] == "review"
-            {
+            if detail["status"] == "waiting_on_human" {
                 return Ok(detail);
             }
             if Instant::now() >= deadline {
@@ -724,11 +1155,28 @@ if [[ " $* " == *" prompt "* ]]; then
   printf ' prompt-input=%s\n' "$prompt" >> "$log"
   mkdir -p "$cwd/.ensemble"
   cat > "$cwd/.ensemble/mock-prompt.txt"
-  if [[ "${ENSEMBLE_E2E_MISSING_HANDOFF:-}" == "1" ]]; then
-    printf '%s\n' '{"result":"succeeded","summary":"mock agent completed","output":{}}' > "$cwd/.ensemble/verdict-implement.json"
-  else
-    printf '%s\n' '{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}}' > "$cwd/.ensemble/verdict-implement.json"
+  verdict='{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}}'
+  if [[ "${ENSEMBLE_E2E_INVALID_EXTRACTION:-}" == "1" && "$prompt" == Extract* && "$prompt" == *"Evaluation publish"* ]]; then
+    verdict='{"invalid":"extraction"}'
+  elif [[ "${ENSEMBLE_E2E_INVALID_EXTRACTION:-}" == "1" && "$prompt" == "The previous Ensemble step result was invalid."* ]]; then
+    verdict='{"result":"succeeded","summary":"repaired","output":{"artifact":"repaired"}}'
+  elif [[ "${ENSEMBLE_E2E_INVALID_EXTRACTION:-}" == "exhaust" && "$prompt" == *"Extract the Ensemble step result"* && "$prompt" == *"Evaluation publish"* ]]; then
+    verdict='{"invalid":"extraction"}'
+  elif [[ "${ENSEMBLE_E2E_INVALID_EXTRACTION:-}" == "exhaust" && "$prompt" == "The previous Ensemble step result was invalid."* ]]; then
+    verdict='{"invalid":"repair"}'
+  elif [[ "${ENSEMBLE_E2E_CONCERN_PUBLISH:-}" == "1" && "$prompt" == *"Evaluation publish"* ]]; then
+    verdict='{"result":"concern","summary":"operator should approve","output":{"artifact":"mock"}}'
+  elif [[ "$prompt" == *"Evaluation reviewer"* ]]; then
+    severity="${ENSEMBLE_E2E_FINDING_SEVERITY:-non_blocking}"
+    verdict="{\"result\":\"succeeded\",\"summary\":\"assessment\",\"output\":{\"assessment\":{\"findings\":[{\"id\":\"finding-1\",\"severity\":\"$severity\",\"summary\":\"Minor concern\",\"evidence\":{\"path\":\"README.md\"}}]}}}"
+  elif [[ "$prompt" == *"Evaluation synthesis"* ]]; then
+    disposition="${ENSEMBLE_E2E_DISPOSITION:-upheld}"
+    if [[ "${ENSEMBLE_E2E_UNRESOLVED_GATE:-}" == "1" ]]; then disposition="unresolved"; fi
+    verdict="{\"result\":\"succeeded\",\"summary\":\"adjudication\",\"output\":{\"adjudication\":{\"dispositions\":[{\"source_step\":\"review_a\",\"finding_id\":\"finding-1\",\"disposition\":\"$disposition\",\"rationale\":\"retained\",\"evidence\":{\"path\":\"README.md\"}},{\"source_step\":\"review_b\",\"finding_id\":\"finding-1\",\"disposition\":\"$disposition\",\"rationale\":\"retained\",\"evidence\":{\"path\":\"README.md\"}}]}}}"
+  elif [[ "${ENSEMBLE_E2E_MISSING_HANDOFF:-}" == "1" ]]; then
+    verdict='{"result":"succeeded","summary":"mock agent completed","output":{}}'
   fi
+  printf '%s\n' "$verdict" > "$cwd/.ensemble/verdict-implement.json"
   if [[ "${ENSEMBLE_E2E_SKIP_REQUIRED_FILE:-}" != "1" ]]; then
     repo_worktree="$(find "$cwd/source" -mindepth 1 -maxdepth 1 -type d -print -quit)"
     printf 'artifact\n' > "$repo_worktree/acceptance.txt"
@@ -739,11 +1187,7 @@ if [[ " $* " == *" prompt "* ]]; then
 
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"mock agent completed"}}}}'
   printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed","content":{"type":"tool_call","name":"read_file","arguments":{"path":"Cargo.toml"}}}}}'
-  if [[ "${ENSEMBLE_E2E_MISSING_HANDOFF:-}" == "1" ]]; then
-    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":{"result":"succeeded","summary":"mock agent completed","output":{}},"stopReason":"end_turn"}}}'
-  else
-    printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":{"result":"succeeded","summary":"mock agent completed","output":{"artifact":"mock"}},"stopReason":"end_turn"}}}'
-  fi
+  printf '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"mock-session","update":{"sessionUpdate":"turn_complete","usage":{"input_tokens":3,"output_tokens":4,"total_tokens":7},"verdict":%s,"stopReason":"end_turn"}}}\n' "$verdict"
   exit 0
 fi
 
@@ -810,6 +1254,167 @@ async fn wait_for_completed_issue(
     }
 }
 
+async fn wait_for_completed_evaluation(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let url = format!("{base_url}/api/v1/{ISSUE_ID}");
+    loop {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if response.status().is_success() {
+            let detail = response
+                .json::<Value>()
+                .await
+                .map_err(|error| error.to_string())?;
+            if detail["status"] == "completed_succeeded"
+                && detail["artifacts"]["gate_evidence"]["gate"].is_object()
+            {
+                return Ok(detail);
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("evaluation evidence did not complete: {detail:#?}"));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_completed_evaluation_with_status(
+    client: &reqwest::Client,
+    base_url: &str,
+    status: &str,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let detail = client
+            .get(format!("{base_url}/api/v1/{ISSUE_ID}"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        if detail["status"] == status && detail["artifacts"]["gate_evidence"]["gate"].is_object() {
+            return Ok(detail);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("evaluation did not reach {status}: {detail:#?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn run_evaluation_variant(disposition: &str, severity: &str, status: &str) -> Value {
+    let fixture = TestFixture::new_with_evaluation().unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_DISPOSITION", disposition)
+        .env("ENSEMBLE_E2E_FINDING_SEVERITY", severity)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let _guard = ChildGuard::new(command.spawn().unwrap());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_completed_evaluation_with_status(&client, &base_url, status)
+        .await
+        .unwrap()
+}
+
+async fn run_repair_variant(mode: &str, status: &str) -> Value {
+    let fixture = TestFixture::new_with_evaluation().unwrap();
+    let port = reserve_local_port().unwrap();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ensemble"));
+    command
+        .arg("web")
+        .arg("--config-dir")
+        .arg(fixture.config_dir.path())
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .env("PATH", fixture.path_with_mock_bin())
+        .env("ENSEMBLE_E2E_ACPX_LOG", &fixture.acpx_log_path)
+        .env("ENSEMBLE_E2E_INVALID_EXTRACTION", mode)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    let _guard = ChildGuard::new(command.spawn().unwrap());
+    let client = reqwest::Client::new();
+    wait_for_server(&client, &base_url).await.unwrap();
+    wait_for_completed_evaluation_with_status(&client, &base_url, status)
+        .await
+        .unwrap()
+}
+
+async fn wait_for_unresolved_evaluation(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let detail = client
+            .get(format!("{base_url}/api/v1/{ISSUE_ID}"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        if detail["status"] == "waiting_on_human"
+            && detail["current_interaction"]["step_name"] == "gate"
+        {
+            return Ok(detail);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("unresolved gate did not wait: {detail:#?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_interaction_step(
+    client: &reqwest::Client,
+    base_url: &str,
+    step_name: &str,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let detail = client
+            .get(format!("{base_url}/api/v1/{ISSUE_ID}"))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        if detail["status"] == "waiting_on_human"
+            && detail["current_interaction"]["step_name"] == step_name
+        {
+            return Ok(detail);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("{step_name} did not await approval: {detail:#?}"));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn wait_for_history_record(
     client: &reqwest::Client,
     base_url: &str,
@@ -833,6 +1438,41 @@ async fn wait_for_history_record(
             });
             return Err(format!(
                 "history record not found before timeout: {json:#?}\npersisted history:\n{persisted_history}"
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_evaluation_history_record(
+    client: &reqwest::Client,
+    base_url: &str,
+    workspace_root: &Path,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let url = format!("{base_url}/api/v1/history?outcome=succeeded");
+    loop {
+        let response = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let json = response
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(record) = json["records"].as_array().and_then(|records| {
+            records
+                .iter()
+                .find(|record| record["issue_identifier"] == ISSUE_ID)
+        }) {
+            return Ok(record.clone());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "evaluation history record not found: {json:#?}\npersisted history:\n{}",
+                fs::read_to_string(workspace_root.join("ensemble_history.jsonl"))
+                    .unwrap_or_default()
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

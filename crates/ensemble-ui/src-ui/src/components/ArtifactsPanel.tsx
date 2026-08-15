@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import type { RunArtifacts, WorkflowStepInfo } from "@/generated/models";
+import { EvaluationEvidence } from "./EvaluationEvidence";
 
 interface ArtifactsPanelProps {
   identifier: string;
@@ -133,6 +134,8 @@ export default function ArtifactsPanel({
           </div>
         </div>
       ) : null}
+
+      {artifacts ? <EvaluationEvidence artifacts={artifacts} /> : null}
 
       {transcripts.length > 0 ? (
         <div className="rounded-lg border bg-muted/20 p-3">

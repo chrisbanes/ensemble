@@ -237,6 +237,14 @@ fn openapi_keeps_review_gate_evidence_on_issue_detail() {
         "#/components/schemas/ArtifactSnapshot"
     );
     assert_eq!(
+        schemas["RunArtifacts"]["properties"]["gate_evidence"]["additionalProperties"]["$ref"],
+        "#/components/schemas/GateEvidence"
+    );
+    assert_eq!(
+        schemas["GateEvidence"]["properties"]["human_resolution"]["oneOf"][1]["$ref"],
+        "#/components/schemas/GateHumanResolution"
+    );
+    assert_eq!(
         schemas["RepoFinalizeSnapshot"]["properties"]["observation"]["oneOf"][1]["$ref"],
         "#/components/schemas/DeliveryObservation"
     );

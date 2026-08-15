@@ -10117,49 +10117,19 @@ impl Orchestrator {
     // Keep snapshot projection out of the terminal worker-exit future's stack frame.
     #[inline(never)]
     fn history_artifacts_with_snapshots(
-        mut artifacts: Option<RunArtifacts>,
+        artifacts: Option<RunArtifacts>,
         run: &PipelineRun,
         run_id: Option<&str>,
         issue_id: &str,
         workspace_path: &str,
     ) -> Option<RunArtifacts> {
-        if run.artifact_snapshots.is_empty()
-            && run.artifact_integrity_violations.is_empty()
-            && run.artifact_access_evidence.is_empty()
-            && run.gate_evidence.is_empty()
-        {
-            return artifacts;
-        }
-        let mut snapshots = run.artifact_snapshots.values().cloned().collect::<Vec<_>>();
-        snapshots.sort_by(|left, right| left.producer_step.cmp(&right.producer_step));
-        let violations = run.artifact_integrity_violations.clone();
-        let access_evidence = run.artifact_access_evidence.clone();
-        let gate_evidence = run
-            .gate_evidence
-            .iter()
-            .map(|(step, evidence)| (step.clone(), evidence.clone()))
-            .collect();
-        match artifacts.as_mut() {
-            Some(artifacts) => {
-                artifacts.artifact_snapshots = snapshots;
-                artifacts.artifact_integrity_violations = violations;
-                artifacts.artifact_access_evidence = access_evidence;
-                artifacts.gate_evidence = gate_evidence;
-            }
-            None => {
-                artifacts = Some(RunArtifacts {
-                    run_id: run_id.unwrap_or(issue_id).to_string(),
-                    workspace_path: workspace_path.to_string(),
-                    repos: Vec::new(),
-                    transcripts: Vec::new(),
-                    artifact_snapshots: snapshots,
-                    artifact_integrity_violations: violations,
-                    artifact_access_evidence: access_evidence,
-                    gate_evidence,
-                });
-            }
-        }
-        artifacts
+        crate::history::artifacts::with_pipeline_evidence(
+            artifacts,
+            run,
+            run_id,
+            issue_id,
+            workspace_path,
+        )
     }
 
     pub(super) fn build_owned_history_record(
@@ -10713,17 +10683,12 @@ impl Orchestrator {
                             approved, reason, ..
                         } => {
                             if approved {
-                                run.approve_gate(&pipeline_step.name)
+                                run.approve_gate(&pipeline_step.name, reason)
                             } else {
-                                run.reject_gate(
-                                    &pipeline_step.name,
-                                    reason.unwrap_or_else(|| {
-                                        format!(
-                                            "approval rejected for step '{}'",
-                                            pipeline_step.name
-                                        )
-                                    }),
-                                )
+                                let failure_reason = reason.clone().unwrap_or_else(|| {
+                                    format!("approval rejected for step '{}'", pipeline_step.name)
+                                });
+                                run.reject_gate(&pipeline_step.name, failure_reason, reason)
                             }
                         }
                         _ => {
@@ -27442,6 +27407,7 @@ agent:
                     dispositions: Vec::new(),
                 },
                 outcome: crate::pipeline::assessment::GateOutcome::AwaitingHuman,
+                human_resolution: None,
             },
         );
         let requested_at = Utc::now();
@@ -28196,6 +28162,116 @@ agent:
         assert!(state.waiting_on_human.contains_key(&issue.id));
         assert!(!state.retry_attempts.contains_key(&issue.id));
         assert!(!worktree.exists());
+        drop(repo_temp);
+    }
+
+    #[tokio::test]
+    async fn restart_revalidates_stale_immutable_evaluator_inputs_without_rerunning_the_producer() {
+        let (repo_temp, mut repo) = create_finalize_repo().await;
+        repo.finalize = Default::default();
+        let repo_key = repository_key(&repo, 0);
+        let mut config = make_config();
+        config.repos = vec![repo.clone()];
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: vec![repo_key.clone()],
+        });
+        let mut review = config.steps[0].clone();
+        review.name = "review".to_string();
+        review.depends = Some(vec!["build".to_string()]);
+        review.artifact_snapshot = None;
+        review.artifact_inputs = vec!["build".to_string()];
+        review.artifact_access = ArtifactAccess::Immutable;
+        config.steps.push(review);
+        let issue = test_issue("immutable-restart-preflight", "Todo");
+        let temp = tempfile::tempdir().unwrap();
+        let (setup, _) = make_restart_test_orchestrator(&temp, &config, &issue);
+        let worktree = setup
+            .workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap()
+            .worktrees
+            .remove(&repo_key)
+            .unwrap()
+            .path;
+        let mut run = PipelineRun::new(issue.id.clone(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        let snapshot = artifact::capture(
+            "run-1",
+            1,
+            "build",
+            1,
+            &serde_json::Value::Null,
+            config.steps[0].artifact_snapshot.as_ref().unwrap(),
+            &BTreeMap::from([(repo_key, worktree.clone())]),
+        )
+        .await
+        .unwrap();
+        run.record_artifact_snapshot("build", snapshot);
+        run.step_states
+            .insert("build".to_string(), StepState::Passed);
+        run.mark_running("review", "crashed-review-session".to_string());
+        setup
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepRunning,
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                run_id: Some("run-1".to_string()),
+                cycle: 1,
+                step: Some("review".to_string()),
+                reason: None,
+                retry: None,
+                snapshot: Some(run.to_snapshot()),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+        drop(setup);
+
+        tokio::fs::write(
+            worktree.join("README.md"),
+            "mutated after evaluator crash\n",
+        )
+        .await
+        .unwrap();
+        let observed_commands = Arc::new(RwLock::new(Vec::new()));
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: Some(Arc::clone(&observed_commands)),
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let (restart, state) =
+            make_restart_test_orchestrator_with_runner(&temp, &config, &issue, runner);
+
+        restart.restore_pipeline_runs_from_journal().await;
+        assert_eq!(
+            state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("review"),
+            Some(&StepState::Pending),
+            "a stale evaluator must be re-dispatched through ordinary preflight"
+        );
+
+        restart.dispatch_issue(&issue, None).await;
+
+        assert!(
+            observed_commands.read().await.is_empty(),
+            "the mutated artifact must stop the stale evaluator before any producer or evaluator launch"
+        );
+        let state = state.read().await;
+        let run = state.get_pipeline_run(&issue.id).unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert!(state.waiting_on_human.contains_key(&issue.id));
+        assert_eq!(run.artifact_integrity_violations.len(), 1);
+        assert_eq!(run.artifact_integrity_violations[0].consumer_step, "review");
+        assert_eq!(run.artifact_integrity_violations[0].producer_step, "build");
         drop(repo_temp);
     }
 

@@ -347,6 +347,13 @@ orchestrator updates the issue tracker state to `approval.state` (if set) and wa
 `Rejected` transition does not write a separate rejection state — it is treated as a failure in the
 `on_failure` sense.
 
+**Evaluation evidence:** Live issue detail and completed history expose the same content-free
+artifact evidence envelope: immutable snapshot identities, access-enforcement records, bounded
+integrity violations, assessments and their exact adjudication dispositions, and gate outcomes.
+An initially `awaiting_human` gate retains that deterministic outcome after an operator approves
+or rejects it, alongside the optional human reason. Older records that omit evaluation fields
+remain readable and expose no inferred evaluation evidence.
+
 Pipeline run recovery:
 
 - Ensemble appends pipeline transition records to

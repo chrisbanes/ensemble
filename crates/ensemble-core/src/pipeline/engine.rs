@@ -9,7 +9,9 @@ use crate::config::ensemble::{
     StepKind,
 };
 use crate::orchestrator::resources::SchedulerReservation;
-use crate::pipeline::assessment::{evaluate_gate, GateEvidence, GateOutcome};
+use crate::pipeline::assessment::{
+    evaluate_gate, GateEvidence, GateHumanDecision, GateHumanResolution, GateOutcome,
+};
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::tracker::OwnershipLease;
@@ -563,13 +565,15 @@ impl PipelineRun {
 
     /// Mark an approval gate as approved, transitioning the step to `Passed`
     /// without re-running it and dispatching any downstream steps.
-    pub fn approve_gate(&mut self, step_name: &str) -> PipelineAction {
+    pub fn approve_gate(&mut self, step_name: &str, reason: Option<String>) -> PipelineAction {
         if !matches!(
             self.step_states.get(step_name),
             Some(StepState::AwaitingApproval { .. })
         ) {
             return PipelineAction::Waiting;
         }
+
+        self.record_gate_human_resolution(step_name, GateHumanDecision::Approved, reason);
 
         self.step_states
             .insert(step_name.to_string(), StepState::Passed);
@@ -581,13 +585,24 @@ impl PipelineRun {
     }
 
     /// Mark an approval gate as failed, halting the pipeline.
-    pub fn reject_gate(&mut self, step_name: &str, reason: String) -> PipelineAction {
+    pub fn reject_gate(
+        &mut self,
+        step_name: &str,
+        reason: String,
+        resolution_reason: Option<String>,
+    ) -> PipelineAction {
         if !matches!(
             self.step_states.get(step_name),
             Some(StepState::AwaitingApproval { .. })
         ) {
             return PipelineAction::Waiting;
         }
+
+        self.record_gate_human_resolution(
+            step_name,
+            GateHumanDecision::Rejected,
+            resolution_reason,
+        );
 
         self.step_states.insert(
             step_name.to_string(),
@@ -598,6 +613,20 @@ impl PipelineRun {
         PipelineAction::Failed {
             step: step_name.to_string(),
             reason,
+        }
+    }
+
+    fn record_gate_human_resolution(
+        &mut self,
+        step_name: &str,
+        decision: GateHumanDecision,
+        reason: Option<String>,
+    ) {
+        let Some(evidence) = self.gate_evidence.get_mut(step_name) else {
+            return;
+        };
+        if evidence.human_resolution.is_none() {
+            evidence.human_resolution = Some(GateHumanResolution { decision, reason });
         }
     }
 
@@ -1910,7 +1939,7 @@ mod tests {
             }
         );
 
-        let action = run.approve_gate("implement");
+        let action = run.approve_gate("implement", None);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
             "expected downstream review dispatch after approval, got {action:?}"
@@ -2003,7 +2032,7 @@ mod tests {
             }
         );
 
-        let action = run.approve_gate("implement");
+        let action = run.approve_gate("implement", None);
         assert!(
             matches!(&action, PipelineAction::Dispatch(reqs) if reqs.len() == 1 && reqs[0].step_name == "review"),
             "expected review dispatch after gate approval, got {action:?}"
@@ -2169,7 +2198,7 @@ mod tests {
         let action = run.bind_approval_interaction("review", "approval-789".to_string());
         assert_eq!(action, PipelineAction::Waiting);
 
-        let action = run.reject_gate("review", "needs more work".to_string());
+        let action = run.reject_gate("review", "needs more work".to_string(), None);
         assert_eq!(
             action,
             PipelineAction::Failed {
@@ -2534,7 +2563,22 @@ mod tests {
             unresolved.step_states["gate"],
             StepState::AwaitingApproval { .. }
         ));
-        assert_eq!(unresolved.approve_gate("gate"), PipelineAction::Succeeded);
+        assert_eq!(
+            unresolved.approve_gate(
+                "gate",
+                Some("operator accepted the residual risk".to_string())
+            ),
+            PipelineAction::Succeeded
+        );
+        let evidence = unresolved.gate_evidence.get("gate").unwrap();
+        assert_eq!(evidence.outcome, GateOutcome::AwaitingHuman);
+        assert_eq!(
+            evidence.human_resolution,
+            Some(crate::pipeline::assessment::GateHumanResolution {
+                decision: crate::pipeline::assessment::GateHumanDecision::Approved,
+                reason: Some("operator accepted the residual risk".to_string()),
+            })
+        );
 
         let mut blocking = make_run(&steps);
         blocking.start();
