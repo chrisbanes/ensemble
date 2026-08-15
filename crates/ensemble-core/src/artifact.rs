@@ -8,6 +8,7 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::{Mutex, OnceLock};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -72,6 +73,10 @@ pub struct ArtifactSnapshot {
     pub producer_step: String,
     pub attempt: u32,
     pub output_digest: String,
+    /// Instant at which the immutable producer evidence was captured. Older
+    /// snapshots intentionally deserialize without this proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<DateTime<Utc>>,
     pub repositories: Vec<ArtifactRepositoryObservation>,
 }
 
@@ -212,6 +217,7 @@ pub async fn capture(
         producer_step: producer_step.to_string(),
         attempt,
         output_digest,
+        captured_at: Some(Utc::now()),
         repositories: observations,
     })
 }
@@ -1394,7 +1400,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(first, second);
+        assert!(first.captured_at.is_some());
+        assert!(second.captured_at.is_some());
+        assert_eq!(first.identity, second.identity);
+        assert_eq!(first.output_digest, second.output_digest);
+        assert_eq!(first.repositories, second.repositories);
         assert_eq!(first.repositories[0].untracked_paths, vec!["visible.txt"]);
 
         tokio::fs::write(dir.path().join("ignored.out"), "changed ignored content")
@@ -1411,7 +1421,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(first, after_ignored_change);
+        assert!(after_ignored_change.captured_at.is_some());
+        assert_eq!(first.identity, after_ignored_change.identity);
+        assert_eq!(first.output_digest, after_ignored_change.output_digest);
+        assert_eq!(first.repositories, after_ignored_change.repositories);
     }
 
     #[tokio::test]

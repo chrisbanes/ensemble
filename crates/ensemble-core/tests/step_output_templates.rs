@@ -46,6 +46,7 @@ fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         artifact_inputs: Vec::new(),
         artifact_access: Default::default(),
         gate: None,
+        authorization: None,
     }
 }
 

@@ -6,7 +6,7 @@ use crate::acceptance::AcceptanceAttempt;
 use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
-    StepKind,
+    StepAuthorizationConfig, StepKind,
 };
 use crate::orchestrator::resources::SchedulerReservation;
 use crate::pipeline::assessment::{
@@ -14,7 +14,7 @@ use crate::pipeline::assessment::{
 };
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
-use crate::tracker::OwnershipLease;
+use crate::tracker::{model::TrackerEvent, OwnershipLease};
 
 /// The execution state of a single pipeline step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -138,6 +138,10 @@ pub struct PipelineRun {
     /// Content-free immutable Artifact evidence retained for restart recovery.
     pub artifact_integrity_violations: Vec<ArtifactIntegrityViolation>,
     pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
+    /// Selected immutable tracker event and exact Artifact binding for protected steps.
+    pub authorization_evidence: HashMap<String, AuthorizationEvidence>,
+    /// Durable intent and acknowledgement for automatic tracker handoffs.
+    automatic_transitions: HashMap<String, AutomaticTransitionState>,
     /// Deterministic assessment and adjudication evidence retained for each gate.
     pub gate_evidence: HashMap<String, GateEvidence>,
     /// Immutable consumers whose launch was durably committed. This authorizes
@@ -176,6 +180,10 @@ pub struct PipelineRunSnapshot {
     pub step_outputs: HashMap<String, StepOutput>,
     #[serde(default)]
     pub artifact_snapshots: HashMap<String, ArtifactSnapshot>,
+    #[serde(default)]
+    pub authorization_evidence: HashMap<String, AuthorizationEvidence>,
+    #[serde(default)]
+    pub automatic_transitions: HashMap<String, AutomaticTransitionState>,
     #[serde(flatten)]
     pub artifact_integrity_evidence: Box<ArtifactIntegrityEvidence>,
     /// Consumers whose launches were durably committed before a crash.
@@ -197,6 +205,26 @@ pub struct PipelineRunSnapshot {
     pub selected_workflow: Option<SelectedWorkflowSnapshot>,
     #[serde(default)]
     pub active_scheduler_reservations: HashMap<String, SchedulerReservation>,
+}
+
+/// Durable evidence that one protected step was authorized against one exact
+/// Artifact snapshot. The event remains adapter-normalized and opaque.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthorizationEvidence {
+    pub event: TrackerEvent,
+    pub artifact_identity: String,
+    pub artifact_output_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutomaticTransitionState {
+    Pending {
+        target_state: String,
+        expected_state: String,
+    },
+    Applied {
+        target_state: String,
+    },
 }
 
 /// Heap-backed durable evidence so empty immutable Artifact support does not enlarge every
@@ -226,6 +254,8 @@ impl PipelineRun {
             artifact_snapshots: HashMap::new(),
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
+            authorization_evidence: HashMap::new(),
+            automatic_transitions: HashMap::new(),
             gate_evidence: HashMap::new(),
             launched_immutable_consumers: HashSet::new(),
             acceptance_attempts: Vec::new(),
@@ -246,6 +276,8 @@ impl PipelineRun {
             step_states: self.step_states.clone(),
             step_outputs: self.step_outputs.clone(),
             artifact_snapshots: self.artifact_snapshots.clone(),
+            authorization_evidence: self.authorization_evidence.clone(),
+            automatic_transitions: self.automatic_transitions.clone(),
             artifact_integrity_evidence: Box::new(ArtifactIntegrityEvidence {
                 artifact_integrity_violations: self.artifact_integrity_violations.clone(),
                 artifact_access_evidence: self.artifact_access_evidence.clone(),
@@ -310,6 +342,139 @@ impl PipelineRun {
             .iter()
             .find(|step| step.name == step_name)
             .map(|step| (step.artifact_inputs.as_slice(), step.artifact_access))
+    }
+
+    pub(crate) fn authorization_for(&self, step_name: &str) -> Option<&StepAuthorizationConfig> {
+        self.dag
+            .steps
+            .iter()
+            .find(|step| step.name == step_name)
+            .and_then(|step| step.authorization.as_ref())
+    }
+
+    /// Choose a matching event deterministically and bind it to the configured
+    /// upstream Artifact. Missing publication time is legacy evidence and does
+    /// not satisfy an ordering requirement.
+    pub(crate) fn select_authorization_evidence(
+        &self,
+        step_name: &str,
+        events: &[TrackerEvent],
+    ) -> Option<AuthorizationEvidence> {
+        let authorization = self.authorization_for(step_name)?;
+        let artifact = self.artifact_snapshots.get(&authorization.artifact_step)?;
+        let mut identities = HashMap::new();
+        for event in events {
+            if let Some(previous) = identities.insert(&event.event_id, event) {
+                if previous != event {
+                    return None;
+                }
+            }
+        }
+        let mut matching = events
+            .iter()
+            .filter(|event| {
+                event.item_id == self.issue_id
+                    && event.field_id == authorization.event.field
+                    && event.value == authorization.event.value
+                    && authorization
+                        .event
+                        .actors
+                        .iter()
+                        .any(|actor| actor == &event.actor_id)
+                    && (!authorization.after_artifact
+                        || artifact
+                            .captured_at
+                            .is_some_and(|captured_at| event.occurred_at > captured_at))
+            })
+            .collect::<Vec<_>>();
+        matching.sort_by(|left, right| {
+            left.occurred_at
+                .cmp(&right.occurred_at)
+                .then_with(|| left.event_id.cmp(&right.event_id))
+        });
+        matching.last().map(|event| AuthorizationEvidence {
+            event: (*event).clone(),
+            artifact_identity: artifact.identity.clone(),
+            artifact_output_digest: artifact.output_digest.clone(),
+        })
+    }
+
+    pub(crate) fn authorization_evidence_is_current(
+        &self,
+        step_name: &str,
+        events: &[TrackerEvent],
+    ) -> bool {
+        self.authorization_evidence.get(step_name)
+            == self
+                .select_authorization_evidence(step_name, events)
+                .as_ref()
+    }
+
+    pub(crate) fn record_authorization_evidence(
+        &mut self,
+        step_name: &str,
+        evidence: AuthorizationEvidence,
+    ) {
+        self.authorization_evidence
+            .insert(step_name.to_string(), evidence);
+    }
+
+    pub(crate) fn clear_authorization_evidence(&mut self, step_name: &str) {
+        self.authorization_evidence.remove(step_name);
+    }
+
+    pub(crate) fn authorization_handoff(
+        &self,
+        step_name: &str,
+    ) -> Option<crate::config::ensemble::AuthorizationHandoffMode> {
+        self.authorization_for(step_name)
+            .map(|authorization| authorization.handoff)
+    }
+
+    pub(crate) fn automatic_transition_state(
+        &self,
+        step_name: &str,
+    ) -> Option<&AutomaticTransitionState> {
+        self.automatic_transitions.get(step_name)
+    }
+
+    pub(crate) fn set_automatic_transition_pending(
+        &mut self,
+        step_name: &str,
+        target_state: String,
+        expected_state: String,
+    ) {
+        self.automatic_transitions.insert(
+            step_name.to_string(),
+            AutomaticTransitionState::Pending {
+                target_state,
+                expected_state,
+            },
+        );
+    }
+
+    pub(crate) fn set_automatic_transition_applied(
+        &mut self,
+        step_name: &str,
+        target_state: String,
+    ) {
+        self.automatic_transitions.insert(
+            step_name.to_string(),
+            AutomaticTransitionState::Applied { target_state },
+        );
+    }
+
+    pub(crate) fn restore_automatic_transition_state(
+        &mut self,
+        step_name: &str,
+        previous: Option<AutomaticTransitionState>,
+    ) {
+        if let Some(previous) = previous {
+            self.automatic_transitions
+                .insert(step_name.to_string(), previous);
+        } else {
+            self.automatic_transitions.remove(step_name);
+        }
     }
 
     pub(crate) fn record_artifact_snapshot(&mut self, step_name: &str, snapshot: ArtifactSnapshot) {
@@ -378,6 +543,8 @@ impl PipelineRun {
             step_states: snapshot.step_states,
             step_outputs: snapshot.step_outputs,
             artifact_snapshots: snapshot.artifact_snapshots,
+            authorization_evidence: snapshot.authorization_evidence,
+            automatic_transitions: snapshot.automatic_transitions,
             artifact_integrity_violations: snapshot
                 .artifact_integrity_evidence
                 .artifact_integrity_violations,
@@ -694,6 +861,8 @@ impl PipelineRun {
             self.step_states.insert(step.clone(), StepState::Pending);
             self.step_outputs.remove(step);
             self.artifact_snapshots.remove(step);
+            self.authorization_evidence.remove(step);
+            self.automatic_transitions.remove(step);
             self.clear_immutable_consumer_launch_commitment(step);
         }
         for gate in reset_gates {
@@ -757,6 +926,7 @@ impl PipelineRun {
                         artifact_inputs: Vec::new(),
                         artifact_access: Default::default(),
                         gate: None,
+                        authorization: None,
                         depends: original_deps,
                     },
                 );
@@ -1152,8 +1322,9 @@ mod tests {
         ArtifactAccessEnforcement, ArtifactRepositoryObservation, ArtifactSnapshot,
     };
     use crate::config::ensemble::{
-        ArtifactSnapshotConfig, GateConfig, OnFailure, OutputSchemaConfig, StepApprovalConfig,
-        StepApprovalMode, StepConfig, StepKind,
+        ArtifactSnapshotConfig, AuthorizationHandoffMode, GateConfig, OnFailure,
+        OutputSchemaConfig, StepApprovalConfig, StepApprovalMode, StepAuthorizationConfig,
+        StepConfig, StepKind, TrackerEventPredicateConfig,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::verdict::StepOutput;
@@ -1182,6 +1353,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 
@@ -1203,6 +1375,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 
@@ -1227,6 +1400,7 @@ mod tests {
                 assessment_steps: vec!["review".to_string()],
                 adjudication_step: "adjudicate".to_string(),
             }),
+            authorization: None,
         }
     }
 
@@ -1316,6 +1490,7 @@ mod tests {
                 producer_step: "build".to_string(),
                 attempt: 1,
                 output_digest: "output-1".to_string(),
+                captured_at: None,
                 repositories: vec![ArtifactRepositoryObservation {
                     repository: "app".to_string(),
                     head: "abc123".to_string(),
@@ -1645,6 +1820,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }];
         let mut run = make_run(&steps);
 
@@ -1683,6 +1859,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 
@@ -1718,6 +1895,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }
     }
 
@@ -2471,6 +2649,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
             assessment_gate(),
             make_step("publish", "publisher", &["gate"]),
@@ -2512,6 +2691,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
             assessment_gate(),
         ];
@@ -2548,6 +2728,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
             assessment_gate(),
         ];
@@ -2611,6 +2792,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -2629,6 +2811,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                authorization: None,
             },
         ];
         let mut run = make_run(&steps);
@@ -2774,6 +2957,7 @@ mod tests {
                     producer_step: producer_step.to_string(),
                     attempt: 1,
                     output_digest: format!("output-{producer_step}"),
+                    captured_at: None,
                     repositories: Vec::new(),
                 },
             );
@@ -3034,5 +3218,68 @@ mod tests {
         let legacy: PipelineRunSnapshot = serde_json::from_value(legacy).unwrap();
         assert!(legacy.acceptance_attempts.is_empty());
         assert!(legacy.resolved_acceptance_plan.is_none());
+    }
+
+    #[test]
+    fn authorization_selects_latest_event_after_captured_artifact_and_rejects_conflicts() {
+        let mut producer = make_step("produce", "builder", &[]);
+        producer.artifact_snapshot = Some(ArtifactSnapshotConfig {
+            repositories: vec!["repo".to_string()],
+        });
+        let mut protected = make_step("protected", "reviewer", &["produce"]);
+        protected.authorization = Some(StepAuthorizationConfig {
+            artifact_step: "produce".to_string(),
+            event: TrackerEventPredicateConfig {
+                field: "field".to_string(),
+                value: "ready".to_string(),
+                actors: vec!["actor".to_string()],
+            },
+            after_artifact: true,
+            handoff: AuthorizationHandoffMode::WaitForEvent,
+        });
+        let mut run = make_run(&[producer, protected]);
+        run.record_artifact_snapshot(
+            "produce",
+            ArtifactSnapshot {
+                identity: "artifact-1".to_string(),
+                run_id: "issue-1".to_string(),
+                cycle: 1,
+                producer_step: "produce".to_string(),
+                attempt: 1,
+                output_digest: "digest-1".to_string(),
+                captured_at: Some("2026-08-15T10:00:00Z".parse().unwrap()),
+                repositories: Vec::new(),
+            },
+        );
+        let event = |id: &str, at: &str| TrackerEvent {
+            item_id: "issue-1".to_string(),
+            field_id: "field".to_string(),
+            previous_value: None,
+            value: "ready".to_string(),
+            actor_id: "actor".to_string(),
+            event_id: id.to_string(),
+            occurred_at: at.parse().unwrap(),
+        };
+
+        let selected = run
+            .select_authorization_evidence(
+                "protected",
+                &[
+                    event("stale", "2026-08-15T09:59:59Z"),
+                    event("later", "2026-08-15T10:01:00Z"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(selected.event.event_id, "later");
+        assert_eq!(selected.artifact_identity, "artifact-1");
+        assert!(run
+            .select_authorization_evidence(
+                "protected",
+                &[
+                    event("duplicate", "2026-08-15T10:01:00Z"),
+                    event("duplicate", "2026-08-15T10:02:00Z")
+                ],
+            )
+            .is_none());
     }
 }

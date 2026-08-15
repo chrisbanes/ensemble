@@ -653,6 +653,7 @@ Pipeline step definitions. Agent and synthesis steps invoke configured agents; g
 | `artifact_snapshot` | object | — | Producer declaration with a non-empty `repositories` list of configured repository keys to observe after output validation |
 | `artifact_inputs` | list of strings | `[]` | Direct producer dependencies whose completed Artifact snapshots this step consumes |
 | `artifact_access` | string | `mutable` | `immutable` verifies every declared input immediately before the step starts and halts on drift; `mutable` permits normal workspace mutation |
+| `authorization` | object | — | Optional immutable tracker-event evidence required before this step starts |
 | `gate` | object | — | Required only for `kind: gate`: ordered unique `assessment_steps` and one `adjudication_step`; a gate has no `agent` |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution. For a complete
@@ -664,6 +665,11 @@ Schema Draft 2020-12 (an omitted `$schema` uses that dialect). `artifact_snapsho
 must contain unique configured repository keys. A step may declare either or both; an empty
 snapshot declaration is rejected during configuration activation.
 `artifact_inputs` entries must be unique direct dependencies that declare `artifact_snapshot`.
+`authorization` names one direct `artifact_step`, opaque `event.field`, `event.value`, and non-empty
+`event.actors`, plus explicit `handoff` of `wait_for_event` or `automatic_transition`.
+`after_artifact: true` requires event time after Artifact capture; automatic handoff requires the
+protected step's existing `tracker_state`, while `wait_for_event` forbids one and writes nothing.
+Activation rejects adapters that cannot prove the configured event history.
 For immutable consumers, their producer snapshots must select disjoint repository keys.
 `artifact_access: immutable` requires at least one input. ACPX consumers use read approval unless
 the configured agent explicitly uses `deny_all`; direct ACP has no equivalent launch-time

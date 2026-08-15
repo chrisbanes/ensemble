@@ -909,6 +909,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 artifact_inputs: step.artifact_inputs.clone(),
                 artifact_access: step.artifact_access,
                 gate: step.gate.clone(),
+                authorization: None,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;

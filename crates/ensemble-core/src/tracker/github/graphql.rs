@@ -360,6 +360,55 @@ pub(super) struct IssueStatesData {
     pub(super) nodes: Vec<Option<IssueNode>>,
 }
 
+pub(super) struct IssueStatusEvents;
+
+impl Operation for IssueStatusEvents {
+    const NAME: &'static str = "IssueStatusEvents";
+    const QUERY: &'static str = ISSUE_STATUS_EVENTS_QUERY;
+    type Response = IssueStatusEventsData;
+}
+
+pub(super) const ISSUE_STATUS_EVENTS_QUERY: &str = r#"
+query($issueId: ID!, $cursor: String) {
+  node(id: $issueId) {
+    ... on Issue {
+      timelineItems(first: 100, after: $cursor, itemTypes: [PROJECT_V2_ITEM_STATUS_CHANGED_EVENT]) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          ... on ProjectV2ItemStatusChangedEvent {
+            id createdAt previousStatus status
+            project { id }
+            actor { id login }
+          }
+        }
+      }
+    }
+  }
+}
+"#;
+
+#[derive(Debug, Deserialize)]
+pub(super) struct IssueStatusEventsData {
+    pub(super) node: Option<IssueStatusEventsNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IssueStatusEventsNode {
+    pub(super) timeline_items: Connection<StatusChangedEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct StatusChangedEvent {
+    pub(super) id: Option<String>,
+    pub(super) created_at: Option<String>,
+    pub(super) previous_status: Option<String>,
+    pub(super) status: Option<String>,
+    pub(super) project: Option<ProjectRef>,
+    pub(super) actor: Option<User>,
+}
+
 pub(super) struct IssueBlockedBy;
 
 impl Operation for IssueBlockedBy {

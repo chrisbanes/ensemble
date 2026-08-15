@@ -6,7 +6,7 @@ pub mod todo_file;
 
 use crate::config::ensemble::{EnsembleConfig, TrackerConfig};
 use async_trait::async_trait;
-use model::{InteractionThreadRoot, Issue, TrackerComment};
+use model::{InteractionThreadRoot, Issue, TrackerComment, TrackerEvent};
 use serde::{Deserialize, Serialize};
 
 /// Error type for tracker operations.
@@ -40,6 +40,8 @@ pub enum TrackerError {
     MissingEndCursor,
     #[error("tracker does not support write operations")]
     WritesNotSupported,
+    #[error("tracker does not support immutable event evidence for field '{field}'")]
+    EventEvidenceUnsupported { field: String },
 }
 
 /// Opaque conflict evidence returned by an adapter when ownership cannot be
@@ -82,6 +84,23 @@ pub trait IssueTracker: Send + Sync {
     /// Validate adapter-specific configuration before a new runtime generation activates.
     async fn validate_configuration(&self) -> Result<(), TrackerError> {
         Ok(())
+    }
+
+    /// Fail closed unless this adapter can prove the configured field's event history.
+    async fn validate_event_evidence(&self, field: &str) -> Result<(), TrackerError> {
+        Err(TrackerError::EventEvidenceUnsupported {
+            field: field.to_string(),
+        })
+    }
+
+    /// Read immutable event history scoped to one normalized tracker item.
+    async fn fetch_tracker_events(
+        &self,
+        _issue_id: &str,
+    ) -> Result<Vec<TrackerEvent>, TrackerError> {
+        Err(TrackerError::EventEvidenceUnsupported {
+            field: "event history".to_string(),
+        })
     }
 
     /// Fetch candidate issues in active states for dispatch.

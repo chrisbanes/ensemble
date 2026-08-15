@@ -668,6 +668,38 @@ pub struct StepConfig {
     /// sources and their ordinary-synthesis adjudicator.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateConfig>,
+    /// Optional tracker-event authorization required before this step can run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization: Option<StepAuthorizationConfig>,
+}
+
+/// Immutable upstream Artifact and tracker-event evidence required before one
+/// protected step may begin. Field and value are opaque adapter data.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StepAuthorizationConfig {
+    pub artifact_step: String,
+    pub event: TrackerEventPredicateConfig,
+    #[serde(default)]
+    pub after_artifact: bool,
+    pub handoff: AuthorizationHandoffMode,
+}
+
+/// Opaque matching predicate over one normalized tracker event.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TrackerEventPredicateConfig {
+    pub field: String,
+    pub value: String,
+    pub actors: Vec<String>,
+}
+
+/// The explicit source of an authorization event.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthorizationHandoffMode {
+    WaitForEvent,
+    AutomaticTransition,
 }
 
 /// Static evidence sources consumed by a deterministic gate.
@@ -1089,6 +1121,25 @@ pub(crate) fn read_dotenv(path: &Path) -> HashMap<String, String> {
 impl EnsembleConfig {
     pub fn uses_workflow_selection(&self) -> bool {
         !self.workflow_selection.is_empty()
+    }
+
+    /// Every opaque event field whose adapter evidence must be proven before
+    /// this configuration generation is allowed to activate.
+    pub fn authorization_event_fields(&self) -> Vec<String> {
+        let mut fields = self
+            .steps
+            .iter()
+            .chain(
+                self.pipelines
+                    .values()
+                    .flat_map(|pipeline| pipeline.steps.iter()),
+            )
+            .filter_map(|step| step.authorization.as_ref())
+            .map(|authorization| authorization.event.field.clone())
+            .collect::<Vec<_>>();
+        fields.sort();
+        fields.dedup();
+        fields
     }
 
     /// Resolve a durable selected-workflow identity into the whole immutable
@@ -2270,6 +2321,81 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
             }
         }
         validate_gate_configs(steps, &dag)?;
+        validate_authorization_configs(steps, &dag)?;
+    }
+    Ok(())
+}
+
+fn validate_authorization_configs(
+    steps: &[StepConfig],
+    dag: &crate::pipeline::dag::StepDag,
+) -> Result<(), PipelineError> {
+    for step in steps {
+        let Some(authorization) = step.authorization.as_ref() else {
+            continue;
+        };
+        let invalid = |reason: &str| PipelineError::InvalidStepConfig {
+            step: step.name.clone(),
+            reason: reason.to_string(),
+        };
+        if step.kind == StepKind::Gate {
+            return Err(invalid(
+                "authorization is valid only for dispatched agent or synthesis steps, not gates",
+            ));
+        }
+        if authorization.artifact_step.trim().is_empty()
+            || !dag
+                .steps
+                .iter()
+                .find(|candidate| candidate.name == step.name)
+                .is_some_and(|resolved| resolved.depends.contains(&authorization.artifact_step))
+            || steps
+                .iter()
+                .find(|candidate| candidate.name == authorization.artifact_step)
+                .is_none_or(|producer| producer.artifact_snapshot.is_none())
+        {
+            return Err(invalid(
+                "authorization artifact_step must name a direct dependency that declares artifact_snapshot",
+            ));
+        }
+        let predicate = &authorization.event;
+        if predicate.field.trim().is_empty() || predicate.value.trim().is_empty() {
+            return Err(invalid(
+                "authorization event field and value must be non-blank",
+            ));
+        }
+        let mut actors = std::collections::HashSet::new();
+        if predicate.actors.is_empty()
+            || predicate
+                .actors
+                .iter()
+                .any(|actor| actor.trim().is_empty() || !actors.insert(actor))
+        {
+            return Err(invalid(
+                "authorization event actors must be non-blank and unique",
+            ));
+        }
+        if matches!(
+            authorization.handoff,
+            AuthorizationHandoffMode::AutomaticTransition
+        ) && step
+            .tracker_state
+            .as_deref()
+            .is_none_or(|state| state.trim().is_empty())
+        {
+            return Err(invalid(
+                "automatic_transition authorization requires the protected step's tracker_state",
+            ));
+        }
+        if matches!(
+            authorization.handoff,
+            AuthorizationHandoffMode::WaitForEvent
+        ) && step.tracker_state.is_some()
+        {
+            return Err(invalid(
+                "wait_for_event authorization forbids the protected step's tracker_state",
+            ));
+        }
     }
     Ok(())
 }
@@ -5287,5 +5413,99 @@ on_failure: Failed
             PipelineError::InvalidSynthesisStep { step, reason }
                 if step == "synthesize" && reason.contains("explicit non-empty depends")
         ));
+    }
+
+    #[test]
+    fn authorization_requires_direct_artifact_and_explicit_handoff_contract() {
+        let mut config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  worker:
+    acpx_agent: claude
+    prompt: "Work."
+steps:
+  - name: produce
+    agent: worker
+    artifact_snapshot:
+      repositories: [repo]
+  - name: protected
+    agent: worker
+    depends: [produce]
+    authorization:
+      artifact_step: produce
+      event:
+        field: opaque-field
+        value: opaque-value
+        actors: [actor-1]
+      after_artifact: true
+      handoff: wait_for_event
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        validate_config(&config).unwrap();
+        assert_eq!(config.authorization_event_fields(), ["opaque-field"]);
+        config.steps[1].tracker_state = Some("In Progress".to_string());
+        assert!(validate_config(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("wait_for_event authorization forbids"));
+
+        config.steps[1].tracker_state = None;
+        config.steps[1].kind = StepKind::Gate;
+        let dag = crate::pipeline::dag::build_dag(&config.steps).unwrap();
+        assert!(validate_authorization_configs(&config.steps, &dag)
+            .unwrap_err()
+            .to_string()
+            .contains(
+                "authorization is valid only for dispatched agent or synthesis steps, not gates"
+            ));
+    }
+
+    #[test]
+    fn automatic_authorization_requires_a_tracker_transition() {
+        let config = parse_config(
+            r#"
+tracker:
+  kind: todo_file
+repos:
+  - path: /tmp/repo
+    branch: main
+agents:
+  worker:
+    acpx_agent: claude
+    prompt: "Work."
+steps:
+  - name: produce
+    agent: worker
+    artifact_snapshot:
+      repositories: [repo]
+  - name: protected
+    agent: worker
+    depends: [produce]
+    authorization:
+      artifact_step: produce
+      event:
+        field: opaque-field
+        value: opaque-value
+        actors: [actor-1]
+      handoff: automatic_transition
+on_success: Done
+on_failure: Failed
+"#,
+        )
+        .unwrap();
+
+        assert!(validate_config(&config)
+            .unwrap_err()
+            .to_string()
+            .contains("automatic_transition authorization requires"));
     }
 }

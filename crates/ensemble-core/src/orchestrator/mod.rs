@@ -56,7 +56,8 @@ use crate::attention::{
     AttentionUpsert,
 };
 use crate::config::ensemble::{
-    repository_key, AgentConfig, ArtifactAccess, EnsembleConfig, OnFailure, StepKind,
+    repository_key, AgentConfig, ArtifactAccess, AuthorizationHandoffMode, EnsembleConfig,
+    OnFailure, StepKind,
 };
 use crate::error::{AgentError, EnsembleError};
 use crate::history::artifacts::{finalize_mode_name, RunArtifacts};
@@ -74,8 +75,7 @@ use crate::interaction::{
 use crate::observability::events::{EventBus, PipelineEvent};
 use crate::observability::events_contract::{
     elapsed_ms, ISSUE_DISPATCH_COMPLETED, ISSUE_DISPATCH_STARTED, ORCH_TICK_FINISHED,
-    ORCH_TICK_STARTED, STEP_STARTED, TRACKER_TRANSITION_FAILED, TRACKER_TRANSITION_REQUESTED,
-    TRACKER_TRANSITION_SUCCEEDED,
+    ORCH_TICK_STARTED, STEP_STARTED,
 };
 #[cfg(test)]
 use crate::orchestrator::delivery::{
@@ -90,8 +90,8 @@ use crate::orchestrator::resources::{resolve_output_paths, SchedulerReservation}
 use crate::pipeline::assessment::{DispositionKind, GateEvidence};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
-    DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot, SelectedWorkflowSnapshot,
-    StepOutputTemplateContext, StepState,
+    AutomaticTransitionState, DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot,
+    SelectedWorkflowSnapshot, StepOutputTemplateContext, StepState,
 };
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::timeline::persistence::TimelinePersistence;
@@ -3550,6 +3550,12 @@ impl Orchestrator {
         dispatch: StepDispatchContext<'_>,
         _permit: &DispatchPermit,
     ) -> Result<StepDispatchOutcome, StepDispatchError> {
+        if !self
+            .select_current_authorization_evidence(issue, dispatch.step_name)
+            .await?
+        {
+            return Ok(StepDispatchOutcome::Deferred);
+        }
         let (
             worker_identity,
             issue_snapshot,
@@ -3805,44 +3811,15 @@ impl Orchestrator {
             "dispatching pipeline step"
         );
 
-        // Set tracker state if specified by the step
-        if let Some(state_name) = dispatch.tracker_state {
-            if self.tracker.supports_writes() {
-                info!(
-                    event = TRACKER_TRANSITION_REQUESTED,
-                    issue_id = %issue.id,
-                    step = dispatch.step_name,
-                    tracker_state_to = state_name,
-                    "requesting tracker state transition"
-                );
-                match self.tracker.set_issue_state(&issue.id, state_name).await {
-                    Ok(()) => {
-                        let mut transitioned_issue = issue.clone();
-                        transitioned_issue.state = state_name.to_string();
-                        self.state
-                            .write()
-                            .await
-                            .update_issue_snapshot(&issue.id, transitioned_issue);
-                        info!(
-                            event = TRACKER_TRANSITION_SUCCEEDED,
-                            issue_id = %issue.id,
-                            step = dispatch.step_name,
-                            tracker_state_to = state_name,
-                            "tracker state transition succeeded"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            event = TRACKER_TRANSITION_FAILED,
-                            issue_id = %issue.id,
-                            step = dispatch.step_name,
-                            tracker_state_to = state_name,
-                            error = %e,
-                            "failed to set tracker state for step dispatch"
-                        );
-                    }
-                }
-            }
+        if !self
+            .apply_tracker_handoff_before_dispatch(
+                issue,
+                dispatch.step_name,
+                dispatch.tracker_state,
+            )
+            .await?
+        {
+            return Ok(StepDispatchOutcome::Deferred);
         }
 
         // Reserve this issue's journal ordering before publishing the speculative
@@ -4228,6 +4205,298 @@ impl Orchestrator {
             completion_tx,
         ));
         Ok(StepDispatchOutcome::Spawned)
+    }
+
+    async fn apply_tracker_handoff_before_dispatch(
+        &self,
+        issue: &Issue,
+        step_name: &str,
+        tracker_state: Option<&str>,
+    ) -> Result<bool, StepDispatchError> {
+        let handoff = self
+            .state
+            .read()
+            .await
+            .get_pipeline_run(&issue.id)
+            .and_then(|run| run.authorization_handoff(step_name));
+        match handoff {
+            Some(AuthorizationHandoffMode::WaitForEvent) => Ok(true),
+            Some(AuthorizationHandoffMode::AutomaticTransition) => {
+                let Some(target_state) = tracker_state else {
+                    return Ok(false);
+                };
+                let pending = {
+                    let mut state = self.state.write().await;
+                    let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                        return Ok(false);
+                    };
+                    match run.automatic_transition_state(step_name) {
+                        Some(AutomaticTransitionState::Applied {
+                            target_state: applied,
+                        }) if applied == target_state => return Ok(true),
+                        Some(AutomaticTransitionState::Pending {
+                            target_state: pending_target,
+                            expected_state,
+                        }) if pending_target == target_state => {
+                            Some((expected_state.clone(), false, None))
+                        }
+                        _ => {
+                            let previous = run.automatic_transition_state(step_name).cloned();
+                            run.set_automatic_transition_pending(
+                                step_name,
+                                target_state.to_string(),
+                                issue.state.clone(),
+                            );
+                            Some((issue.state.clone(), true, previous))
+                        }
+                    }
+                };
+                let Some((expected_state, newly_pending, previous_pending)) = pending else {
+                    return Ok(false);
+                };
+                if newly_pending {
+                    let transition = {
+                        let state = self.state.read().await;
+                        Self::transition_input_for_run(
+                            &state,
+                            &issue.id,
+                            &issue.identifier,
+                            PipelineTransitionKind::AutomaticTransitionPending,
+                            Some(step_name.to_string()),
+                            None,
+                            None,
+                        )
+                    };
+                    if let Some(transition) = transition {
+                        let transaction = self
+                            .pipeline_journal
+                            .begin_issue_transition(&issue.id)
+                            .await;
+                        let pending_is_durable = match transaction.append(transition.clone()).await
+                        {
+                            Ok(_) => true,
+                            Err(_) => transaction
+                                .latest_record_matches(&transition)
+                                .await
+                                .unwrap_or(false),
+                        };
+                        drop(transaction);
+                        if !pending_is_durable {
+                            if let Some(run) =
+                                self.state.write().await.get_pipeline_run_mut(&issue.id)
+                            {
+                                run.restore_automatic_transition_state(step_name, previous_pending);
+                            }
+                            return Ok(false);
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                }
+                let current = match self
+                    .tracker
+                    .fetch_issue_states_by_ids(std::slice::from_ref(&issue.id))
+                    .await
+                {
+                    Ok(states) => states
+                        .into_iter()
+                        .find(|candidate| candidate.id == issue.id),
+                    Err(_) => return Ok(false),
+                };
+                let Some(current) = current else {
+                    return Ok(false);
+                };
+                if current.state != target_state {
+                    if current.state != expected_state || !self.tracker.supports_writes() {
+                        return Ok(false);
+                    }
+                    if self
+                        .tracker
+                        .set_issue_state(&issue.id, target_state)
+                        .await
+                        .is_err()
+                    {
+                        return Ok(false);
+                    }
+                }
+                let original_current = current.clone();
+                let transition = {
+                    let mut state = self.state.write().await;
+                    let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                        return Ok(false);
+                    };
+                    run.set_automatic_transition_applied(step_name, target_state.to_string());
+                    let mut transitioned = current;
+                    transitioned.state = target_state.to_string();
+                    state.update_issue_snapshot(&issue.id, transitioned);
+                    Self::transition_input_for_run(
+                        &state,
+                        &issue.id,
+                        &issue.identifier,
+                        PipelineTransitionKind::AutomaticTransitionApplied,
+                        Some(step_name.to_string()),
+                        None,
+                        None,
+                    )
+                };
+                let Some(transition) = transition else {
+                    return Ok(false);
+                };
+                if self.pipeline_journal.append(transition).await.is_err() {
+                    // The remote write may already have succeeded, but only a
+                    // durable `AutomaticTransitionApplied` record opens the
+                    // protected dispatch gate. Keep the in-memory owner at
+                    // its durable Pending checkpoint so a crash or later tick
+                    // revalidates the remote state without repeating the write.
+                    let mut state = self.state.write().await;
+                    if let Some(run) = state.get_pipeline_run_mut(&issue.id) {
+                        run.set_automatic_transition_pending(
+                            step_name,
+                            target_state.to_string(),
+                            expected_state,
+                        );
+                    }
+                    state.update_issue_snapshot(&issue.id, original_current);
+                    return Ok(false);
+                }
+                Ok(true)
+            }
+            None => {
+                if let Some(state_name) = tracker_state {
+                    if self.tracker.supports_writes()
+                        && self
+                            .tracker
+                            .set_issue_state(&issue.id, state_name)
+                            .await
+                            .is_ok()
+                    {
+                        let mut transitioned = issue.clone();
+                        transitioned.state = state_name.to_string();
+                        self.state
+                            .write()
+                            .await
+                            .update_issue_snapshot(&issue.id, transitioned);
+                    }
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// Re-read adapter evidence immediately before reservation. An unavailable
+    /// or changed proof deliberately leaves the step pending without consuming
+    /// agent capacity; the next poll can retry the read.
+    async fn select_current_authorization_evidence(
+        &self,
+        issue: &Issue,
+        step_name: &str,
+    ) -> Result<bool, StepDispatchError> {
+        let authorization_artifact = {
+            let state = self.state.read().await;
+            state.get_pipeline_run(&issue.id).and_then(|run| {
+                run.authorization_for(step_name).and_then(|authorization| {
+                    run.artifact_snapshots
+                        .get(&authorization.artifact_step)
+                        .cloned()
+                })
+            })
+        };
+        let Some(authorization_artifact) = authorization_artifact else {
+            let configured = self
+                .state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .is_some_and(|run| run.authorization_for(step_name).is_some());
+            if configured {
+                return Ok(false);
+            }
+            return Ok(true);
+        };
+        let events = match self.tracker.fetch_tracker_events(&issue.id).await {
+            Ok(events) => events,
+            Err(error) => {
+                warn!(issue_id = %issue.id, step = step_name, error = %error, "authorization evidence is unavailable; retaining pending step");
+                return Ok(false);
+            }
+        };
+        let repositories = self
+            .workspace_mgr
+            .owned_worktree_paths(&issue.id)
+            .map(|paths| paths.into_iter().collect::<BTreeMap<_, _>>())
+            .map_err(|error| StepDispatchError::immutable_integrity(AgentError::PromptError {
+                reason: format!(
+                    "authorization Artifact could not be verified: prepared worktree unavailable: {error}"
+                ),
+            }))?;
+        let violations = artifact::verify_immutable_inputs(
+            step_name,
+            std::slice::from_ref(&authorization_artifact),
+            &repositories,
+        )
+        .await
+        .map_err(|reason| {
+            StepDispatchError::immutable_integrity(AgentError::PromptError {
+                reason: format!("authorization Artifact could not be verified: {reason}"),
+            })
+        })?;
+        if !violations.is_empty() {
+            if let Some(run) = self.state.write().await.get_pipeline_run_mut(&issue.id) {
+                run.record_artifact_integrity_violations(violations.clone());
+            }
+            return Err(StepDispatchError::immutable_integrity(
+                AgentError::PromptError {
+                    reason: format!(
+                        "authorization Artifact changed before step '{}': {}",
+                        step_name,
+                        violations
+                            .iter()
+                            .map(|violation| format!(
+                                "{}:{} ({})",
+                                violation.producer_step,
+                                violation.repository,
+                                violation.artifact_identity
+                            ))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                },
+            ));
+        }
+        let transition = {
+            let mut state = self.state.write().await;
+            let Some(run) = state.get_pipeline_run_mut(&issue.id) else {
+                return Ok(false);
+            };
+            let Some(evidence) = run.select_authorization_evidence(step_name, &events) else {
+                run.clear_authorization_evidence(step_name);
+                return Ok(false);
+            };
+            if run.authorization_evidence_is_current(step_name, &events) {
+                return Ok(true);
+            }
+            run.record_authorization_evidence(step_name, evidence);
+            Self::transition_input_for_run(
+                &state,
+                &issue.id,
+                &issue.identifier,
+                PipelineTransitionKind::AuthorizationEvidenceSelected,
+                Some(step_name.to_string()),
+                None,
+                None,
+            )
+        };
+        let Some(transition) = transition else {
+            return Ok(false);
+        };
+        if let Err(error) = self.pipeline_journal.append(transition).await {
+            warn!(issue_id = %issue.id, step = step_name, error = %error, "failed to persist authorization evidence; retaining pending step");
+            if let Some(run) = self.state.write().await.get_pipeline_run_mut(&issue.id) {
+                run.clear_authorization_evidence(step_name);
+            }
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// Handle a worker event from the channel.
@@ -5164,8 +5433,8 @@ impl Orchestrator {
     }
 
     // Complete the #480 Artifact observation before re-entering the existing success/acceptance
-    // state machine. Keeping this boxed prevents the observation vectors from inflating that
-    // Tokio worker future.
+    // state machine. The #512 durable transition snapshot is returned behind its own box, so it
+    // cannot inflate the caller's acceptance and terminal-lifecycle worker frame.
     fn process_successful_worker_exit<'a>(
         &'a self,
         issue_id: &'a str,
@@ -5174,7 +5443,7 @@ impl Orchestrator {
         output: StepOutput,
         has_approval_request: bool,
         workspace_capture_held: bool,
-    ) -> Pin<Box<dyn Future<Output = Option<SuccessfulWorkerExitAction>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Option<Box<SuccessfulWorkerExitAction>>> + Send + 'a>> {
         Box::pin(self.process_successful_worker_exit_inner(
             issue_id,
             step_name,
@@ -5193,7 +5462,7 @@ impl Orchestrator {
         output: StepOutput,
         has_approval_request: bool,
         workspace_capture_held: bool,
-    ) -> Option<SuccessfulWorkerExitAction> {
+    ) -> Option<Box<SuccessfulWorkerExitAction>> {
         let mut artifact_outcome = self
             .process_artifacts_after_worker_exit(
                 issue_id,
@@ -5248,12 +5517,12 @@ impl Orchestrator {
             Some(verdict_value.to_string()),
             None,
         );
-        Some(SuccessfulWorkerExitAction {
+        Some(Box::new(SuccessfulWorkerExitAction {
             action,
             config_snapshot,
             step_transition,
             integrity_failed,
-        })
+        }))
     }
 
     /// Handle a worker exit. Integrates with PipelineRun to drive step DAG.
@@ -5323,13 +5592,13 @@ impl Orchestrator {
                     )
                     .await;
 
-                if let Some(SuccessfulWorkerExitAction {
-                    action,
-                    config_snapshot,
-                    step_transition,
-                    integrity_failed,
-                }) = successful_action
-                {
+                if let Some(successful_action) = successful_action {
+                    let SuccessfulWorkerExitAction {
+                        action,
+                        config_snapshot,
+                        step_transition,
+                        integrity_failed,
+                    } = *successful_action;
                     let mut state = self.state.write().await;
                     match action {
                         PipelineAction::Dispatch(requests) => {
@@ -11918,8 +12187,9 @@ mod tests {
     };
     use crate::artifact::ArtifactSnapshot;
     use crate::config::ensemble::{
-        parse_config, ConcurrencyConfig, PipelineConfig, SchedulerConfig, SchedulerLaneConfig,
-        StepConfig, WorkflowOrderKey, WorkflowSelectionRuleConfig,
+        parse_config, AuthorizationHandoffMode, ConcurrencyConfig, PipelineConfig, SchedulerConfig,
+        SchedulerLaneConfig, StepAuthorizationConfig, StepConfig, TrackerEventPredicateConfig,
+        WorkflowOrderKey, WorkflowSelectionRuleConfig,
     };
     use crate::error::AgentError;
     use crate::interaction::{
@@ -12676,6 +12946,13 @@ mod tests {
         state_writes: Arc<RwLock<Vec<(String, String)>>>,
     }
 
+    /// Stateful test adapter for recovery boundaries: a successful write is
+    /// immediately visible to the next runtime instance.
+    struct RestartableWriteTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        state_writes: Arc<RwLock<Vec<(String, String)>>>,
+    }
+
     #[async_trait]
     impl IssueTracker for RecordingTracker {
         async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
@@ -12717,6 +12994,60 @@ mod tests {
                 .write()
                 .await
                 .push((id.to_string(), state.to_string()));
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for RestartableWriteTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self.issues.read().await.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            let states_lower: Vec<String> =
+                states.iter().map(|state| state.to_lowercase()).collect();
+            Ok(issues
+                .iter()
+                .filter(|issue| states_lower.contains(&issue.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let issues = self.issues.read().await;
+            Ok(issues
+                .iter()
+                .filter(|issue| ids.contains(&issue.id))
+                .cloned()
+                .collect())
+        }
+
+        fn supports_writes(&self) -> bool {
+            true
+        }
+
+        async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+            self.state_writes
+                .write()
+                .await
+                .push((id.to_string(), state.to_string()));
+            if let Some(issue) = self
+                .issues
+                .write()
+                .await
+                .iter_mut()
+                .find(|issue| issue.id == id)
+            {
+                issue.state = state.to_string();
+            }
             Ok(())
         }
     }
@@ -15652,6 +15983,197 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn automatic_handoff_restart_after_remote_write_requires_durable_applied_record() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut config = make_config();
+        config.steps[0].artifact_snapshot = Some(crate::config::ensemble::ArtifactSnapshotConfig {
+            repositories: Vec::new(),
+        });
+        let mut protected = config.steps[0].clone();
+        protected.name = "protected".to_string();
+        protected.depends = Some(vec!["build".to_string()]);
+        protected.tracker_state = Some("In Progress".to_string());
+        protected.artifact_snapshot = None;
+        protected.authorization = Some(StepAuthorizationConfig {
+            artifact_step: "build".to_string(),
+            event: TrackerEventPredicateConfig {
+                field: "project.status".to_string(),
+                value: "Ready".to_string(),
+                actors: vec!["operator".to_string()],
+            },
+            after_artifact: false,
+            handoff: AuthorizationHandoffMode::AutomaticTransition,
+        });
+        config.steps.push(protected);
+
+        let config = Arc::new(RwLock::new(config));
+        let issue = test_issue("restart-after-write", "Todo");
+        let tracker_issues = Arc::new(RwLock::new(vec![issue.clone()]));
+        let state_writes = Arc::new(RwLock::new(Vec::new()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(RestartableWriteTracker {
+            issues: Arc::clone(&tracker_issues),
+            state_writes: Arc::clone(&state_writes),
+        });
+
+        let first_state = Arc::new(RwLock::new(OrchestratorState::new(
+            config.read().await.polling.interval_ms,
+            &config.read().await.concurrency,
+        )));
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let mut first = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&first_state),
+                config: Arc::clone(&config),
+                tracker: Arc::clone(&tracker),
+                agent_runner: Arc::new(CountingRunner {
+                    runs: Arc::new(AtomicUsize::new(0)),
+                }),
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
+                workspace_mgr: WorkspaceManager::new(&config_dir.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root: config_dir.path().join("workspaces"),
+            },
+            config_dir.path(),
+            shutdown_rx,
+        );
+        {
+            let config_snapshot = config.read().await.clone();
+            let run = PipelineRun::new(
+                issue.id.clone(),
+                1,
+                build_dag(&config_snapshot.steps).unwrap(),
+            );
+            let mut state = first_state.write().await;
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config_snapshot));
+            state.add_claimed(&issue.id);
+        }
+
+        // A failed first pending append must not leave an in-memory checkpoint
+        // that a later dispatch can mistake for durable intent.
+        first.pipeline_journal.transaction_append_error_on_call =
+            Some((Arc::new(AtomicUsize::new(0)), 1));
+        assert!(!first
+            .apply_tracker_handoff_before_dispatch(&issue, "protected", Some("In Progress"),)
+            .await
+            .unwrap());
+        assert!(state_writes.read().await.is_empty());
+        assert!(first
+            .state
+            .read()
+            .await
+            .get_pipeline_run(&issue.id)
+            .and_then(|run| run.automatic_transition_state("protected"))
+            .is_none());
+
+        // The pending checkpoint is durable first. Then the remote write
+        // succeeds, but an injected pre-append error models a crash before
+        // `AutomaticTransitionApplied` reaches the journal.
+        first.pipeline_journal.transaction_append_error_on_call =
+            Some((Arc::new(AtomicUsize::new(0)), 2));
+        assert!(!first
+            .apply_tracker_handoff_before_dispatch(&issue, "protected", Some("In Progress"),)
+            .await
+            .unwrap());
+        assert_eq!(
+            state_writes.read().await.as_slice(),
+            [(issue.id.clone(), "In Progress".to_string())]
+        );
+        assert!(matches!(
+            first
+                .state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .and_then(|run| run.automatic_transition_state("protected")),
+            Some(AutomaticTransitionState::Pending { .. })
+        ));
+        assert_eq!(
+            first
+                .pipeline_journal
+                .read_records_for_issue(&issue.id)
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::AutomaticTransitionPending
+        );
+        drop(first);
+
+        let restarted_state = Arc::new(RwLock::new(OrchestratorState::new(
+            config.read().await.polling.interval_ms,
+            &config.read().await.concurrency,
+        )));
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let restarted = Orchestrator::new_with_state(
+            OrchestratorRuntimeParts {
+                state: Arc::clone(&restarted_state),
+                config: Arc::clone(&config),
+                tracker,
+                agent_runner: Arc::new(CountingRunner {
+                    runs: Arc::new(AtomicUsize::new(0)),
+                }),
+                acceptance_runner: Arc::new(ShellAcceptanceCommandRunner),
+                workspace_mgr: WorkspaceManager::new(&config_dir.path().join("workspaces"), None)
+                    .unwrap(),
+                refresh_requested: Arc::new(tokio::sync::Notify::new()),
+                cancellation_registry: new_cancellation_registry(),
+                event_bus: EventBus::new(),
+                transcript_event_bus: TranscriptEventBus::new(),
+                workspace_root: config_dir.path().join("workspaces"),
+            },
+            config_dir.path(),
+            shutdown_rx,
+        );
+        restarted.restore_pipeline_runs_from_journal().await;
+
+        assert!(matches!(
+            restarted_state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .and_then(|run| run.automatic_transition_state("protected")),
+            Some(AutomaticTransitionState::Pending { .. })
+        ));
+        assert!(
+            restarted
+                .apply_tracker_handoff_before_dispatch(&issue, "protected", Some("In Progress"),)
+                .await
+                .unwrap(),
+            "the protected dispatch gate opens only after its Applied record is durable"
+        );
+        assert_eq!(
+            state_writes.read().await.len(),
+            1,
+            "restart must not repeat the remote write"
+        );
+        assert!(matches!(
+            restarted
+                .state
+                .read()
+                .await
+                .get_pipeline_run(&issue.id)
+                .and_then(|run| run.automatic_transition_state("protected")),
+            Some(AutomaticTransitionState::Applied { .. })
+        ));
+        assert_eq!(
+            restarted
+                .pipeline_journal
+                .read_records_for_issue(&issue.id)
+                .await
+                .unwrap()
+                .last()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::AutomaticTransitionApplied
+        );
     }
 
     #[test]
@@ -19093,6 +19615,7 @@ agent:
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);
@@ -27334,6 +27857,7 @@ agent:
                     producer_step: producer_step.to_string(),
                     attempt: 1,
                     output_digest: format!("output-{producer_step}"),
+                    captured_at: None,
                     repositories: Vec::new(),
                 },
             );

@@ -32,3 +32,4 @@ opener = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wiremock = { workspace = true }

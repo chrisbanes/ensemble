@@ -872,6 +872,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            authorization: None,
         }])
         .unwrap();
         state.pipeline_runs.insert(

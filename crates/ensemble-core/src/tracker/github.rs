@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::{debug, info, warn};
 
-use super::model::{BlockerRef, InteractionThreadRoot, Issue, TrackerComment};
+use super::model::{BlockerRef, InteractionThreadRoot, Issue, TrackerComment, TrackerEvent};
 use super::{IssueTracker, OwnershipClaim, OwnershipConflict, OwnershipLease, TrackerError};
 use crate::config::ensemble::{GithubClaimConfig, GithubTrackerConfig};
 use crate::workspace::key::issue_workspace_key;
@@ -123,6 +123,70 @@ impl GithubTracker {
             .delivery_adoption
             .as_ref()
             .map(|policy| policy.render_branch(&issue_workspace_key(&issue.id)))
+    }
+
+    async fn fetch_status_events(&self, issue_id: &str) -> Result<Vec<TrackerEvent>, TrackerError> {
+        let metadata = self.ensure_project_metadata().await?;
+        let mut cursor = None;
+        let mut events = Vec::new();
+        loop {
+            let data = self
+                .graphql::<graphql::IssueStatusEvents>(json!({
+                    "issueId": issue_id,
+                    "cursor": cursor,
+                }))
+                .await?;
+            let node = data.node.ok_or_else(|| TrackerError::UnexpectedPayload {
+                reason: "IssueStatusEvents response missing issue".to_string(),
+            })?;
+            for event in node.timeline_items.nodes.into_iter().flatten() {
+                let project_id = event.project.as_ref().map(|project| project.id.as_str());
+                if project_id != Some(metadata.project_id.as_str()) {
+                    continue;
+                }
+                let event_id = event.id.ok_or_else(|| TrackerError::UnexpectedPayload {
+                    reason: "IssueStatusEvents response has project event without ID".to_string(),
+                })?;
+                let occurred_at = event
+                    .created_at
+                    .as_deref()
+                    .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                    .map(|value| value.with_timezone(&Utc))
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: format!(
+                            "IssueStatusEvents event '{event_id}' has invalid timestamp"
+                        ),
+                    })?;
+                let actor_id = event
+                    .actor
+                    .and_then(|actor| actor.id.or(actor.login))
+                    .filter(|actor| !actor.trim().is_empty())
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: format!(
+                            "IssueStatusEvents event '{event_id}' has no actor identity"
+                        ),
+                    })?;
+                let value = event
+                    .status
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| TrackerError::UnexpectedPayload {
+                        reason: format!("IssueStatusEvents event '{event_id}' has no status"),
+                    })?;
+                events.push(TrackerEvent {
+                    item_id: issue_id.to_string(),
+                    field_id: metadata.status.id.clone(),
+                    previous_value: event.previous_status,
+                    value,
+                    actor_id,
+                    event_id,
+                    occurred_at,
+                });
+            }
+            cursor = node.timeline_items.page_info.next_cursor()?;
+            if cursor.is_none() {
+                return Ok(events);
+            }
+        }
     }
 
     /// Execute a GraphQL query against the configured endpoint.
@@ -1283,6 +1347,24 @@ impl IssueTracker for GithubTracker {
         Ok(())
     }
 
+    async fn validate_event_evidence(&self, field: &str) -> Result<(), TrackerError> {
+        let metadata = self.ensure_project_metadata().await?;
+        if metadata.status.id == field {
+            Ok(())
+        } else {
+            Err(TrackerError::EventEvidenceUnsupported {
+                field: field.to_string(),
+            })
+        }
+    }
+
+    async fn fetch_tracker_events(
+        &self,
+        issue_id: &str,
+    ) -> Result<Vec<TrackerEvent>, TrackerError> {
+        self.fetch_status_events(issue_id).await
+    }
+
     /// Fetch candidate issues in active states for dispatch.
     ///
     /// When project_number is set: queries project board items.
@@ -1996,6 +2078,58 @@ mod tests {
             metadata.status.option_ids.get("Todo"),
             Some(&"O_todo".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn status_event_history_paginates_and_filters_to_the_configured_project() {
+        let server = MockServer::start().await;
+        mount_project_discovery(&server, "P_configured").await;
+        let first = graphql_response(json!({
+            "node": { "timelineItems": {
+                "pageInfo": {"hasNextPage": true, "endCursor": "next"},
+                "nodes": [
+                    {"id":"E_foreign","createdAt":"2026-08-15T10:00:00Z","previousStatus":"A","status":"B","project":{"id":"P_other"},"actor":{"id":"U_other","login":"other"}},
+                    {"id":"E_authorized","createdAt":"2026-08-15T10:01:00Z","previousStatus":"A","status":"B","project":{"id":"P_configured"},"actor":{"id":"U_actor","login":"actor"}}
+                ]
+            }}
+        }));
+        let second = graphql_response(json!({
+            "node": { "timelineItems": {
+                "pageInfo": {"hasNextPage": false, "endCursor": null},
+                "nodes": [{"id":"E_later","createdAt":"2026-08-15T10:01:00Z","previousStatus":"B","status":"C","project":{"id":"P_configured"},"actor":{"id":"U_actor","login":"actor"}}]
+            }}
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("timelineItems(first:"))
+            .and(body_string_contains("\"cursor\":null"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(first))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("timelineItems(first:"))
+            .and(body_string_contains("\"cursor\":\"next\""))
+            .respond_with(ResponseTemplate::new(200).set_body_json(second))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tracker = create_test_tracker(&server.uri(), Some(1));
+        tracker.validate_event_evidence("F_status").await.unwrap();
+        let events = tracker.fetch_tracker_events("I_1").await.unwrap();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_id, "E_authorized");
+        assert_eq!(events[0].field_id, "F_status");
+        assert_eq!(events[0].previous_value.as_deref(), Some("A"));
+        assert_eq!(events[1].event_id, "E_later");
+        assert_eq!(events[1].actor_id, "U_actor");
+        assert!(matches!(
+            tracker.validate_event_evidence("unsupported").await,
+            Err(TrackerError::EventEvidenceUnsupported { .. })
+        ));
     }
 
     // --- parse_owner_repo tests ---

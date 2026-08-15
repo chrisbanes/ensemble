@@ -109,6 +109,20 @@ pub struct TrackerComment {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+/// Immutable, adapter-normalized evidence for a configured tracker event.
+/// The runtime intentionally gives field and value no tracker-specific meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerEvent {
+    pub item_id: String,
+    pub field_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_value: Option<String>,
+    pub value: String,
+    pub actor_id: String,
+    pub event_id: String,
+    pub occurred_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +159,23 @@ mod tests {
         assert_eq!(totals.output_tokens, 0);
         assert_eq!(totals.total_tokens, 0);
         assert_eq!(totals.seconds_running, 0.0);
+    }
+
+    #[test]
+    fn tracker_event_serialization_roundtrip_preserves_immutable_identity() {
+        let event = TrackerEvent {
+            item_id: "item-1".to_string(),
+            field_id: "field-1".to_string(),
+            previous_value: Some("before".to_string()),
+            value: "after".to_string(),
+            actor_id: "actor-1".to_string(),
+            event_id: "event-1".to_string(),
+            occurred_at: "2026-08-15T10:00:00Z".parse().unwrap(),
+        };
+
+        assert_eq!(
+            serde_json::from_str::<TrackerEvent>(&serde_json::to_string(&event).unwrap()).unwrap(),
+            event
+        );
     }
 }

@@ -310,9 +310,13 @@ pub(crate) async fn prepare_orchestrator_runtime(
         return Ok(None);
     };
 
+    let authorization_event_fields = config.authorization_event_fields();
     let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker_for_runtime(&config)?);
     let config = Arc::new(RwLock::new(config));
     tracker.validate_configuration().await?;
+    for field in authorization_event_fields {
+        tracker.validate_event_evidence(&field).await?;
+    }
     // `AcpAgentRunner` is the shared runtime dispatcher: `acpx_agent` steps run through the
     // acpx CLI/session runtime, while explicit direct configs keep the ACP stdio path.
     let agent_runner: Arc<dyn AgentRunner> = Arc::new(AcpAgentRunner::new_with_document_state(
