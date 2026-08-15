@@ -1,0 +1,15 @@
+{
+  "assessment": {
+    "findings": [
+      {
+        "id": "artifact-boundary",
+        "severity": "blocking",
+        "summary": "The proposal needs an explicit immutable input boundary.",
+        "evidence": {
+          "reference": "design section 3",
+          "observation": "The proposed evaluator reads the live workspace."
+        }
+      }
+    ]
+  }
+}
