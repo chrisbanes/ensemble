@@ -1,0 +1,59 @@
+# A complete, fixture-backed adversarial-review pipeline. All relative paths are
+# resolved from this directory.
+tracker:
+  kind: todo_file
+  path: TODO.md
+
+repos:
+  - path: target
+    branch: main
+
+agents:
+  producer:
+    executor: example-agent
+    model: example-model
+    prompt: Produce the candidate artifact and report its completion.
+  evaluator:
+    executor: example-agent
+    model: example-model
+    prompt: Assess the immutable Artifact snapshot and return schema-valid evidence.
+  adjudicator:
+    executor: example-agent
+    model: example-model
+    prompt: Dispose every assessment finding with evidence-backed adjudication.
+
+steps:
+  - name: produce
+    agent: producer
+    depends: []
+    artifact_snapshot:
+      repositories: [target]
+  - name: architecture
+    agent: evaluator
+    depends: [produce]
+    output_schema:
+      path: schemas/assessment.schema.json
+    artifact_inputs: [produce]
+    artifact_access: immutable
+  - name: verification
+    agent: evaluator
+    depends: [produce]
+    output_schema:
+      path: schemas/assessment.schema.json
+    artifact_inputs: [produce]
+    artifact_access: immutable
+  - name: synthesis
+    kind: synthesis
+    agent: adjudicator
+    depends: [architecture, verification]
+    output_schema:
+      path: schemas/adjudication.schema.json
+  - name: adversarial-gate
+    kind: gate
+    depends: [synthesis]
+    gate:
+      assessment_steps: [architecture, verification]
+      adjudication_step: synthesis
+
+on_success: Done
+on_failure: Failed

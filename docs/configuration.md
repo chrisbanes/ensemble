@@ -655,7 +655,9 @@ Pipeline step definitions. Agent and synthesis steps invoke configured agents; g
 | `artifact_access` | string | `mutable` | `immutable` verifies every declared input immediately before the step starts and halts on drift; `mutable` permits normal workspace mutation |
 | `gate` | object | — | Required only for `kind: gate`: ordered unique `assessment_steps` and one `adjudication_step`; a gate has no `agent` |
 
-See [Pipeline Guide](pipelines.md) for details on DAG construction and execution.
+See [Pipeline Guide](pipelines.md) for details on DAG construction and execution. For a complete
+fixture-backed composition of Artifact snapshots, immutable Assessment consumers, synthesis, and
+a deterministic gate, see [Adversarial reviews](adversarial-reviews.md).
 
 `output_schema.path` must resolve beneath the configuration directory and must be valid JSON
 Schema Draft 2020-12 (an omitted `$schema` uses that dialect). `artifact_snapshot.repositories`

@@ -141,6 +141,9 @@ evidence; unresolved findings create one durable accept/reject approval request.
 only downstream steps and reject fails the gate. Gate failure permits whole-issue retry or halt,
 never gate-local retry or fixup.
 
+For a complete fixture-backed operator composition, including plan, code, and test-review routes,
+prompt guidance, trust boundaries, and recovery, see [Adversarial reviews](adversarial-reviews.md).
+
 ## Clarification request style (batched by default)
 
 Ensemble now injects interaction-policy guidance into prompts by default. Agents are expected to:

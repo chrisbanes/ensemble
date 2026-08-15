@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["adjudication"],
+  "properties": {
+    "adjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dispositions"],
+      "properties": {
+        "dispositions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_step", "finding_id", "disposition", "rationale", "evidence"],
+            "properties": {
+              "source_step": { "type": "string", "minLength": 1 },
+              "finding_id": { "type": "string", "minLength": 1 },
+              "disposition": { "enum": ["upheld", "dismissed", "unresolved"] },
+              "rationale": { "type": "string", "minLength": 1 },
+              "evidence": { "type": "object", "minProperties": 1 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

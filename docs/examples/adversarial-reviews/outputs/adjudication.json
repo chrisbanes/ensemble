@@ -1,0 +1,24 @@
+{
+  "adjudication": {
+    "dispositions": [
+      {
+        "source_step": "architecture",
+        "finding_id": "artifact-boundary",
+        "disposition": "dismissed",
+        "rationale": "The producer already captures the declared repository after output validation.",
+        "evidence": {
+          "configuration": "produce.artifact_snapshot.repositories"
+        }
+      },
+      {
+        "source_step": "verification",
+        "finding_id": "missing-regression",
+        "disposition": "upheld",
+        "rationale": "The requested assertion is absent from the supplied test plan.",
+        "evidence": {
+          "required_test": "rejected-input regression"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "assessment": {
+    "findings": [
+      {
+        "id": "missing-regression",
+        "severity": "non_blocking",
+        "summary": "The proposed change lacks a regression test for the rejected input.",
+        "evidence": {
+          "test": "adversarial_review_examples",
+          "observation": "No rejected-input assertion is described."
+        }
+      }
+    ]
+  }
+}
