@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
+use crate::pipeline::engine::PipelineRun;
 use crate::workspace::finalize::FinalizeMode;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -19,6 +20,53 @@ pub struct RunArtifacts {
     pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
     #[serde(default)]
     pub gate_evidence: BTreeMap<String, crate::pipeline::assessment::GateEvidence>,
+}
+
+/// Merge durable pipeline evidence into the public artifact envelope used by
+/// both live snapshots and completed history.
+pub fn with_pipeline_evidence(
+    mut artifacts: Option<RunArtifacts>,
+    run: &PipelineRun,
+    run_id: Option<&str>,
+    issue_id: &str,
+    workspace_path: &str,
+) -> Option<RunArtifacts> {
+    if run.artifact_snapshots.is_empty()
+        && run.artifact_integrity_violations.is_empty()
+        && run.artifact_access_evidence.is_empty()
+        && run.gate_evidence.is_empty()
+    {
+        return artifacts;
+    }
+
+    let mut snapshots = run.artifact_snapshots.values().cloned().collect::<Vec<_>>();
+    snapshots.sort_by(|left, right| left.producer_step.cmp(&right.producer_step));
+    let gate_evidence = run
+        .gate_evidence
+        .iter()
+        .map(|(step, evidence)| (step.clone(), evidence.clone()))
+        .collect();
+    match artifacts.as_mut() {
+        Some(artifacts) => {
+            artifacts.artifact_snapshots = snapshots;
+            artifacts.artifact_integrity_violations = run.artifact_integrity_violations.clone();
+            artifacts.artifact_access_evidence = run.artifact_access_evidence.clone();
+            artifacts.gate_evidence = gate_evidence;
+        }
+        None => {
+            artifacts = Some(RunArtifacts {
+                run_id: run_id.unwrap_or(issue_id).to_string(),
+                workspace_path: workspace_path.to_string(),
+                repos: Vec::new(),
+                transcripts: Vec::new(),
+                artifact_snapshots: snapshots,
+                artifact_integrity_violations: run.artifact_integrity_violations.clone(),
+                artifact_access_evidence: run.artifact_access_evidence.clone(),
+                gate_evidence,
+            });
+        }
+    }
+    artifacts
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]

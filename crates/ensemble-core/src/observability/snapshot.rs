@@ -645,8 +645,22 @@ pub async fn build_issue_snapshot(
         }
     };
 
-    let artifacts = state.artifacts.get(&issue_id).cloned();
     let pipeline_run = state.pipeline_runs.get(&issue_id);
+    let active_run_id = running_entry
+        .and_then(|entry| entry.run_id.as_deref())
+        .or_else(|| waiting_entry.and_then(|entry| entry.run_id.as_deref()));
+    let artifacts = pipeline_run.map_or_else(
+        || state.artifacts.get(&issue_id).cloned(),
+        |run| {
+            crate::history::artifacts::with_pipeline_evidence(
+                state.artifacts.get(&issue_id).cloned(),
+                run,
+                active_run_id,
+                &issue_id,
+                &workspace_path,
+            )
+        },
+    );
     let config = state.pipeline_configs.get(&issue_id);
 
     // Try to get workflow_steps from running config first, then from completed entry
@@ -1298,6 +1312,46 @@ mod tests {
         let running = detail.running.unwrap();
         assert_eq!(running.turn_count, 7);
         assert_eq!(running.session_id, Some("session-abc".to_string()));
+    }
+
+    #[tokio::test]
+    async fn live_issue_snapshot_projects_gate_evidence_before_terminal_history() {
+        let mut state = build_test_state();
+        attach_pipeline_state(&mut state, "NODE_123");
+        state
+            .pipeline_runs
+            .get_mut("NODE_123")
+            .unwrap()
+            .gate_evidence
+            .insert(
+                "gate".to_string(),
+                crate::pipeline::assessment::GateEvidence {
+                    assessments: Default::default(),
+                    adjudication: crate::pipeline::assessment::Adjudication {
+                        dispositions: Vec::new(),
+                    },
+                    outcome: crate::pipeline::assessment::GateOutcome::AwaitingHuman,
+                    human_resolution: Some(crate::pipeline::assessment::GateHumanResolution {
+                        decision: crate::pipeline::assessment::GateHumanDecision::Approved,
+                        reason: Some("accepted residual risk".to_string()),
+                    }),
+                },
+            );
+
+        let detail = build_issue_snapshot(&state, "my-repo#42", "/tmp/workspaces", None)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            detail.artifacts.as_ref().unwrap().gate_evidence["gate"]
+                .human_resolution
+                .as_ref()
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("accepted residual risk")
+        );
+        assert_eq!(detail.artifacts.as_ref().unwrap().run_id, "run-1");
     }
 
     #[tokio::test]

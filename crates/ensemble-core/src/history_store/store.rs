@@ -472,7 +472,20 @@ mod tests {
             artifact_snapshots: Vec::new(),
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
-            gate_evidence: Default::default(),
+            gate_evidence: std::collections::BTreeMap::from([(
+                "gate".into(),
+                crate::pipeline::assessment::GateEvidence {
+                    assessments: Default::default(),
+                    adjudication: crate::pipeline::assessment::Adjudication {
+                        dispositions: Vec::new(),
+                    },
+                    outcome: crate::pipeline::assessment::GateOutcome::AwaitingHuman,
+                    human_resolution: Some(crate::pipeline::assessment::GateHumanResolution {
+                        decision: crate::pipeline::assessment::GateHumanDecision::Rejected,
+                        reason: Some("risk remains".into()),
+                    }),
+                },
+            )]),
         });
 
         store.append_history_record("run-1", &record).await.unwrap();
@@ -484,6 +497,15 @@ mod tests {
             Some("https://github.com/acme/repo/pull/12")
         );
         assert_eq!(artifacts.transcripts[0].step_name, "build");
+        assert_eq!(
+            artifacts.gate_evidence["gate"]
+                .human_resolution
+                .as_ref()
+                .unwrap()
+                .reason
+                .as_deref(),
+            Some("risk remains")
+        );
     }
 
     #[tokio::test]
