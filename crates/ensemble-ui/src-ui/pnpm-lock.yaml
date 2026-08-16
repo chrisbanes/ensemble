@@ -3007,8 +3007,8 @@ packages:
   remark-stringify@11.0.0:
     resolution: {integrity: sha512-1OSmLd3awB/t8qdoEOMazZkNsfVTeY4fTsgzcQFdXNq8ToTN4ZGwrMnlda4K6smTFKD+GRV6O48i6Z4iKgPPpw==}
 
-  remeda@2.39.0:
-    resolution: {integrity: sha512-3Ki8dU1o3OVu4dwIQ2Pj+yiuP7OnEbmWAGmJ3yDRqopily5jsj8NWzPvbS89H85d6UdONKEcUnrfuHY6jN9vyw==}
+  remeda@2.40.0:
+    resolution: {integrity: sha512-Y8yxrbK8SbTao2+mTqJcjre3/eBH641nr88aAgYfOdbW5p4FH+1Jk3mMypnA+SoktEXBVA8id0o3XPbgHYvQ9Q==}
     engines: {node: '>=18.0.0'}
 
   require-from-string@2.0.2:
@@ -4126,7 +4126,7 @@ snapshots:
       fs-extra: 11.4.0
       jiti: 2.7.0
       jsesc: 3.1.0
-      remeda: 2.39.0
+      remeda: 2.40.0
       tinyglobby: 0.2.17
       typedoc: 0.28.20(typescript@7.0.2)
     transitivePeerDependencies:
@@ -4136,7 +4136,7 @@ snapshots:
   '@orval/effect@8.24.0(typescript@7.0.2)':
     dependencies:
       '@orval/core': 8.24.0(typescript@7.0.2)
-      remeda: 2.39.0
+      remeda: 2.40.0
     transitivePeerDependencies:
       - '@faker-js/faker'
       - supports-color
@@ -4174,7 +4174,7 @@ snapshots:
   '@orval/mock@8.24.0(typescript@7.0.2)':
     dependencies:
       '@orval/core': 8.24.0(typescript@7.0.2)
-      remeda: 2.39.0
+      remeda: 2.40.0
     transitivePeerDependencies:
       - '@faker-js/faker'
       - supports-color
@@ -4184,7 +4184,7 @@ snapshots:
     dependencies:
       '@orval/core': 8.24.0(typescript@7.0.2)
       '@orval/fetch': 8.24.0(typescript@7.0.2)
-      remeda: 2.39.0
+      remeda: 2.40.0
     transitivePeerDependencies:
       - '@faker-js/faker'
       - supports-color
@@ -4211,7 +4211,7 @@ snapshots:
     dependencies:
       '@orval/core': 8.24.0(typescript@7.0.2)
       jsesc: 3.1.0
-      remeda: 2.39.0
+      remeda: 2.40.0
     transitivePeerDependencies:
       - '@faker-js/faker'
       - supports-color
@@ -6322,7 +6322,7 @@ snapshots:
       get-tsconfig: 4.14.2
       jiti: 2.7.0
       js-yaml: 4.3.1
-      remeda: 2.39.0
+      remeda: 2.40.0
       string-argv: 0.3.2
       typedoc: 0.28.20(typescript@7.0.2)
       typedoc-plugin-coverage: 4.0.3(typedoc@0.28.20(typescript@7.0.2))
@@ -6582,7 +6582,7 @@ snapshots:
       mdast-util-to-markdown: 2.1.2
       unified: 11.0.5
 
-  remeda@2.39.0: {}
+  remeda@2.40.0: {}
 
   require-from-string@2.0.2: {}
 
