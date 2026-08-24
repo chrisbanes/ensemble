@@ -976,6 +976,7 @@ mod tests {
                 },
                 cases: std::collections::BTreeMap::new(),
             }),
+            actions: Vec::new(),
         }])
         .unwrap();
         state.pipeline_runs.insert(

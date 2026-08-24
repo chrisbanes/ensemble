@@ -7,7 +7,7 @@ use crate::acceptance::AcceptanceAttempt;
 use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
-    RouteConfig, StepAuthorizationConfig, StepKind,
+    RouteConfig, StepActionConfig, StepAuthorizationConfig, StepKind,
 };
 use crate::orchestrator::resources::SchedulerReservation;
 use crate::pipeline::assessment::{
@@ -32,6 +32,9 @@ pub enum StepState {
     AwaitingApproval {
         interaction_request_id: Option<String>,
     },
+    /// A completed producer has durable effects that must finish before it can
+    /// satisfy downstream dependencies. These effects never occupy an agent slot.
+    AwaitingActions { approval_requested: bool },
     /// Step completed and was approved.
     Passed,
     /// Step was intentionally excluded by one or more completed route decisions.
@@ -86,12 +89,56 @@ pub enum PipelineAction {
         step: String,
         approval_state: Option<String>,
     },
+    /// A completed step has an ordered durable effect ready for the host to execute.
+    AwaitingAction { step: String },
     /// All steps have passed — pipeline completed successfully.
     Succeeded,
     /// A step failed or errored — pipeline halted.
     Failed { step: String, reason: String },
     /// No steps are ready right now; waiting for running steps to finish.
     Waiting,
+}
+
+/// Values resolved from a producer's schema-validated output. The action keeps
+/// configuration vocabulary opaque while allowing the host to execute bounded
+/// effects without rereading or rerunning the producer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResolvedStepAction {
+    TrackerComment {
+        body: String,
+    },
+    OperatorAttention {
+        kind: String,
+        summary: String,
+        remedy: String,
+        references: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingStepAction {
+    pub identity: String,
+    pub source_output_digest: String,
+    pub action: ResolvedStepAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StepActionReceipt {
+    TrackerComment { receipt: String },
+    OperatorAttention { receipt: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum StepActionState {
+    Pending(PendingStepAction),
+    Applied {
+        identity: String,
+        source_output_digest: String,
+        receipt: StepActionReceipt,
+    },
 }
 
 /// Durable evidence that a route selected a case from one validated producer output.
@@ -168,6 +215,8 @@ pub struct PipelineRun {
     pub gate_evidence: HashMap<String, GateEvidence>,
     /// Frozen selections, keyed by route step, used for recovery and downstream retries.
     pub route_decisions: HashMap<String, RouteDecisionEvidence>,
+    /// Ordered effects retained with the producer output until each external acknowledgement is durable.
+    action_states: HashMap<String, Vec<StepActionState>>,
     /// Immutable consumers whose launch was durably committed. This authorizes
     /// launch; it does not claim that the child processed any instructions.
     launched_immutable_consumers: HashSet<String>,
@@ -217,6 +266,8 @@ pub struct PipelineRunSnapshot {
     pub gate_evidence: Box<HashMap<String, GateEvidence>>,
     #[serde(default)]
     pub route_decisions: HashMap<String, RouteDecisionEvidence>,
+    #[serde(default)]
+    pub action_states: HashMap<String, Vec<StepActionState>>,
     #[serde(default)]
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     #[serde(default)]
@@ -284,6 +335,7 @@ impl PipelineRun {
             automatic_transitions: HashMap::new(),
             gate_evidence: HashMap::new(),
             route_decisions: HashMap::new(),
+            action_states: HashMap::new(),
             launched_immutable_consumers: HashSet::new(),
             acceptance_attempts: Vec::new(),
             resolved_acceptance_plan: None,
@@ -312,6 +364,7 @@ impl PipelineRun {
             launched_immutable_consumers: self.launched_immutable_consumers.clone(),
             gate_evidence: Box::new(self.gate_evidence.clone()),
             route_decisions: self.route_decisions.clone(),
+            action_states: self.action_states.clone(),
             acceptance_attempts: self.acceptance_attempts.clone(),
             resolved_acceptance_plan: self.resolved_acceptance_plan.clone(),
             dag_steps: self.dag.steps.clone(),
@@ -582,6 +635,7 @@ impl PipelineRun {
             launched_immutable_consumers: snapshot.launched_immutable_consumers,
             gate_evidence: *snapshot.gate_evidence,
             route_decisions: snapshot.route_decisions,
+            action_states: snapshot.action_states,
             acceptance_attempts: snapshot.acceptance_attempts,
             resolved_acceptance_plan: snapshot.resolved_acceptance_plan,
             dag: StepDag {
@@ -682,7 +736,40 @@ impl PipelineRun {
         self.clear_active_scheduler_reservation(step_name);
         self.clear_immutable_consumer_launch_commitment(step_name);
         let result = output.result.clone();
+        let actions = matches!(result, StepResult::Succeeded | StepResult::Concern { .. })
+            .then(|| self.resolve_actions(step_name, &output))
+            .transpose();
         self.step_outputs.insert(step_name.to_string(), output);
+        let actions = match actions {
+            Ok(actions) => actions,
+            Err(reason) => {
+                self.step_states.insert(
+                    step_name.to_string(),
+                    StepState::Errored {
+                        error: reason.clone(),
+                    },
+                );
+                return PipelineAction::Failed {
+                    step: step_name.to_string(),
+                    reason,
+                };
+            }
+        };
+        if let Some(actions) = actions {
+            if !actions.is_empty() {
+                self.action_states.insert(
+                    step_name.to_string(),
+                    actions.into_iter().map(StepActionState::Pending).collect(),
+                );
+                self.step_states.insert(
+                    step_name.to_string(),
+                    StepState::AwaitingActions { approval_requested },
+                );
+                return PipelineAction::AwaitingAction {
+                    step: step_name.to_string(),
+                };
+            }
+        }
         match result {
             StepResult::Succeeded | StepResult::Concern { .. } => {
                 match self.gate_check(step_name, approval_requested) {
@@ -739,6 +826,165 @@ impl PipelineRun {
                 }
             }
         }
+    }
+
+    /// Return the next ordered, unresolved effect for a producer. The returned
+    /// data comes entirely from the durably retained output snapshot.
+    pub fn pending_action(&self, step_name: &str) -> Option<&PendingStepAction> {
+        self.action_states
+            .get(step_name)?
+            .iter()
+            .find_map(|state| match state {
+                StepActionState::Pending(action) => Some(action),
+                StepActionState::Applied { .. } => None,
+            })
+    }
+
+    /// Record one durable external-effect receipt and advance the producer only
+    /// after its full declared sequence has been acknowledged.
+    pub fn acknowledge_action(
+        &mut self,
+        step_name: &str,
+        receipt: StepActionReceipt,
+    ) -> PipelineAction {
+        let Some(states) = self.action_states.get_mut(step_name) else {
+            return PipelineAction::Waiting;
+        };
+        let Some(index) = states
+            .iter()
+            .position(|state| matches!(state, StepActionState::Pending(_)))
+        else {
+            return PipelineAction::Waiting;
+        };
+        let StepActionState::Pending(pending) = states[index].clone() else {
+            unreachable!("pending action index must contain a pending action");
+        };
+        states[index] = StepActionState::Applied {
+            identity: pending.identity,
+            source_output_digest: pending.source_output_digest,
+            receipt,
+        };
+        if states
+            .iter()
+            .any(|state| matches!(state, StepActionState::Pending(_)))
+        {
+            return PipelineAction::AwaitingAction {
+                step: step_name.to_string(),
+            };
+        }
+        let approval_requested = matches!(
+            self.step_states.get(step_name),
+            Some(StepState::AwaitingActions {
+                approval_requested: true
+            })
+        );
+        self.finish_completed_step(step_name, approval_requested)
+    }
+
+    fn finish_completed_step(
+        &mut self,
+        step_name: &str,
+        approval_requested: bool,
+    ) -> PipelineAction {
+        match self.gate_check(step_name, approval_requested) {
+            ApprovalGateCheck::EligibleGating => {
+                let approval_state = self.approval_state_for(step_name);
+                self.step_states.insert(
+                    step_name.to_string(),
+                    StepState::AwaitingApproval {
+                        interaction_request_id: None,
+                    },
+                );
+                PipelineAction::AwaitingApproval {
+                    step: step_name.to_string(),
+                    approval_state,
+                }
+            }
+            ApprovalGateCheck::UnconfiguredButRequested => {
+                let reason = format!(
+                    "step '{step_name}' has no approval configuration but the worker requested one"
+                );
+                self.step_states.insert(
+                    step_name.to_string(),
+                    StepState::Errored {
+                        error: reason.clone(),
+                    },
+                );
+                PipelineAction::Failed {
+                    step: step_name.to_string(),
+                    reason,
+                }
+            }
+            ApprovalGateCheck::NotRequested => {
+                self.step_states
+                    .insert(step_name.to_string(), StepState::Passed);
+                if self.all_passed() {
+                    PipelineAction::Succeeded
+                } else {
+                    self.find_dispatchable()
+                }
+            }
+        }
+    }
+
+    fn resolve_actions(
+        &self,
+        step_name: &str,
+        output: &StepOutput,
+    ) -> Result<Vec<PendingStepAction>, String> {
+        let Some(step) = self.step(step_name) else {
+            return Err(format!(
+                "completed step '{step_name}' is not in the pipeline"
+            ));
+        };
+        let Some(value) = output.output.as_ref() else {
+            return step
+                .actions
+                .is_empty()
+                .then(Vec::new)
+                .ok_or_else(|| format!("step '{step_name}' has actions but no structured output"));
+        };
+        let source_output_digest = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(value).map_err(|error| error.to_string())?)
+        );
+        step.actions
+            .iter()
+            .enumerate()
+            .map(|(index, config)| {
+                let action = match config {
+                    StepActionConfig::TrackerComment { body } => ResolvedStepAction::TrackerComment {
+                        body: value.pointer(body).and_then(serde_json::Value::as_str)
+                            .filter(|body| !body.is_empty())
+                            .ok_or_else(|| format!("step '{step_name}' action {index} body pointer did not resolve to a non-empty string"))?
+                            .to_string(),
+                    },
+                    StepActionConfig::OperatorAttention { kind, summary, remedy, references } => {
+                        let string_at = |pointer: &str| value.pointer(pointer)
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_string)
+                            .ok_or_else(|| format!("step '{step_name}' action {index} pointer '{pointer}' did not resolve to a non-empty string"));
+                        let references = references.as_ref().map(|pointer| {
+                            value.pointer(pointer).and_then(serde_json::Value::as_array)
+                                .ok_or_else(|| format!("step '{step_name}' action {index} references pointer did not resolve to an array"))?
+                                .iter().map(|value| value.as_str().filter(|value| !value.is_empty()).map(str::to_string)
+                                    .ok_or_else(|| format!("step '{step_name}' action {index} references contained an empty or non-string value")))
+                                .collect::<Result<Vec<_>, _>>()
+                        }).transpose()?.unwrap_or_default();
+                        ResolvedStepAction::OperatorAttention {
+                            kind: kind.clone(), summary: string_at(summary)?, remedy: string_at(remedy)?, references,
+                        }
+                    }
+                };
+                let identity_material = format!("{}:{}:{step_name}:{index}:{source_output_digest}", self.issue_id, self.cycle);
+                Ok(PendingStepAction {
+                    identity: format!("action:{:x}", Sha256::digest(identity_material.as_bytes())),
+                    source_output_digest: source_output_digest.clone(),
+                    action,
+                })
+            })
+            .collect()
     }
 
     /// Bind an approval interaction request to a step that is awaiting
@@ -892,6 +1138,7 @@ impl PipelineRun {
             self.artifact_snapshots.remove(step);
             self.authorization_evidence.remove(step);
             self.automatic_transitions.remove(step);
+            self.action_states.remove(step);
             self.clear_immutable_consumer_launch_commitment(step);
         }
         self.route_decisions.retain(|route, decision| {
@@ -960,6 +1207,7 @@ impl PipelineRun {
                         gate: None,
                         authorization: None,
                         route: None,
+                        actions: Vec::new(),
                         depends: original_deps,
                     },
                 );
@@ -1432,6 +1680,68 @@ fn validate_snapshot(snapshot: &PipelineRunSnapshot) -> Result<(), crate::error:
         }
     }
 
+    for (step_name, actions) in &snapshot.action_states {
+        let Some(step) = snapshot
+            .dag_steps
+            .iter()
+            .find(|step| step.name == *step_name)
+        else {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!("action state references missing step '{step_name}'"),
+            });
+        };
+        if !step.kind.requires_agent()
+            || step.actions.len() != actions.len()
+            || !snapshot.step_outputs.contains_key(step_name)
+            || actions.is_empty()
+        {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!(
+                    "action state for step '{step_name}' is inconsistent with its producer"
+                ),
+            });
+        }
+        let mut identities = HashSet::new();
+        for action in actions {
+            let (identity, digest) = match action {
+                StepActionState::Pending(action) => {
+                    (&action.identity, &action.source_output_digest)
+                }
+                StepActionState::Applied {
+                    identity,
+                    source_output_digest,
+                    ..
+                } => (identity, source_output_digest),
+            };
+            if identity.trim().is_empty()
+                || digest.trim().is_empty()
+                || !identities.insert(identity.as_str())
+            {
+                return Err(crate::error::PipelineError::InvalidSnapshot {
+                    reason: format!(
+                        "action state for step '{step_name}' has invalid identity evidence"
+                    ),
+                });
+            }
+        }
+    }
+    for (step_name, state) in &snapshot.step_states {
+        if matches!(state, StepState::AwaitingActions { .. })
+            && !snapshot
+                .action_states
+                .get(step_name)
+                .is_some_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| matches!(action, StepActionState::Pending(_)))
+                })
+        {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!("action-waiting step '{step_name}' has no pending action"),
+            });
+        }
+    }
+
     for step in &snapshot.dag_steps {
         if !snapshot.step_states.contains_key(&step.name) {
             return Err(crate::error::PipelineError::InvalidSnapshot {
@@ -1527,8 +1837,9 @@ mod tests {
     };
     use crate::config::ensemble::{
         ArtifactSnapshotConfig, AuthorizationHandoffMode, GateConfig, OnFailure,
-        OutputSchemaConfig, RouteConfig, RouteSource, StepApprovalConfig, StepApprovalMode,
-        StepAuthorizationConfig, StepConfig, StepKind, TrackerEventPredicateConfig,
+        OutputSchemaConfig, RouteConfig, RouteSource, StepActionConfig, StepApprovalConfig,
+        StepApprovalMode, StepAuthorizationConfig, StepConfig, StepKind,
+        TrackerEventPredicateConfig,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::verdict::StepOutput;
@@ -1559,6 +1870,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -1582,6 +1894,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -1608,6 +1921,7 @@ mod tests {
             }),
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -2029,6 +2343,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }];
         let mut run = make_run(&steps);
 
@@ -2069,6 +2384,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -2106,6 +2422,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -2889,6 +3206,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
             assessment_gate(),
             make_step("publish", "publisher", &["gate"]),
@@ -2932,6 +3250,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
             assessment_gate(),
         ];
@@ -2970,6 +3289,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
             assessment_gate(),
         ];
@@ -3035,6 +3355,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -3055,6 +3376,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
         ];
         let mut run = make_run(&steps);
@@ -3890,5 +4212,71 @@ mod tests {
             Some(StepState::Failed { .. })
         ));
         assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+    }
+
+    #[test]
+    fn completed_producer_blocks_dependents_until_ordered_actions_are_acknowledged() {
+        let mut producer = make_step("produce", "builder", &[]);
+        producer.actions = vec![
+            StepActionConfig::TrackerComment {
+                body: "/comment".to_string(),
+            },
+            StepActionConfig::OperatorAttention {
+                kind: "ensemble.review".to_string(),
+                summary: "/summary".to_string(),
+                remedy: "/remedy".to_string(),
+                references: Some("/references".to_string()),
+            },
+        ];
+        let downstream = make_step("consume", "reviewer", &["produce"]);
+        let mut run = make_run(&[producer, downstream]);
+
+        assert!(matches!(run.start(), PipelineAction::Dispatch(_)));
+        let action = run.step_completed(
+            "produce",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({
+                    "comment": "ready for review",
+                    "summary": "needs review",
+                    "remedy": "inspect the artifact",
+                    "references": ["artifact:1"]
+                })),
+            },
+            false,
+        );
+        assert!(matches!(action, PipelineAction::AwaitingAction { .. }));
+        assert_eq!(
+            run.step_states["produce"],
+            StepState::AwaitingActions {
+                approval_requested: false
+            }
+        );
+        assert!(matches!(run.start(), PipelineAction::Waiting));
+
+        let snapshot = run.to_snapshot();
+        let mut recovered = PipelineRun::from_snapshot(snapshot).unwrap();
+        let first = recovered.pending_action("produce").unwrap();
+        assert!(matches!(
+            first.action,
+            ResolvedStepAction::TrackerComment { .. }
+        ));
+        assert!(matches!(
+            recovered.acknowledge_action(
+                "produce",
+                StepActionReceipt::TrackerComment {
+                    receipt: "comment-1".to_string()
+                },
+            ),
+            PipelineAction::AwaitingAction { .. }
+        ));
+        assert!(matches!(
+            recovered.acknowledge_action(
+                "produce",
+                StepActionReceipt::OperatorAttention { receipt: "attention-1".to_string() },
+            ),
+            PipelineAction::Dispatch(requests) if requests[0].step_name == "consume"
+        ));
     }
 }

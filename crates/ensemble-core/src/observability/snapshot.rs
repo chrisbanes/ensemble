@@ -388,7 +388,9 @@ pub fn extract_step_detail_state(
                         StepState::Failed { .. } => "failed",
                         StepState::Errored { .. } => "failed",
                         StepState::BlockedOnHuman { .. } => "waiting",
-                        StepState::AwaitingApproval { .. } => "waiting",
+                        StepState::AwaitingApproval { .. } | StepState::AwaitingActions { .. } => {
+                            "waiting"
+                        }
                     })
                     .unwrap_or("pending")
                     .to_string();
@@ -692,7 +694,9 @@ pub async fn build_issue_snapshot(
                         StepState::Failed { .. } => "failed",
                         StepState::Errored { .. } => "failed",
                         StepState::BlockedOnHuman { .. } => "waiting",
-                        StepState::AwaitingApproval { .. } => "waiting",
+                        StepState::AwaitingApproval { .. } | StepState::AwaitingActions { .. } => {
+                            "waiting"
+                        }
                     })
                     .unwrap_or("pending");
                 WorkflowStepInfo {
@@ -1103,6 +1107,7 @@ mod tests {
                     gate: None,
                     authorization: None,
                     route: None,
+                    actions: Vec::new(),
                 },
                 StepConfig {
                     name: "review".to_string(),
@@ -1123,6 +1128,7 @@ mod tests {
                     gate: None,
                     authorization: None,
                     route: None,
+                    actions: Vec::new(),
                 },
             ],
             on_success: "finalize".to_string(),

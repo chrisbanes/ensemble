@@ -1432,6 +1432,33 @@ impl IssueTracker for GithubTracker {
         true
     }
 
+    fn supports_idempotent_comment_publication(&self) -> bool {
+        true
+    }
+
+    async fn publish_comment(
+        &self,
+        id: &str,
+        publication: crate::tracker::model::TrackerCommentPublication,
+    ) -> Result<crate::tracker::model::TrackerCommentReceipt, TrackerError> {
+        let marker = format!("<!-- ensemble-action:{} -->", publication.marker);
+        if self
+            .list_comments_after(id, "")
+            .await?
+            .iter()
+            .any(|comment| comment.body.contains(&marker))
+        {
+            return Ok(crate::tracker::model::TrackerCommentReceipt {
+                receipt: publication.marker,
+            });
+        }
+        self.add_comment(id, &format!("{}\n\n{}", publication.body, marker))
+            .await?;
+        Ok(crate::tracker::model::TrackerCommentReceipt {
+            receipt: publication.marker,
+        })
+    }
+
     async fn add_comment(&self, id: &str, body: &str) -> Result<(), TrackerError> {
         let variables = json!({
             "subjectId": id,
@@ -1521,6 +1548,9 @@ impl IssueTracker for GithubTracker {
                 .cmp(&right.created_at)
                 .then_with(|| left.comment_id.cmp(&right.comment_id))
         });
+        if after_comment_id.is_empty() {
+            return Ok(comments);
+        }
         if let Some(anchor_index) = comments
             .iter()
             .position(|comment| comment.comment_id == after_comment_id)

@@ -55,6 +55,11 @@ _Avoid_: Run, session
 The structured result by which a step reports success, failure, concern, summary, and downstream data.
 _Avoid_: Verdict
 
+**Post-output action**:
+A bounded configured effect resolved from one producer's schema-validated Step output and durably
+acknowledged before that producer can satisfy downstream dependencies.
+_Avoid_: Replan, workflow mode, command
+
 **Artifact snapshot**:
 An immutable identity for material exposed by one step to downstream evaluation, ensuring sibling evaluators assess the same subject.
 _Avoid_: Current workspace, live files

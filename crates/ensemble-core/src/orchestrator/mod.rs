@@ -91,11 +91,12 @@ use crate::pipeline::assessment::{DispositionKind, GateEvidence};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
     AutomaticTransitionState, DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot,
-    RouteDecisionEvidence, SelectedWorkflowSnapshot, StepOutputTemplateContext, StepState,
+    ResolvedStepAction, RouteDecisionEvidence, SelectedWorkflowSnapshot, StepActionReceipt,
+    StepOutputTemplateContext, StepState,
 };
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::timeline::persistence::TimelinePersistence;
-use crate::tracker::model::{Issue, RetryEntry, RunningEntry};
+use crate::tracker::model::{Issue, RetryEntry, RunningEntry, TrackerCommentPublication};
 use crate::tracker::{IssueTracker, OwnershipClaim, OwnershipLease};
 use crate::transcript::events::TranscriptEventBus;
 use crate::transcript::model::TranscriptRecordKind;
@@ -2280,6 +2281,7 @@ impl Orchestrator {
                         }
                     }
                     PipelineAction::Waiting
+                    | PipelineAction::AwaitingAction { .. }
                     | PipelineAction::Failed { .. }
                     | PipelineAction::BlockedOnHuman { .. }
                     | PipelineAction::AwaitingApproval { .. } => {}
@@ -2726,6 +2728,7 @@ impl Orchestrator {
         active_issue_ids.sort();
 
         for (_, issue_id) in active_issue_ids {
+            self.apply_pending_step_actions(&issue_id).await;
             if self
                 .pending_run_started_transitions
                 .lock()
@@ -2742,6 +2745,145 @@ impl Orchestrator {
                 break;
             }
             self.dispatch_ready_steps_for_issue(&issue_id, permit).await;
+        }
+    }
+
+    /// Execute durable configured effects before normal ready-step dispatch.
+    /// Failures leave the pending snapshot and issue ownership in place so the
+    /// next scheduler tick retries the effect, never its producer.
+    async fn apply_pending_step_actions(&self, issue_id: &str) {
+        loop {
+            let Some((identifier, step_name, pending, transition)) = ({
+                let state = self.state.read().await;
+                let Some(run) = state.get_pipeline_run(issue_id) else {
+                    return;
+                };
+                let Some((step_name, pending)) = run.workflow_steps().find_map(|step| {
+                    run.pending_action(&step.name)
+                        .cloned()
+                        .map(|pending| (step.name.clone(), pending))
+                }) else {
+                    return;
+                };
+                let identifier = state
+                    .get_running(issue_id)
+                    .map(|entry| entry.identifier.clone())
+                    .unwrap_or_else(|| issue_id.to_string());
+                let Some(transition) = Self::transition_input_for_snapshot(
+                    &state,
+                    run,
+                    PipelineTransitionTarget {
+                        issue_id,
+                        identifier: &identifier,
+                    },
+                    PipelineTransitionKind::ActionPending,
+                    Some(step_name.clone()),
+                    Some(pending.identity.clone()),
+                    None,
+                ) else {
+                    return;
+                };
+                Some((identifier, step_name, pending, transition))
+            }) else {
+                return;
+            };
+            if let Err(error) = self.pipeline_journal.append(transition).await {
+                warn!(issue_id = %issue_id, step = %step_name, error = %error, "failed to checkpoint configured action before execution");
+                return;
+            }
+            let receipt = match pending.action.clone() {
+                ResolvedStepAction::TrackerComment { body } => self
+                    .tracker
+                    .publish_comment(
+                        issue_id,
+                        TrackerCommentPublication {
+                            marker: pending.identity.clone(),
+                            body,
+                        },
+                    )
+                    .await
+                    .map(|receipt| StepActionReceipt::TrackerComment {
+                        receipt: receipt.receipt,
+                    })
+                    .map_err(|error| error.to_string()),
+                ResolvedStepAction::OperatorAttention {
+                    kind,
+                    summary,
+                    remedy,
+                    references,
+                } => {
+                    let Some(reporter) = self.attention_reporter.as_ref() else {
+                        warn!(issue_id = %issue_id, step = %step_name, "configured attention action requires durable history storage");
+                        return;
+                    };
+                    let observation = AttentionIdentity::new(&pending.identity, issue_id, kind)
+                        .and_then(|identity| {
+                            AttentionPresentation::new(summary, remedy, references).and_then(
+                                |presentation| {
+                                    AttentionEvidence::new(&pending.source_output_digest).map(
+                                        |evidence| {
+                                            AttentionUpsert::new(identity, presentation, evidence)
+                                        },
+                                    )
+                                },
+                            )
+                        });
+                    match observation {
+                        Ok(observation) => reporter
+                            .upsert_open(observation)
+                            .await
+                            .map(|item| StepActionReceipt::OperatorAttention {
+                                receipt: item.identity.producer_key,
+                            })
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
+            };
+            let receipt = match receipt {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    warn!(issue_id = %issue_id, step = %step_name, error = %error, "configured action remains pending for retry");
+                    return;
+                }
+            };
+            let Some((candidate, transition)) = ({
+                let state = self.state.read().await;
+                let Some(run) = state.get_pipeline_run(issue_id) else {
+                    return;
+                };
+                let mut candidate = run.clone();
+                candidate.acknowledge_action(&step_name, receipt);
+                let Some(transition) = Self::transition_input_for_snapshot(
+                    &state,
+                    &candidate,
+                    PipelineTransitionTarget {
+                        issue_id,
+                        identifier: &identifier,
+                    },
+                    PipelineTransitionKind::ActionApplied,
+                    Some(step_name.clone()),
+                    Some(pending.identity.clone()),
+                    None,
+                ) else {
+                    return;
+                };
+                Some((candidate, transition))
+            }) else {
+                return;
+            };
+            if let Err(error) = self.pipeline_journal.append(transition).await {
+                warn!(issue_id = %issue_id, step = %step_name, error = %error, "effect completed but receipt was not durable; marker reconciliation will retry it");
+                return;
+            }
+            let mut state = self.state.write().await;
+            let still_pending = state
+                .get_pipeline_run(issue_id)
+                .and_then(|run| run.pending_action(&step_name))
+                .is_some_and(|current| current.identity == pending.identity);
+            if still_pending {
+                state.pipeline_runs.insert(issue_id.to_string(), candidate);
+            }
         }
     }
 
@@ -6455,7 +6597,7 @@ impl Orchestrator {
                                 self.commit_whole_issue_failure_retry(terminal).await;
                             }
                         }
-                        PipelineAction::Waiting => {
+                        PipelineAction::Waiting | PipelineAction::AwaitingAction { .. } => {
                             debug!(issue_id = %issue_id, "pipeline waiting for other steps");
                             drop(state);
                             if let Err(error) = self
@@ -10214,7 +10356,9 @@ impl Orchestrator {
             PipelineAction::Failed { .. } => PipelineTransitionKind::StepFailed,
             PipelineAction::BlockedOnHuman { .. } => PipelineTransitionKind::StepBlockedOnHuman,
             PipelineAction::AwaitingApproval { .. } => PipelineTransitionKind::StepAwaitingApproval,
-            PipelineAction::Waiting => PipelineTransitionKind::StepCompleted,
+            PipelineAction::Waiting | PipelineAction::AwaitingAction { .. } => {
+                PipelineTransitionKind::StepCompleted
+            }
         }
     }
 
@@ -12023,7 +12167,9 @@ impl Orchestrator {
                     } => {
                         nested_approval = Some((step, approval_state));
                     }
-                    PipelineAction::Waiting | PipelineAction::BlockedOnHuman { .. } => {}
+                    PipelineAction::Waiting
+                    | PipelineAction::AwaitingAction { .. }
+                    | PipelineAction::BlockedOnHuman { .. } => {}
                 }
             }
         }
@@ -20960,6 +21106,7 @@ agent:
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);

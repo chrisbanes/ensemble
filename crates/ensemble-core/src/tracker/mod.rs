@@ -6,7 +6,10 @@ pub mod todo_file;
 
 use crate::config::ensemble::{EnsembleConfig, TrackerConfig};
 use async_trait::async_trait;
-use model::{InteractionThreadRoot, Issue, TrackerComment, TrackerEvent};
+use model::{
+    InteractionThreadRoot, Issue, TrackerComment, TrackerCommentPublication, TrackerCommentReceipt,
+    TrackerEvent,
+};
 use serde::{Deserialize, Serialize};
 
 /// Error type for tracker operations.
@@ -40,6 +43,8 @@ pub enum TrackerError {
     MissingEndCursor,
     #[error("tracker does not support write operations")]
     WritesNotSupported,
+    #[error("tracker cannot reconcile configured marker-bound comment publication")]
+    IdempotentCommentPublicationUnsupported,
     #[error("tracker does not support immutable event evidence for field '{field}'")]
     EventEvidenceUnsupported { field: String },
 }
@@ -153,6 +158,23 @@ pub trait IssueTracker: Send + Sync {
 
     /// Add a comment to an issue in the tracker.
     async fn add_comment(&self, _id: &str, _body: &str) -> Result<(), TrackerError> {
+        Err(TrackerError::WritesNotSupported)
+    }
+
+    /// Whether this adapter can reconcile a marker-bound comment after a
+    /// post-write crash. Configuration activation uses this capability before
+    /// accepting a configured comment action.
+    fn supports_idempotent_comment_publication(&self) -> bool {
+        false
+    }
+
+    /// Publish a marker-bound comment, returning the same receipt when the
+    /// effect was already visible from an earlier ambiguous attempt.
+    async fn publish_comment(
+        &self,
+        _id: &str,
+        _publication: TrackerCommentPublication,
+    ) -> Result<TrackerCommentReceipt, TrackerError> {
         Err(TrackerError::WritesNotSupported)
     }
 

@@ -48,6 +48,7 @@ fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         gate: None,
         authorization: None,
         route: None,
+        actions: Vec::new(),
     }
 }
 

@@ -314,6 +314,11 @@ pub(crate) async fn prepare_orchestrator_runtime(
     let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker_for_runtime(&config)?);
     let config = Arc::new(RwLock::new(config));
     tracker.validate_configuration().await?;
+    if config.read().await.has_tracker_comment_actions()
+        && !tracker.supports_idempotent_comment_publication()
+    {
+        return Err(crate::tracker::TrackerError::IdempotentCommentPublicationUnsupported.into());
+    }
     for field in authorization_event_fields {
         tracker.validate_event_evidence(&field).await?;
     }

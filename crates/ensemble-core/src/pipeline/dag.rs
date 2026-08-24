@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, GateConfig, OnFailure,
-    ResolvedOutputSchema, RouteConfig, StepApprovalConfig, StepAuthorizationConfig, StepConfig,
-    StepKind,
+    ResolvedOutputSchema, RouteConfig, StepActionConfig, StepApprovalConfig,
+    StepAuthorizationConfig, StepConfig, StepKind,
 };
 use crate::error::PipelineError;
 
@@ -39,6 +39,8 @@ pub struct DagStep {
     pub authorization: Option<StepAuthorizationConfig>,
     #[serde(default)]
     pub route: Option<RouteConfig>,
+    #[serde(default)]
+    pub actions: Vec<StepActionConfig>,
     pub depends: Vec<String>,
 }
 
@@ -163,6 +165,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             gate: step.gate.clone(),
             authorization: step.authorization.clone(),
             route: step.route.clone(),
+            actions: step.actions.clone(),
             depends: deps,
         });
     }
@@ -265,6 +268,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -288,6 +292,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 
@@ -452,6 +457,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -472,6 +478,7 @@ mod tests {
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
         ];
 
@@ -506,6 +513,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -537,6 +545,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -574,6 +583,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }];
 
         let dag = build_dag(&steps).unwrap();

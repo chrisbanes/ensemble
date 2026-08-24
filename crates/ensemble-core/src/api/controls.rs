@@ -1071,6 +1071,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }])
         .unwrap();
 
