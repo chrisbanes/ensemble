@@ -117,7 +117,7 @@ pub fn validate_step_output_value_with_schema(
             StepOutputValidationError::new(format!("invalid resolved output_schema: {error}"))
         })?;
         let schema_error = validator.iter_errors(output).next().map(|error| {
-            let location = error.instance_path.as_str();
+            let location = error.instance_path().as_str();
             format!(
                 "output does not satisfy declared schema at {}: {}",
                 if location.is_empty() { "/" } else { location },
