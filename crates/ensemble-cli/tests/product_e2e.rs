@@ -875,19 +875,6 @@ impl TestFixture {
             root.join("config.yaml"),
             config_yaml(&todo_path, &workspace_root, &repo_path, acceptance_run),
         )?;
-        fs::write(
-            root.join("outcome-schema.json"),
-            r#"{
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object",
-  "required": ["artifact", "comment", "summary", "remedy", "references"],
-  "properties": {
-    "artifact": {"type": "string"}, "comment": {"type": "string"},
-    "summary": {"type": "string"}, "remedy": {"type": "string"},
-    "references": {"type": "array", "items": {"type": "string"}}
-  }
-}"#,
-        )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
 
         #[cfg(unix)]
@@ -1215,16 +1202,7 @@ agents:
 steps:
   - name: produce
     agent: producer
-    output_schema: {{ path: outcome-schema.json }}
     artifact_snapshot: {{ repositories: [source] }}
-    actions:
-      - type: tracker_comment
-        body: /comment
-      - type: operator_attention
-        kind: ensemble.outcome
-        summary: /summary
-        remedy: /remedy
-        references: /references
   - name: review_a
     agent: reviewer
     depends: [produce]
