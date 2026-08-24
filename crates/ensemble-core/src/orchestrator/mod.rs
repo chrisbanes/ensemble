@@ -2748,8 +2748,14 @@ impl Orchestrator {
             };
             active_issue_ids.sort();
 
+            for (_, issue_id) in &active_issue_ids {
+                if let Some(action) = self.apply_pending_step_actions(issue_id).await {
+                    self.handle_applied_action_outcome(issue_id, action, permit)
+                        .await;
+                }
+            }
+
             for (_, issue_id) in active_issue_ids {
-                self.apply_pending_step_actions(&issue_id).await;
                 if self
                     .pending_run_started_transitions
                     .lock()
@@ -2773,27 +2779,23 @@ impl Orchestrator {
     /// Execute durable configured effects before normal ready-step dispatch.
     /// Failures leave the pending snapshot and issue ownership in place so the
     /// next scheduler tick retries the effect, never its producer.
-    async fn apply_pending_step_actions(&self, issue_id: &str) {
+    async fn apply_pending_step_actions(&self, issue_id: &str) -> Option<PipelineAction> {
         let action_lock = self.action_mutation_lock(issue_id);
         let _action_guard = action_lock.lock().await;
         loop {
-            let Some((identifier, step_name, pending, transition)) = ({
+            let (identifier, step_name, pending, transition) = {
                 let state = self.state.read().await;
-                let Some(run) = state.get_pipeline_run(issue_id) else {
-                    return;
-                };
-                let Some((step_name, pending)) = run.workflow_steps().find_map(|step| {
+                let run = state.get_pipeline_run(issue_id)?;
+                let (step_name, pending) = run.workflow_steps().find_map(|step| {
                     run.pending_action(&step.name)
                         .cloned()
                         .map(|pending| (step.name.clone(), pending))
-                }) else {
-                    return;
-                };
+                })?;
                 let identifier = state
                     .get_running(issue_id)
                     .map(|entry| entry.identifier.clone())
                     .unwrap_or_else(|| issue_id.to_string());
-                let Some(transition) = Self::transition_input_for_snapshot(
+                let transition = Self::transition_input_for_snapshot(
                     &state,
                     run,
                     PipelineTransitionTarget {
@@ -2804,16 +2806,12 @@ impl Orchestrator {
                     Some(step_name.clone()),
                     Some(pending.identity.clone()),
                     None,
-                ) else {
-                    return;
-                };
-                Some((identifier, step_name, pending, transition))
-            }) else {
-                return;
+                )?;
+                (identifier, step_name, pending, transition)
             };
             if let Err(error) = self.pipeline_journal.append(transition).await {
                 warn!(issue_id = %issue_id, step = %step_name, error = %error, "failed to checkpoint configured action before execution");
-                return;
+                return None;
             }
             let receipt = match pending.action.clone() {
                 ResolvedStepAction::TrackerComment { body } => self
@@ -2838,7 +2836,7 @@ impl Orchestrator {
                 } => {
                     let Some(reporter) = self.attention_reporter.as_ref() else {
                         warn!(issue_id = %issue_id, step = %step_name, "configured attention action requires durable history storage");
-                        return;
+                        return None;
                     };
                     let observation = AttentionIdentity::new(&pending.identity, issue_id, kind)
                         .and_then(|identity| {
@@ -2868,23 +2866,21 @@ impl Orchestrator {
                 Ok(receipt) => receipt,
                 Err(error) => {
                     warn!(issue_id = %issue_id, step = %step_name, error = %error, "configured action remains pending for retry");
-                    return;
+                    return None;
                 }
             };
-            let Some((candidate, transition)) = ({
+            let (candidate, transition, action) = {
                 let state = self.state.read().await;
-                let Some(run) = state.get_pipeline_run(issue_id) else {
-                    return;
-                };
+                let run = state.get_pipeline_run(issue_id)?;
                 let mut candidate = run.clone();
-                candidate.acknowledge_action(&step_name, &pending.identity, receipt);
+                let action = candidate.acknowledge_action(&step_name, &pending.identity, receipt);
                 if candidate
                     .pending_action(&step_name)
                     .is_some_and(|current| current.identity == pending.identity)
                 {
-                    return;
+                    return None;
                 }
-                let Some(transition) = Self::transition_input_for_snapshot(
+                let transition = Self::transition_input_for_snapshot(
                     &state,
                     &candidate,
                     PipelineTransitionTarget {
@@ -2895,16 +2891,12 @@ impl Orchestrator {
                     Some(step_name.clone()),
                     Some(pending.identity.clone()),
                     None,
-                ) else {
-                    return;
-                };
-                Some((candidate, transition))
-            }) else {
-                return;
+                )?;
+                (candidate, transition, action)
             };
             if let Err(error) = self.pipeline_journal.append(transition).await {
                 warn!(issue_id = %issue_id, step = %step_name, error = %error, "effect completed but receipt was not durable; marker reconciliation will retry it");
-                return;
+                return None;
             }
             let mut state = self.state.write().await;
             let still_pending = state
@@ -2913,7 +2905,71 @@ impl Orchestrator {
                 .is_some_and(|current| current.identity == pending.identity);
             if still_pending {
                 state.pipeline_runs.insert(issue_id.to_string(), candidate);
+                drop(state);
+                if !matches!(action, PipelineAction::AwaitingAction { .. }) {
+                    return Some(action);
+                }
+            } else {
+                return None;
             }
+        }
+    }
+
+    async fn handle_applied_action_outcome(
+        &self,
+        issue_id: &str,
+        action: PipelineAction,
+        permit: &DispatchPermit,
+    ) {
+        match action {
+            PipelineAction::Succeeded => {
+                let issue = self
+                    .state
+                    .read()
+                    .await
+                    .get_running(issue_id)
+                    .map(|entry| entry.issue.clone());
+                if let Some(issue) = issue {
+                    self.dispatch_issue_with_permit(&issue, None, permit).await;
+                }
+            }
+            PipelineAction::Failed { step, reason } => {
+                self.handle_pipeline_step_failure(issue_id, &step, reason, false)
+                    .await;
+            }
+            PipelineAction::AwaitingApproval {
+                step,
+                approval_state,
+            } => {
+                let issue = self
+                    .state
+                    .read()
+                    .await
+                    .get_running(issue_id)
+                    .map(|entry| entry.issue.clone());
+                if let Err(error) = self
+                    .handle_post_step_approval(
+                        issue_id,
+                        &step,
+                        approval_state,
+                        None,
+                        issue.as_ref(),
+                    )
+                    .await
+                {
+                    self.handle_pipeline_step_failure(
+                        issue_id,
+                        &step,
+                        format!("failed to create post-step approval checkpoint: {error}"),
+                        false,
+                    )
+                    .await;
+                }
+            }
+            PipelineAction::Waiting
+            | PipelineAction::AwaitingAction { .. }
+            | PipelineAction::Dispatch(_)
+            | PipelineAction::BlockedOnHuman { .. } => {}
         }
     }
 
@@ -6670,7 +6726,16 @@ impl Orchestrator {
 
                             if action_is_pending_effect {
                                 drop(action_mutation_guard);
-                                self.apply_pending_step_actions(issue_id).await;
+                                if let Some(action) =
+                                    self.apply_pending_step_actions(issue_id).await
+                                {
+                                    self.handle_applied_action_outcome(
+                                        issue_id,
+                                        action,
+                                        worker_exit_permit,
+                                    )
+                                    .await;
+                                }
                             }
 
                             let mut state = self.state.write().await;
@@ -13555,6 +13620,7 @@ mod tests {
         issues: Arc<RwLock<Vec<Issue>>>,
         failures_remaining: AtomicUsize,
         publications: AtomicUsize,
+        state_writes: Arc<RwLock<Vec<(String, String)>>>,
     }
 
     #[async_trait]
@@ -13637,6 +13703,18 @@ mod tests {
 
         fn supports_idempotent_comment_publication(&self) -> bool {
             true
+        }
+
+        fn supports_writes(&self) -> bool {
+            true
+        }
+
+        async fn set_issue_state(&self, id: &str, state: &str) -> Result<(), TrackerError> {
+            self.state_writes
+                .write()
+                .await
+                .push((id.to_string(), state.to_string()));
+            Ok(())
         }
 
         async fn publish_comment(
@@ -17786,6 +17864,156 @@ agent:
     }
 
     #[tokio::test]
+    async fn final_action_acknowledgement_runs_the_terminal_lifecycle() {
+        let mut config = make_config();
+        config.steps[0].actions = vec![crate::config::ensemble::StepActionConfig::TrackerComment {
+            body: "/comment".to_string(),
+        }];
+        let config = Arc::new(RwLock::new(config));
+        let issue = test_issue("terminal-action", "Todo");
+        let state_writes = Arc::new(RwLock::new(Vec::new()));
+        let tracker = Arc::new(ActionPublicationTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+            failures_remaining: AtomicUsize::new(0),
+            publications: AtomicUsize::new(0),
+            state_writes: Arc::clone(&state_writes),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let temp = tempfile::TempDir::new().unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker.clone(),
+            runner,
+            WorkspaceManager::new(temp.path(), None).unwrap(),
+            temp.path(),
+            shutdown_rx,
+        );
+        let mut run = PipelineRun::new(
+            issue.id.clone(),
+            1,
+            build_dag(&config.read().await.steps).unwrap(),
+        );
+        run.start();
+        run.step_completed(
+            "build",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"comment": "complete"})),
+            },
+            false,
+        );
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config.read().await.clone()));
+        }
+
+        let permit = orchestrator.quiescing.begin_dispatch().unwrap();
+        orchestrator.dispatch_ready_active_pipelines(&permit).await;
+
+        assert_eq!(tracker.publications.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state_writes.read().await.as_slice(),
+            &[(issue.id.clone(), "Done".to_string())]
+        );
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.get_pipeline_run(&issue.id).is_none());
+    }
+
+    #[tokio::test]
+    async fn saturated_worker_capacity_does_not_starve_pending_actions() {
+        let mut raw_config = make_config();
+        raw_config.concurrency.max_concurrent_agents = 1;
+        raw_config.steps[0].actions =
+            vec![crate::config::ensemble::StepActionConfig::TrackerComment {
+                body: "/comment".to_string(),
+            }];
+        let mut downstream = raw_config.steps[0].clone();
+        downstream.name = "downstream".to_string();
+        downstream.depends = Some(vec!["build".to_string()]);
+        downstream.actions.clear();
+        raw_config.steps.push(downstream);
+        let config = Arc::new(RwLock::new(raw_config));
+        let busy_issue = test_issue("1", "Todo");
+        let action_issue = test_issue("2", "Todo");
+        let tracker = Arc::new(ActionPublicationTracker {
+            issues: Arc::new(RwLock::new(vec![busy_issue.clone(), action_issue.clone()])),
+            failures_remaining: AtomicUsize::new(0),
+            publications: AtomicUsize::new(0),
+            state_writes: Arc::new(RwLock::new(Vec::new())),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let temp = tempfile::TempDir::new().unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker.clone(),
+            runner,
+            WorkspaceManager::new(temp.path(), None).unwrap(),
+            temp.path(),
+            shutdown_rx,
+        );
+        let dag = build_dag(&config.read().await.steps).unwrap();
+        let mut busy_run = PipelineRun::new(busy_issue.id.clone(), 1, dag.clone());
+        busy_run.start();
+        busy_run.mark_running("build", "busy-session".to_string());
+        let mut action_run = PipelineRun::new(action_issue.id.clone(), 1, dag);
+        action_run.start();
+        action_run.step_completed(
+            "build",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"comment": "ready"})),
+            },
+            false,
+        );
+        let config_snapshot = Arc::new(config.read().await.clone());
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&busy_issue, Some(1));
+            state.insert_pipeline_run(&busy_issue.id, busy_run, Arc::clone(&config_snapshot));
+            state.add_running(&action_issue, Some(1));
+            state.insert_pipeline_run(&action_issue.id, action_run, config_snapshot);
+        }
+        let (_, completion) = watch::channel(false);
+        crate::agent::cancellation::register_worker(
+            &orchestrator.cancellation_registry,
+            WorkerIdentity {
+                issue_id: busy_issue.id.clone(),
+                run_id: "busy-run".to_string(),
+                cycle: 1,
+                step_name: "build".to_string(),
+                started_at: Utc::now(),
+            },
+            tokio_util::sync::CancellationToken::new(),
+            completion,
+        );
+
+        let permit = orchestrator.quiescing.begin_dispatch().unwrap();
+        orchestrator.dispatch_ready_active_pipelines(&permit).await;
+
+        assert_eq!(tracker.publications.load(Ordering::SeqCst), 1);
+        let state = orchestrator.state.read().await;
+        let run = state.get_pipeline_run(&action_issue.id).unwrap();
+        assert_eq!(run.step_states["build"], StepState::Passed);
+        assert_eq!(run.step_states["downstream"], StepState::Pending);
+    }
+
+    #[tokio::test]
     async fn transient_action_failure_retains_owner_output_workspace_and_retries_without_producer_rerun(
     ) {
         let mut config = make_config();
@@ -17803,6 +18031,7 @@ agent:
             issues: Arc::new(RwLock::new(vec![issue.clone()])),
             failures_remaining: AtomicUsize::new(1),
             publications: AtomicUsize::new(0),
+            state_writes: Arc::new(RwLock::new(Vec::new())),
         });
         let runner_runs = Arc::new(AtomicUsize::new(0));
         let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
@@ -17851,7 +18080,7 @@ agent:
             state.insert_pipeline_run(&issue.id, run, config_snapshot);
         }
 
-        orchestrator.apply_pending_step_actions(&issue.id).await;
+        let _ = orchestrator.apply_pending_step_actions(&issue.id).await;
         {
             let state = orchestrator.state.read().await;
             let retained = state.get_pipeline_run(&issue.id).unwrap();
@@ -17875,7 +18104,7 @@ agent:
         assert_eq!(runner_runs.load(Ordering::SeqCst), 0);
         assert_eq!(tracker.publications.load(Ordering::SeqCst), 0);
 
-        orchestrator.apply_pending_step_actions(&issue.id).await;
+        let _ = orchestrator.apply_pending_step_actions(&issue.id).await;
         let state = orchestrator.state.read().await;
         let recovered = state.get_pipeline_run(&issue.id).unwrap();
         assert_eq!(

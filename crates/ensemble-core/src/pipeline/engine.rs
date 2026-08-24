@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::acceptance::AcceptanceAttempt;
 use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
+use crate::attention::AttentionPresentation;
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
     RouteConfig, StepActionConfig, StepAuthorizationConfig, StepKind,
@@ -1039,8 +1040,18 @@ fn resolve_actions_for_step(
                                     .ok_or_else(|| format!("step '{step_name}' action {index} references contained an empty or non-string value")))
                                 .collect::<Result<Vec<_>, _>>()
                         }).transpose()?.unwrap_or_default();
+                        let presentation = AttentionPresentation::new(
+                            string_at(summary)?,
+                            string_at(remedy)?,
+                            references,
+                        ).map_err(|error| format!(
+                            "step '{step_name}' action {index} has invalid operator attention presentation: {error}"
+                        ))?;
                         ResolvedStepAction::OperatorAttention {
-                            kind: kind.clone(), summary: string_at(summary)?, remedy: string_at(remedy)?, references,
+                            kind: kind.clone(),
+                            summary: presentation.summary,
+                            remedy: presentation.remedy,
+                            references: presentation.references,
                         }
                     }
                 };
@@ -4321,6 +4332,44 @@ mod tests {
         ));
         assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
         assert!(run.pending_action("accept").is_none());
+    }
+
+    #[test]
+    fn invalid_attention_presentation_fails_before_the_action_becomes_pending() {
+        let mut producer = make_step("produce", "builder", &[]);
+        producer.actions = vec![StepActionConfig::OperatorAttention {
+            kind: "ensemble.review".to_string(),
+            summary: "/summary".to_string(),
+            remedy: "/remedy".to_string(),
+            references: Some("/references".to_string()),
+        }];
+        let mut run = make_run(&[producer]);
+        run.start();
+
+        let action = run.step_completed(
+            "produce",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({
+                    "summary": "needs review",
+                    "remedy": "inspect the artifact",
+                    "references": ["artifact:1", "artifact:1"]
+                })),
+            },
+            false,
+        );
+
+        assert!(matches!(
+            action,
+            PipelineAction::Failed { step, reason }
+                if step == "produce" && reason.contains("must not contain duplicate entries")
+        ));
+        assert!(matches!(
+            run.step_states.get("produce"),
+            Some(StepState::Errored { .. })
+        ));
+        assert!(run.pending_action("produce").is_none());
     }
 
     #[test]
