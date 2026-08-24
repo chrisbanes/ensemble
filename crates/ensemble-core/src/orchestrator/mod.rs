@@ -5842,6 +5842,8 @@ impl Orchestrator {
                         .sum())
                         .map(|_| Self::run_context_for_issue(&mut state, issue_id))
                         .collect::<Vec<_>>();
+                    let action_is_pending_effect =
+                        matches!(&action, PipelineAction::AwaitingAction { .. });
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Collect output contexts while state lock is still held
@@ -6632,6 +6634,10 @@ impl Orchestrator {
                                 self.recover_unpublished_route_candidate(issue_id, step_name)
                                     .await;
                                 return;
+                            }
+
+                            if action_is_pending_effect {
+                                self.apply_pending_step_actions(issue_id).await;
                             }
 
                             let mut state = self.state.write().await;

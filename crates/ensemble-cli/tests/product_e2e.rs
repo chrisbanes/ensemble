@@ -52,6 +52,21 @@ struct GithubMutationResponder {
     calls: Arc<AtomicUsize>,
 }
 
+struct GithubCommentResponder {
+    calls: Arc<AtomicUsize>,
+}
+
+impl Respond for GithubCommentResponder {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "addComment": { "commentEdge": { "node": {
+                "id": "comment-action", "url": "https://github.example/comment-action"
+            }}}}
+        }))
+    }
+}
+
 impl Respond for GithubMutationResponder {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         self.calls.fetch_add(1, Ordering::SeqCst);
@@ -716,6 +731,7 @@ async fn github_wait_for_event_survives_restart_without_replaying_the_artifact_p
         "protected step ran before external tracker evidence: {prompts_before_restart}"
     );
     assert_eq!(fixture.mutations.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.comments.load(Ordering::SeqCst), 1);
 
     drop(first);
     let restarted = spawn_web(&fixture.fixture, port);
@@ -727,6 +743,11 @@ async fn github_wait_for_event_survives_restart_without_replaying_the_artifact_p
         "restart must retain the completed Artifact producer and pending handoff"
     );
     assert_eq!(fixture.mutations.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        fixture.comments.load(Ordering::SeqCst),
+        1,
+        "restart must not replay the marker-bound comment action"
+    );
 
     fixture.event_visible.store(true, Ordering::SeqCst);
     let completed = wait_for_history_step(&client, &base_url, "protected").await;
@@ -804,6 +825,7 @@ struct GithubAuthorizationFixture {
     _server: MockServer,
     event_visible: Arc<AtomicBool>,
     mutations: Arc<AtomicUsize>,
+    comments: Arc<AtomicUsize>,
 }
 
 impl GithubAuthorizationFixture {
@@ -811,7 +833,14 @@ impl GithubAuthorizationFixture {
         let server = MockServer::start().await;
         let event_visible = Arc::new(AtomicBool::new(false));
         let mutations = Arc::new(AtomicUsize::new(0));
-        mount_github_authorization_api(&server, event_visible.clone(), mutations.clone()).await;
+        let comments = Arc::new(AtomicUsize::new(0));
+        mount_github_authorization_api(
+            &server,
+            event_visible.clone(),
+            mutations.clone(),
+            comments.clone(),
+        )
+        .await;
         let fixture =
             TestFixture::new_with_github_authorization(&server.uri(), automatic_transition)?;
         Ok(Self {
@@ -819,6 +848,7 @@ impl GithubAuthorizationFixture {
             _server: server,
             event_visible,
             mutations,
+            comments,
         })
     }
 }
@@ -844,6 +874,19 @@ impl TestFixture {
         fs::write(
             root.join("config.yaml"),
             config_yaml(&todo_path, &workspace_root, &repo_path, acceptance_run),
+        )?;
+        fs::write(
+            root.join("outcome-schema.json"),
+            r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["artifact", "comment", "summary", "remedy", "references"],
+  "properties": {
+    "artifact": {"type": "string"}, "comment": {"type": "string"},
+    "summary": {"type": "string"}, "remedy": {"type": "string"},
+    "references": {"type": "array", "items": {"type": "string"}}
+  }
+}"#,
         )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
 
@@ -949,6 +992,19 @@ impl TestFixture {
                 &repo_path,
                 automatic_transition,
             ),
+        )?;
+        fs::write(
+            root.join("outcome-schema.json"),
+            r#"{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["artifact", "comment", "summary", "remedy", "references"],
+  "properties": {
+    "artifact": {"type": "string"}, "comment": {"type": "string"},
+    "summary": {"type": "string"}, "remedy": {"type": "string"},
+    "references": {"type": "array", "items": {"type": "string"}}
+  }
+}"#,
         )?;
         fs::write(mock_bin_dir.join("acpx"), mock_acpx_script())?;
         #[cfg(unix)]
@@ -1159,7 +1215,16 @@ agents:
 steps:
   - name: produce
     agent: producer
+    output_schema: {{ path: outcome-schema.json }}
     artifact_snapshot: {{ repositories: [source] }}
+    actions:
+      - type: tracker_comment
+        body: /comment
+      - type: operator_attention
+        kind: ensemble.outcome
+        summary: /summary
+        remedy: /remedy
+        references: /references
   - name: review_a
     agent: reviewer
     depends: [produce]
@@ -1231,7 +1296,16 @@ agents:
 steps:
   - name: produce
     agent: producer
+    output_schema: {{ path: outcome-schema.json }}
     artifact_snapshot: {{ repositories: [source] }}
+    actions:
+      - type: tracker_comment
+        body: /comment
+      - type: operator_attention
+        kind: ensemble.outcome
+        summary: /summary
+        remedy: /remedy
+        references: /references
   - name: protected
     agent: protected
     depends: [produce]
@@ -1262,6 +1336,7 @@ async fn mount_github_authorization_api(
     server: &MockServer,
     event_visible: Arc<AtomicBool>,
     mutations: Arc<AtomicUsize>,
+    comments: Arc<AtomicUsize>,
 ) {
     let discovery = serde_json::json!({ "data": { "repository": { "projectV2": {
         "id": "P_configured",
@@ -1277,6 +1352,24 @@ async fn mount_github_authorization_api(
         .and(path("/"))
         .and(body_string_contains("projectNumber"))
         .respond_with(ResponseTemplate::new(200).set_body_json(discovery))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("comments(first: 100"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": { "node": { "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null }, "nodes": []
+            }}}
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("addComment"))
+        .respond_with(GithubCommentResponder { calls: comments })
         .mount(server)
         .await;
 
@@ -1510,6 +1603,8 @@ if [[ " $* " == *" prompt "* ]]; then
     verdict='{"invalid":"repair"}'
   elif [[ "${ENSEMBLE_E2E_CONCERN_PUBLISH:-}" == "1" && "$prompt" == *"Evaluation publish"* ]]; then
     verdict='{"result":"concern","summary":"operator should approve","output":{"artifact":"mock"}}'
+  elif [[ "$prompt" == *"GitHub producer"* ]]; then
+    verdict='{"result":"succeeded","summary":"GitHub producer completed","output":{"artifact":"mock","comment":"Artifact ready","summary":"Artifact ready","remedy":"Review it","references":["artifact:mock"]}}'
   elif [[ "$prompt" == *"Evaluation reviewer"* ]]; then
     severity="${ENSEMBLE_E2E_FINDING_SEVERITY:-non_blocking}"
     verdict="{\"result\":\"succeeded\",\"summary\":\"assessment\",\"output\":{\"assessment\":{\"findings\":[{\"id\":\"finding-1\",\"severity\":\"$severity\",\"summary\":\"Minor concern\",\"evidence\":{\"path\":\"README.md\"}}]}}}"
