@@ -2425,7 +2425,7 @@ fn validate_step_actions(steps: &[StepConfig]) -> Result<(), PipelineError> {
                     remedy,
                     references,
                 } => {
-                    if !is_namespaced_action_kind(kind)
+                    if crate::attention::model::validate_configured_kind(kind).is_err()
                         || !is_valid_json_pointer(summary)
                         || !is_valid_json_pointer(remedy)
                         || !required_string_at(schema, summary)
@@ -2442,10 +2442,6 @@ fn validate_step_actions(steps: &[StepConfig]) -> Result<(), PipelineError> {
         }
     }
     Ok(())
-}
-
-fn is_namespaced_action_kind(kind: &str) -> bool {
-    kind.split('.').count() >= 2 && kind.split('.').all(|segment| !segment.trim().is_empty())
 }
 
 fn required_schema_value_at<'a>(
@@ -3009,6 +3005,17 @@ mod tests {
         assert!(matches!(
             validate_step_actions(&[invalid_pointer]),
             Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("required string")
+        ));
+
+        let invalid_attention_kind = action_producer(vec![StepActionConfig::OperatorAttention {
+            kind: "Ensemble review\n".to_string(),
+            summary: "/summary".to_string(),
+            remedy: "/remedy".to_string(),
+            references: Some("/references".to_string()),
+        }]);
+        assert!(matches!(
+            validate_step_actions(&[invalid_attention_kind]),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("operator_attention")
         ));
 
         let mut route = valid;

@@ -1,7 +1,3 @@
 {
-  "outcome": "revised_artifact",
-  "comment": "Artifact is ready for the protected publication step.",
-  "summary": "A revised artifact is available.",
-  "remedy": "Review the artifact and record authorization when ready.",
-  "references": ["artifact:target"]
+  "outcome": "revised_artifact"
 }

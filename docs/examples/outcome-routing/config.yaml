@@ -1,8 +1,12 @@
 # A public composition of a static output route and generic durable actions.
 # All domain vocabulary is confined to this reference configuration.
 tracker:
-  kind: todo_file
-  path: TODO.md
+  # GitHub is used because marker-bound comments require idempotent publication.
+  kind: github
+  repository: example/ensemble
+  api_key: example-token-not-a-secret
+  github:
+    status_field: Status
 
 repos:
   - path: target
@@ -29,14 +33,6 @@ steps:
     output_schema: { path: schemas/outcome.schema.json }
     artifact_snapshot:
       repositories: [target]
-    actions:
-      - type: tracker_comment
-        body: /comment
-      - type: operator_attention
-        kind: ensemble.outcome
-        summary: /summary
-        remedy: /remedy
-        references: /references
   - name: choose_outcome
     kind: route
     depends: [produce]
@@ -56,9 +52,22 @@ steps:
       event: { field: review, value: approved, actors: [maintainer] }
       after_artifact: true
       handoff: wait_for_event
+    output_schema: { path: schemas/publication.schema.json }
+    actions:
+      - type: tracker_comment
+        body: /comment
   - name: notify_operator
     agent: operator
     depends: [choose_outcome]
+    output_schema: { path: schemas/operator-attention.schema.json }
+    actions:
+      - type: tracker_comment
+        body: /comment
+      - type: operator_attention
+        kind: ensemble.outcome
+        summary: /summary
+        remedy: /remedy
+        references: /references
 
 on_success: Done
 on_failure: Failed

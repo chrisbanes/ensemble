@@ -25,6 +25,8 @@ pub struct GithubTracker {
     project_fields: Option<GithubTrackerConfig>,
     project_metadata: tokio::sync::RwLock<Option<ProjectMetadata>>,
     authenticated_viewer: tokio::sync::RwLock<Option<AuthenticatedViewer>>,
+    /// Serializes list-then-add comment publication across concurrent host ticks.
+    comment_publication_lock: tokio::sync::Mutex<()>,
     hydrate_native_relationships: bool,
 }
 
@@ -102,6 +104,7 @@ impl GithubTracker {
             client,
             project_metadata: tokio::sync::RwLock::new(None),
             authenticated_viewer: tokio::sync::RwLock::new(None),
+            comment_publication_lock: tokio::sync::Mutex::new(()),
             hydrate_native_relationships: settings.hydrate_native_relationships,
         })
     }
@@ -1441,6 +1444,7 @@ impl IssueTracker for GithubTracker {
         id: &str,
         publication: crate::tracker::model::TrackerCommentPublication,
     ) -> Result<crate::tracker::model::TrackerCommentReceipt, TrackerError> {
+        let _publication_guard = self.comment_publication_lock.lock().await;
         let marker = format!("<!-- ensemble-action:{} -->", publication.marker);
         if self
             .list_comments_after(id, "")
@@ -1635,6 +1639,36 @@ mod tests {
                     "id": "I_issue", "number": 1, "title": "Issue", "state": "OPEN",
                     "url": "https://example.test/issues/1", "labels": labels
                 }]
+            })))
+        }
+    }
+
+    struct CommentPublicationSequence {
+        marker: String,
+        calls: AtomicUsize,
+    }
+
+    impl Respond for CommentPublicationSequence {
+        fn respond(&self, _request: &Request) -> ResponseTemplate {
+            let visible = self.calls.fetch_add(1, Ordering::SeqCst) > 0;
+            let nodes = if visible {
+                json!([{
+                    "id": "C_published",
+                    "body": format!("published\n\n{}", self.marker),
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "updatedAt": "2026-01-01T00:00:00Z",
+                    "author": { "login": "ensemble" }
+                }])
+            } else {
+                json!([])
+            };
+            ResponseTemplate::new(200).set_body_json(graphql_response(json!({
+                "node": {
+                    "comments": {
+                        "pageInfo": { "hasNextPage": false, "endCursor": null },
+                        "nodes": nodes
+                    }
+                }
             })))
         }
     }
@@ -4017,6 +4051,96 @@ mod tests {
             .add_comment("ISSUE_NODE_1", "Hello")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn publish_comment_reconciles_an_existing_action_marker_without_duplicate_write() {
+        let server = MockServer::start().await;
+        let marker = "<!-- ensemble-action:run-1:build:0 -->";
+        let response = graphql_response(json!({
+            "node": {
+                "comments": {
+                    "pageInfo": { "hasNextPage": false, "endCursor": null },
+                    "nodes": [{
+                        "id": "C_1",
+                        "body": format!("already published\n\n{marker}"),
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                        "author": { "login": "ensemble" }
+                    }]
+                }
+            }
+        }));
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("comments(first: 100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addComment"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let receipt = create_test_tracker(&server.uri(), None)
+            .publish_comment(
+                "ISSUE_NODE_1",
+                crate::tracker::model::TrackerCommentPublication {
+                    marker: "run-1:build:0".to_string(),
+                    body: "publish this".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(receipt.receipt, "run-1:build:0");
+    }
+
+    #[tokio::test]
+    async fn publish_comment_reconciles_post_write_pre_ack_ambiguity_and_concurrent_replay_without_duplicate(
+    ) {
+        let server = MockServer::start().await;
+        let marker = "<!-- ensemble-action:run-1:build:0 -->";
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("comments(first: 100"))
+            .respond_with(CommentPublicationSequence {
+                marker: marker.to_string(),
+                calls: AtomicUsize::new(0),
+            })
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/graphql"))
+            .and(body_string_contains("addComment"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(graphql_response(json!({}))))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tracker = std::sync::Arc::new(create_test_tracker(&server.uri(), None));
+        let publication = crate::tracker::model::TrackerCommentPublication {
+            marker: "run-1:build:0".to_string(),
+            body: "publish this".to_string(),
+        };
+        let first = {
+            let tracker = std::sync::Arc::clone(&tracker);
+            let publication = publication.clone();
+            tokio::spawn(async move { tracker.publish_comment("ISSUE_NODE_1", publication).await })
+        };
+        let second = {
+            let tracker = std::sync::Arc::clone(&tracker);
+            tokio::spawn(async move { tracker.publish_comment("ISSUE_NODE_1", publication).await })
+        };
+        first.await.unwrap().unwrap();
+        let receipt = second.await.unwrap().unwrap();
+
+        assert_eq!(receipt.receipt, "run-1:build:0");
     }
 
     #[tokio::test]

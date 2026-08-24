@@ -685,6 +685,8 @@ pub struct Orchestrator {
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes publication and acknowledgement of an action across host ticks.
+    pending_action_write_lock: Arc<tokio::sync::Mutex<()>>,
     history_store: Option<HistoryStore>,
     attention_reporter: Option<AttentionReporter>,
     attention_reconciled_on_startup: AtomicBool,
@@ -1032,6 +1034,7 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            pending_action_write_lock: Arc::new(tokio::sync::Mutex::new(())),
             history_store,
             attention_reporter,
             attention_reconciled_on_startup: AtomicBool::new(false),
@@ -2752,6 +2755,7 @@ impl Orchestrator {
     /// Failures leave the pending snapshot and issue ownership in place so the
     /// next scheduler tick retries the effect, never its producer.
     async fn apply_pending_step_actions(&self, issue_id: &str) {
+        let _action_guard = self.pending_action_write_lock.lock().await;
         loop {
             let Some((identifier, step_name, pending, transition)) = ({
                 let state = self.state.read().await;
@@ -2853,7 +2857,13 @@ impl Orchestrator {
                     return;
                 };
                 let mut candidate = run.clone();
-                candidate.acknowledge_action(&step_name, receipt);
+                candidate.acknowledge_action(&step_name, &pending.identity, receipt);
+                if candidate
+                    .pending_action(&step_name)
+                    .is_some_and(|current| current.identity == pending.identity)
+                {
+                    return;
+                }
                 let Some(transition) = Self::transition_input_for_snapshot(
                     &state,
                     &candidate,

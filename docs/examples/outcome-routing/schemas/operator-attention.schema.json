@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["comment", "summary", "remedy", "references"],
+  "properties": {
+    "comment": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "remedy": { "type": "string", "minLength": 1 },
+    "references": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

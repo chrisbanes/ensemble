@@ -49,6 +49,12 @@ impl AttentionIdentity {
     }
 }
 
+/// Validate a configured attention kind using the same contract as durable
+/// attention identities, before a pipeline can start waiting on an effect.
+pub(crate) fn validate_configured_kind(kind: &str) -> Result<(), AttentionError> {
+    AttentionIdentity::new("configured-action", "configured-action", kind).map(|_| ())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AttentionPresentation {
     pub summary: String,

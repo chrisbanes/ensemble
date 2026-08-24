@@ -1,7 +1,3 @@
 {
-  "outcome": "operator_required",
-  "comment": "An operator decision is required before continuing.",
-  "summary": "The selected outcome needs operator attention.",
-  "remedy": "Inspect the referenced artifact and decide the next whole Run policy.",
-  "references": ["artifact:target"]
+  "outcome": "operator_required"
 }

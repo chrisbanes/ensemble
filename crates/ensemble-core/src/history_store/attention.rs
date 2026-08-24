@@ -333,7 +333,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_retains_one_event_for_an_idempotent_observation() {
+    async fn operator_attention_action_replay_upserts_once_with_stable_identity() {
         let dir = tempfile::TempDir::new().unwrap();
         let reporter = AttentionReporter::new(
             HistoryStore::new(dir.path().join(".ensemble/history.db"))
@@ -342,10 +342,12 @@ mod tests {
         );
         let observation = observation("open-v1");
 
-        reporter.upsert_open(observation.clone()).await.unwrap();
-        reporter.upsert_open(observation).await.unwrap();
+        let first = reporter.upsert_open(observation.clone()).await.unwrap();
+        let replayed = reporter.upsert_open(observation).await.unwrap();
 
         let history = reporter.history(None, None, None, None).await.unwrap();
+        assert_eq!(first.identity, replayed.identity);
+        assert_eq!(replayed.identity.producer_key, "producer-a");
         assert_eq!(history.events.len(), 1);
     }
 
