@@ -311,6 +311,12 @@ pub(crate) async fn prepare_orchestrator_runtime(
     };
 
     let authorization_event_fields = config.authorization_event_fields();
+    if config.has_operator_attention_actions() && app_state.history_store.is_none() {
+        return Err(crate::error::ConfigError::ConfigWriteRejected {
+            reason: "operator_attention actions require durable history storage".to_string(),
+        }
+        .into());
+    }
     let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker_for_runtime(&config)?);
     let config = Arc::new(RwLock::new(config));
     tracker.validate_configuration().await?;

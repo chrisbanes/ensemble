@@ -685,8 +685,9 @@ pub struct Orchestrator {
     refresh_requested: Arc<tokio::sync::Notify>,
     cancellation_registry: CancellationRegistry,
     history_write_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Serializes publication and acknowledgement of an action across host ticks.
-    pending_action_write_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Per-issue mutation boundaries shared by worker completion and durable actions.
+    action_mutation_locks:
+        Arc<std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>>,
     history_store: Option<HistoryStore>,
     attention_reporter: Option<AttentionReporter>,
     attention_reconciled_on_startup: AtomicBool,
@@ -815,6 +816,19 @@ struct RejectedGateOwnerSnapshot {
 }
 
 impl Orchestrator {
+    fn action_mutation_lock(&self, issue_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self
+            .action_mutation_locks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(issue_id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(issue_id.to_string(), Arc::downgrade(&lock));
+        lock
+    }
     fn drain_snapshot(state: &OrchestratorState) -> ResidualWorkSummary {
         let mut summary = ResidualWorkSummary {
             runnable: state.running.keys().cloned().collect(),
@@ -1034,7 +1048,7 @@ impl Orchestrator {
             refresh_requested: parts.refresh_requested,
             cancellation_registry: parts.cancellation_registry,
             history_write_lock: Arc::new(tokio::sync::Mutex::new(())),
-            pending_action_write_lock: Arc::new(tokio::sync::Mutex::new(())),
+            action_mutation_locks: Arc::new(std::sync::Mutex::new(HashMap::new())),
             history_store,
             attention_reporter,
             attention_reconciled_on_startup: AtomicBool::new(false),
@@ -2755,7 +2769,8 @@ impl Orchestrator {
     /// Failures leave the pending snapshot and issue ownership in place so the
     /// next scheduler tick retries the effect, never its producer.
     async fn apply_pending_step_actions(&self, issue_id: &str) {
-        let _action_guard = self.pending_action_write_lock.lock().await;
+        let action_lock = self.action_mutation_lock(issue_id);
+        let _action_guard = action_lock.lock().await;
         loop {
             let Some((identifier, step_name, pending, transition)) = ({
                 let state = self.state.read().await;
@@ -5804,6 +5819,8 @@ impl Orchestrator {
         workspace_capture_held: bool,
         worker_exit_permit: &DispatchPermit,
     ) {
+        let action_lock = self.action_mutation_lock(issue_id);
+        let action_mutation_guard = action_lock.lock().await;
         // Get the issue snapshot for potential re-dispatch
         let issue_snapshot = {
             let state = self.state.read().await;
@@ -6647,6 +6664,7 @@ impl Orchestrator {
                             }
 
                             if action_is_pending_effect {
+                                drop(action_mutation_guard);
                                 self.apply_pending_step_actions(issue_id).await;
                             }
 
@@ -17565,6 +17583,45 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn action_mutation_locks_serialize_one_issue_without_blocking_another() {
+        let config = Arc::new(RwLock::new(make_config()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            config,
+            tracker,
+            runner,
+            WorkspaceManager::new(dir.path(), None).unwrap(),
+            dir.path(),
+            shutdown_rx,
+        );
+        let same = orchestrator.action_mutation_lock("same");
+        let held = same.lock().await;
+        let second = orchestrator.action_mutation_lock("same");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), second.lock())
+                .await
+                .is_err()
+        );
+        let other = orchestrator.action_mutation_lock("other");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), other.lock())
+                .await
+                .is_ok()
+        );
+        drop(held);
     }
 
     #[tokio::test]

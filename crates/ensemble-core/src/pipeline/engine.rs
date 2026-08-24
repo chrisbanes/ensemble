@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -16,6 +18,19 @@ use crate::pipeline::assessment::{
 use crate::pipeline::dag::{DagStep, StepDag};
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::tracker::{model::TrackerEvent, OwnershipLease};
+
+static RUN_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn new_run_generation() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!(
+        "{nanos:x}-{:x}",
+        RUN_GENERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// The execution state of a single pipeline step.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +224,7 @@ pub struct PipelineRun {
     pub issue_id: String,
     /// The current cycle number (incremented on retry).
     pub cycle: u32,
+    generation: String,
     /// Current state of each step, keyed by step name.
     pub step_states: HashMap<String, StepState>,
     /// Stored outputs from completed steps.
@@ -260,6 +276,8 @@ pub struct SelectedWorkflowSnapshot {
 pub struct PipelineRunSnapshot {
     pub issue_id: String,
     pub cycle: u32,
+    #[serde(default)]
+    pub generation: String,
     pub step_states: HashMap<String, StepState>,
     pub step_outputs: HashMap<String, StepOutput>,
     #[serde(default)]
@@ -337,6 +355,7 @@ impl PipelineRun {
         Self {
             issue_id,
             cycle,
+            generation: new_run_generation(),
             step_states,
             step_outputs: HashMap::new(),
             artifact_snapshots: HashMap::new(),
@@ -363,6 +382,7 @@ impl PipelineRun {
         PipelineRunSnapshot {
             issue_id: self.issue_id.clone(),
             cycle: self.cycle,
+            generation: self.generation.clone(),
             step_states: self.step_states.clone(),
             step_outputs: self.step_outputs.clone(),
             artifact_snapshots: self.artifact_snapshots.clone(),
@@ -632,6 +652,7 @@ impl PipelineRun {
         Ok(Self {
             issue_id: snapshot.issue_id,
             cycle: snapshot.cycle,
+            generation: snapshot.generation,
             step_states: snapshot.step_states,
             step_outputs: snapshot.step_outputs,
             artifact_snapshots: snapshot.artifact_snapshots,
@@ -990,7 +1011,14 @@ impl PipelineRun {
                 "completed step '{step_name}' is not in the pipeline"
             ));
         };
-        resolve_actions_for_step(&self.issue_id, self.cycle, step_name, step, output)
+        resolve_actions_for_step(
+            &self.issue_id,
+            self.cycle,
+            &self.generation,
+            step_name,
+            step,
+            output,
+        )
     }
 }
 
@@ -1010,6 +1038,7 @@ fn receipt_matches_action(receipt: &StepActionReceipt, action: &ResolvedStepActi
 fn resolve_actions_for_step(
     issue_id: &str,
     cycle: u32,
+    generation: &str,
     step_name: &str,
     step: &DagStep,
     output: &StepOutput,
@@ -1054,7 +1083,7 @@ fn resolve_actions_for_step(
                         }
                     }
                 };
-                let identity_material = format!("{issue_id}:{cycle}:{step_name}:{index}:{source_output_digest}");
+                let identity_material = format!("{issue_id}:{cycle}:{generation}:{step_name}:{index}:{source_output_digest}");
                 Ok(PendingStepAction {
                     identity: format!("action:{:x}", Sha256::digest(identity_material.as_bytes())),
                     source_output_digest: source_output_digest.clone(),
@@ -1780,13 +1809,17 @@ fn validate_snapshot(snapshot: &PipelineRunSnapshot) -> Result<(), crate::error:
             });
         }
         let output = snapshot.step_outputs.get(step_name).expect("checked above");
-        let expected =
-            resolve_actions_for_step(&snapshot.issue_id, snapshot.cycle, step_name, step, output)
-                .map_err(|reason| crate::error::PipelineError::InvalidSnapshot {
-                reason: format!(
-                    "action state for step '{step_name}' cannot be recomputed: {reason}"
-                ),
-            })?;
+        let expected = resolve_actions_for_step(
+            &snapshot.issue_id,
+            snapshot.cycle,
+            &snapshot.generation,
+            step_name,
+            step,
+            output,
+        )
+        .map_err(|reason| crate::error::PipelineError::InvalidSnapshot {
+            reason: format!("action state for step '{step_name}' cannot be recomputed: {reason}"),
+        })?;
         for (index, (state, expected)) in actions.iter().zip(expected.iter()).enumerate() {
             let valid = match state {
                 StepActionState::Pending(actual) => actual == expected,
@@ -1807,6 +1840,33 @@ fn validate_snapshot(snapshot: &PipelineRunSnapshot) -> Result<(), crate::error:
                     ),
                 });
             }
+        }
+    }
+    for step in &snapshot.dag_steps {
+        if step.actions.is_empty() {
+            continue;
+        }
+        let completed = snapshot.step_outputs.contains_key(&step.name)
+            && matches!(
+                snapshot.step_states.get(&step.name),
+                Some(
+                    StepState::AwaitingActions { .. }
+                        | StepState::AwaitingApproval { .. }
+                        | StepState::Passed
+                )
+            );
+        if completed && !snapshot.action_states.contains_key(&step.name) {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: format!(
+                    "action-bearing completed step '{}' has no action state",
+                    step.name
+                ),
+            });
+        }
+        if completed && snapshot.generation.is_empty() {
+            return Err(crate::error::PipelineError::InvalidSnapshot {
+                reason: "action-bearing snapshot has no durable run generation".to_string(),
+            });
         }
     }
     for (step_name, state) in &snapshot.step_states {
@@ -4478,6 +4538,13 @@ mod tests {
                 receipt: "wrong-kind".to_string(),
             },
         };
+        assert!(PipelineRun::from_snapshot(snapshot).is_err());
+
+        let mut snapshot = run.to_snapshot();
+        snapshot.action_states.remove("produce");
+        snapshot
+            .step_states
+            .insert("produce".to_string(), StepState::Passed);
         assert!(PipelineRun::from_snapshot(snapshot).is_err());
     }
 

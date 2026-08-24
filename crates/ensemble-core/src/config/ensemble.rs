@@ -1177,6 +1177,22 @@ impl EnsembleConfig {
                     .any(|action| matches!(action, StepActionConfig::TrackerComment { .. }))
             })
     }
+
+    /// Whether activation requires the durable operator-attention store.
+    pub fn has_operator_attention_actions(&self) -> bool {
+        self.steps
+            .iter()
+            .chain(
+                self.pipelines
+                    .values()
+                    .flat_map(|pipeline| pipeline.steps.iter()),
+            )
+            .any(|step| {
+                step.actions
+                    .iter()
+                    .any(|action| matches!(action, StepActionConfig::OperatorAttention { .. }))
+            })
+    }
     pub fn uses_workflow_selection(&self) -> bool {
         !self.workflow_selection.is_empty()
     }
