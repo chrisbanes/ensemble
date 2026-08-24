@@ -13,6 +13,7 @@ const stateIcons: Record<string, string> = {
   pending: "○",
   running: "●",
   passed: "✓",
+  skipped: "↷",
   failed: "✗",
   waiting: "◐",
   rejected: "⊘",
@@ -22,6 +23,7 @@ const stateColors: Record<string, string> = {
   pending: "text-gray-400",
   running: "text-blue-500",
   passed: "text-green-500",
+  skipped: "text-slate-500",
   failed: "text-red-500",
   waiting: "text-yellow-500",
   rejected: "text-orange-500",
@@ -46,6 +48,7 @@ export default function WorkflowStepsSidebar({
           const inspect = step.capabilities?.inspect;
           const disabledReason = inspect?.disabled_reason ?? "Inspection is unavailable; refresh and try again.";
           const canInspect = inspect?.enabled === true;
+          const routeProvenance = step.route_provenance;
 
           return (
             <div key={step.name} className="flex items-center gap-2">
@@ -69,6 +72,11 @@ export default function WorkflowStepsSidebar({
               <Badge variant="outline" className="text-xs ml-auto">
                 {step.agent}
               </Badge>
+              {routeProvenance?.[0] && (
+                <span className="text-xs text-muted-foreground" title={`Skipped by ${routeProvenance[0].route_step}`}>
+                  route: {routeProvenance[0].selected_case}
+                </span>
+              )}
             </div>
           );
         })}

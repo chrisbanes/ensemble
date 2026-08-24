@@ -42,6 +42,14 @@ pub(crate) enum ManualStepRetryError {
     NoPipelineRun,
     StepNotFound,
     GateRetryForbidden,
+    SkippedRetryForbidden {
+        route_step: String,
+        source_step: String,
+    },
+    FailedRouteRetryForbidden {
+        route_step: String,
+        source_step: String,
+    },
     MaxCyclesExhausted,
     OwnerChanged,
     Interaction(InteractionError),
@@ -81,6 +89,18 @@ pub(crate) async fn queue_manual_step_retry(
             .is_some_and(|step| step.kind == crate::config::ensemble::StepKind::Gate)
         {
             return Err(ManualStepRetryError::GateRetryForbidden);
+        }
+        if let Some((route_step, source_step)) = skipped_route_source(run, request.step_name) {
+            return Err(ManualStepRetryError::SkippedRetryForbidden {
+                route_step,
+                source_step,
+            });
+        }
+        if let Some((route_step, source_step)) = failed_route_source(run, request.step_name) {
+            return Err(ManualStepRetryError::FailedRouteRetryForbidden {
+                route_step,
+                source_step,
+            });
         }
 
         let previous_retry = state.retry_attempts.get(request.issue_id).cloned();
@@ -298,6 +318,15 @@ pub(crate) async fn queue_manual_whole_issue_retry(
         if state.delivery.contains_key(request.issue_id) {
             return Err(ManualStepRetryError::OwnerChanged);
         }
+        if let Some((route_step, source_step)) = state
+            .get_pipeline_run(request.issue_id)
+            .and_then(first_failed_route_source)
+        {
+            return Err(ManualStepRetryError::FailedRouteRetryForbidden {
+                route_step,
+                source_step,
+            });
+        }
         let previous_retry = state.retry_attempts.get(request.issue_id).cloned();
         let previous_waiting = state.waiting_on_human.get(request.issue_id).cloned();
         if previous_retry.is_none() && previous_waiting.is_none() {
@@ -459,6 +488,46 @@ pub(crate) async fn queue_manual_whole_issue_retry(
     }
 
     Ok(())
+}
+
+fn failed_route_source(
+    run: &crate::pipeline::engine::PipelineRun,
+    step_name: &str,
+) -> Option<(String, String)> {
+    run.step(step_name)
+        .filter(|step| step.kind == crate::config::ensemble::StepKind::Route)
+        .filter(|_| {
+            matches!(
+                run.step_states.get(step_name),
+                Some(
+                    crate::pipeline::engine::StepState::Failed { .. }
+                        | crate::pipeline::engine::StepState::Errored { .. }
+                )
+            )
+        })?
+        .route
+        .as_ref()
+        .map(|route| (step_name.to_string(), route.source.step.clone()))
+}
+
+fn first_failed_route_source(
+    run: &crate::pipeline::engine::PipelineRun,
+) -> Option<(String, String)> {
+    run.step_states
+        .keys()
+        .find_map(|step_name| failed_route_source(run, step_name))
+}
+
+fn skipped_route_source(
+    run: &crate::pipeline::engine::PipelineRun,
+    step_name: &str,
+) -> Option<(String, String)> {
+    match run.step_states.get(step_name)? {
+        crate::pipeline::engine::StepState::Skipped { provenance } => provenance
+            .first()
+            .map(|cause| (cause.route_step.clone(), cause.source_step.clone())),
+        _ => None,
+    }
 }
 
 struct RetiredInteraction {
@@ -818,10 +887,31 @@ mod tests {
     };
     use crate::orchestrator::state::WaitingOnHumanEntry;
     use crate::pipeline::dag::build_dag;
-    use crate::pipeline::engine::PipelineRun;
+    use crate::pipeline::engine::{PipelineRun, StepState};
     use crate::tracker::model::Issue;
 
     fn manual_retry_state() -> Arc<RwLock<OrchestratorState>> {
+        manual_retry_state_for_kind(StepKind::Agent)
+    }
+
+    async fn failed_route_retry_state() -> Arc<RwLock<OrchestratorState>> {
+        let state = manual_retry_state_for_kind(StepKind::Route);
+        state
+            .write()
+            .await
+            .get_pipeline_run_mut("issue-1")
+            .expect("fixture pipeline run")
+            .step_states
+            .insert(
+                "build".to_string(),
+                StepState::Failed {
+                    summary: "bad route value".to_string(),
+                },
+            );
+        state
+    }
+
+    fn manual_retry_state_for_kind(kind: StepKind) -> Arc<RwLock<OrchestratorState>> {
         let mut state = OrchestratorState::new(30000, &ConcurrencyConfig::default());
         let issue = Issue {
             id: "issue-1".to_string(),
@@ -857,13 +947,19 @@ mod tests {
         });
         let dag = build_dag(&[StepConfig {
             name: "build".to_string(),
-            kind: StepKind::Agent,
-            agent: "builder".to_string(),
+            kind,
+            agent: (kind == StepKind::Agent)
+                .then(|| "builder".to_string())
+                .unwrap_or_default(),
             depends: None,
             tracker_state: None,
             timeout_ms: None,
             approval: None,
-            on_failure: OnFailure::RetryIssue,
+            on_failure: if kind == StepKind::Route {
+                OnFailure::Halt
+            } else {
+                OnFailure::RetryIssue
+            },
             fixup_agent: None,
             resource_requests: Default::default(),
             affected_paths: None,
@@ -873,6 +969,13 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: (kind == StepKind::Route).then(|| crate::config::ensemble::RouteConfig {
+                source: crate::config::ensemble::RouteSource {
+                    step: "source".to_string(),
+                    pointer: "/decision".to_string(),
+                },
+                cases: std::collections::BTreeMap::new(),
+            }),
         }])
         .unwrap();
         state.pipeline_runs.insert(
@@ -1115,6 +1218,96 @@ mod tests {
 
         assert_eq!(scheduled.attempt, 2);
         assert!(!state.read().await.is_waiting_on_human("issue-1"));
+    }
+
+    #[tokio::test]
+    async fn skipped_step_retry_is_rejected_until_its_route_source_is_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = manual_retry_state();
+        state
+            .write()
+            .await
+            .get_pipeline_run_mut("issue-1")
+            .expect("fixture pipeline run")
+            .step_states
+            .insert(
+                "build".to_string(),
+                StepState::Skipped {
+                    provenance: vec![crate::pipeline::engine::RouteSkipProvenance {
+                        route_step: "choose".to_string(),
+                        source_step: "compare".to_string(),
+                        selected_case: "agreement".to_string(),
+                    }],
+                },
+            );
+
+        let error = queue_manual_step_retry(
+            &state,
+            &PipelineRunJournal::new(dir.path()),
+            &InteractionStore::new(dir.path().to_path_buf()),
+            ManualStepRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+                step_name: "build",
+                max_backoff_ms: 300_000,
+                max_cycles: 5,
+            },
+        )
+        .await
+        .expect_err("a route-skipped step must be retried from its source");
+
+        assert!(matches!(
+            error,
+            ManualStepRetryError::SkippedRetryForbidden { route_step, source_step }
+                if route_step == "choose" && source_step == "compare"
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_route_step_retry_is_rejected_until_its_source_is_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = queue_manual_step_retry(
+            &failed_route_retry_state().await,
+            &PipelineRunJournal::new(dir.path()),
+            &InteractionStore::new(dir.path().to_path_buf()),
+            ManualStepRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+                step_name: "build",
+                max_backoff_ms: 300_000,
+                max_cycles: 5,
+            },
+        )
+        .await
+        .expect_err("a failed route must restart from its source step");
+
+        assert!(matches!(
+            error,
+            ManualStepRetryError::FailedRouteRetryForbidden { route_step, source_step }
+                if route_step == "build" && source_step == "source"
+        ));
+    }
+
+    #[tokio::test]
+    async fn failed_route_whole_issue_retry_is_rejected_until_its_source_is_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let error = queue_manual_whole_issue_retry(
+            &failed_route_retry_state().await,
+            &PipelineRunJournal::new(dir.path()),
+            &InteractionStore::new(dir.path().to_path_buf()),
+            ManualWholeIssueRetryRequest {
+                issue_id: "issue-1",
+                identifier: "repo#1",
+            },
+        )
+        .await
+        .expect_err("a failed route must restart from its source step");
+
+        assert!(matches!(
+            error,
+            ManualStepRetryError::FailedRouteRetryForbidden { route_step, source_step }
+                if route_step == "build" && source_step == "source"
+        ));
     }
 
     #[tokio::test]

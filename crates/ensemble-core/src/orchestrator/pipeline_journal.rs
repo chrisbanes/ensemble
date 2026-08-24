@@ -31,6 +31,9 @@ fn requires_durable_sync(kind: PipelineTransitionKind, created: bool) -> bool {
                 | PipelineTransitionKind::AuthorizationEvidenceSelected
                 | PipelineTransitionKind::AutomaticTransitionPending
                 | PipelineTransitionKind::AutomaticTransitionApplied
+                | PipelineTransitionKind::StepRunning
+                | PipelineTransitionKind::StepAwaitingApproval
+                | PipelineTransitionKind::RouteSelected
         )
 }
 
@@ -119,6 +122,8 @@ pub enum PipelineTransitionKind {
     /// A worker launch was durably committed; this authorizes gate delivery.
     StepLaunched,
     StepCompleted,
+    /// A deterministic route selection and its skipped descendants were persisted.
+    RouteSelected,
     StepFailed,
     StepBlockedOnHuman,
     StepAwaitingApproval,
@@ -659,6 +664,18 @@ mod tests {
     }
 
     #[test]
+    fn route_selection_requires_durable_sync_and_round_trips() {
+        let kind = PipelineTransitionKind::RouteSelected;
+        assert!(requires_durable_sync(kind, false));
+        let json = serde_json::to_string(&kind).unwrap();
+        assert_eq!(json, "\"route_selected\"");
+        assert_eq!(
+            serde_json::from_str::<PipelineTransitionKind>(&json).unwrap(),
+            kind
+        );
+    }
+
+    #[test]
     fn newly_created_journal_requires_durable_sync() {
         assert!(requires_durable_sync(
             PipelineTransitionKind::RunStarted,
@@ -685,6 +702,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 

@@ -11,7 +11,7 @@ use crate::config::ensemble::{ConcurrencyConfig, EnsembleConfig};
 use crate::history::artifacts::RunArtifacts;
 use crate::orchestrator::delivery::DeliveryRecord;
 use crate::orchestrator::pipeline_journal::PendingTerminalTransition;
-use crate::pipeline::engine::PipelineRun;
+use crate::pipeline::engine::{PipelineRun, RouteSkipProvenance, StepState};
 use crate::tracker::model::{AgentTotals, Issue, RetryEntry, RunningEntry};
 
 /// Runtime state of an individual step within a pipeline run.
@@ -87,6 +87,7 @@ pub struct CompletedWorkflowStep {
     pub dependencies: Vec<String>,
     pub state: String,
     pub can_navigate: bool,
+    pub route_provenance: Option<Vec<RouteSkipProvenance>>,
 }
 
 /// Rate limit snapshot from agent events.
@@ -743,6 +744,7 @@ fn completed_workflow_steps_from_config(config: &EnsembleConfig) -> Vec<Complete
             dependencies: step.depends.clone().unwrap_or_default(),
             state: "unknown".to_string(),
             can_navigate: false,
+            route_provenance: None,
         })
         .collect()
 }
@@ -755,7 +757,14 @@ fn completed_workflow_steps_from_run(run: &PipelineRun) -> Vec<CompletedWorkflow
             kind: step.kind.to_string(),
             dependencies: step.depends.clone(),
             state: completed_step_state_for_name(&step.name, run),
-            can_navigate: run.step_states.contains_key(&step.name),
+            can_navigate: !matches!(
+                run.step_states.get(&step.name),
+                Some(StepState::Skipped { .. })
+            ) && run.step_states.contains_key(&step.name),
+            route_provenance: match run.step_states.get(&step.name) {
+                Some(StepState::Skipped { provenance }) => Some(provenance.clone()),
+                _ => None,
+            },
         })
         .collect()
 }
@@ -767,6 +776,7 @@ fn completed_step_state_for_name(step_name: &str, run: &PipelineRun) -> String {
             crate::pipeline::engine::StepState::Pending => "pending",
             crate::pipeline::engine::StepState::Running { .. } => "running",
             crate::pipeline::engine::StepState::Passed => "passed",
+            crate::pipeline::engine::StepState::Skipped { .. } => "skipped",
             crate::pipeline::engine::StepState::Failed { .. } => "failed",
             crate::pipeline::engine::StepState::BlockedOnHuman { .. } => "waiting",
             crate::pipeline::engine::StepState::AwaitingApproval { .. } => "waiting",

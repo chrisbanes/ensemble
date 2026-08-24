@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::acceptance::AcceptanceAttempt;
 use crate::artifact::{ArtifactAccessEvidence, ArtifactIntegrityViolation, ArtifactSnapshot};
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, OnFailure, ResolvedOutputSchema,
-    StepAuthorizationConfig, StepKind,
+    RouteConfig, StepAuthorizationConfig, StepKind,
 };
 use crate::orchestrator::resources::SchedulerReservation;
 use crate::pipeline::assessment::{
@@ -33,6 +34,10 @@ pub enum StepState {
     },
     /// Step completed and was approved.
     Passed,
+    /// Step was intentionally excluded by one or more completed route decisions.
+    Skipped {
+        provenance: Vec<RouteSkipProvenance>,
+    },
     /// Step completed with a failed result.
     Failed { summary: String },
     /// Step failed due to an agent crash or runtime error.
@@ -45,7 +50,7 @@ impl StepState {
     pub fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Passed | Self::Failed { .. } | Self::Errored { .. }
+            Self::Passed | Self::Skipped { .. } | Self::Failed { .. } | Self::Errored { .. }
         )
     }
 }
@@ -87,6 +92,23 @@ pub enum PipelineAction {
     Failed { step: String, reason: String },
     /// No steps are ready right now; waiting for running steps to finish.
     Waiting,
+}
+
+/// Durable evidence that a route selected a case from one validated producer output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteDecisionEvidence {
+    pub source_step: String,
+    pub pointer: String,
+    pub selected_case: String,
+    pub source_output_digest: String,
+}
+
+/// Why a step did not run. Nested routes retain every causal selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RouteSkipProvenance {
+    pub route_step: String,
+    pub source_step: String,
+    pub selected_case: String,
 }
 
 /// Result of checking whether a step is eligible for post-step approval gating.
@@ -144,6 +166,8 @@ pub struct PipelineRun {
     automatic_transitions: HashMap<String, AutomaticTransitionState>,
     /// Deterministic assessment and adjudication evidence retained for each gate.
     pub gate_evidence: HashMap<String, GateEvidence>,
+    /// Frozen selections, keyed by route step, used for recovery and downstream retries.
+    pub route_decisions: HashMap<String, RouteDecisionEvidence>,
     /// Immutable consumers whose launch was durably committed. This authorizes
     /// launch; it does not claim that the child processed any instructions.
     launched_immutable_consumers: HashSet<String>,
@@ -191,6 +215,8 @@ pub struct PipelineRunSnapshot {
     pub launched_immutable_consumers: HashSet<String>,
     #[serde(default)]
     pub gate_evidence: Box<HashMap<String, GateEvidence>>,
+    #[serde(default)]
+    pub route_decisions: HashMap<String, RouteDecisionEvidence>,
     #[serde(default)]
     pub acceptance_attempts: Vec<AcceptanceAttempt>,
     #[serde(default)]
@@ -257,6 +283,7 @@ impl PipelineRun {
             authorization_evidence: HashMap::new(),
             automatic_transitions: HashMap::new(),
             gate_evidence: HashMap::new(),
+            route_decisions: HashMap::new(),
             launched_immutable_consumers: HashSet::new(),
             acceptance_attempts: Vec::new(),
             resolved_acceptance_plan: None,
@@ -284,6 +311,7 @@ impl PipelineRun {
             }),
             launched_immutable_consumers: self.launched_immutable_consumers.clone(),
             gate_evidence: Box::new(self.gate_evidence.clone()),
+            route_decisions: self.route_decisions.clone(),
             acceptance_attempts: self.acceptance_attempts.clone(),
             resolved_acceptance_plan: self.resolved_acceptance_plan.clone(),
             dag_steps: self.dag.steps.clone(),
@@ -553,6 +581,7 @@ impl PipelineRun {
                 .artifact_access_evidence,
             launched_immutable_consumers: snapshot.launched_immutable_consumers,
             gate_evidence: *snapshot.gate_evidence,
+            route_decisions: snapshot.route_decisions,
             acceptance_attempts: snapshot.acceptance_attempts,
             resolved_acceptance_plan: snapshot.resolved_acceptance_plan,
             dag: StepDag {
@@ -865,6 +894,9 @@ impl PipelineRun {
             self.automatic_transitions.remove(step);
             self.clear_immutable_consumer_launch_commitment(step);
         }
+        self.route_decisions.retain(|route, decision| {
+            !reset_steps.contains(route) && !reset_steps.contains(&decision.source_step)
+        });
         for gate in reset_gates {
             self.gate_evidence.remove(&gate);
         }
@@ -927,6 +959,7 @@ impl PipelineRun {
                         artifact_access: Default::default(),
                         gate: None,
                         authorization: None,
+                        route: None,
                         depends: original_deps,
                     },
                 );
@@ -980,13 +1013,14 @@ impl PipelineRun {
             .collect()
     }
 
-    /// Returns `true` when every step in the DAG is in the
-    /// [`StepState::Passed`] state.
+    /// Returns `true` when every step reached a successful terminal state.
     fn all_passed(&self) -> bool {
-        self.dag
-            .steps
-            .iter()
-            .all(|s| self.step_states.get(&s.name) == Some(&StepState::Passed))
+        self.dag.steps.iter().all(|s| {
+            matches!(
+                self.step_states.get(&s.name),
+                Some(StepState::Passed | StepState::Skipped { .. })
+            )
+        })
     }
 
     fn gate_check(&self, step_name: &str, approval_requested: bool) -> ApprovalGateCheck {
@@ -1056,19 +1090,48 @@ impl PipelineRun {
         })
     }
 
-    /// Find all steps that are [`StepState::Pending`] and whose dependencies
-    /// are all [`StepState::Passed`].
+    /// Find all steps whose dependencies have settled. A shared join can run
+    /// with any passed predecessor; all-skipped work is derived as skipped.
     ///
     /// Returns [`PipelineAction::Dispatch`] with the ready steps, or
     /// [`PipelineAction::Waiting`] if nothing is currently dispatchable.
     fn find_dispatchable(&mut self) -> PipelineAction {
         loop {
-            let ready_gate = self.dag.steps.iter().find(|step| {
-                step.kind == StepKind::Gate
+            self.propagate_skipped();
+            let ready_route = self.dag.steps.iter().find(|step| {
+                step.kind == StepKind::Route
                     && self.step_states.get(&step.name) == Some(&StepState::Pending)
                     && step.depends.iter().all(|dependency| {
                         self.step_states.get(dependency) == Some(&StepState::Passed)
                     })
+            });
+            if let Some(step) = ready_route.cloned() {
+                if let Err(reason) = self.evaluate_route(&step) {
+                    self.step_states.insert(
+                        step.name.clone(),
+                        StepState::Failed {
+                            summary: reason.clone(),
+                        },
+                    );
+                    return PipelineAction::Failed {
+                        step: step.name,
+                        reason,
+                    };
+                }
+                continue;
+            }
+            let ready_gate = self.dag.steps.iter().find(|step| {
+                step.kind == StepKind::Gate
+                    && self.step_states.get(&step.name) == Some(&StepState::Pending)
+                    && (step.depends.is_empty()
+                        || (step.depends.iter().all(|dependency| {
+                            matches!(
+                                self.step_states.get(dependency),
+                                Some(StepState::Passed | StepState::Skipped { .. })
+                            )
+                        }) && step.depends.iter().any(|dependency| {
+                            self.step_states.get(dependency) == Some(&StepState::Passed)
+                        })))
             });
             let Some(step) = ready_gate.cloned() else {
                 break;
@@ -1153,22 +1216,26 @@ impl PipelineRun {
             }
         }
 
-        let passed: HashSet<String> = self
-            .dag
-            .steps
-            .iter()
-            .filter(|s| self.step_states.get(&s.name) == Some(&StepState::Passed))
-            .map(|s| s.name.clone())
-            .collect();
+        if self.all_passed() {
+            return PipelineAction::Succeeded;
+        }
 
         let requests: Vec<DispatchRequest> = self
             .dag
             .steps
             .iter()
             .filter(|s| {
-                s.kind != StepKind::Gate
+                s.kind.requires_agent()
                     && self.step_states.get(&s.name) == Some(&StepState::Pending)
-                    && s.depends.iter().all(|dep| passed.contains(dep))
+                    && (s.depends.is_empty()
+                        || (s.depends.iter().all(|dependency| {
+                            matches!(
+                                self.step_states.get(dependency),
+                                Some(StepState::Passed | StepState::Skipped { .. })
+                            )
+                        }) && s.depends.iter().any(|dependency| {
+                            self.step_states.get(dependency) == Some(&StepState::Passed)
+                        })))
             })
             .map(|s| DispatchRequest {
                 step_name: s.name.clone(),
@@ -1183,6 +1250,143 @@ impl PipelineRun {
             PipelineAction::Waiting
         } else {
             PipelineAction::Dispatch(requests)
+        }
+    }
+
+    fn evaluate_route(&mut self, step: &DagStep) -> Result<(), String> {
+        let config = step.route.as_ref().ok_or_else(|| {
+            format!(
+                "route step '{}' has no resolved route configuration",
+                step.name
+            )
+        })?;
+        if let Some(existing) = self.route_decisions.get(&step.name).cloned() {
+            self.step_states
+                .insert(step.name.clone(), StepState::Passed);
+            self.skip_unselected_route_successors(step, &existing)?;
+            return Ok(());
+        }
+        let source = self
+            .step_outputs
+            .get(&config.source.step)
+            .and_then(|output| output.output.as_ref())
+            .ok_or_else(|| format!("route step '{}' source output is missing", step.name))?;
+        let selected_case = source
+            .pointer(&config.source.pointer)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "route step '{}' source pointer did not resolve to a string",
+                    step.name
+                )
+            })?
+            .to_string();
+        if !config.cases.contains_key(&selected_case) {
+            return Err(format!(
+                "route step '{}' has no case for source value '{selected_case}'",
+                step.name
+            ));
+        }
+        let bytes = serde_json::to_vec(source).map_err(|error| {
+            format!(
+                "route step '{}' could not serialize source evidence: {error}",
+                step.name
+            )
+        })?;
+        let decision = RouteDecisionEvidence {
+            source_step: config.source.step.clone(),
+            pointer: config.source.pointer.clone(),
+            selected_case,
+            source_output_digest: format!("{:x}", Sha256::digest(bytes)),
+        };
+        self.route_decisions
+            .insert(step.name.clone(), decision.clone());
+        self.step_states
+            .insert(step.name.clone(), StepState::Passed);
+        self.skip_unselected_route_successors(step, &decision)
+    }
+
+    fn skip_unselected_route_successors(
+        &mut self,
+        step: &DagStep,
+        decision: &RouteDecisionEvidence,
+    ) -> Result<(), String> {
+        let config: &RouteConfig = step.route.as_ref().ok_or_else(|| {
+            format!(
+                "route step '{}' has no resolved route configuration",
+                step.name
+            )
+        })?;
+        let selected = config
+            .cases
+            .get(&decision.selected_case)
+            .ok_or_else(|| format!("route step '{}' has no selected case", step.name))?;
+        let provenance = RouteSkipProvenance {
+            route_step: step.name.clone(),
+            source_step: decision.source_step.clone(),
+            selected_case: decision.selected_case.clone(),
+        };
+        let successors = self
+            .dag
+            .steps
+            .iter()
+            .filter(|candidate| candidate.depends.contains(&step.name))
+            .map(|candidate| candidate.name.clone())
+            .collect::<Vec<_>>();
+        for successor in successors {
+            if !selected.contains(&successor)
+                && self.step_states.get(&successor) == Some(&StepState::Pending)
+            {
+                self.step_states.insert(
+                    successor,
+                    StepState::Skipped {
+                        provenance: vec![provenance.clone()],
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn propagate_skipped(&mut self) {
+        loop {
+            let pending = self
+                .dag
+                .steps
+                .iter()
+                .filter(|step| {
+                    self.step_states.get(&step.name) == Some(&StepState::Pending)
+                        && !step.depends.is_empty()
+                        && step.depends.iter().all(|dependency| {
+                            matches!(
+                                self.step_states.get(dependency),
+                                Some(StepState::Skipped { .. })
+                            )
+                        })
+                })
+                .map(|step| step.name.clone())
+                .collect::<Vec<_>>();
+            if pending.is_empty() {
+                break;
+            }
+            for step_name in pending {
+                let provenance = self
+                    .dag
+                    .steps
+                    .iter()
+                    .find(|step| step.name == step_name)
+                    .into_iter()
+                    .flat_map(|step| step.depends.iter())
+                    .filter_map(|dependency| match self.step_states.get(dependency) {
+                        Some(StepState::Skipped { provenance }) => Some(provenance.clone()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                self.step_states
+                    .insert(step_name, StepState::Skipped { provenance });
+            }
         }
     }
 }
@@ -1323,8 +1527,8 @@ mod tests {
     };
     use crate::config::ensemble::{
         ArtifactSnapshotConfig, AuthorizationHandoffMode, GateConfig, OnFailure,
-        OutputSchemaConfig, StepApprovalConfig, StepApprovalMode, StepAuthorizationConfig,
-        StepConfig, StepKind, TrackerEventPredicateConfig,
+        OutputSchemaConfig, RouteConfig, RouteSource, StepApprovalConfig, StepApprovalMode,
+        StepAuthorizationConfig, StepConfig, StepKind, TrackerEventPredicateConfig,
     };
     use crate::pipeline::dag::build_dag;
     use crate::pipeline::verdict::StepOutput;
@@ -1354,6 +1558,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 
@@ -1376,6 +1581,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 
@@ -1401,6 +1607,7 @@ mod tests {
                 adjudication_step: "adjudicate".to_string(),
             }),
             authorization: None,
+            route: None,
         }
     }
 
@@ -1821,6 +2028,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }];
         let mut run = make_run(&steps);
 
@@ -1860,6 +2068,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 
@@ -1896,6 +2105,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 
@@ -2040,6 +2250,34 @@ mod tests {
         // Now review-b also passes → Succeeded.
         let action = run2.step_completed("review-b", approve_output(), false);
         assert_eq!(action, PipelineAction::Succeeded);
+    }
+
+    #[test]
+    fn failed_parallel_predecessor_does_not_dispatch_a_shared_join() {
+        let steps = vec![
+            make_step("build", "builder", &[]),
+            make_step("review-a", "reviewer", &["build"]),
+            make_step("review-b", "reviewer", &["build"]),
+            make_step("synthesize", "synthesizer", &["review-a", "review-b"]),
+        ];
+        let mut run = make_run(&steps);
+
+        run.mark_running("build", "session-build".to_string());
+        assert!(matches!(
+            run.step_completed("build", approve_output(), false),
+            PipelineAction::Dispatch(_)
+        ));
+        run.mark_running("review-a", "session-a".to_string());
+        run.mark_running("review-b", "session-b".to_string());
+
+        assert!(matches!(
+            run.step_completed("review-a", failed_output("review failed"), false),
+            PipelineAction::Failed { .. }
+        ));
+        let action = run.step_completed("review-b", approve_output(), false);
+
+        assert_eq!(action, PipelineAction::Waiting);
+        assert_eq!(run.step_states["synthesize"], StepState::Pending);
     }
 
     #[test]
@@ -2650,6 +2888,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
             assessment_gate(),
             make_step("publish", "publisher", &["gate"]),
@@ -2692,6 +2931,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
             assessment_gate(),
         ];
@@ -2729,6 +2969,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
             assessment_gate(),
         ];
@@ -2793,6 +3034,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -2812,6 +3054,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
         ];
         let mut run = make_run(&steps);
@@ -3281,5 +3524,371 @@ mod tests {
                 ],
             )
             .is_none());
+    }
+
+    #[test]
+    fn route_execution_selects_one_branch_skips_the_other_and_runs_the_shared_join() {
+        let mut compare = make_step("compare", "comparator", &[]);
+        compare.output_schema = Some(OutputSchemaConfig {
+            path: "comparison.json".into(),
+            schema: Some(json!({
+                "type": "object",
+                "required": ["decision"],
+                "properties": {"decision": {"type": "string", "enum": ["agreement", "disagreement"]}}
+            })),
+        });
+        let mut route = make_step("choose_review_path", "", &["compare"]);
+        route.kind = StepKind::Route;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([
+                (
+                    "agreement".to_string(),
+                    vec!["accept_agreement".to_string()],
+                ),
+                ("disagreement".to_string(), vec!["escalate".to_string()]),
+            ]),
+        });
+        let accept = make_step(
+            "accept_agreement",
+            "agreement_handler",
+            &["choose_review_path"],
+        );
+        let escalate = make_step("escalate", "adjudicator", &["choose_review_path"]);
+        let finish = make_step("finish", "finisher", &["accept_agreement", "escalate"]);
+        let mut run = make_run(&[compare, route, accept, escalate, finish]);
+
+        assert!(
+            matches!(run.start(), PipelineAction::Dispatch(requests) if requests.iter().map(|request| request.step_name.as_str()).collect::<Vec<_>>() == vec!["compare"])
+        );
+        let action = run.step_completed(
+            "compare",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"decision": "agreement"})),
+            },
+            false,
+        );
+        assert!(
+            matches!(action, PipelineAction::Dispatch(requests) if requests.iter().map(|request| request.step_name.as_str()).collect::<Vec<_>>() == vec!["accept_agreement"])
+        );
+        assert_eq!(
+            run.step_states.get("choose_review_path"),
+            Some(&StepState::Passed)
+        );
+        assert!(
+            matches!(run.step_states.get("escalate"), Some(StepState::Skipped { provenance }) if provenance[0].route_step == "choose_review_path")
+        );
+        assert!(run.step_outputs.get("choose_review_path").is_none());
+        assert!(run.step_outputs.get("escalate").is_none());
+        let restored = PipelineRun::from_snapshot(run.to_snapshot()).unwrap();
+        assert_eq!(
+            restored
+                .route_decisions
+                .get("choose_review_path")
+                .map(|decision| decision.selected_case.as_str()),
+            Some("agreement")
+        );
+        assert!(matches!(
+            restored.step_states.get("escalate"),
+            Some(StepState::Skipped { .. })
+        ));
+
+        let action = run.step_completed("accept_agreement", approve_output(), false);
+        assert!(
+            matches!(action, PipelineAction::Dispatch(requests) if requests.iter().map(|request| request.step_name.as_str()).collect::<Vec<_>>() == vec!["finish"])
+        );
+        assert_eq!(
+            run.output_context_for("finish")
+                .unwrap()
+                .dependency_outputs
+                .len(),
+            1
+        );
+        assert_eq!(
+            run.step_completed("finish", approve_output(), false),
+            PipelineAction::Succeeded
+        );
+    }
+
+    #[test]
+    fn route_shared_gate_join_evaluates_after_selected_dependencies_settle() {
+        let compare = make_step("compare", "comparator", &[]);
+        let mut route = make_step("choose", "", &["compare"]);
+        route.kind = StepKind::Route;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([
+                ("review".to_string(), vec!["review".to_string()]),
+                ("skip".to_string(), vec!["skipped_branch".to_string()]),
+            ]),
+        });
+        let review = make_step("review", "reviewer", &["choose"]);
+        let mut adjudicate = make_step("adjudicate", "synthesizer", &["review"]);
+        adjudicate.kind = StepKind::Synthesis;
+        let skipped_branch = make_step("skipped_branch", "handler", &["choose"]);
+        let mut gate = assessment_gate();
+        gate.depends = Some(vec!["adjudicate".to_string(), "skipped_branch".to_string()]);
+        let mut run = make_run(&[compare, route, review, adjudicate, skipped_branch, gate]);
+
+        assert!(matches!(run.start(), PipelineAction::Dispatch(_)));
+        assert!(matches!(
+            run.step_completed(
+                "compare",
+                StepOutput {
+                    result: StepResult::Succeeded,
+                    summary: None,
+                    output: Some(json!({"decision": "review"})),
+                },
+                false,
+            ),
+            PipelineAction::Dispatch(requests) if requests[0].step_name == "review"
+        ));
+        assert!(matches!(
+            run.step_states.get("skipped_branch"),
+            Some(StepState::Skipped { .. })
+        ));
+        assert!(matches!(
+            run.step_completed("review", assessment_output(), false),
+            PipelineAction::Dispatch(requests) if requests[0].step_name == "adjudicate"
+        ));
+        let action = run.step_completed("adjudicate", adjudication_output("dismissed"), false);
+        assert_eq!(run.step_states.get("gate"), Some(&StepState::Passed));
+        assert!(run.gate_evidence.contains_key("gate"));
+        assert_eq!(action, PipelineAction::Succeeded);
+    }
+
+    #[test]
+    fn route_case_with_no_unselected_successor_dispatches_its_only_entry() {
+        let compare = make_step("compare", "comparator", &[]);
+        let mut route = make_step("choose", "", &["compare"]);
+        route.kind = StepKind::Route;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([("agreement".to_string(), vec!["accept".to_string()])]),
+        });
+        let accept = make_step("accept", "handler", &["choose"]);
+        let mut run = make_run(&[compare, route, accept]);
+
+        run.start();
+        let action = run.step_completed(
+            "compare",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"decision": "agreement"})),
+            },
+            false,
+        );
+
+        assert!(
+            matches!(action, PipelineAction::Dispatch(requests) if requests[0].step_name == "accept")
+        );
+        assert!(run
+            .step_states
+            .values()
+            .all(|state| !matches!(state, StepState::Skipped { .. })));
+    }
+
+    #[test]
+    fn nested_routes_execute_only_the_selected_agreement_escalation_path() {
+        let compare = make_step("compare", "comparator", &[]);
+        let mut choose_primary = make_step("choose_primary", "", &["compare"]);
+        choose_primary.kind = StepKind::Route;
+        choose_primary.on_failure = OnFailure::Halt;
+        choose_primary.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([
+                (
+                    "agreement".to_string(),
+                    vec!["review_agreement".to_string()],
+                ),
+                (
+                    "escalation".to_string(),
+                    vec!["review_escalation".to_string()],
+                ),
+            ]),
+        });
+        let review_agreement = make_step("review_agreement", "reviewer", &["choose_primary"]);
+        let review_escalation = make_step("review_escalation", "reviewer", &["choose_primary"]);
+        let mut choose_agreement = make_step("choose_agreement", "", &["review_agreement"]);
+        choose_agreement.kind = StepKind::Route;
+        choose_agreement.on_failure = OnFailure::Halt;
+        choose_agreement.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "review_agreement".to_string(),
+                pointer: "/outcome".to_string(),
+            },
+            cases: BTreeMap::from([
+                ("accept".to_string(), vec!["accept".to_string()]),
+                ("escalate".to_string(), vec!["escalate".to_string()]),
+            ]),
+        });
+        let accept = make_step("accept", "handler", &["choose_agreement"]);
+        let escalate = make_step("escalate", "handler", &["choose_agreement"]);
+        let mut run = make_run(&[
+            compare,
+            choose_primary,
+            review_agreement,
+            review_escalation,
+            choose_agreement,
+            accept,
+            escalate,
+        ]);
+
+        run.start();
+        let action = run.step_completed(
+            "compare",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"decision": "agreement"})),
+            },
+            false,
+        );
+        assert!(
+            matches!(action, PipelineAction::Dispatch(requests) if requests[0].step_name == "review_agreement")
+        );
+        let action = run.step_completed(
+            "review_agreement",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"outcome": "accept"})),
+            },
+            false,
+        );
+        assert!(
+            matches!(action, PipelineAction::Dispatch(requests) if requests[0].step_name == "accept")
+        );
+        assert!(matches!(
+            run.step_states.get("review_escalation"),
+            Some(StepState::Skipped { .. })
+        ));
+        assert!(matches!(
+            run.step_states.get("escalate"),
+            Some(StepState::Skipped { .. })
+        ));
+        assert_eq!(run.route_decisions.len(), 2);
+    }
+
+    #[test]
+    fn retrying_a_route_source_reopens_the_route_and_its_skipped_branch() {
+        let mut compare = make_step("compare", "comparator", &[]);
+        compare.output_schema = Some(OutputSchemaConfig {
+            path: "comparison.json".into(),
+            schema: Some(json!({
+                "type": "object",
+                "required": ["decision"],
+                "properties": {"decision": {"type": "string", "enum": ["agreement", "disagreement"]}}
+            })),
+        });
+        let mut route = make_step("choose", "", &["compare"]);
+        route.kind = StepKind::Route;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([
+                ("agreement".to_string(), vec!["accept".to_string()]),
+                ("disagreement".to_string(), vec!["escalate".to_string()]),
+            ]),
+        });
+        let accept = make_step("accept", "handler", &["choose"]);
+        let escalate = make_step("escalate", "handler", &["choose"]);
+        let finish = make_step("finish", "finisher", &["accept", "escalate"]);
+        let mut run = make_run(&[compare, route, accept, escalate, finish]);
+
+        run.start();
+        run.step_completed(
+            "compare",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"decision": "agreement"})),
+            },
+            false,
+        );
+        assert!(matches!(
+            run.step_states.get("escalate"),
+            Some(StepState::Skipped { .. })
+        ));
+
+        let reset = run.retry_from_step("compare");
+
+        assert!(reset.is_superset(
+            &[
+                "compare".to_string(),
+                "choose".to_string(),
+                "accept".to_string(),
+                "escalate".to_string(),
+                "finish".to_string(),
+            ]
+            .into()
+        ));
+        assert!(run.route_decisions.is_empty());
+        assert_eq!(run.step_states.get("choose"), Some(&StepState::Pending));
+        assert_eq!(run.step_states.get("escalate"), Some(&StepState::Pending));
+        assert!(matches!(
+            run.start(),
+            PipelineAction::Dispatch(requests) if requests[0].step_name == "compare"
+        ));
+    }
+
+    #[test]
+    fn unknown_route_value_fails_closed_without_dispatching_a_branch() {
+        let compare = make_step("compare", "comparator", &[]);
+        let mut route = make_step("choose", "", &["compare"]);
+        route.kind = StepKind::Route;
+        route.on_failure = OnFailure::Halt;
+        route.route = Some(RouteConfig {
+            source: RouteSource {
+                step: "compare".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([("agreement".to_string(), vec!["accept".to_string()])]),
+        });
+        let accept = make_step("accept", "handler", &["choose"]);
+        let mut run = make_run(&[compare, route, accept]);
+
+        run.start();
+        let action = run.step_completed(
+            "compare",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"decision": "disagreement"})),
+            },
+            false,
+        );
+
+        assert!(matches!(
+            action,
+            PipelineAction::Failed { step, reason }
+                if step == "choose" && reason.contains("no case")
+        ));
+        assert!(matches!(
+            run.step_states.get("choose"),
+            Some(StepState::Failed { .. })
+        ));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
     }
 }

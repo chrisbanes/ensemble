@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::ensemble::{
     AffectedPathSource, ArtifactAccess, ArtifactSnapshotConfig, GateConfig, OnFailure,
-    ResolvedOutputSchema, StepApprovalConfig, StepAuthorizationConfig, StepConfig, StepKind,
+    ResolvedOutputSchema, RouteConfig, StepApprovalConfig, StepAuthorizationConfig, StepConfig,
+    StepKind,
 };
 use crate::error::PipelineError;
 
@@ -36,6 +37,8 @@ pub struct DagStep {
     pub gate: Option<GateConfig>,
     #[serde(default)]
     pub authorization: Option<StepAuthorizationConfig>,
+    #[serde(default)]
+    pub route: Option<RouteConfig>,
     pub depends: Vec<String>,
 }
 
@@ -159,6 +162,7 @@ pub fn build_dag(steps: &[StepConfig]) -> Result<StepDag, PipelineError> {
             artifact_access: step.artifact_access,
             gate: step.gate.clone(),
             authorization: step.authorization.clone(),
+            route: step.route.clone(),
             depends: deps,
         });
     }
@@ -260,6 +264,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 
@@ -282,6 +287,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }
     }
 
@@ -445,6 +451,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
             StepConfig {
                 name: "synthesize".to_string(),
@@ -464,6 +471,7 @@ mod tests {
                 artifact_access: Default::default(),
                 gate: None,
                 authorization: None,
+                route: None,
             },
         ];
 
@@ -497,6 +505,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -527,6 +536,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }];
 
         let dag = build_dag(&steps).unwrap();
@@ -563,6 +573,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }];
 
         let dag = build_dag(&steps).unwrap();

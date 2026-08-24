@@ -135,7 +135,7 @@ function latestTerminalStepName(data: IssueDetailSnapshot | undefined): string |
 
   for (let index = data.workflow_steps.length - 1; index >= 0; index -= 1) {
     const step = data.workflow_steps[index];
-    if (step && (step.state === "passed" || step.state === "failed")) return step.name;
+    if (step && (step.state === "passed" || step.state === "skipped" || step.state === "failed")) return step.name;
   }
 
   return null;

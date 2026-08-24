@@ -161,6 +161,45 @@ never gate-local retry or fixup.
 For a complete fixture-backed operator composition, including plan, code, and test-review routes,
 prompt guidance, trust boundaries, and recovery, see [Adversarial reviews](adversarial-reviews.md).
 
+## Static route steps
+
+A `kind: route` step is an agentless, fixed-DAG branch selector. It reads a non-empty JSON Pointer
+from one direct producer. Activation proves that pointer is a required `string` enum in the
+producer's resolved Draft 2020-12 output schema; route cases must exactly exhaust that enum and
+partition every direct successor exactly once.
+
+```yaml
+- name: compare
+  agent: comparator
+  output_schema: { path: schemas/comparison.json }
+- name: choose_review_path
+  kind: route
+  depends: [compare]
+  on_failure: halt
+  route:
+    source: { step: compare, pointer: /decision }
+    cases:
+      agreement: [accept_agreement]
+      disagreement: [escalate]
+- name: accept_agreement
+  agent: agreement_handler
+  depends: [choose_review_path]
+- name: escalate
+  agent: adjudicator
+  depends: [choose_review_path]
+```
+
+The selected branch remains eligible. Direct non-selected entries, and descendants whose settled
+dependencies are all skipped, become terminal `Skipped` with the route provenance; they produce no
+output, attempt, transcript, artifact, or dependency-output entry. A shared join waits for every
+dependency to settle and runs when at least one passed. A run containing only `Passed` and `Skipped`
+terminal steps succeeds.
+
+The selected case and a source-output digest are stored in the run snapshot, so restart and a
+downstream retry retain the choice. Resetting the source resets its descendants and removes affected
+route decisions. Missing or unmatched route evidence fails the route closed and halts; routes do
+not support automatic retry, fixup, defaults, coercion, predicates, dynamic nodes, or loops.
+
 ## Clarification request style (batched by default)
 
 Ensemble now injects interaction-policy guidance into prompts by default. Agents are expected to:

@@ -590,6 +590,8 @@ pub enum StepKind {
     Synthesis,
     /// A deterministic, non-agent step that adjudicates completed assessment evidence.
     Gate,
+    /// A deterministic, non-agent step that selects one static successor branch.
+    Route,
 }
 
 impl StepKind {
@@ -598,7 +600,7 @@ impl StepKind {
     }
 
     pub fn requires_agent(&self) -> bool {
-        !matches!(self, Self::Gate)
+        !matches!(self, Self::Gate | Self::Route)
     }
 }
 
@@ -608,6 +610,7 @@ impl std::fmt::Display for StepKind {
             Self::Agent => write!(f, "agent"),
             Self::Synthesis => write!(f, "synthesis"),
             Self::Gate => write!(f, "gate"),
+            Self::Route => write!(f, "route"),
         }
     }
 }
@@ -671,6 +674,25 @@ pub struct StepConfig {
     /// Optional tracker-event authorization required before this step can run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authorization: Option<StepAuthorizationConfig>,
+    /// Static branch-selection metadata for an agentless route step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteConfig>,
+}
+
+/// The source output inspected by a route step.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteSource {
+    pub step: String,
+    pub pointer: String,
+}
+
+/// A statically exhaustive mapping from one source enum value to direct successors.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RouteConfig {
+    pub source: RouteSource,
+    pub cases: BTreeMap<String, Vec<String>>,
 }
 
 /// Immutable upstream Artifact and tracker-event evidence required before one
@@ -2321,6 +2343,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
             }
         }
         validate_gate_configs(steps, &dag)?;
+        validate_route_configs(steps, &dag)?;
         validate_authorization_configs(steps, &dag)?;
     }
     Ok(())
@@ -2557,6 +2580,201 @@ fn validate_gate_configs(
     Ok(())
 }
 
+fn validate_route_configs(
+    steps: &[StepConfig],
+    dag: &crate::pipeline::dag::StepDag,
+) -> Result<(), PipelineError> {
+    for route in steps.iter().filter(|step| step.kind == StepKind::Route) {
+        let invalid = |reason: String| PipelineError::InvalidStepConfig {
+            step: route.name.clone(),
+            reason,
+        };
+        if !route.agent.trim().is_empty()
+            || route.artifact_snapshot.is_some()
+            || !route.artifact_inputs.is_empty()
+            || route.artifact_access != ArtifactAccess::Mutable
+            || route.approval.is_some()
+            || route.authorization.is_some()
+            || !route.resource_requests.is_empty()
+            || route.affected_paths.is_some()
+            || route.fixup_agent.is_some()
+            || !matches!(route.on_failure, OnFailure::Halt)
+        {
+            return Err(invalid(
+                "route steps are agentless and permit only on_failure: halt".to_string(),
+            ));
+        }
+        let config = route
+            .route
+            .as_ref()
+            .ok_or_else(|| invalid("route steps require source and cases".to_string()))?;
+        if config.source.step.trim().is_empty() || !is_valid_json_pointer(&config.source.pointer) {
+            return Err(invalid("route source requires a non-blank direct dependency and valid non-empty JSON Pointer".to_string()));
+        }
+        let resolved = dag
+            .steps
+            .iter()
+            .find(|step| step.name == route.name)
+            .expect("resolved DAG step originates from configuration");
+        if !resolved.depends.contains(&config.source.step) {
+            return Err(invalid(format!(
+                "route source step '{}' must be a direct dependency",
+                config.source.step
+            )));
+        }
+        if resolved.depends.len() != 1 {
+            return Err(invalid(
+                "route steps must depend only on their source step".to_string(),
+            ));
+        }
+        let source = steps
+            .iter()
+            .find(|step| step.name == config.source.step)
+            .ok_or_else(|| {
+                invalid(format!(
+                    "route source step '{}' is unknown",
+                    config.source.step
+                ))
+            })?;
+        if !source.kind.requires_agent() {
+            return Err(invalid(
+                "route source must be an agent or synthesis step that produces output".to_string(),
+            ));
+        }
+        let schema = source
+            .output_schema
+            .as_ref()
+            .and_then(|schema| schema.schema.as_ref())
+            .ok_or_else(|| {
+                invalid("route source must declare a resolved output_schema".to_string())
+            })?;
+        let enum_values = required_string_enum_at(schema, &config.source.pointer)
+            .ok_or_else(|| invalid("route source pointer must resolve to a required string enum in its output_schema".to_string()))?;
+        if config.cases.is_empty()
+            || config
+                .cases
+                .keys()
+                .collect::<std::collections::BTreeSet<_>>()
+                != enum_values
+                    .iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+        {
+            return Err(invalid(
+                "route cases must exactly exhaust the source string enum".to_string(),
+            ));
+        }
+        let direct_successors = dag
+            .steps
+            .iter()
+            .filter(|candidate| candidate.depends.contains(&route.name))
+            .map(|candidate| candidate.name.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut entries = std::collections::BTreeSet::new();
+        for (case, case_entries) in &config.cases {
+            if case.trim().is_empty() || case_entries.is_empty() {
+                return Err(invalid(
+                    "route cases and case entries must be non-empty".to_string(),
+                ));
+            }
+            for entry in case_entries {
+                if !direct_successors.contains(entry.as_str()) {
+                    return Err(invalid(format!(
+                        "route case entry '{entry}' must be a direct successor"
+                    )));
+                }
+                if !entries.insert(entry.as_str()) {
+                    return Err(invalid(format!(
+                        "route branch entry '{entry}' belongs to more than one case"
+                    )));
+                }
+            }
+        }
+        if entries != direct_successors {
+            return Err(invalid(
+                "route cases must partition every direct successor exactly once".to_string(),
+            ));
+        }
+
+        let case_downstreams = config
+            .cases
+            .iter()
+            .map(|(case, entries)| {
+                (
+                    case,
+                    entries
+                        .iter()
+                        .flat_map(|entry| dag.downstream_steps(entry))
+                        .collect::<std::collections::HashSet<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for join in dag
+            .steps
+            .iter()
+            .filter(|candidate| candidate.depends.len() > 1)
+        {
+            let reaching_cases = case_downstreams
+                .iter()
+                .filter(|(_, downstream)| downstream.contains(&join.name))
+                .count();
+            if reaching_cases > 1 {
+                for (case, downstream) in &case_downstreams {
+                    if !downstream.contains(&join.name) {
+                        return Err(invalid(format!(
+                            "route case '{case}' leaves shared join '{}' with no potentially passed predecessor (impossible join activation)",
+                            join.name
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    for step in steps.iter().filter(|step| step.kind != StepKind::Route) {
+        if step.route.is_some() {
+            return Err(PipelineError::InvalidStepConfig {
+                step: step.name.clone(),
+                reason: "route configuration is valid only for kind: route".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Proves a JSON Pointer resolves through object properties whose every segment is required,
+/// ending at an exact string enum. Complex schemas deliberately fail closed.
+fn required_string_enum_at(schema: &serde_json::Value, pointer: &str) -> Option<Vec<String>> {
+    let mut current = schema;
+    for segment in pointer.strip_prefix('/')?.split('/') {
+        let segment = segment.replace("~1", "/").replace("~0", "~");
+        if current.get("type")?.as_str()? != "object"
+            || !current
+                .get("required")?
+                .as_array()?
+                .iter()
+                .any(|value| value.as_str() == Some(&segment))
+        {
+            return None;
+        }
+        current = current.get("properties")?.get(segment)?;
+    }
+    if current.get("type")?.as_str()? != "string" {
+        return None;
+    }
+    let values = current.get("enum")?.as_array()?;
+    let strings = values
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    (!strings.is_empty()
+        && strings.iter().all(|value| !value.is_empty())
+        && strings
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            == strings.len())
+    .then_some(strings)
+}
+
 fn is_valid_json_pointer(pointer: &str) -> bool {
     pointer.starts_with('/')
         && pointer.split('/').skip(1).all(|segment| {
@@ -2651,6 +2869,221 @@ on_failure: Failed
         assert!(config.acceptance.required_files.is_empty());
         assert!(config.acceptance.required_handoff_sections.is_empty());
         assert!(config.acceptance.required_pull_requests.is_empty());
+    }
+
+    #[test]
+    fn route_config_activation_requires_an_exhaustive_direct_successor_partition() {
+        let mut config = parse_config(minimal_yaml()).unwrap();
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["decision"],
+            "properties": {"decision": {"type": "string", "enum": ["agreement", "disagreement"]}}
+        });
+        let compare = StepConfig {
+            name: "compare".to_string(),
+            kind: StepKind::Agent,
+            agent: "build".to_string(),
+            depends: Some(vec![]),
+            tracker_state: None,
+            timeout_ms: None,
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+            resource_requests: BTreeMap::new(),
+            affected_paths: None,
+            output_schema: Some(OutputSchemaConfig {
+                path: "comparison.json".into(),
+                schema: Some(schema),
+            }),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: ArtifactAccess::Mutable,
+            gate: None,
+            authorization: None,
+            route: None,
+        };
+        let route = StepConfig {
+            name: "choose_review_path".to_string(),
+            kind: StepKind::Route,
+            agent: String::new(),
+            depends: Some(vec!["compare".to_string()]),
+            tracker_state: None,
+            timeout_ms: None,
+            approval: None,
+            on_failure: OnFailure::Halt,
+            fixup_agent: None,
+            resource_requests: BTreeMap::new(),
+            affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: ArtifactAccess::Mutable,
+            gate: None,
+            authorization: None,
+            route: Some(RouteConfig {
+                source: RouteSource {
+                    step: "compare".to_string(),
+                    pointer: "/decision".to_string(),
+                },
+                cases: BTreeMap::from([
+                    (
+                        "agreement".to_string(),
+                        vec!["accept_agreement".to_string()],
+                    ),
+                    ("disagreement".to_string(), vec!["escalate".to_string()]),
+                ]),
+            }),
+        };
+        let branch = |name: &str| StepConfig {
+            name: name.to_string(),
+            kind: StepKind::Agent,
+            agent: "build".to_string(),
+            depends: Some(vec!["choose_review_path".to_string()]),
+            tracker_state: None,
+            timeout_ms: None,
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+            resource_requests: BTreeMap::new(),
+            affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: ArtifactAccess::Mutable,
+            gate: None,
+            authorization: None,
+            route: None,
+        };
+        config.steps = vec![
+            compare,
+            route,
+            branch("accept_agreement"),
+            branch("escalate"),
+        ];
+
+        assert!(validate_config(&config).is_ok());
+        let serialized = serde_yaml::to_string(&config).unwrap();
+        assert!(serialized.contains("kind: route"));
+        assert!(serialized.contains("pointer: /decision"));
+
+        config.steps[1]
+            .route
+            .as_mut()
+            .unwrap()
+            .cases
+            .remove("disagreement");
+        assert!(
+            matches!(validate_config(&config), Err(PipelineError::InvalidStepConfig { step, reason }) if step == "choose_review_path" && reason.contains("exactly exhaust"))
+        );
+    }
+
+    #[test]
+    fn route_config_allows_branch_private_joins_and_rejects_omitted_shared_joins() {
+        let mut config = parse_config(minimal_yaml()).unwrap();
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["decision"],
+            "properties": {"decision": {"type": "string", "enum": ["agreement", "escalation"]}}
+        });
+        let agent = |name: &str, depends: Vec<&str>| StepConfig {
+            name: name.to_string(),
+            kind: StepKind::Agent,
+            agent: "build".to_string(),
+            depends: Some(depends.into_iter().map(str::to_string).collect()),
+            tracker_state: None,
+            timeout_ms: None,
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+            resource_requests: BTreeMap::new(),
+            affected_paths: None,
+            output_schema: None,
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: ArtifactAccess::Mutable,
+            gate: None,
+            authorization: None,
+            route: None,
+        };
+        config.steps = vec![
+            StepConfig {
+                name: "compare".to_string(),
+                kind: StepKind::Agent,
+                agent: "build".to_string(),
+                depends: Some(vec![]),
+                tracker_state: None,
+                timeout_ms: None,
+                approval: None,
+                on_failure: OnFailure::RetryIssue,
+                fixup_agent: None,
+                resource_requests: BTreeMap::new(),
+                affected_paths: None,
+                output_schema: Some(OutputSchemaConfig {
+                    path: "comparison.json".into(),
+                    schema: Some(schema),
+                }),
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: ArtifactAccess::Mutable,
+                gate: None,
+                authorization: None,
+                route: None,
+            },
+            StepConfig {
+                name: "choose_path".to_string(),
+                kind: StepKind::Route,
+                agent: String::new(),
+                depends: Some(vec!["compare".to_string()]),
+                tracker_state: None,
+                timeout_ms: None,
+                approval: None,
+                on_failure: OnFailure::Halt,
+                fixup_agent: None,
+                resource_requests: BTreeMap::new(),
+                affected_paths: None,
+                output_schema: None,
+                artifact_snapshot: None,
+                artifact_inputs: Vec::new(),
+                artifact_access: ArtifactAccess::Mutable,
+                gate: None,
+                authorization: None,
+                route: Some(RouteConfig {
+                    source: RouteSource {
+                        step: "compare".to_string(),
+                        pointer: "/decision".to_string(),
+                    },
+                    cases: BTreeMap::from([
+                        ("agreement".to_string(), vec!["accept".to_string()]),
+                        ("escalation".to_string(), vec!["escalate".to_string()]),
+                    ]),
+                }),
+            },
+            agent("accept", vec!["choose_path"]),
+            agent("escalate", vec!["choose_path"]),
+            agent("escalation_review", vec!["escalate"]),
+            agent("escalation_join", vec!["escalate", "escalation_review"]),
+        ];
+
+        assert!(validate_config(&config).is_ok());
+
+        config.steps[0].output_schema.as_mut().unwrap().schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["decision"],
+            "properties": {"decision": {"type": "string", "enum": ["agreement", "escalation", "defer"]}}
+        }));
+        config.steps[1].route.as_mut().unwrap().cases = BTreeMap::from([
+            ("agreement".to_string(), vec!["accept".to_string()]),
+            ("escalation".to_string(), vec!["escalate".to_string()]),
+            ("defer".to_string(), vec!["defer".to_string()]),
+        ]);
+        config.steps[5].depends = Some(vec!["accept".to_string(), "escalate".to_string()]);
+        config.steps.push(agent("defer", vec!["choose_path"]));
+
+        assert!(matches!(
+            validate_config(&config),
+            Err(PipelineError::InvalidStepConfig { step, reason })
+                if step == "choose_path" && reason.contains("case 'defer'") && reason.contains("impossible join")
+        ));
     }
 
     #[test]

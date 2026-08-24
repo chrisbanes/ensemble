@@ -35,6 +35,14 @@ The structured terminal result of bounded scheduler execution: success, waiting 
 A named unit of agent or synthesis work within a pipeline.
 _Avoid_: Stage, phase
 
+**Route**:
+An agentless Step that selects one statically declared successor partition from a required string-enum Step output.
+_Avoid_: Dynamic graph, condition
+
+**Skipped**:
+A successful terminal Step state for work excluded by a Route. It has no agent attempt, Step output, transcript, or artifact.
+_Avoid_: Passed, failed
+
 **Run**:
 One issue's execution through a resolved pipeline.
 _Avoid_: Session when referring to issue-level execution

@@ -29,6 +29,19 @@ pub enum PipelineEvent {
         verdict: Option<String>,
         detail: String,
     },
+    RouteSelected {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        selected_case: String,
+        detail: String,
+    },
+    StepSkipped {
+        issue_identifier: String,
+        timestamp: DateTime<Utc>,
+        step_name: String,
+        detail: String,
+    },
     TurnCompleted {
         issue_identifier: String,
         timestamp: DateTime<Utc>,
@@ -131,6 +144,12 @@ impl PipelineEvent {
             | Self::StepCompleted {
                 issue_identifier, ..
             }
+            | Self::RouteSelected {
+                issue_identifier, ..
+            }
+            | Self::StepSkipped {
+                issue_identifier, ..
+            }
             | Self::TurnCompleted {
                 issue_identifier, ..
             }
@@ -178,6 +197,8 @@ impl PipelineEvent {
             Self::SessionStarted { timestamp, .. }
             | Self::StepStarted { timestamp, .. }
             | Self::StepCompleted { timestamp, .. }
+            | Self::RouteSelected { timestamp, .. }
+            | Self::StepSkipped { timestamp, .. }
             | Self::TurnCompleted { timestamp, .. }
             | Self::ToolCall { timestamp, .. }
             | Self::Output { timestamp, .. }
@@ -253,6 +274,41 @@ impl PipelineEvent {
                 attempt,
                 detail: detail.clone(),
                 verdict: verdict.clone(),
+                tool_name: None,
+            },
+            Self::RouteSelected {
+                issue_identifier,
+                timestamp,
+                step_name,
+                selected_case,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "route_selected".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: format!("{detail} (case: {selected_case})"),
+                verdict: None,
+                tool_name: None,
+            },
+            Self::StepSkipped {
+                issue_identifier,
+                timestamp,
+                step_name,
+                detail,
+            } => TimelineEventRecord {
+                run_id: run_id.to_string(),
+                issue_identifier: issue_identifier.clone(),
+                sequence,
+                timestamp: *timestamp,
+                event_type: "step_skipped".to_string(),
+                step_name: Some(step_name.clone()),
+                attempt,
+                detail: detail.clone(),
+                verdict: None,
                 tool_name: None,
             },
             Self::TurnCompleted {
@@ -666,5 +722,31 @@ mod tests {
         let retry_record = retry.to_timeline_record("run-1", 9, 99);
         assert_eq!(retry_record.event_type, "retry_scheduled");
         assert_eq!(retry_record.attempt, 3);
+
+        let route = PipelineEvent::RouteSelected {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            step_name: "choose_review_path".into(),
+            selected_case: "agreement".into(),
+            detail: "route selected".into(),
+        };
+        let route_record = route.to_timeline_record("run-1", 10, 1);
+        assert_eq!(route_record.event_type, "route_selected");
+        assert_eq!(
+            route_record.step_name.as_deref(),
+            Some("choose_review_path")
+        );
+        assert!(route_record.detail.contains("agreement"));
+
+        let skipped = PipelineEvent::StepSkipped {
+            issue_identifier: "repo#1".into(),
+            timestamp: ts,
+            step_name: "escalate".into(),
+            detail: "skipped by selected route".into(),
+        };
+        assert_eq!(
+            skipped.to_timeline_record("run-1", 11, 1).event_type,
+            "step_skipped"
+        );
     }
 }

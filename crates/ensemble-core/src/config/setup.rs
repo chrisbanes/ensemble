@@ -1,7 +1,7 @@
 use crate::config::ensemble::ModelDefinition;
 use crate::config::ensemble::{
     resolve_relative_to_base, ArtifactAccess, ArtifactSnapshotConfig, GateConfig, OnFailure,
-    StepConfig, StepKind,
+    RouteConfig, StepConfig, StepKind,
 };
 use crate::config::secrets::{SecretDisplay, SecretEdit, SecretValue};
 use crate::error::ConfigError;
@@ -93,6 +93,8 @@ pub struct SetupStep {
     pub artifact_access: ArtifactAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteConfig>,
 }
 
 /// Generated artifacts from a setup request.
@@ -756,6 +758,12 @@ fn generate_yaml(request: &SetupRequest) -> String {
                 if kind != "agent" {
                     step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
                 }
+                if kind == "route" {
+                    step_map.insert(
+                        "on_failure".into(),
+                        serde_yaml::Value::String("halt".into()),
+                    );
+                }
             }
             if let Some(depends) = &step.depends {
                 step_map.insert(
@@ -803,6 +811,14 @@ fn generate_yaml(request: &SetupRequest) -> String {
                     "gate".into(),
                     serde_yaml::to_value(gate)
                         .unwrap_or_else(|error| panic!("failed to serialize gate config: {error}")),
+                );
+            }
+            if let Some(route) = &step.route {
+                step_map.insert(
+                    "route".into(),
+                    serde_yaml::to_value(route).unwrap_or_else(|error| {
+                        panic!("failed to serialize route config: {error}")
+                    }),
                 );
             }
             serde_yaml::Value::Mapping(step_map)
@@ -883,10 +899,11 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 Some("agent") => StepKind::Agent,
                 Some("synthesis") => StepKind::Synthesis,
                 Some("gate") => StepKind::Gate,
+                Some("route") => StepKind::Route,
                 Some(other) => {
                     return Err(ConfigError::ConfigParseError {
                         reason: format!(
-                            "unknown step kind '{}' for step '{}' (expected 'agent', 'synthesis', or 'gate')",
+                            "unknown step kind '{}' for step '{}' (expected 'agent', 'synthesis', 'gate', or 'route')",
                             other, step.name
                         ),
                     });
@@ -900,7 +917,11 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 tracker_state: step.tracker_state.clone(),
                 timeout_ms: None,
                 approval: None,
-                on_failure: OnFailure::RetryIssue,
+                on_failure: if kind == StepKind::Route {
+                    OnFailure::Halt
+                } else {
+                    OnFailure::RetryIssue
+                },
                 fixup_agent: None,
                 resource_requests: Default::default(),
                 affected_paths: None,
@@ -910,6 +931,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 artifact_access: step.artifact_access,
                 gate: step.gate.clone(),
                 authorization: None,
+                route: step.route.clone(),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -1170,7 +1192,9 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                         .get("agent")
                         .and_then(|agent| agent.as_str())
                         .unwrap_or_default();
-                    if agent_role.is_empty() && kind.as_deref() != Some("gate") {
+                    if agent_role.is_empty()
+                        && !matches!(kind.as_deref(), Some("gate") | Some("route"))
+                    {
                         return None;
                     }
                     let depends = item.get("depends").and_then(|value| {
@@ -1187,6 +1211,9 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                         .map(String::from);
                     let gate = item
                         .get("gate")
+                        .and_then(|value| serde_yaml::from_value(value.clone()).ok());
+                    let route = item
+                        .get("route")
                         .and_then(|value| serde_yaml::from_value(value.clone()).ok());
                     let artifact_snapshot = item
                         .get("artifact_snapshot")
@@ -1209,6 +1236,7 @@ fn extract_steps(doc: &serde_yaml::Value) -> Result<Vec<SetupStep>, ConfigError>
                         artifact_inputs,
                         artifact_access,
                         gate,
+                        route,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1414,6 +1442,7 @@ fn update_yaml_from_request(
                 "artifact_inputs",
                 "artifact_access",
                 "gate",
+                "route",
             ] {
                 step_map.remove(serde_yaml::Value::String(key.to_string()));
             }
@@ -1427,6 +1456,12 @@ fn update_yaml_from_request(
             if let Some(ref kind) = s.kind {
                 if kind != "agent" {
                     step_map.insert("kind".into(), serde_yaml::Value::String(kind.clone()));
+                }
+                if kind == "route" {
+                    step_map.insert(
+                        "on_failure".into(),
+                        serde_yaml::Value::String("halt".into()),
+                    );
                 }
             }
             if let Some(depends) = &s.depends {
@@ -1471,6 +1506,14 @@ fn update_yaml_from_request(
                     "gate".into(),
                     serde_yaml::to_value(gate)
                         .unwrap_or_else(|error| panic!("failed to serialize gate config: {error}")),
+                );
+            }
+            if let Some(route) = &s.route {
+                step_map.insert(
+                    "route".into(),
+                    serde_yaml::to_value(route).unwrap_or_else(|error| {
+                        panic!("failed to serialize route config: {error}")
+                    }),
                 );
             }
             serde_yaml::Value::Mapping(step_map)
@@ -1523,6 +1566,7 @@ pub fn resolve_tracker_output_path(path: &Path, base_dir: &Path) -> Result<PathB
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ensemble::{RouteConfig, RouteSource};
 
     fn github_setup_request(api_key_edit: SecretEdit) -> SetupRequest {
         SetupRequest {
@@ -1542,6 +1586,69 @@ mod tests {
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
         }
+    }
+
+    #[test]
+    fn setup_route_steps_round_trip_with_agentless_configuration() {
+        let request = SetupRequest {
+            tracker: SetupTracker::TodoFile {
+                path: PathBuf::from("TODO.md"),
+            },
+            repos: vec![],
+            agents: vec![SetupAgent {
+                role: "compare".to_string(),
+                acpx_agent: "codex".to_string(),
+                model: None,
+                reasoning_level: None,
+                permission_mode: None,
+                prompt: None,
+                prompt_file: None,
+            }],
+            steps: vec![
+                SetupStep {
+                    name: "compare".to_string(),
+                    agent_role: "compare".to_string(),
+                    kind: None,
+                    depends: None,
+                    tracker_state: None,
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
+                    route: None,
+                },
+                SetupStep {
+                    name: "choose".to_string(),
+                    agent_role: String::new(),
+                    kind: Some("route".to_string()),
+                    depends: Some(vec!["compare".to_string()]),
+                    tracker_state: None,
+                    artifact_snapshot: None,
+                    artifact_inputs: Vec::new(),
+                    artifact_access: Default::default(),
+                    gate: None,
+                    route: Some(RouteConfig {
+                        source: RouteSource {
+                            step: "compare".to_string(),
+                            pointer: "/decision".to_string(),
+                        },
+                        cases: BTreeMap::from([(
+                            "agreement".to_string(),
+                            vec!["publish".to_string()],
+                        )]),
+                    }),
+                },
+            ],
+            on_success: "Done".to_string(),
+            on_failure: "Failed".to_string(),
+        };
+
+        let yaml = build_setup_artifacts(&request).raw_yaml;
+        let restored = extract_setup_defaults(&yaml).expect("route setup is extracted");
+
+        assert!(yaml.contains("kind: route"));
+        assert!(yaml.contains("on_failure: halt"));
+        assert_eq!(restored.steps[1].route, request.steps[1].route);
     }
 
     #[test]
@@ -1697,6 +1804,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -1870,6 +1978,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -1917,6 +2026,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -1979,6 +2089,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2021,6 +2132,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2070,6 +2182,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2143,6 +2256,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2187,6 +2301,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2230,6 +2345,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2271,6 +2387,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2427,6 +2544,7 @@ custom_section:
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2503,6 +2621,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Merged".to_string(),
             on_failure: "Failed".to_string(),
@@ -2569,6 +2688,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2636,6 +2756,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
             SetupStep {
                 name: "b".to_string(),
@@ -2647,6 +2768,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
         ];
 
@@ -2667,6 +2789,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
             SetupStep {
                 name: "test".to_string(),
@@ -2678,6 +2801,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
             SetupStep {
                 name: "deploy".to_string(),
@@ -2689,6 +2813,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
         ];
 
@@ -2712,6 +2837,7 @@ on_failure: Failed
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
 
         let error = validate_dag(&steps).unwrap_err();
@@ -2731,6 +2857,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
             SetupStep {
                 name: "build".into(),
@@ -2742,6 +2869,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
             SetupStep {
                 name: "test".into(),
@@ -2753,6 +2881,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
         ];
 
@@ -2780,6 +2909,7 @@ on_failure: Failed
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
 
         let error = build_setup_dag(&steps).unwrap_err();
@@ -2809,6 +2939,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2876,6 +3007,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2912,6 +3044,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -2950,6 +3083,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -3043,6 +3177,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -3281,6 +3416,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -3522,6 +3658,7 @@ on_failure: Failed
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -3595,6 +3732,7 @@ on_failure: Done
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Done".to_string(),

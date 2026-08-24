@@ -91,7 +91,7 @@ use crate::pipeline::assessment::{DispositionKind, GateEvidence};
 use crate::pipeline::dag::build_dag;
 use crate::pipeline::engine::{
     AutomaticTransitionState, DispatchRequest, PipelineAction, PipelineRun, PipelineRunSnapshot,
-    SelectedWorkflowSnapshot, StepOutputTemplateContext, StepState,
+    RouteDecisionEvidence, SelectedWorkflowSnapshot, StepOutputTemplateContext, StepState,
 };
 use crate::pipeline::verdict::{StepOutput, StepResult};
 use crate::timeline::persistence::TimelinePersistence;
@@ -199,7 +199,25 @@ struct SuccessfulWorkerExitAction {
     action: PipelineAction,
     config_snapshot: Option<Arc<EnsembleConfig>>,
     step_transition: Option<PipelineTransitionInput>,
+    route_transitions: Vec<PipelineTransitionInput>,
+    /// The candidate state is published only after every route transition is
+    /// durably confirmed. Until then the live run remains at its pre-exit state.
+    route_candidate: Option<PipelineRun>,
+    route_previous_snapshot: Option<PipelineRunSnapshot>,
     integrity_failed: bool,
+    route_events: Vec<RouteSelectionEvent>,
+}
+
+struct RouteSelectionEvent {
+    route_step: String,
+    decision: RouteDecisionEvidence,
+    skipped_steps: Vec<String>,
+}
+
+#[derive(Clone, Copy)]
+struct PipelineTransitionTarget<'a> {
+    issue_id: &'a str,
+    identifier: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5492,36 +5510,108 @@ impl Orchestrator {
             "received validated step result"
         );
         let mut state = self.state.write().await;
-        let run = match state.get_pipeline_run_mut(issue_id) {
-            Some(run) => run,
+        let previous_run = match state.get_pipeline_run(issue_id) {
+            Some(run) => run.clone(),
             None => {
                 warn!(issue_id = %issue_id, "no pipeline run found for worker exit");
                 return None;
             }
         };
+        let mut candidate_run = previous_run.clone();
         if let Some(snapshot) = captured_snapshot {
-            run.record_artifact_snapshot(step_name, snapshot);
+            candidate_run.record_artifact_snapshot(step_name, snapshot);
         }
-        let action = run.step_completed(step_name, output, has_approval_request);
+        let decisions_before_completion = candidate_run
+            .route_decisions
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let action = candidate_run.step_completed(step_name, output, has_approval_request);
+        let mut route_events = candidate_run
+            .route_decisions
+            .iter()
+            .filter(|(route_step, _)| !decisions_before_completion.contains(*route_step))
+            .map(|(route_step, decision)| RouteSelectionEvent {
+                route_step: route_step.clone(),
+                decision: decision.clone(),
+                skipped_steps: candidate_run
+                    .step_states
+                    .iter()
+                    .filter_map(|(step, state)| match state {
+                        StepState::Skipped { provenance }
+                            if provenance
+                                .iter()
+                                .any(|cause| cause.route_step == *route_step) =>
+                        {
+                            Some(step.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        Self::sort_route_events(&candidate_run, &mut route_events);
         let transition_step = match &action {
             PipelineAction::AwaitingApproval { step, .. } => step,
             _ => step_name,
         };
         let config_snapshot = state.get_pipeline_config(issue_id).cloned();
-        let step_transition = Self::transition_input_for_run(
-            &state,
-            issue_id,
-            issue_identifier.unwrap_or(issue_id),
-            Self::transition_kind_for_action(&action),
-            Some(transition_step.to_string()),
-            Some(verdict_value.to_string()),
-            None,
-        );
+        let (step_transition, route_transitions, route_candidate, route_previous_snapshot) =
+            if route_events.is_empty() {
+                state
+                    .pipeline_runs
+                    .insert(issue_id.to_string(), candidate_run);
+                (
+                    Self::transition_input_for_run(
+                        &state,
+                        issue_id,
+                        issue_identifier.unwrap_or(issue_id),
+                        Self::transition_kind_for_action(&action),
+                        Some(transition_step.to_string()),
+                        Some(verdict_value.to_string()),
+                        None,
+                    ),
+                    Vec::new(),
+                    None,
+                    None,
+                )
+            } else {
+                let step_transition = Self::transition_input_for_snapshot(
+                    &state,
+                    &previous_run,
+                    PipelineTransitionTarget {
+                        issue_id,
+                        identifier: issue_identifier.unwrap_or(issue_id),
+                    },
+                    Self::transition_kind_for_action(&action),
+                    Some(transition_step.to_string()),
+                    Some(verdict_value.to_string()),
+                    None,
+                );
+                let route_transitions = Self::route_transition_inputs(
+                    &state,
+                    issue_id,
+                    issue_identifier.unwrap_or(issue_id),
+                    &previous_run,
+                    &candidate_run,
+                    &route_events,
+                );
+                (
+                    step_transition,
+                    route_transitions,
+                    Some(candidate_run),
+                    Some(previous_run.to_snapshot()),
+                )
+            };
         Some(Box::new(SuccessfulWorkerExitAction {
             action,
             config_snapshot,
             step_transition,
+            route_transitions,
+            route_candidate,
+            route_previous_snapshot,
             integrity_failed,
+            route_events,
         }))
     }
 
@@ -5597,9 +5687,19 @@ impl Orchestrator {
                         action,
                         config_snapshot,
                         step_transition,
+                        route_transitions,
+                        route_candidate,
+                        route_previous_snapshot,
                         integrity_failed,
+                        route_events,
                     } = *successful_action;
                     let mut state = self.state.write().await;
+                    let route_event_contexts = (0..route_events
+                        .iter()
+                        .map(|event| 1 + event.skipped_steps.len())
+                        .sum())
+                        .map(|_| Self::run_context_for_issue(&mut state, issue_id))
+                        .collect::<Vec<_>>();
                     match action {
                         PipelineAction::Dispatch(requests) => {
                             // Collect output contexts while state lock is still held
@@ -5607,7 +5707,9 @@ impl Orchestrator {
                                 DispatchRequest,
                                 StepOutputTemplateContext,
                             )> = {
-                                let run = state.get_pipeline_run(issue_id);
+                                let run = route_candidate
+                                    .as_ref()
+                                    .or_else(|| state.get_pipeline_run(issue_id));
                                 requests
                                     .into_iter()
                                     .map(|req| {
@@ -5620,8 +5722,38 @@ impl Orchestrator {
                             };
                             // Need to drop state lock before dispatching
                             drop(state);
-                            if let Some(input) = step_transition {
-                                self.append_pipeline_transition(input).await;
+                            if let Err(error) = self
+                                .append_successful_step_and_routes(
+                                    step_transition,
+                                    route_transitions,
+                                    issue_snapshot.as_ref(),
+                                    route_events,
+                                    route_event_contexts,
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(issue_id = %issue_id, error = %error, "failed to durably persist route selection before dispatch");
+                                self.handle_pipeline_step_failure(
+                                    issue_id,
+                                    step_name,
+                                    format!("failed to persist route selection: {error}; retry source step '{step_name}'"),
+                                    false,
+                                )
+                                .await;
+                                return;
+                            }
+                            if !self
+                                .publish_route_candidate(
+                                    issue_id,
+                                    route_candidate,
+                                    route_previous_snapshot.as_ref(),
+                                )
+                                .await
+                            {
+                                self.recover_unpublished_route_candidate(issue_id, step_name)
+                                    .await;
+                                return;
                             }
                             if let Some(ref issue) = issue_snapshot {
                                 let Some(config_snapshot) = config_snapshot else {
@@ -5722,8 +5854,38 @@ impl Orchestrator {
                                 return;
                             };
                             drop(state);
-                            if let Some(input) = step_transition {
-                                self.append_pipeline_transition(input).await;
+                            if let Err(error) = self
+                                .append_successful_step_and_routes(
+                                    step_transition,
+                                    route_transitions,
+                                    issue_snapshot.as_ref(),
+                                    route_events,
+                                    route_event_contexts,
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(issue_id = %issue_id, error = %error, "failed to durably persist route selection before success");
+                                self.handle_pipeline_step_failure(
+                                    issue_id,
+                                    step_name,
+                                    format!("failed to persist route selection: {error}; retry source step '{step_name}'"),
+                                    false,
+                                )
+                                .await;
+                                return;
+                            }
+                            if !self
+                                .publish_route_candidate(
+                                    issue_id,
+                                    route_candidate,
+                                    route_previous_snapshot.as_ref(),
+                                )
+                                .await
+                            {
+                                self.recover_unpublished_route_candidate(issue_id, step_name)
+                                    .await;
+                                return;
                             }
                             let Some(acceptance_issue) = acceptance_issue else {
                                 warn!(issue_id = %issue_id, "pipeline success has no issue identity for acceptance");
@@ -6226,8 +6388,38 @@ impl Orchestrator {
                                 return;
                             };
                             drop(state);
-                            if let Some(input) = step_transition {
-                                self.append_pipeline_transition(input).await;
+                            if let Err(error) = self
+                                .append_successful_step_and_routes(
+                                    step_transition,
+                                    route_transitions,
+                                    issue_snapshot.as_ref(),
+                                    route_events,
+                                    route_event_contexts,
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(issue_id = %issue_id, error = %error, "failed to durably persist route selection before approval");
+                                self.handle_pipeline_step_failure(
+                                    issue_id,
+                                    step_name,
+                                    format!("failed to persist route selection: {error}; retry source step '{step_name}'"),
+                                    false,
+                                )
+                                .await;
+                                return;
+                            }
+                            if !self
+                                .publish_route_candidate(
+                                    issue_id,
+                                    route_candidate,
+                                    route_previous_snapshot.as_ref(),
+                                )
+                                .await
+                            {
+                                self.recover_unpublished_route_candidate(issue_id, step_name)
+                                    .await;
+                                return;
                             }
                             if let Err(error) = self
                                 .handle_post_step_approval(
@@ -6264,21 +6456,51 @@ impl Orchestrator {
                             }
                         }
                         PipelineAction::Waiting => {
+                            debug!(issue_id = %issue_id, "pipeline waiting for other steps");
+                            drop(state);
+                            if let Err(error) = self
+                                .append_successful_step_and_routes(
+                                    step_transition,
+                                    route_transitions,
+                                    issue_snapshot.as_ref(),
+                                    route_events,
+                                    route_event_contexts,
+                                    None,
+                                )
+                                .await
+                            {
+                                warn!(issue_id = %issue_id, error = %error, "failed to durably persist route selection before waiting");
+                                self.handle_pipeline_step_failure(
+                                    issue_id,
+                                    step_name,
+                                    format!("failed to persist route selection: {error}; retry source step '{step_name}'"),
+                                    false,
+                                )
+                                .await;
+                                return;
+                            }
+                            if !self
+                                .publish_route_candidate(
+                                    issue_id,
+                                    route_candidate,
+                                    route_previous_snapshot.as_ref(),
+                                )
+                                .await
+                            {
+                                self.recover_unpublished_route_candidate(issue_id, step_name)
+                                    .await;
+                                return;
+                            }
+
+                            let mut state = self.state.write().await;
                             let issue_waiting_on_human = state.is_waiting_on_human(issue_id);
                             let has_running_steps = state
                                 .get_pipeline_run(issue_id)
                                 .is_some_and(Self::pipeline_has_running_steps);
-
                             if issue_waiting_on_human && !has_running_steps {
                                 if let Some(entry) = state.remove_running(issue_id) {
                                     state.add_runtime_seconds(&entry);
                                 }
-                            }
-
-                            debug!(issue_id = %issue_id, "pipeline waiting for other steps");
-                            drop(state);
-                            if let Some(input) = step_transition {
-                                self.append_pipeline_transition(input).await;
                             }
                         }
                     }
@@ -9024,6 +9246,287 @@ impl Orchestrator {
         }
     }
 
+    fn sort_route_events(run: &PipelineRun, events: &mut [RouteSelectionEvent]) {
+        let positions = run
+            .to_snapshot()
+            .dag_steps
+            .into_iter()
+            .enumerate()
+            .map(|(position, step)| (step.name, position))
+            .collect::<HashMap<_, _>>();
+        events.sort_by(|left, right| {
+            positions
+                .get(&left.route_step)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .cmp(
+                    &positions
+                        .get(&right.route_step)
+                        .copied()
+                        .unwrap_or(usize::MAX),
+                )
+                .then_with(|| left.route_step.cmp(&right.route_step))
+        });
+        for event in events {
+            event.skipped_steps.sort_by(|left, right| {
+                positions
+                    .get(left)
+                    .copied()
+                    .unwrap_or(usize::MAX)
+                    .cmp(&positions.get(right).copied().unwrap_or(usize::MAX))
+                    .then_with(|| left.cmp(right))
+            });
+        }
+    }
+
+    fn route_transition_inputs(
+        state: &OrchestratorState,
+        issue_id: &str,
+        identifier: &str,
+        previous_run: &PipelineRun,
+        candidate_run: &PipelineRun,
+        events: &[RouteSelectionEvent],
+    ) -> Vec<PipelineTransitionInput> {
+        events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                let snapshot = if index + 1 == events.len() {
+                    candidate_run
+                } else {
+                    previous_run
+                };
+                Self::transition_input_for_snapshot(
+                    state,
+                    snapshot,
+                    PipelineTransitionTarget {
+                        issue_id,
+                        identifier,
+                    },
+                    PipelineTransitionKind::RouteSelected,
+                    Some(event.route_step.clone()),
+                    Some(format!(
+                        "source={} pointer={} selected_case={} source_output_digest={}",
+                        event.decision.source_step,
+                        event.decision.pointer,
+                        event.decision.selected_case,
+                        event.decision.source_output_digest,
+                    )),
+                    None,
+                )
+            })
+            .collect()
+    }
+
+    async fn publish_route_candidate(
+        &self,
+        issue_id: &str,
+        candidate: Option<PipelineRun>,
+        previous_snapshot: Option<&PipelineRunSnapshot>,
+    ) -> bool {
+        let Some(candidate) = candidate else {
+            return true;
+        };
+        let Some(previous_snapshot) = previous_snapshot else {
+            return false;
+        };
+        let mut state = self.state.write().await;
+        let is_current = state
+            .get_pipeline_run(issue_id)
+            .is_some_and(|run| run.to_snapshot() == *previous_snapshot);
+        if !is_current {
+            warn!(
+                issue_id,
+                "route persistence candidate lost its live run owner"
+            );
+            return false;
+        }
+        state.pipeline_runs.insert(issue_id.to_string(), candidate);
+        true
+    }
+
+    async fn recover_unpublished_route_candidate(&self, issue_id: &str, source_step: &str) {
+        let reason = format!(
+            "route persistence candidate lost its live owner; retry source step '{source_step}'"
+        );
+        self.handle_pipeline_step_failure(issue_id, source_step, reason, false)
+            .await;
+    }
+
+    /// Makes a fully journaled approval route candidate eligible for ordinary tick dispatch.
+    ///
+    /// Route selection is the commit point for an approval continuation. In particular, do not
+    /// put the run back behind the approval checkpoint if later capacity, workspace, or launch
+    /// work cannot proceed: that would make live state disagree with the final RouteSelected
+    /// record. Retiring the interaction here also prevents a later retry from reprocessing the
+    /// already committed approval.
+    async fn activate_published_approval_route_candidate(
+        &self,
+        issue: &Issue,
+        interaction: &InteractionRequest,
+        fallback_attempt: u32,
+        source_step: &str,
+    ) -> Result<u32, EnsembleError> {
+        let attempt = {
+            let mut state = self.state.write().await;
+            let attempt = state
+                .get_pipeline_run(&issue.id)
+                .map(|run| run.cycle)
+                .unwrap_or(fallback_attempt.max(1));
+            state.add_running(issue, Some(attempt));
+            attempt
+        };
+
+        let retired = match self
+            .interaction_store
+            .retire_waiting_state(&interaction.id)
+            .await
+        {
+            Ok((_, retired)) => retired,
+            Err(error) => {
+                self.handle_pipeline_step_failure(
+                    &issue.id,
+                    source_step,
+                    format!(
+                        "failed to retire committed approval interaction '{}': {error}",
+                        interaction.id
+                    ),
+                    false,
+                )
+                .await;
+                return Err(error.into());
+            }
+        };
+        self.reconcile_interaction_attention(&retired).await;
+        let mut state = self.state.write().await;
+        state.remove_waiting_on_human(&issue.id);
+        state.clear_resume_request(&issue.id);
+        Ok(attempt)
+    }
+
+    async fn restore_route_persistence_checkpoint(
+        &self,
+        issue_id: &str,
+        checkpoint: Option<&PipelineTransitionInput>,
+    ) {
+        let Some(snapshot) = checkpoint.and_then(|checkpoint| checkpoint.snapshot.clone()) else {
+            return;
+        };
+        let run = match PipelineRun::from_snapshot(snapshot) {
+            Ok(run) => run,
+            Err(error) => {
+                warn!(issue_id, error = %error, "failed to restore route persistence checkpoint");
+                return;
+            }
+        };
+        self.state
+            .write()
+            .await
+            .pipeline_runs
+            .insert(issue_id.to_string(), run);
+    }
+
+    async fn append_successful_step_and_routes(
+        &self,
+        step_transition: Option<PipelineTransitionInput>,
+        transitions: Vec<PipelineTransitionInput>,
+        issue: Option<&Issue>,
+        events: Vec<RouteSelectionEvent>,
+        contexts: Vec<(Option<String>, Option<u64>, u32)>,
+        recovery_checkpoint: Option<&PipelineTransitionInput>,
+    ) -> Result<(), std::io::Error> {
+        // A completed source Step must be durable before its Route transitions.
+        // Non-route completions retain the journal's existing best-effort
+        // behavior so a transient journal failure cannot strand terminal intent.
+        if transitions.is_empty() {
+            if let Some(transition) = step_transition {
+                self.append_pipeline_transition(transition).await;
+            }
+            return Ok(());
+        }
+
+        let issue_id = step_transition
+            .as_ref()
+            .or_else(|| transitions.first())
+            .map(|transition| transition.issue_id.as_str())
+            .ok_or_else(|| std::io::Error::other("route transition has no issue identity"))?;
+        let transaction = self.pipeline_journal.begin_issue_transition(issue_id).await;
+        if let Some(transition) = step_transition {
+            if let Err(error) = transaction.append(transition.clone()).await {
+                if !transaction
+                    .latest_record_matches(&transition)
+                    .await
+                    .unwrap_or(false)
+                {
+                    return Err(error);
+                }
+            }
+        }
+        for transition in transitions {
+            if let Err(error) = transaction.append(transition.clone()).await {
+                if !transaction
+                    .latest_record_matches(&transition)
+                    .await
+                    .unwrap_or(false)
+                {
+                    if let Some(checkpoint) = recovery_checkpoint {
+                        transaction.append(checkpoint.clone()).await?;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        let Some(issue) = issue else {
+            return Ok(());
+        };
+        let mut contexts = contexts.into_iter();
+        for event in events {
+            let Some((run_id, sequence, attempt)) = contexts.next() else {
+                return Ok(());
+            };
+            self.publish_pipeline_event(
+                run_id,
+                sequence,
+                attempt,
+                PipelineEvent::RouteSelected {
+                    issue_identifier: issue.identifier.clone(),
+                    timestamp: Utc::now(),
+                    step_name: event.route_step.clone(),
+                    selected_case: event.decision.selected_case.clone(),
+                    detail: format!(
+                        "route source '{}' at '{}' (digest {})",
+                        event.decision.source_step,
+                        event.decision.pointer,
+                        event.decision.source_output_digest,
+                    ),
+                },
+            )
+            .await;
+            for skipped_step in event.skipped_steps {
+                let Some((run_id, sequence, attempt)) = contexts.next() else {
+                    return Ok(());
+                };
+                self.publish_pipeline_event(
+                    run_id,
+                    sequence,
+                    attempt,
+                    PipelineEvent::StepSkipped {
+                        issue_identifier: issue.identifier.clone(),
+                        timestamp: Utc::now(),
+                        step_name: skipped_step,
+                        detail: format!(
+                            "skipped by route '{}' selecting '{}'",
+                            event.route_step, event.decision.selected_case,
+                        ),
+                    },
+                )
+                .await;
+            }
+        }
+        Ok(())
+    }
+
     // The terminal transition serializes the full durable run snapshot. Keep it out of the
     // worker-exit future, which now also owns artifact snapshot state.
     fn begin_terminal_transition<'a>(
@@ -9653,22 +10156,45 @@ impl Orchestrator {
         retry: Option<RetryEntry>,
     ) -> Option<PipelineTransitionInput> {
         let run = state.get_pipeline_run(issue_id)?;
+        Self::transition_input_for_snapshot(
+            state,
+            run,
+            PipelineTransitionTarget {
+                issue_id,
+                identifier,
+            },
+            kind,
+            step,
+            reason,
+            retry,
+        )
+    }
+
+    fn transition_input_for_snapshot(
+        state: &OrchestratorState,
+        run: &PipelineRun,
+        target: PipelineTransitionTarget<'_>,
+        kind: PipelineTransitionKind,
+        step: Option<String>,
+        reason: Option<String>,
+        retry: Option<RetryEntry>,
+    ) -> Option<PipelineTransitionInput> {
         let run_id = state
             .running
-            .get(issue_id)
+            .get(target.issue_id)
             .and_then(|entry| entry.run_id.clone())
             .or_else(|| {
                 state
                     .waiting_on_human
-                    .get(issue_id)
+                    .get(target.issue_id)
                     .and_then(|entry| entry.run_id.clone())
             })
-            .or_else(|| state.issue_run_ids.get(issue_id).cloned());
+            .or_else(|| state.issue_run_ids.get(target.issue_id).cloned());
 
         Some(PipelineTransitionInput {
             kind,
-            issue_id: issue_id.to_string(),
-            identifier: identifier.to_string(),
+            issue_id: target.issue_id.to_string(),
+            identifier: target.identifier.to_string(),
             run_id,
             cycle: run.cycle,
             step,
@@ -10506,7 +11032,7 @@ impl Orchestrator {
         if run
             .step_states
             .values()
-            .all(|state| matches!(state, StepState::Passed))
+            .all(|state| matches!(state, StepState::Passed | StepState::Skipped { .. }))
         {
             return Some(HISTORY_VERDICT_APPROVED.to_string());
         }
@@ -10934,52 +11460,155 @@ impl Orchestrator {
                             ),
                         })?;
 
-                let (action, dispatch_contexts, previous_run, previous_running) = {
+                let (
+                    action,
+                    dispatch_contexts,
+                    previous_run,
+                    previous_running,
+                    candidate_run,
+                    step_transition,
+                    route_transitions,
+                    route_events,
+                    route_event_contexts,
+                    recovery_checkpoint,
+                ) = {
                     let mut state = self.state.write().await;
                     let previous_running = state.get_running(&issue.id).cloned();
-                    let run = state.get_pipeline_run_mut(&issue.id).ok_or_else(|| {
-                        AgentError::PromptError {
-                            reason: format!(
-                                "issue '{}' is missing a pipeline run during approval resume",
-                                issue.identifier
-                            ),
-                        }
-                    })?;
-                    let previous_run = run.clone();
-
-                    let action = match response {
-                        InteractionResponse::Approval {
-                            approved, reason, ..
-                        } => {
-                            if approved {
-                                run.approve_gate(&pipeline_step.name, reason)
-                            } else {
-                                let failure_reason = reason.clone().unwrap_or_else(|| {
-                                    format!("approval rejected for step '{}'", pipeline_step.name)
-                                });
-                                run.reject_gate(&pipeline_step.name, failure_reason, reason)
-                            }
-                        }
-                        _ => {
-                            return Err(AgentError::PromptError {
+                    let previous_run =
+                        state.get_pipeline_run(&issue.id).cloned().ok_or_else(|| {
+                            AgentError::PromptError {
                                 reason: format!(
-                                    "approval gate '{}' resolved with a non-approval response",
-                                    interaction.id
+                                    "issue '{}' is missing a pipeline run during approval resume",
+                                    issue.identifier
                                 ),
                             }
-                            .into())
-                        }
+                        })?;
+                    let (candidate_run, action, mut route_events) = {
+                        let mut candidate_run = previous_run.clone();
+                        let decisions_before_approval = candidate_run
+                            .route_decisions
+                            .keys()
+                            .cloned()
+                            .collect::<HashSet<_>>();
+                        let action = match response {
+                            InteractionResponse::Approval {
+                                approved, reason, ..
+                            } => {
+                                if approved {
+                                    candidate_run.approve_gate(&pipeline_step.name, reason)
+                                } else {
+                                    let failure_reason = reason.clone().unwrap_or_else(|| {
+                                        format!(
+                                            "approval rejected for step '{}'",
+                                            pipeline_step.name
+                                        )
+                                    });
+                                    candidate_run.reject_gate(
+                                        &pipeline_step.name,
+                                        failure_reason,
+                                        reason,
+                                    )
+                                }
+                            }
+                            _ => {
+                                return Err(AgentError::PromptError {
+                                    reason: format!(
+                                        "approval gate '{}' resolved with a non-approval response",
+                                        interaction.id
+                                    ),
+                                }
+                                .into())
+                            }
+                        };
+                        let route_events = candidate_run
+                            .route_decisions
+                            .iter()
+                            .filter(|(route_step, _)| {
+                                !decisions_before_approval.contains(*route_step)
+                            })
+                            .map(|(route_step, decision)| RouteSelectionEvent {
+                                route_step: route_step.clone(),
+                                decision: decision.clone(),
+                                skipped_steps: candidate_run
+                                    .step_states
+                                    .iter()
+                                    .filter_map(|(step, state)| match state {
+                                        StepState::Skipped { provenance }
+                                            if provenance
+                                                .iter()
+                                                .any(|cause| cause.route_step == *route_step) =>
+                                        {
+                                            Some(step.clone())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect(),
+                            })
+                            .collect::<Vec<_>>();
+                        (candidate_run, action, route_events)
                     };
+                    Self::sort_route_events(&candidate_run, &mut route_events);
+
+                    let step_transition = (!route_events.is_empty())
+                        .then(|| {
+                            Self::transition_input_for_snapshot(
+                                &state,
+                                &previous_run,
+                                PipelineTransitionTarget {
+                                    issue_id: &issue.id,
+                                    identifier: &issue.identifier,
+                                },
+                                PipelineTransitionKind::StepCompleted,
+                                Some(pipeline_step.name.clone()),
+                                Some("approved".to_string()),
+                                None,
+                            )
+                        })
+                        .flatten();
+                    let route_transitions =
+                        route_events.is_empty().then(Vec::new).unwrap_or_else(|| {
+                            Self::route_transition_inputs(
+                                &state,
+                                &issue.id,
+                                &issue.identifier,
+                                &previous_run,
+                                &candidate_run,
+                                &route_events,
+                            )
+                        });
+                    let route_event_contexts = (0..route_events
+                        .iter()
+                        .map(|event| 1 + event.skipped_steps.len())
+                        .sum())
+                        .map(|_| Self::run_context_for_issue(&mut state, &issue.id))
+                        .collect::<Vec<_>>();
+                    let recovery_checkpoint =
+                        (!route_transitions.is_empty()).then(|| PipelineTransitionInput {
+                            kind: PipelineTransitionKind::StepAwaitingApproval,
+                            issue_id: issue.id.clone(),
+                            identifier: issue.identifier.clone(),
+                            run_id: waiting.run_id.clone(),
+                            cycle: previous_run.cycle,
+                            step: Some(pipeline_step.name.clone()),
+                            reason: Some(
+                                "route selection persistence failed during approval resume"
+                                    .to_string(),
+                            ),
+                            retry: None,
+                            snapshot: Some(previous_run.to_snapshot()),
+                            terminal_transition: None,
+                            delivery: None,
+                        });
 
                     // Collect output contexts while the run is still accessible
                     let dispatch_contexts: Vec<(DispatchRequest, StepOutputTemplateContext)> =
                         if let PipelineAction::Dispatch(ref requests) = action {
-                            let run = state.get_pipeline_run(&issue.id).unwrap();
                             requests
                                 .iter()
                                 .map(|req| {
-                                    let step_outputs =
-                                        run.output_context_for(&req.step_name).unwrap_or_default();
+                                    let step_outputs = candidate_run
+                                        .output_context_for(&req.step_name)
+                                        .unwrap_or_default();
                                     (req.clone(), step_outputs)
                                 })
                                 .collect()
@@ -10987,22 +11616,102 @@ impl Orchestrator {
                             vec![]
                         };
 
-                    (action, dispatch_contexts, previous_run, previous_running)
+                    (
+                        action,
+                        dispatch_contexts,
+                        previous_run,
+                        previous_running,
+                        candidate_run,
+                        step_transition,
+                        route_transitions,
+                        route_events,
+                        route_event_contexts,
+                        recovery_checkpoint,
+                    )
                 };
+
+                let published_route_candidate = !route_transitions.is_empty();
+                if published_route_candidate {
+                    let Some(step_transition) = step_transition else {
+                        self.restore_route_persistence_checkpoint(
+                            &issue.id,
+                            recovery_checkpoint.as_ref(),
+                        )
+                        .await;
+                        return Err(AgentError::PromptError {
+                            reason: format!(
+                                "cannot persist completed approval step '{}' before route selection",
+                                pipeline_step.name
+                            ),
+                        }
+                        .into());
+                    };
+                    if let Err(error) = self
+                        .append_successful_step_and_routes(
+                            Some(step_transition),
+                            route_transitions,
+                            Some(issue),
+                            route_events,
+                            route_event_contexts,
+                            recovery_checkpoint.as_ref(),
+                        )
+                        .await
+                    {
+                        self.restore_route_persistence_checkpoint(
+                            &issue.id,
+                            recovery_checkpoint.as_ref(),
+                        )
+                        .await;
+                        return Err(AgentError::PromptError {
+                            reason: format!(
+                                "failed to durably persist route selection during approval resume: {error}"
+                            ),
+                        }
+                        .into());
+                    }
+                }
+
+                if !self
+                    .publish_route_candidate(
+                        &issue.id,
+                        Some(candidate_run),
+                        Some(&previous_run.to_snapshot()),
+                    )
+                    .await
+                {
+                    self.recover_unpublished_route_candidate(&issue.id, &pipeline_step.name)
+                        .await;
+                    return Err(AgentError::PromptError {
+                        reason: format!(
+                            "approval resume for '{}' lost its pipeline owner before publication",
+                            pipeline_step.name
+                        ),
+                    }
+                    .into());
+                }
 
                 match action {
                     PipelineAction::Dispatch(_requests) => {
-                        if !self
-                            .state_worker_capacity_available(issue, &pipeline_config)
-                            .await
-                        {
-                            let mut state = self.state.write().await;
-                            state
-                                .pipeline_runs
-                                .insert(issue.id.clone(), previous_run.clone());
-                            return Err(EnsembleError::RuntimeBusy);
-                        }
-                        let attempt = {
+                        let attempt = if published_route_candidate {
+                            interaction_was_retired = true;
+                            self.activate_published_approval_route_candidate(
+                                issue,
+                                &interaction,
+                                interaction.pipeline_cycle,
+                                &pipeline_step.name,
+                            )
+                            .await?
+                        } else {
+                            if !self
+                                .state_worker_capacity_available(issue, &pipeline_config)
+                                .await
+                            {
+                                let mut state = self.state.write().await;
+                                state
+                                    .pipeline_runs
+                                    .insert(issue.id.clone(), previous_run.clone());
+                                return Err(EnsembleError::RuntimeBusy);
+                            }
                             let mut state = self.state.write().await;
                             let attempt = state
                                 .get_pipeline_run(&issue.id)
@@ -11011,26 +11720,61 @@ impl Orchestrator {
                             state.add_running(issue, Some(attempt));
                             attempt
                         };
+                        if !self
+                            .state_worker_capacity_available(issue, &pipeline_config)
+                            .await
+                        {
+                            if !published_route_candidate {
+                                let mut state = self.state.write().await;
+                                state
+                                    .pipeline_runs
+                                    .insert(issue.id.clone(), previous_run.clone());
+                            }
+                            return Err(EnsembleError::RuntimeBusy);
+                        }
 
-                        let workspace_path =
-                            match self.prepare_step_workspace(issue, &pipeline_config).await {
-                                Ok(path) => path,
-                                Err(error) => {
-                                    let mut state = self.state.write().await;
-                                    Self::restore_previous_running(
-                                        &mut state,
-                                        &issue.id,
-                                        previous_running.as_ref(),
-                                    );
-                                    state
-                                        .pipeline_runs
-                                        .insert(issue.id.clone(), previous_run.clone());
-                                    return Err(AgentError::PromptError {
-                                        reason: format!("workspace error: {error}"),
-                                    }
-                                    .into());
+                        let workspace_path = match self
+                            .prepare_step_workspace(issue, &pipeline_config)
+                            .await
+                        {
+                            Ok(path) => path,
+                            Err(error) => {
+                                if published_route_candidate {
+                                    let reason = format!("workspace error: {error}");
+                                    let Some((request, _)) = dispatch_contexts.first() else {
+                                        return Err(AgentError::PromptError {
+                                                reason: format!(
+                                                    "{reason}; approval continuation has no dispatch request"
+                                                ),
+                                            }
+                                            .into());
+                                    };
+                                    self.handle_step_dispatch_error(
+                                        issue,
+                                        &request.step_name,
+                                        &pipeline_config,
+                                        &StepDispatchError::ordinary(AgentError::PromptError {
+                                            reason: reason.clone(),
+                                        }),
+                                    )
+                                    .await;
+                                    return Err(AgentError::PromptError { reason }.into());
                                 }
-                            };
+                                let mut state = self.state.write().await;
+                                Self::restore_previous_running(
+                                    &mut state,
+                                    &issue.id,
+                                    previous_running.as_ref(),
+                                );
+                                state
+                                    .pipeline_runs
+                                    .insert(issue.id.clone(), previous_run.clone());
+                                return Err(AgentError::PromptError {
+                                    reason: format!("workspace error: {error}"),
+                                }
+                                .into());
+                            }
+                        };
 
                         let mut dispatched_any = false;
                         for (req, step_outputs) in dispatch_contexts {
@@ -11078,6 +11822,16 @@ impl Orchestrator {
                             {
                                 Ok(outcome) => outcome,
                                 Err(error) => {
+                                    if published_route_candidate {
+                                        self.handle_step_dispatch_error(
+                                            issue,
+                                            &req.step_name,
+                                            &pipeline_config,
+                                            &error,
+                                        )
+                                        .await;
+                                        return Err(error.error);
+                                    }
                                     if error.kind == StepDispatchFailureKind::ImmutableIntegrity {
                                         self.handle_step_dispatch_error(
                                             issue,
@@ -11124,15 +11878,17 @@ impl Orchestrator {
                             dispatched_any = true;
                         }
                         if !dispatched_any {
-                            let mut state = self.state.write().await;
-                            Self::restore_previous_running(
-                                &mut state,
-                                &issue.id,
-                                previous_running.as_ref(),
-                            );
-                            state
-                                .pipeline_runs
-                                .insert(issue.id.clone(), previous_run.clone());
+                            if !published_route_candidate {
+                                let mut state = self.state.write().await;
+                                Self::restore_previous_running(
+                                    &mut state,
+                                    &issue.id,
+                                    previous_running.as_ref(),
+                                );
+                                state
+                                    .pipeline_runs
+                                    .insert(issue.id.clone(), previous_run.clone());
+                            }
                             return Err(EnsembleError::RuntimeBusy);
                         }
                     }
@@ -12187,9 +12943,10 @@ mod tests {
     };
     use crate::artifact::ArtifactSnapshot;
     use crate::config::ensemble::{
-        parse_config, AuthorizationHandoffMode, ConcurrencyConfig, PipelineConfig, SchedulerConfig,
-        SchedulerLaneConfig, StepAuthorizationConfig, StepConfig, TrackerEventPredicateConfig,
-        WorkflowOrderKey, WorkflowSelectionRuleConfig,
+        parse_config, AuthorizationHandoffMode, ConcurrencyConfig, OutputSchemaConfig,
+        PipelineConfig, RouteConfig, RouteSource, SchedulerConfig, SchedulerLaneConfig,
+        StepAuthorizationConfig, StepConfig, TrackerEventPredicateConfig, WorkflowOrderKey,
+        WorkflowSelectionRuleConfig,
     };
     use crate::error::AgentError;
     use crate::interaction::{
@@ -13290,6 +14047,592 @@ mod tests {
         install_unresolved_gate_waiting_run(&orchestrator, &config, "gate-approval").await;
         write_rejected_gate_interaction(config_dir.path(), "gate-approval").await;
         (config_dir, orchestrator)
+    }
+
+    #[tokio::test]
+    async fn pre_write_second_route_append_failure_keeps_only_the_preceding_step_completed_record()
+    {
+        let (config_dir, mut orchestrator) = rejected_gate_orchestrator(make_config()).await;
+        let transition = |kind: PipelineTransitionKind, step: &str| PipelineTransitionInput {
+            kind,
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            run_id: Some("run-1".to_string()),
+            cycle: 1,
+            step: Some(step.to_string()),
+            reason: None,
+            retry: None,
+            snapshot: None,
+            terminal_transition: None,
+            delivery: None,
+        };
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+
+        let error = orchestrator
+            .append_successful_step_and_routes(
+                Some(transition(PipelineTransitionKind::StepCompleted, "compare")),
+                vec![transition(PipelineTransitionKind::RouteSelected, "choose")],
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect_err("a route transition must be durable before continuation");
+        assert!(error.to_string().contains("injected"));
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, PipelineTransitionKind::StepCompleted);
+        drop(config_dir);
+    }
+
+    #[tokio::test]
+    async fn late_visible_step_completion_is_reconciled_before_its_route_selection() {
+        let (config_dir, mut orchestrator) = rejected_gate_orchestrator(make_config()).await;
+        let transition = |kind: PipelineTransitionKind, step: &str| PipelineTransitionInput {
+            kind,
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            run_id: Some("run-1".to_string()),
+            cycle: 1,
+            step: Some(step.to_string()),
+            reason: None,
+            retry: None,
+            snapshot: None,
+            terminal_transition: None,
+            delivery: None,
+        };
+        orchestrator
+            .pipeline_journal
+            .transaction_append_late_error_kind = Some(PipelineTransitionKind::StepCompleted);
+
+        orchestrator
+            .append_successful_step_and_routes(
+                Some(transition(PipelineTransitionKind::StepCompleted, "compare")),
+                vec![transition(PipelineTransitionKind::RouteSelected, "choose")],
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("a visible step completion must be reconciled before continuing");
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.iter().map(|record| record.kind).collect::<Vec<_>>(),
+            vec![
+                PipelineTransitionKind::StepCompleted,
+                PipelineTransitionKind::RouteSelected,
+            ]
+        );
+        drop(config_dir);
+    }
+
+    #[tokio::test]
+    async fn late_visible_route_selection_is_reconciled_before_continuation() {
+        let (config_dir, mut orchestrator) = rejected_gate_orchestrator(make_config()).await;
+        let transition = |kind: PipelineTransitionKind, step: &str| PipelineTransitionInput {
+            kind,
+            issue_id: "1".to_string(),
+            identifier: "repo#1".to_string(),
+            run_id: Some("run-1".to_string()),
+            cycle: 1,
+            step: Some(step.to_string()),
+            reason: None,
+            retry: None,
+            snapshot: None,
+            terminal_transition: None,
+            delivery: None,
+        };
+        orchestrator
+            .pipeline_journal
+            .transaction_append_late_error_kind = Some(PipelineTransitionKind::RouteSelected);
+
+        orchestrator
+            .append_successful_step_and_routes(
+                Some(transition(PipelineTransitionKind::StepCompleted, "compare")),
+                vec![transition(PipelineTransitionKind::RouteSelected, "choose")],
+                None,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+            .await
+            .expect("a visible route selection must be reconciled before continuing");
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records.iter().map(|record| record.kind).collect::<Vec<_>>(),
+            vec![
+                PipelineTransitionKind::StepCompleted,
+                PipelineTransitionKind::RouteSelected,
+            ]
+        );
+        drop(config_dir);
+    }
+
+    async fn running_route_worker_orchestrator(
+        raw_config: EnsembleConfig,
+        running_steps: &[&str],
+    ) -> (tempfile::TempDir, Orchestrator) {
+        let config = Arc::new(RwLock::new(raw_config));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        let cfg = config.read().await;
+        let mut run = PipelineRun::new("1".to_string(), 1, build_dag(&cfg.steps).unwrap());
+        run.start();
+        for step in running_steps {
+            run.mark_running(step, format!("session-{step}"));
+        }
+        let mut state = orchestrator.state.write().await;
+        state.add_running(&test_issue("1", "Todo"), None);
+        state.insert_pipeline_run("1", run, Arc::new(cfg.clone()));
+        drop(state);
+        drop(cfg);
+        (config_dir, orchestrator)
+    }
+
+    fn successful_route_source_output() -> StepOutput {
+        StepOutput {
+            result: StepResult::Succeeded,
+            summary: None,
+            output: Some(serde_json::json!({"decision": "accept"})),
+        }
+    }
+
+    #[test]
+    fn route_event_sorting_orders_skipped_step_timeline_contexts_deterministically() {
+        let config = make_always_approval_route_config();
+        let run = PipelineRun::new("1".to_string(), 1, build_dag(&config.steps).unwrap());
+        let mut events = vec![RouteSelectionEvent {
+            route_step: "choose".to_string(),
+            decision: RouteDecisionEvidence {
+                source_step: "build".to_string(),
+                pointer: "/decision".to_string(),
+                selected_case: "accept".to_string(),
+                source_output_digest: "digest".to_string(),
+            },
+            skipped_steps: vec!["reject".to_string(), "accept".to_string()],
+        }];
+
+        Orchestrator::sort_route_events(&run, &mut events);
+
+        assert_eq!(events[0].skipped_steps, ["accept", "reject"]);
+    }
+
+    #[test]
+    fn routed_terminal_history_preserves_the_approved_verdict() {
+        let mut config = make_always_approval_route_config();
+        config.steps[0].approval = None;
+        let mut run = PipelineRun::new("1".to_string(), 1, build_dag(&config.steps).unwrap());
+        run.start();
+        run.mark_running("build", "build-session".to_string());
+        assert!(matches!(
+            run.step_completed("build", successful_route_source_output(), false),
+            PipelineAction::Dispatch(requests) if requests[0].step_name == "accept"
+        ));
+        run.mark_running("accept", "accept-session".to_string());
+        assert_eq!(
+            run.step_completed("accept", succeeded_step_output(), false),
+            PipelineAction::Succeeded
+        );
+        assert!(matches!(
+            run.step_states.get("reject"),
+            Some(StepState::Skipped { .. })
+        ));
+        assert_eq!(
+            Orchestrator::history_verdict(&run),
+            Some(HISTORY_VERDICT_APPROVED.to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn route_append_failure_releases_the_exited_worker_and_schedules_recovery() {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let (_config_dir, mut orchestrator) =
+            running_route_worker_orchestrator(raw_config, &["build"]).await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    output: successful_route_source_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        assert!(!state.is_running("1"));
+        assert!(state.retry_attempts.contains_key("1"));
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(records.len() >= 2);
+        assert_eq!(records[0].kind, PipelineTransitionKind::StepCompleted);
+        assert_eq!(records[1].kind, PipelineTransitionKind::StepFailed);
+        assert!(records[0]
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.route_decisions.is_empty()));
+        assert!(records
+            .iter()
+            .all(|record| record.kind != PipelineTransitionKind::StepRunning));
+    }
+
+    #[tokio::test]
+    async fn route_append_failure_recovers_without_restoring_a_phantom_worker() {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let restart_config = raw_config.clone();
+        let (config_dir, mut setup) =
+            running_route_worker_orchestrator(raw_config, &["build"]).await;
+        setup.pipeline_journal.transaction_append_error_on_call =
+            Some((Arc::new(AtomicUsize::new(0)), 2));
+        setup
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    output: successful_route_source_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let issue = test_issue("1", "Todo");
+        let (restart, state) = make_restart_test_orchestrator(&config_dir, &restart_config, &issue);
+        restart.restore_pipeline_runs_from_journal().await;
+
+        let state = state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(state.retry_attempts.contains_key("1"));
+        let run = state
+            .get_pipeline_run("1")
+            .expect("retry recovery should retain a fresh pipeline run");
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        assert!(run.route_decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn route_candidate_owner_conflict_recovers_without_a_phantom_worker() {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let (_config_dir, orchestrator) =
+            running_route_worker_orchestrator(raw_config, &["build"]).await;
+        let (previous, candidate) = {
+            let state = orchestrator.state.read().await;
+            let previous = state.get_pipeline_run("1").unwrap().clone();
+            let mut candidate = previous.clone();
+            assert!(matches!(
+                candidate.step_completed("build", successful_route_source_output(), false),
+                PipelineAction::Dispatch(_)
+            ));
+            (previous, candidate)
+        };
+        {
+            let mut state = orchestrator.state.write().await;
+            state
+                .get_pipeline_run_mut("1")
+                .unwrap()
+                .step_outputs
+                .insert("sibling".to_string(), succeeded_step_output());
+        }
+
+        assert!(
+            !orchestrator
+                .publish_route_candidate("1", Some(candidate), Some(&previous.to_snapshot()))
+                .await
+        );
+        orchestrator
+            .recover_unpublished_route_candidate("1", "build")
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(state.retry_attempts.contains_key("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        assert!(run.route_decisions.is_empty());
+        drop(state);
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .read_records_for_issue("1")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|record| record.kind == PipelineTransitionKind::StepRunning)
+                .count(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn crash_after_step_completed_before_route_selection_retries_the_source() {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let restart_config = raw_config.clone();
+        let (config_dir, setup) = running_route_worker_orchestrator(raw_config, &["build"]).await;
+        let snapshot = setup
+            .state
+            .read()
+            .await
+            .get_pipeline_run("1")
+            .unwrap()
+            .to_snapshot();
+        setup
+            .pipeline_journal
+            .append(PipelineTransitionInput {
+                kind: PipelineTransitionKind::StepCompleted,
+                issue_id: "1".to_string(),
+                identifier: "repo#1".to_string(),
+                run_id: None,
+                cycle: 1,
+                step: Some("build".to_string()),
+                reason: Some("succeeded".to_string()),
+                retry: None,
+                snapshot: Some(snapshot),
+                terminal_transition: None,
+                delivery: None,
+            })
+            .await
+            .unwrap();
+
+        let issue = test_issue("1", "Todo");
+        let (restart, state) = make_restart_test_orchestrator(&config_dir, &restart_config, &issue);
+        restart.restore_pipeline_runs_from_journal().await;
+
+        let state = state.read().await;
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        assert!(run.route_decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn crash_between_route_selection_records_retries_the_source() {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let restart_config = raw_config.clone();
+        let (config_dir, setup) = running_route_worker_orchestrator(raw_config, &["build"]).await;
+        let snapshot = setup
+            .state
+            .read()
+            .await
+            .get_pipeline_run("1")
+            .unwrap()
+            .to_snapshot();
+        for kind in [
+            PipelineTransitionKind::StepCompleted,
+            PipelineTransitionKind::RouteSelected,
+        ] {
+            setup
+                .pipeline_journal
+                .append(PipelineTransitionInput {
+                    kind,
+                    issue_id: "1".to_string(),
+                    identifier: "repo#1".to_string(),
+                    run_id: None,
+                    cycle: 1,
+                    step: Some(if kind == PipelineTransitionKind::StepCompleted {
+                        "build".to_string()
+                    } else {
+                        "choose".to_string()
+                    }),
+                    reason: Some("intermediate route persistence".to_string()),
+                    retry: None,
+                    snapshot: Some(snapshot.clone()),
+                    terminal_transition: None,
+                    delivery: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let issue = test_issue("1", "Todo");
+        let (restart, state) = make_restart_test_orchestrator(&config_dir, &restart_config, &issue);
+        restart.restore_pipeline_runs_from_journal().await;
+
+        let state = state.read().await;
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        assert!(run.route_decisions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn final_route_selection_snapshot_restores_the_selected_branch_once() {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let restart_config = raw_config.clone();
+        let (config_dir, setup) = running_route_worker_orchestrator(raw_config, &["build"]).await;
+        let (previous, candidate) = {
+            let state = setup.state.read().await;
+            let previous = state.get_pipeline_run("1").unwrap().clone();
+            let mut candidate = previous.clone();
+            let action = candidate.step_completed("build", successful_route_source_output(), false);
+            assert!(matches!(action, PipelineAction::Dispatch(_)));
+            (previous, candidate)
+        };
+        for (kind, step, snapshot) in [
+            (
+                PipelineTransitionKind::StepCompleted,
+                "build",
+                previous.to_snapshot(),
+            ),
+            (
+                PipelineTransitionKind::RouteSelected,
+                "choose",
+                candidate.to_snapshot(),
+            ),
+        ] {
+            setup
+                .pipeline_journal
+                .append(PipelineTransitionInput {
+                    kind,
+                    issue_id: "1".to_string(),
+                    identifier: "repo#1".to_string(),
+                    run_id: None,
+                    cycle: 1,
+                    step: Some(step.to_string()),
+                    reason: Some("route persistence".to_string()),
+                    retry: None,
+                    snapshot: Some(snapshot),
+                    terminal_transition: None,
+                    delivery: None,
+                })
+                .await
+                .unwrap();
+        }
+
+        let issue = test_issue("1", "Todo");
+        let (restart, state) = make_restart_test_orchestrator(&config_dir, &restart_config, &issue);
+        restart.restore_pipeline_runs_from_journal().await;
+
+        let mut state = state.write().await;
+        let run = state.get_pipeline_run_mut("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert!(run.route_decisions.contains_key("choose"));
+        let PipelineAction::Dispatch(requests) = run.start() else {
+            panic!("the restored route should dispatch its selected branch exactly once");
+        };
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].step_name, "accept");
+        run.mark_running("accept", "restored-session".to_string());
+        assert!(matches!(run.start(), PipelineAction::Waiting));
+    }
+
+    #[tokio::test]
+    async fn route_append_failure_cannot_duplicate_dispatch_after_a_delayed_unrelated_predecessor_tick(
+    ) {
+        let mut raw_config = make_always_approval_route_config();
+        raw_config.steps[0].approval = None;
+        let mut blocker = raw_config.steps[0].clone();
+        blocker.name = "blocker".to_string();
+        blocker.output_schema = None;
+        raw_config.steps.push(blocker);
+        raw_config
+            .steps
+            .iter_mut()
+            .find(|step| step.name == "accept")
+            .unwrap()
+            .depends = Some(vec!["choose".to_string(), "blocker".to_string()]);
+        let (_config_dir, mut orchestrator) =
+            running_route_worker_orchestrator(raw_config, &["build", "blocker"]).await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "build",
+                WorkerResult::Success {
+                    output: successful_route_source_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+        orchestrator
+            .handle_worker_exit(
+                "1",
+                "blocker",
+                WorkerResult::Success {
+                    output: succeeded_step_output(),
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let permit = orchestrator
+            .quiescing
+            .begin_dispatch()
+            .expect("the test orchestrator remains dispatchable");
+        orchestrator.dispatch_ready_active_pipelines(&permit).await;
+
+        let state = orchestrator.state.read().await;
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        drop(state);
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .read_records_for_issue("1")
+                .await
+                .unwrap()
+                .iter()
+                .filter(|record| {
+                    record.kind == PipelineTransitionKind::StepRunning
+                        && record.step.as_deref() == Some("accept")
+                })
+                .count(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -19616,6 +20959,7 @@ agent:
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }])
         .unwrap();
         let stale_run = PipelineRun::new(issue.id.clone(), 1, stale_dag);
@@ -20207,6 +21551,62 @@ agent:
         parse_config(&yaml).unwrap()
     }
 
+    fn make_always_approval_route_config() -> EnsembleConfig {
+        let mut config = make_always_approval_config(10);
+        config.steps[0].output_schema = Some(OutputSchemaConfig {
+            path: "decision.json".into(),
+            schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["decision"],
+                "properties": {
+                    "decision": {"type": "string", "enum": ["accept", "reject"]}
+                }
+            })),
+        });
+        config.steps[1].kind = StepKind::Route;
+        config.steps[1].name = "choose".to_string();
+        config.steps[1].agent.clear();
+        config.steps[1].on_failure = OnFailure::Halt;
+        config.steps[1].route = Some(RouteConfig {
+            source: RouteSource {
+                step: "build".to_string(),
+                pointer: "/decision".to_string(),
+            },
+            cases: BTreeMap::from([
+                ("accept".to_string(), vec!["accept".to_string()]),
+                ("reject".to_string(), vec!["reject".to_string()]),
+            ]),
+        });
+        for name in ["accept", "reject"] {
+            let mut branch = config.steps[0].clone();
+            branch.name = name.to_string();
+            branch.depends = Some(vec!["choose".to_string()]);
+            branch.approval = None;
+            branch.output_schema = None;
+            config.steps.push(branch);
+        }
+        config
+    }
+
+    fn make_parallel_approval_route_config() -> EnsembleConfig {
+        let mut config = make_always_approval_route_config();
+        let approval = config.steps[0].approval.clone();
+        config.steps[0].approval = None;
+        let mut parallel_approval = config.steps[0].clone();
+        parallel_approval.name = "approve".to_string();
+        parallel_approval.depends = None;
+        parallel_approval.output_schema = None;
+        parallel_approval.approval = approval;
+        config.steps.push(parallel_approval);
+        config
+            .steps
+            .iter_mut()
+            .find(|step| step.name == "accept")
+            .unwrap()
+            .depends = Some(vec!["choose".to_string(), "approve".to_string()]);
+        config
+    }
+
     fn make_approval_then_unresolved_gate_config() -> EnsembleConfig {
         parse_config(
             r#"
@@ -20313,6 +21713,91 @@ agent:
         tokio::fs::write(path, serde_json::to_vec_pretty(&payload).unwrap())
             .await
             .unwrap();
+    }
+
+    async fn write_approved_build_interaction(config_dir: &std::path::Path, interaction_id: &str) {
+        write_raw_interaction(
+            config_dir,
+            interaction_id,
+            serde_json::json!({
+                "id": interaction_id,
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": [],
+                "step_name": "build",
+                "agent_name": "builder",
+                "step_depends": [],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve build",
+                "body": "Please review the build output.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true,
+                    "reason": "looks good"
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+    }
+
+    async fn route_approval_orchestrator_with_config(
+        raw_config: EnsembleConfig,
+    ) -> (tempfile::TempDir, Orchestrator, EnsembleConfig) {
+        let config = Arc::new(RwLock::new(raw_config.clone()));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+        install_approval_waiting_run(&orchestrator, &config, "approval-1").await;
+        {
+            let mut state = orchestrator.state.write().await;
+            state
+                .get_pipeline_run_mut("1")
+                .unwrap()
+                .step_outputs
+                .insert(
+                    "build".to_string(),
+                    StepOutput {
+                        result: StepResult::Succeeded,
+                        summary: None,
+                        output: Some(serde_json::json!({"decision": "accept"})),
+                    },
+                );
+        }
+        write_approved_build_interaction(config_dir.path(), "approval-1").await;
+        (config_dir, orchestrator, raw_config)
+    }
+
+    async fn route_approval_orchestrator() -> (tempfile::TempDir, Orchestrator, EnsembleConfig) {
+        route_approval_orchestrator_with_config(make_always_approval_route_config()).await
     }
 
     #[test]
@@ -22744,6 +24229,514 @@ agent:
             run.step_states.get("review"),
             Some(crate::pipeline::engine::StepState::Running { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn approval_resume_does_not_dispatch_a_route_until_its_selection_is_durable() {
+        let (_config_dir, mut orchestrator, _) = route_approval_orchestrator().await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 2));
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("route selection persistence must precede approval continuation");
+
+        assert!(error.to_string().contains("route selection"), "{error}");
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running("1"));
+        assert!(state.is_waiting_on_human("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert!(matches!(
+            run.step_states.get("build"),
+            Some(StepState::AwaitingApproval { .. })
+        ));
+        assert_eq!(run.step_states.get("choose"), Some(&StepState::Pending));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, PipelineTransitionKind::StepCompleted);
+        assert_eq!(
+            records[1].kind,
+            PipelineTransitionKind::StepAwaitingApproval
+        );
+        assert!(matches!(
+            records[1]
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.step_states.get("build")),
+            Some(StepState::AwaitingApproval { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_route_append_failure_recovers_the_waiting_checkpoint_after_restart() {
+        let (config_dir, mut setup, config) = route_approval_orchestrator().await;
+        setup.pipeline_journal.transaction_append_error_on_call =
+            Some((Arc::new(AtomicUsize::new(0)), 2));
+        setup
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("the route transition append should fail");
+
+        let (restart, state) =
+            make_restart_test_orchestrator(&config_dir, &config, &test_issue("1", "Todo"));
+        restart.restore_pipeline_runs_from_journal().await;
+        restart.hydrate_waiting_on_human_from_store().await;
+
+        restart
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("recovered approval should select and dispatch its branch once");
+
+        let state = state.read().await;
+        let run = state.get_pipeline_run("1").unwrap();
+        assert!(matches!(
+            run.step_states.get("accept"),
+            Some(StepState::Running { .. })
+        ));
+        drop(state);
+        let records = restart
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|record| {
+                    record.kind == PipelineTransitionKind::StepRunning
+                        && record.step.as_deref() == Some("accept")
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_resume_persists_route_selection_before_dispatching_its_branch() {
+        let (_config_dir, orchestrator, _) = route_approval_orchestrator().await;
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect("approval resume should persist and dispatch the selected route branch");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert_eq!(run.step_states.get("choose"), Some(&StepState::Passed));
+        assert!(matches!(
+            run.step_states.get("accept"),
+            Some(StepState::Running { .. })
+        ));
+        assert!(matches!(
+            run.step_states.get("reject"),
+            Some(StepState::Skipped { .. })
+        ));
+        drop(state);
+
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        let step_completed = records
+            .iter()
+            .position(|record| {
+                record.kind == PipelineTransitionKind::StepCompleted
+                    && record.step.as_deref() == Some("build")
+            })
+            .expect("approval source completion should be journaled");
+        let route_selected = records
+            .iter()
+            .position(|record| {
+                record.kind == PipelineTransitionKind::RouteSelected
+                    && record.step.as_deref() == Some("choose")
+            })
+            .expect("route selection should be journaled");
+        let branch_running = records
+            .iter()
+            .position(|record| {
+                record.kind == PipelineTransitionKind::StepRunning
+                    && record.step.as_deref() == Some("accept")
+            })
+            .expect("selected route branch should be dispatched");
+        assert!(step_completed < route_selected);
+        assert!(route_selected < branch_running);
+    }
+
+    #[tokio::test]
+    async fn route_waiting_publication_releases_owner_for_parallel_approval_resume() {
+        let config = Arc::new(RwLock::new(make_parallel_approval_route_config()));
+        let issue = test_issue("1", "Todo");
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 1_000,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let config_dir = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            workspace_mgr,
+            config_dir.path(),
+            shutdown_rx,
+        );
+
+        let interaction_id = "parallel-approval";
+        {
+            let cfg = config.read().await;
+            let dag = build_dag(&cfg.steps).unwrap();
+            let mut run = PipelineRun::new(issue.id.clone(), 1, dag);
+            run.start();
+            run.mark_running("build", "session-build".to_string());
+            run.step_states.insert(
+                "approve".to_string(),
+                StepState::AwaitingApproval {
+                    interaction_request_id: Some(interaction_id.to_string()),
+                },
+            );
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, None);
+            let (retry_attempt, run_id) = state
+                .get_running(&issue.id)
+                .map(|running| (running.retry_attempt, running.run_id.clone()))
+                .unwrap();
+            state.add_waiting_on_human(WaitingOnHumanEntry {
+                issue_id: issue.id.clone(),
+                identifier: issue.identifier.clone(),
+                interaction_request_id: interaction_id.to_string(),
+                step_name: "approve".to_string(),
+                kind: InteractionKind::ApprovalGate,
+                prompt: "Approve the parallel check".to_string(),
+                agent_name: "builder".to_string(),
+                retry_attempt,
+                started_at: None,
+                agent_input_tokens: 0,
+                agent_output_tokens: 0,
+                agent_total_tokens: 0,
+                requested_at: Utc::now(),
+                run_id,
+                issue: Some(issue.clone()),
+            });
+            state.insert_pipeline_run(&issue.id, run, Arc::new(cfg.clone()));
+        }
+        write_raw_interaction(
+            config_dir.path(),
+            interaction_id,
+            serde_json::json!({
+                "id": interaction_id,
+                "schema_version": 1,
+                "issue_id": "1",
+                "issue_identifier": "repo#1",
+                "pipeline_cycle": 1,
+                "completed_steps": ["reject"],
+                "step_name": "approve",
+                "agent_name": "builder",
+                "step_depends": ["reject"],
+                "step_tracker_state": null,
+                "kind": "approval_gate",
+                "status": "resolved",
+                "blocking": true,
+                "awaiting_resume": true,
+                "resume_strategy": "advance_after_step",
+                "title": "Approve the parallel check",
+                "body": "Continue the selected route.",
+                "options": [],
+                "artifacts": [],
+                "response": {
+                    "kind": "approval",
+                    "response_schema_version": 1,
+                    "approved": true,
+                    "reason": "looks good"
+                },
+                "requested_at": Utc::now(),
+                "resolved_at": Utc::now(),
+            }),
+        )
+        .await;
+
+        orchestrator
+            .handle_worker_exit(
+                &issue.id,
+                "build",
+                WorkerResult::Success {
+                    output: StepOutput {
+                        result: StepResult::Succeeded,
+                        summary: None,
+                        output: Some(serde_json::json!({"decision": "accept"})),
+                    },
+                    approval_request: None,
+                },
+            )
+            .await;
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_running(&issue.id));
+        assert!(state.is_waiting_on_human(&issue.id));
+        let run = state.get_pipeline_run(&issue.id).unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert_eq!(run.step_states.get("choose"), Some(&StepState::Passed));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        drop(state);
+
+        orchestrator
+            .resume_blocked_issue(&issue)
+            .await
+            .expect("the parallel approval must remain resumable after route publication");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running(&issue.id));
+        assert!(!state.is_waiting_on_human(&issue.id));
+        assert!(matches!(
+            state
+                .get_pipeline_run(&issue.id)
+                .unwrap()
+                .step_states
+                .get("accept"),
+            Some(StepState::Running { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn approval_route_capacity_deferral_keeps_the_committed_candidate_active() {
+        let mut config = make_always_approval_route_config();
+        config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("todo".to_string(), 1);
+        let (_config_dir, orchestrator, _) = route_approval_orchestrator_with_config(config).await;
+        let peer = WorkerIdentity {
+            issue_id: "2".to_string(),
+            run_id: "peer-run".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (_, peer_completion) = watch::channel(false);
+        try_reserve_worker(
+            &orchestrator.cancellation_registry,
+            peer.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            peer_completion,
+            5,
+            1,
+            StateWorkerCapacity::new(
+                "Todo",
+                &orchestrator
+                    .config
+                    .read()
+                    .await
+                    .agent
+                    .max_concurrent_agents_by_state,
+            ),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(
+            &orchestrator.cancellation_registry,
+            &peer
+        ));
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("capacity must defer the committed route candidate");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Passed));
+        assert_eq!(run.step_states.get("choose"), Some(&StepState::Passed));
+        assert_eq!(run.step_states.get("accept"), Some(&StepState::Pending));
+        assert!(matches!(
+            run.step_states.get("reject"),
+            Some(StepState::Skipped { .. })
+        ));
+        drop(state);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        assert_eq!(
+            orchestrator
+                .pipeline_journal
+                .latest_live_record_for_issue("1")
+                .await
+                .unwrap()
+                .unwrap()
+                .kind,
+            PipelineTransitionKind::RouteSelected
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_route_deferred_dispatch_keeps_the_committed_candidate_active() {
+        let mut config = make_always_approval_route_config();
+        config.concurrency.max_concurrent_agents = 1;
+        config
+            .agent
+            .max_concurrent_agents_by_state
+            .insert("todo".to_string(), 2);
+        let (_config_dir, orchestrator, _) = route_approval_orchestrator_with_config(config).await;
+        let peer = WorkerIdentity {
+            issue_id: "2".to_string(),
+            run_id: "peer-run".to_string(),
+            cycle: 1,
+            step_name: "build".to_string(),
+            started_at: Utc::now(),
+        };
+        let (_, peer_completion) = watch::channel(false);
+        try_reserve_worker(
+            &orchestrator.cancellation_registry,
+            peer.clone(),
+            tokio_util::sync::CancellationToken::new(),
+            peer_completion,
+            1,
+            1,
+            StateWorkerCapacity::new(
+                "Todo",
+                &orchestrator
+                    .config
+                    .read()
+                    .await
+                    .agent
+                    .max_concurrent_agents_by_state,
+            ),
+        )
+        .unwrap();
+        assert!(mark_worker_launched(
+            &orchestrator.cancellation_registry,
+            &peer
+        ));
+
+        orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("reservation deferral must retain the committed route candidate");
+
+        let state = orchestrator.state.read().await;
+        assert!(state.is_running("1"));
+        assert!(!state.is_waiting_on_human("1"));
+        assert_eq!(
+            state
+                .get_pipeline_run("1")
+                .unwrap()
+                .step_states
+                .get("accept"),
+            Some(&StepState::Pending)
+        );
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(records.iter().all(|record| {
+            !(record.kind == PipelineTransitionKind::StepRunning
+                && record.step.as_deref() == Some("accept"))
+        }));
+        assert_eq!(
+            records.last().map(|record| record.kind),
+            Some(PipelineTransitionKind::RouteSelected)
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_route_workspace_failure_retries_the_committed_candidate() {
+        let (config_dir, orchestrator, _) = route_approval_orchestrator().await;
+        let blocked_workspace = orchestrator.workspace_mgr.workspace_path("1");
+        tokio::fs::write(&blocked_workspace, b"not a directory")
+            .await
+            .unwrap();
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("workspace preparation should fail after route publication");
+        assert!(error.to_string().contains("workspace error"), "{error}");
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(state.retry_attempts.contains_key("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        let live_snapshot = run.to_snapshot();
+        drop(state);
+        assert!(
+            !orchestrator
+                .interaction_store
+                .get("approval-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .awaiting_resume
+        );
+        let durable = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.kind, PipelineTransitionKind::StepRetryScheduled);
+        assert_eq!(durable.snapshot, Some(live_snapshot));
+        drop(config_dir);
+    }
+
+    #[tokio::test]
+    async fn approval_route_dispatch_append_failure_retries_the_committed_candidate() {
+        let (_config_dir, mut orchestrator, _) = route_approval_orchestrator().await;
+        orchestrator
+            .pipeline_journal
+            .transaction_append_error_on_call = Some((Arc::new(AtomicUsize::new(0)), 3));
+
+        let error = orchestrator
+            .resume_blocked_issue(&test_issue("1", "Todo"))
+            .await
+            .expect_err("the first selected branch dispatch should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("failed to persist step 'accept' dispatch"),
+            "{error}"
+        );
+
+        let state = orchestrator.state.read().await;
+        assert!(!state.is_waiting_on_human("1"));
+        assert!(state.retry_attempts.contains_key("1"));
+        let run = state.get_pipeline_run("1").unwrap();
+        assert_eq!(run.step_states.get("build"), Some(&StepState::Pending));
+        let live_snapshot = run.to_snapshot();
+        drop(state);
+        let durable = orchestrator
+            .pipeline_journal
+            .latest_live_record_for_issue("1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(durable.kind, PipelineTransitionKind::StepRetryScheduled);
+        assert_eq!(durable.snapshot, Some(live_snapshot));
     }
 
     #[tokio::test]

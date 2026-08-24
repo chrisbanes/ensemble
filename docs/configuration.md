@@ -640,8 +640,8 @@ Pipeline step definitions. Agent and synthesis steps invoke configured agents; g
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Unique step identifier |
-| `agent` | string | required for `agent` and `synthesis` | Name of an agent defined in `agents`; omit for `gate` |
-| `kind` | string | `agent` | Step kind. Use `agent` for normal steps, `synthesis` for direct-dependency adjudication, and `gate` for deterministic non-agent assessment evaluation. |
+| `agent` | string | required for `agent` and `synthesis` | Name of an agent defined in `agents`; omit for `gate` and `route` |
+| `kind` | string | `agent` | Step kind. Use `agent` for normal steps, `synthesis` for direct-dependency adjudication, `gate` for deterministic non-agent assessment evaluation, and `route` for static non-agent branch selection. |
 | `depends` | list of strings | — | Steps this depends on. Omit for sequential order. Use `[]` for no dependencies (root step). |
 | `tracker_state` | string | — | Tracker state to write when this step starts |
 | `timeout_ms` | integer | inherits `agent.turn_timeout_ms` | Optional maximum time for each runtime prompt or turn in this step |
@@ -655,6 +655,7 @@ Pipeline step definitions. Agent and synthesis steps invoke configured agents; g
 | `artifact_access` | string | `mutable` | `immutable` verifies every declared input immediately before the step starts and halts on drift; `mutable` permits normal workspace mutation |
 | `authorization` | object | — | Optional immutable tracker-event evidence required before this step starts |
 | `gate` | object | — | Required only for `kind: gate`: ordered unique `assessment_steps` and one `adjudication_step`; a gate has no `agent` |
+| `route` | object | — | Required only for `kind: route`: a direct `source` (`step`, non-empty JSON Pointer) and exhaustive enum `cases`; a route has no `agent` and must use `on_failure: halt` |
 
 See [Pipeline Guide](pipelines.md) for details on DAG construction and execution. For a complete
 fixture-backed composition of Artifact snapshots, immutable Assessment consumers, synthesis, and
