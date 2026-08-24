@@ -4546,6 +4546,10 @@ mod tests {
             .step_states
             .insert("produce".to_string(), StepState::Passed);
         assert!(PipelineRun::from_snapshot(snapshot).is_err());
+
+        let mut snapshot = run.to_snapshot();
+        snapshot.generation.clear();
+        assert!(PipelineRun::from_snapshot(snapshot).is_err());
     }
 
     #[test]
@@ -4578,7 +4582,7 @@ mod tests {
             },
         );
 
-        let mut later = PipelineRun::new("issue-1".to_string(), 2, build_dag(&[producer]).unwrap());
+        let mut later = PipelineRun::new("issue-1".to_string(), 1, build_dag(&[producer]).unwrap());
         assert!(later.route_decisions.is_empty());
         assert!(later.action_states.is_empty());
         later.start();
@@ -4594,6 +4598,12 @@ mod tests {
         assert_ne!(
             later.pending_action("produce").unwrap().identity,
             first_identity
+        );
+        let snapshot = later.to_snapshot();
+        let recovered = PipelineRun::from_snapshot(snapshot).unwrap();
+        assert_eq!(
+            recovered.pending_action("produce").unwrap().identity,
+            later.pending_action("produce").unwrap().identity
         );
     }
 

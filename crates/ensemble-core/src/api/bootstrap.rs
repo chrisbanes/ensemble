@@ -762,6 +762,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_runtime_rejects_operator_attention_without_history_store() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("outcome.schema.json"),
+            r#"{"type":"object","required":["summary","remedy"],"properties":{"summary":{"type":"string"},"remedy":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        let yaml = valid_config_yaml(None).replace(
+            "    agent: builder",
+            "    agent: builder\n    output_schema: { path: outcome.schema.json }\n    actions:\n      - type: operator_attention\n        kind: ensemble.review\n        summary: /summary\n        remedy: /remedy",
+        );
+        let state = parse_raw_yaml(temp.path().join("config.yaml"), yaml);
+        assert!(state.active_config.is_some());
+        let mut app = crate::api::test_helpers::app_state_with_document_state(state.clone());
+        app.history_store = None;
+        let error = match prepare_orchestrator_runtime(&app, &state).await {
+            Err(error) => error,
+            Ok(_) => panic!("operator attention requires durable history storage"),
+        };
+        assert!(error
+            .to_string()
+            .contains("operator_attention actions require durable history storage"));
+    }
+
+    #[tokio::test]
     async fn build_app_state_uses_config_values_when_document_is_runnable() {
         let config_path = PathBuf::from("/tmp/config.yaml");
         let document_state = parse_raw_yaml(
