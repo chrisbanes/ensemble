@@ -1522,7 +1522,7 @@ impl Orchestrator {
         // Give already-claimed pipelines the first opportunity to consume
         // newly available worker capacity before admitting new issues.
         if let Some(permit) = self.quiescing.begin_dispatch() {
-            Box::pin(self.dispatch_ready_active_pipelines(&permit)).await;
+            self.dispatch_ready_active_pipelines(&permit).await;
         }
 
         // Durable journal owners always win. Only after they have had an
@@ -2733,36 +2733,41 @@ impl Orchestrator {
         }
     }
 
-    async fn dispatch_ready_active_pipelines(&self, permit: &DispatchPermit) {
-        let mut active_issue_ids = {
-            let state = self.state.read().await;
-            state
-                .running
-                .values()
-                .map(|entry| (entry.identifier.clone(), entry.issue_id.clone()))
-                .collect::<Vec<_>>()
-        };
-        active_issue_ids.sort();
+    fn dispatch_ready_active_pipelines<'a>(
+        &'a self,
+        permit: &'a DispatchPermit,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            let mut active_issue_ids = {
+                let state = self.state.read().await;
+                state
+                    .running
+                    .values()
+                    .map(|entry| (entry.identifier.clone(), entry.issue_id.clone()))
+                    .collect::<Vec<_>>()
+            };
+            active_issue_ids.sort();
 
-        for (_, issue_id) in active_issue_ids {
-            self.apply_pending_step_actions(&issue_id).await;
-            if self
-                .pending_run_started_transitions
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains_key(&issue_id)
-            {
-                continue;
+            for (_, issue_id) in active_issue_ids {
+                self.apply_pending_step_actions(&issue_id).await;
+                if self
+                    .pending_run_started_transitions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .contains_key(&issue_id)
+                {
+                    continue;
+                }
+                let max_workers = self.config.read().await.concurrency.max_concurrent_agents;
+                if !has_available_worker_slots(
+                    live_worker_count(&self.cancellation_registry),
+                    max_workers,
+                ) {
+                    break;
+                }
+                self.dispatch_ready_steps_for_issue(&issue_id, permit).await;
             }
-            let max_workers = self.config.read().await.concurrency.max_concurrent_agents;
-            if !has_available_worker_slots(
-                live_worker_count(&self.cancellation_registry),
-                max_workers,
-            ) {
-                break;
-            }
-            self.dispatch_ready_steps_for_issue(&issue_id, permit).await;
-        }
+        })
     }
 
     /// Execute durable configured effects before normal ready-step dispatch.
