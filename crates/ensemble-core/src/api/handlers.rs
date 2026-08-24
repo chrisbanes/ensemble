@@ -1333,6 +1333,7 @@ on_failure: Failed
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
                     gate_evidence: Default::default(),
+                    applied_actions: Vec::new(),
                 }),
             })
             .await
@@ -1371,6 +1372,7 @@ on_failure: Failed
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
             gate_evidence: Default::default(),
+            applied_actions: Vec::new(),
         };
         history_artifacts.gate_evidence.insert(
             "gate".into(),
@@ -1422,6 +1424,7 @@ on_failure: Failed
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
             gate_evidence: Default::default(),
+            applied_actions: Vec::new(),
         };
         {
             let mut state = app_state.orchestrator_state.write().await;
@@ -1494,6 +1497,7 @@ on_failure: Failed
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
                     gate_evidence: Default::default(),
+                    applied_actions: Vec::new(),
                 }),
             })
             .await

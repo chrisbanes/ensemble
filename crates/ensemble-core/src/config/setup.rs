@@ -932,6 +932,7 @@ fn build_setup_dag(steps: &[SetupStep]) -> Result<crate::pipeline::dag::StepDag,
                 gate: step.gate.clone(),
                 authorization: None,
                 route: step.route.clone(),
+                actions: Vec::new(),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;

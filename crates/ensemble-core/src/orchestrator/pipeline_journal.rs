@@ -34,6 +34,8 @@ fn requires_durable_sync(kind: PipelineTransitionKind, created: bool) -> bool {
                 | PipelineTransitionKind::StepRunning
                 | PipelineTransitionKind::StepAwaitingApproval
                 | PipelineTransitionKind::RouteSelected
+                | PipelineTransitionKind::ActionPending
+                | PipelineTransitionKind::ActionApplied
         )
 }
 
@@ -124,6 +126,10 @@ pub enum PipelineTransitionKind {
     StepCompleted,
     /// A deterministic route selection and its skipped descendants were persisted.
     RouteSelected,
+    /// A configured post-output effect is present in the persisted snapshot before execution.
+    ActionPending,
+    /// An effect receipt was persisted before enabling dependent work.
+    ActionApplied,
     StepFailed,
     StepBlockedOnHuman,
     StepAwaitingApproval,
@@ -703,6 +709,7 @@ mod tests {
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         }
     }
 

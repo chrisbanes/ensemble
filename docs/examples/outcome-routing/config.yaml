@@ -1,0 +1,73 @@
+# A public composition of a static output route and generic durable actions.
+# All domain vocabulary is confined to this reference configuration.
+tracker:
+  # GitHub is used because marker-bound comments require idempotent publication.
+  kind: github
+  repository: example/ensemble
+  api_key: example-token-not-a-secret
+  github:
+    status_field: Status
+
+repos:
+  - path: target
+    branch: main
+
+agents:
+  producer:
+    executor: example-agent
+    model: example-model
+    prompt: templates/produce.liquid
+  publisher:
+    executor: example-agent
+    model: example-model
+    prompt: templates/publish.liquid
+  operator:
+    executor: example-agent
+    model: example-model
+    prompt: templates/operator.liquid
+
+steps:
+  - name: produce
+    agent: producer
+    depends: []
+    output_schema: { path: schemas/outcome.schema.json }
+    artifact_snapshot:
+      repositories: [target]
+  - name: choose_outcome
+    kind: route
+    depends: [produce]
+    on_failure: halt
+    route:
+      source: { step: produce, pointer: /outcome }
+      cases:
+        revised_artifact: [publish_revision]
+        operator_required: [notify_operator]
+  - name: publish_revision
+    agent: publisher
+    depends: [choose_outcome, produce]
+    artifact_inputs: [produce]
+    artifact_access: immutable
+    authorization:
+      artifact_step: produce
+      event: { field: review, value: approved, actors: [maintainer] }
+      after_artifact: true
+      handoff: wait_for_event
+    output_schema: { path: schemas/publication.schema.json }
+    actions:
+      - type: tracker_comment
+        body: /comment
+  - name: notify_operator
+    agent: operator
+    depends: [choose_outcome]
+    output_schema: { path: schemas/operator-attention.schema.json }
+    actions:
+      - type: tracker_comment
+        body: /comment
+      - type: operator_attention
+        kind: ensemble.outcome
+        summary: /summary
+        remedy: /remedy
+        references: /references
+
+on_success: Done
+on_failure: Failed

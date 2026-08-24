@@ -200,6 +200,24 @@ downstream retry retain the choice. Resetting the source resets its descendants 
 route decisions. Missing or unmatched route evidence fails the route closed and halts; routes do
 not support automatic retry, fixup, defaults, coercion, predicates, dynamic nodes, or loops.
 
+## Durable post-output actions
+
+Ordinary agent and synthesis steps may have ordered generic actions sourced from their own
+schema-validated output. A producer is `AwaitingActions` until every declared effect has a durable
+receipt, so dependents, routes, approval, terminal state changes, and finalization cannot proceed
+early. A pending action is retried from its saved output after restart; it does not rerun the
+producer, consume worker capacity, change `max_cycles`, or select a new Pipeline.
+
+The public effects are marker-reconciled tracker comments and durable operator-attention upserts.
+Actions are invalid on routes and gates. Route-excluded `Skipped` steps have no output, action,
+receipt, artifact, attempt, or transcript. Retrying a producer clears its own and dependent action
+receipts. Completed history exposes only bounded applied-action evidence (identity, source digest,
+kind, and receipt); it never includes resolved comment bodies or attention presentation. Retrying
+a producer clears its own and dependent action state together with their outputs.
+
+The checked-in [outcome-routing example](outcome-routing.md) shows this composition with Artifact
+and authorization wiring while keeping its policy labels out of the runtime.
+
 ## Clarification request style (batched by default)
 
 Ensemble now injects interaction-policy guidance into prompts by default. Agents are expected to:

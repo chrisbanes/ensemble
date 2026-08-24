@@ -677,6 +677,27 @@ pub struct StepConfig {
     /// Static branch-selection metadata for an agentless route step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteConfig>,
+    /// Ordered, durable effects applied after this step has produced a valid output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<StepActionConfig>,
+}
+
+/// A bounded effect selected from one validated step output. Values remain
+/// opaque configuration data; the runtime only understands their shape and
+/// durability requirements.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StepActionConfig {
+    TrackerComment {
+        body: String,
+    },
+    OperatorAttention {
+        kind: String,
+        summary: String,
+        remedy: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        references: Option<String>,
+    },
 }
 
 /// The source output inspected by a route step.
@@ -1141,6 +1162,37 @@ pub(crate) fn read_dotenv(path: &Path) -> HashMap<String, String> {
 }
 
 impl EnsembleConfig {
+    /// Whether activation must verify marker-based tracker comment capability.
+    pub fn has_tracker_comment_actions(&self) -> bool {
+        self.steps
+            .iter()
+            .chain(
+                self.pipelines
+                    .values()
+                    .flat_map(|pipeline| pipeline.steps.iter()),
+            )
+            .any(|step| {
+                step.actions
+                    .iter()
+                    .any(|action| matches!(action, StepActionConfig::TrackerComment { .. }))
+            })
+    }
+
+    /// Whether activation requires the durable operator-attention store.
+    pub fn has_operator_attention_actions(&self) -> bool {
+        self.steps
+            .iter()
+            .chain(
+                self.pipelines
+                    .values()
+                    .flat_map(|pipeline| pipeline.steps.iter()),
+            )
+            .any(|step| {
+                step.actions
+                    .iter()
+                    .any(|action| matches!(action, StepActionConfig::OperatorAttention { .. }))
+            })
+    }
     pub fn uses_workflow_selection(&self) -> bool {
         !self.workflow_selection.is_empty()
     }
@@ -2345,8 +2397,107 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         validate_gate_configs(steps, &dag)?;
         validate_route_configs(steps, &dag)?;
         validate_authorization_configs(steps, &dag)?;
+        validate_step_actions(steps)?;
     }
     Ok(())
+}
+
+fn validate_step_actions(steps: &[StepConfig]) -> Result<(), PipelineError> {
+    for step in steps {
+        if step.actions.is_empty() {
+            continue;
+        }
+        let invalid = |reason: &str| PipelineError::InvalidStepConfig {
+            step: step.name.clone(),
+            reason: reason.to_string(),
+        };
+        if !step.kind.requires_agent() {
+            return Err(invalid(
+                "actions are valid only for agent or synthesis steps",
+            ));
+        }
+        let schema = step
+            .output_schema
+            .as_ref()
+            .and_then(|schema| schema.schema.as_ref())
+            .ok_or_else(|| invalid("actions require a resolved output_schema"))?;
+        let mut identities = std::collections::HashSet::new();
+        for action in &step.actions {
+            let identity = serde_json::to_string(action).map_err(|error| {
+                invalid(&format!("could not serialize action identity: {error}"))
+            })?;
+            if !identities.insert(identity) {
+                return Err(invalid("actions must not contain duplicate declarations"));
+            }
+            match action {
+                StepActionConfig::TrackerComment { body } => {
+                    if !is_valid_json_pointer(body) || !required_string_at(schema, body) {
+                        return Err(invalid("tracker_comment body must be a valid non-empty JSON Pointer to a required string in output_schema"));
+                    }
+                }
+                StepActionConfig::OperatorAttention {
+                    kind,
+                    summary,
+                    remedy,
+                    references,
+                } => {
+                    if crate::attention::model::validate_configured_kind(kind).is_err()
+                        || !is_valid_json_pointer(summary)
+                        || !is_valid_json_pointer(remedy)
+                        || !required_string_at(schema, summary)
+                        || !required_string_at(schema, remedy)
+                        || references.as_ref().is_some_and(|pointer| {
+                            !is_valid_json_pointer(pointer)
+                                || !required_string_array_at(schema, pointer)
+                        })
+                    {
+                        return Err(invalid("operator_attention requires a namespaced kind, required string summary/remedy pointers, and an optional required string-array references pointer"));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn required_schema_value_at<'a>(
+    schema: &'a serde_json::Value,
+    pointer: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = schema;
+    for segment in pointer.strip_prefix('/')?.split('/') {
+        let segment = segment.replace("~1", "/").replace("~0", "~");
+        if current.get("type")?.as_str()? != "object"
+            || !current
+                .get("required")?
+                .as_array()?
+                .iter()
+                .any(|value| value.as_str() == Some(&segment))
+        {
+            return None;
+        }
+        current = current.get("properties")?.get(segment)?;
+    }
+    Some(current)
+}
+
+fn required_string_at(schema: &serde_json::Value, pointer: &str) -> bool {
+    required_schema_value_at(schema, pointer)
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("string")
+}
+
+fn required_string_array_at(schema: &serde_json::Value, pointer: &str) -> bool {
+    let Some(value) = required_schema_value_at(schema, pointer) else {
+        return false;
+    };
+    value.get("type").and_then(serde_json::Value::as_str) == Some("array")
+        && value
+            .get("items")
+            .and_then(|items| items.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("string")
 }
 
 fn validate_authorization_configs(
@@ -2800,6 +2951,97 @@ mod tests {
         "ENSEMBLE_TEST_REPO",
     ];
 
+    fn action_producer(actions: Vec<StepActionConfig>) -> StepConfig {
+        StepConfig {
+            name: "produce".to_string(),
+            kind: StepKind::Agent,
+            agent: "builder".to_string(),
+            depends: Some(vec![]),
+            tracker_state: None,
+            timeout_ms: None,
+            approval: None,
+            on_failure: OnFailure::RetryIssue,
+            fixup_agent: None,
+            resource_requests: BTreeMap::new(),
+            affected_paths: None,
+            output_schema: Some(OutputSchemaConfig {
+                path: "outcome.json".into(),
+                schema: Some(serde_json::json!({
+                    "type": "object",
+                    "required": ["comment", "summary", "remedy", "references"],
+                    "properties": {
+                        "comment": {"type": "string"},
+                        "summary": {"type": "string"},
+                        "remedy": {"type": "string"},
+                        "references": {"type": "array", "items": {"type": "string"}}
+                    }
+                })),
+            }),
+            artifact_snapshot: None,
+            artifact_inputs: Vec::new(),
+            artifact_access: ArtifactAccess::Mutable,
+            gate: None,
+            authorization: None,
+            route: None,
+            actions,
+        }
+    }
+
+    #[test]
+    fn actions_require_declared_bounded_output_sources_and_unique_declarations() {
+        let valid = action_producer(vec![
+            StepActionConfig::TrackerComment {
+                body: "/comment".to_string(),
+            },
+            StepActionConfig::OperatorAttention {
+                kind: "ensemble.review".to_string(),
+                summary: "/summary".to_string(),
+                remedy: "/remedy".to_string(),
+                references: Some("/references".to_string()),
+            },
+        ]);
+        assert!(validate_step_actions(&[valid.clone()]).is_ok());
+
+        let duplicate = action_producer(vec![
+            StepActionConfig::TrackerComment {
+                body: "/comment".to_string(),
+            },
+            StepActionConfig::TrackerComment {
+                body: "/comment".to_string(),
+            },
+        ]);
+        assert!(matches!(
+            validate_step_actions(&[duplicate]),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("duplicate")
+        ));
+
+        let invalid_pointer = action_producer(vec![StepActionConfig::TrackerComment {
+            body: "/missing".to_string(),
+        }]);
+        assert!(matches!(
+            validate_step_actions(&[invalid_pointer]),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("required string")
+        ));
+
+        let invalid_attention_kind = action_producer(vec![StepActionConfig::OperatorAttention {
+            kind: "Ensemble review\n".to_string(),
+            summary: "/summary".to_string(),
+            remedy: "/remedy".to_string(),
+            references: Some("/references".to_string()),
+        }]);
+        assert!(matches!(
+            validate_step_actions(&[invalid_attention_kind]),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("operator_attention")
+        ));
+
+        let mut route = valid;
+        route.kind = StepKind::Route;
+        assert!(matches!(
+            validate_step_actions(&[route]),
+            Err(PipelineError::InvalidStepConfig { reason, .. }) if reason.contains("agent or synthesis")
+        ));
+    }
+
     struct EnvGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<String>)>,
@@ -2901,6 +3143,7 @@ on_failure: Failed
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         };
         let route = StepConfig {
             name: "choose_review_path".to_string(),
@@ -2933,6 +3176,7 @@ on_failure: Failed
                     ("disagreement".to_string(), vec!["escalate".to_string()]),
                 ]),
             }),
+            actions: Vec::new(),
         };
         let branch = |name: &str| StepConfig {
             name: name.to_string(),
@@ -2953,6 +3197,7 @@ on_failure: Failed
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         };
         config.steps = vec![
             compare,
@@ -3004,6 +3249,7 @@ on_failure: Failed
             gate: None,
             authorization: None,
             route: None,
+            actions: Vec::new(),
         };
         config.steps = vec![
             StepConfig {
@@ -3028,6 +3274,7 @@ on_failure: Failed
                 gate: None,
                 authorization: None,
                 route: None,
+                actions: Vec::new(),
             },
             StepConfig {
                 name: "choose_path".to_string(),
@@ -3057,6 +3304,7 @@ on_failure: Failed
                         ("escalation".to_string(), vec!["escalate".to_string()]),
                     ]),
                 }),
+                actions: Vec::new(),
             },
             agent("accept", vec!["choose_path"]),
             agent("escalate", vec!["choose_path"]),

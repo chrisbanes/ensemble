@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn append_history_record_round_trips_artifacts() {
+    async fn completed_history_round_trips_bounded_applied_action_evidence() {
         let dir = tempfile::TempDir::new().unwrap();
         let store = HistoryStore::new(dir.path().join("history.db"))
             .await
@@ -486,6 +486,13 @@ mod tests {
                     }),
                 },
             )]),
+            applied_actions: vec![crate::pipeline::engine::AppliedStepActionEvidence {
+                step: "notify_operator".into(),
+                identity: "action:abc".into(),
+                source_output_digest: "digest-123".into(),
+                kind: "operator_attention".into(),
+                receipt: "action:abc".into(),
+            }],
         });
 
         store.append_history_record("run-1", &record).await.unwrap();
@@ -497,6 +504,9 @@ mod tests {
             Some("https://github.com/acme/repo/pull/12")
         );
         assert_eq!(artifacts.transcripts[0].step_name, "build");
+        assert_eq!(artifacts.applied_actions.len(), 1);
+        assert_eq!(artifacts.applied_actions[0].identity, "action:abc");
+        assert_eq!(artifacts.applied_actions[0].kind, "operator_attention");
         assert_eq!(
             artifacts.gate_evidence["gate"]
                 .human_resolution

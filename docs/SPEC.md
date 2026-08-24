@@ -305,6 +305,12 @@ Pipeline step definition:
     The runtime persists the selected event and exact Artifact identity/digest, then revalidates
     both immediately before launch. Automatic handoff journals pending intent before the remote
     write and opens dispatch only after its applied acknowledgement is durable.
+- `actions` (list, optional) — ordered bounded post-output effects valid only on `agent` and
+  `synthesis` steps with an output schema. `tracker_comment` has one required-string `body` JSON
+  Pointer. `operator_attention` has an opaque namespaced `kind`, required-string `summary` and
+  `remedy` pointers, and an optional required string-array `references` pointer. Intent and
+  acknowledgement receipts are durable; a pending action blocks downstream work and retries from
+  the retained output without rerunning the producer or consuming agent capacity.
 
 #### 4.1.5 Workspace
 
@@ -347,6 +353,8 @@ Step states:
 - `Running` — agent dispatched, session active
 - `AwaitingApproval` — step completed but blocked on an approval gate. The orchestrator
   holds the pipeline here until a `approve_gate` or `reject_gate` signal is received.
+- `AwaitingActions` — a producer has completed but one or more configured post-output effects
+  still lack durable receipts. It retains the Run, Workspace, and claim.
 - `Passed` — agent exited successfully with a `succeeded` or `concern` result, or was approved at
   an approval gate
 - `Skipped` — successful terminal work excluded by a durable static route selection; it has no
@@ -999,6 +1007,9 @@ Pipeline step definitions forming a DAG. Each step is an object:
   - Pre-dispatch authorization as specified in Section 4.1.4: a direct snapshot-producing
     dependency, opaque event predicate, and explicit `wait_for_event` or
     `automatic_transition` handoff constraints.
+- `actions` (list, optional)
+  - Ordered `tracker_comment` and `operator_attention` declarations as specified in Section
+    4.1.4. Routes and gates cannot declare actions; `Skipped` work has no action state.
 
 #### 5.3.5 `on_success` (string)
 
@@ -1323,6 +1334,8 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `steps[].kind`: string, optional, default `"agent"`; `"agent"`, `"synthesis"`, `"gate"`, or `"route"`
 - `steps[].route`: required for `kind: route`; `{ source: { step, pointer }, cases }` with an
   exact, required source string enum and direct-successor case partition
+- `steps[].actions`: optional ordered post-output actions on agent/synthesis steps with a resolved
+  output schema; every pointer must resolve to the declared bounded string or string-array shape
 - `steps[].depends`: list of strings, optional; step dependencies for DAG
 - `steps[].tracker_state`: string, optional; tracker state to write on step entry
 - `steps[].authorization`: optional pre-dispatch contract for agent/synthesis steps only:

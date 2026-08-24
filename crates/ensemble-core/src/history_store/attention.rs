@@ -26,6 +26,14 @@ impl HistoryStore {
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(io::Error::other)?;
             let current = select_item(&tx, &observation.identity)?;
+            if let Some(item) = current
+                .as_ref()
+                .filter(|item| item.state != AttentionLifecycleState::Open)
+                .cloned()
+            {
+                tx.commit().map_err(io::Error::other)?;
+                return Ok(item);
+            }
             let unchanged = current.as_ref().is_some_and(|item| {
                 item.state == AttentionLifecycleState::Open
                     && item.presentation == observation.presentation
@@ -333,7 +341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn history_retains_one_event_for_an_idempotent_observation() {
+    async fn operator_attention_action_replay_upserts_once_with_stable_identity() {
         let dir = tempfile::TempDir::new().unwrap();
         let reporter = AttentionReporter::new(
             HistoryStore::new(dir.path().join(".ensemble/history.db"))
@@ -342,10 +350,12 @@ mod tests {
         );
         let observation = observation("open-v1");
 
-        reporter.upsert_open(observation.clone()).await.unwrap();
-        reporter.upsert_open(observation).await.unwrap();
+        let first = reporter.upsert_open(observation.clone()).await.unwrap();
+        let replayed = reporter.upsert_open(observation).await.unwrap();
 
         let history = reporter.history(None, None, None, None).await.unwrap();
+        assert_eq!(first.identity, replayed.identity);
+        assert_eq!(replayed.identity.producer_key, "producer-a");
         assert_eq!(history.events.len(), 1);
     }
 
@@ -410,6 +420,48 @@ mod tests {
             .unwrap();
 
         assert!(open.is_empty());
+        assert_eq!(resolved.events.len(), 1);
+        assert_eq!(resolved.events[0].evidence.fingerprint, "resolved-v1");
+    }
+
+    #[tokio::test]
+    async fn replay_after_resolution_preserves_the_terminal_attention_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let reporter = AttentionReporter::new(
+            HistoryStore::new(dir.path().join(".ensemble/history.db"))
+                .await
+                .unwrap(),
+        );
+        let observation = observation("open-v1");
+        reporter.upsert_open(observation.clone()).await.unwrap();
+        reporter
+            .resolve(
+                AttentionClose::new(
+                    observation.identity.clone(),
+                    "open-v1",
+                    AttentionEvidence::new("resolved-v1").unwrap(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let replayed = reporter.upsert_open(observation).await.unwrap();
+        let resolved = reporter
+            .history(
+                None,
+                Some(crate::attention::AttentionLifecycleState::Resolved),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            replayed.state,
+            crate::attention::AttentionLifecycleState::Resolved
+        );
+        assert!(reporter.open_items().await.unwrap().is_empty());
         assert_eq!(resolved.events.len(), 1);
         assert_eq!(resolved.events[0].evidence.fingerprint, "resolved-v1");
     }

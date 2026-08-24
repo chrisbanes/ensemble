@@ -779,7 +779,8 @@ fn completed_step_state_for_name(step_name: &str, run: &PipelineRun) -> String {
             crate::pipeline::engine::StepState::Skipped { .. } => "skipped",
             crate::pipeline::engine::StepState::Failed { .. } => "failed",
             crate::pipeline::engine::StepState::BlockedOnHuman { .. } => "waiting",
-            crate::pipeline::engine::StepState::AwaitingApproval { .. } => "waiting",
+            crate::pipeline::engine::StepState::AwaitingApproval { .. }
+            | crate::pipeline::engine::StepState::AwaitingActions { .. } => "waiting",
             crate::pipeline::engine::StepState::Errored { .. } => "failed",
         })
         .unwrap_or("pending")

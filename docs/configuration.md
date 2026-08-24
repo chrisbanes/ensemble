@@ -3,8 +3,35 @@
 ## First-release configuration boundary
 
 Operator-attention reporting is a runtime primitive backed by the shared workspace history
-database. This release adds no `config.yaml` routing, kind, or development-method vocabulary for
-attention; configured branch adapters may use the generic reporter in a later change.
+database. Steps may also declare bounded generic post-output actions; action kinds and values are
+opaque configuration data and do not add a development-method runtime mode.
+
+## Post-output actions
+
+An `agent` or `synthesis` step with an `output_schema` may declare ordered `actions`. Each JSON
+Pointer is resolved only from that step's validated structured output. Pointers must name required
+strings (or, for optional `references`, a required array of strings), so activation rejects
+ambiguous data before dispatch.
+
+```yaml
+actions:
+  - type: tracker_comment
+    body: /comment
+  - type: operator_attention
+    kind: ensemble.review
+    summary: /summary
+    remedy: /remedy
+    references: /references
+```
+
+The runtime stores resolved values and an opaque marker identity with the producer output, then
+journals each effect before execution and its receipt before downstream work. A comment-capable
+tracker reconciles the marker after a crash before creating another comment; activation fails when
+a comment action is configured for an adapter that cannot prove this behavior. Attention uses the
+existing bounded, evidence-sensitive upsert store. Pending actions retain the Run, Workspace, and
+claim without rerunning their producer or consuming an agent slot.
+
+For a complete static-route composition, see [Outcome routing](outcome-routing.md).
 
 Configuration serves one trusted local operator. ACPX-backed agents and sequential pipelines are
 the supported first-release path. `agent.max_turns` is not a supported field and is rejected.

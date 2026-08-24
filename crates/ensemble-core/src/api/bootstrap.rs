@@ -311,9 +311,20 @@ pub(crate) async fn prepare_orchestrator_runtime(
     };
 
     let authorization_event_fields = config.authorization_event_fields();
+    if config.has_operator_attention_actions() && app_state.history_store.is_none() {
+        return Err(crate::error::ConfigError::ConfigWriteRejected {
+            reason: "operator_attention actions require durable history storage".to_string(),
+        }
+        .into());
+    }
     let tracker: Arc<dyn IssueTracker> = Arc::from(create_tracker_for_runtime(&config)?);
     let config = Arc::new(RwLock::new(config));
     tracker.validate_configuration().await?;
+    if config.read().await.has_tracker_comment_actions()
+        && !tracker.supports_idempotent_comment_publication()
+    {
+        return Err(crate::tracker::TrackerError::IdempotentCommentPublicationUnsupported.into());
+    }
     for field in authorization_event_fields {
         tracker.validate_event_evidence(&field).await?;
     }
@@ -748,6 +759,31 @@ mod tests {
             "tracker:\n  kind: todo_file\n  path: TODO.md\npolling:\n  interval_ms: 1234\nconcurrency:\n  max_concurrent_agents: 7\nagents:\n  builder:\n    acpx_agent: claude\n    prompt: Build it.\nsteps:\n  - name: build\n    agent: builder\non_success: Done\non_failure: Failed\n{}",
             workspace
         )
+    }
+
+    #[tokio::test]
+    async fn prepare_runtime_rejects_operator_attention_without_history_store() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("outcome.schema.json"),
+            r#"{"type":"object","required":["summary","remedy"],"properties":{"summary":{"type":"string"},"remedy":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        let yaml = valid_config_yaml(None).replace(
+            "    agent: builder",
+            "    agent: builder\n    output_schema: { path: outcome.schema.json }\n    actions:\n      - type: operator_attention\n        kind: ensemble.review\n        summary: /summary\n        remedy: /remedy",
+        );
+        let state = parse_raw_yaml(temp.path().join("config.yaml"), yaml);
+        assert!(state.active_config.is_some());
+        let mut app = crate::api::test_helpers::app_state_with_document_state(state.clone());
+        app.history_store = None;
+        let error = match prepare_orchestrator_runtime(&app, &state).await {
+            Err(error) => error,
+            Ok(_) => panic!("operator attention requires durable history storage"),
+        };
+        assert!(error
+            .to_string()
+            .contains("operator_attention actions require durable history storage"));
     }
 
     #[tokio::test]

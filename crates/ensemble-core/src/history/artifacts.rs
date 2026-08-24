@@ -20,6 +20,8 @@ pub struct RunArtifacts {
     pub artifact_access_evidence: Vec<ArtifactAccessEvidence>,
     #[serde(default)]
     pub gate_evidence: BTreeMap<String, crate::pipeline::assessment::GateEvidence>,
+    #[serde(default)]
+    pub applied_actions: Vec<crate::pipeline::engine::AppliedStepActionEvidence>,
 }
 
 /// Merge durable pipeline evidence into the public artifact envelope used by
@@ -35,6 +37,7 @@ pub fn with_pipeline_evidence(
         && run.artifact_integrity_violations.is_empty()
         && run.artifact_access_evidence.is_empty()
         && run.gate_evidence.is_empty()
+        && run.applied_action_evidence().is_empty()
     {
         return artifacts;
     }
@@ -52,6 +55,7 @@ pub fn with_pipeline_evidence(
             artifacts.artifact_integrity_violations = run.artifact_integrity_violations.clone();
             artifacts.artifact_access_evidence = run.artifact_access_evidence.clone();
             artifacts.gate_evidence = gate_evidence;
+            artifacts.applied_actions = run.applied_action_evidence();
         }
         None => {
             artifacts = Some(RunArtifacts {
@@ -63,6 +67,7 @@ pub fn with_pipeline_evidence(
                 artifact_integrity_violations: run.artifact_integrity_violations.clone(),
                 artifact_access_evidence: run.artifact_access_evidence.clone(),
                 gate_evidence,
+                applied_actions: run.applied_action_evidence(),
             });
         }
     }

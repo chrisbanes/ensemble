@@ -271,6 +271,7 @@ mod tests {
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
             gate_evidence: Default::default(),
+            applied_actions: Vec::new(),
         });
 
         writer.append(&record).await.unwrap();

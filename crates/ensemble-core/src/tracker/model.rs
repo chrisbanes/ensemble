@@ -109,6 +109,20 @@ pub struct TrackerComment {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+/// A marker-bound tracker comment request. The marker is opaque runtime
+/// identity, allowing capable adapters to reconcile an ambiguous write before
+/// creating another visible comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerCommentPublication {
+    pub marker: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackerCommentReceipt {
+    pub receipt: String,
+}
+
 /// Immutable, adapter-normalized evidence for a configured tracker event.
 /// The runtime intentionally gives field and value no tracker-specific meaning.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
