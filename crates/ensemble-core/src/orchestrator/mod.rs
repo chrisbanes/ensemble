@@ -13528,6 +13528,12 @@ mod tests {
         comments: Arc<RwLock<Vec<(String, String)>>>,
     }
 
+    struct ActionPublicationTracker {
+        issues: Arc<RwLock<Vec<Issue>>>,
+        failures_remaining: AtomicUsize,
+        publications: AtomicUsize,
+    }
+
     #[async_trait]
     impl IssueTracker for CommentRecordingTracker {
         async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
@@ -13565,6 +13571,71 @@ mod tests {
                 .await
                 .push((id.to_string(), body.to_string()));
             Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl IssueTracker for ActionPublicationTracker {
+        async fn fetch_candidate_issues(&self) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self.issues.read().await.clone())
+        }
+
+        async fn fetch_issues_by_states(
+            &self,
+            states: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            let states = states
+                .iter()
+                .map(|state| state.to_lowercase())
+                .collect::<Vec<_>>();
+            Ok(self
+                .issues
+                .read()
+                .await
+                .iter()
+                .filter(|issue| states.contains(&issue.state.to_lowercase()))
+                .cloned()
+                .collect())
+        }
+
+        async fn fetch_issue_states_by_ids(
+            &self,
+            ids: &[String],
+        ) -> Result<Vec<Issue>, TrackerError> {
+            Ok(self
+                .issues
+                .read()
+                .await
+                .iter()
+                .filter(|issue| ids.contains(&issue.id))
+                .cloned()
+                .collect())
+        }
+
+        fn supports_idempotent_comment_publication(&self) -> bool {
+            true
+        }
+
+        async fn publish_comment(
+            &self,
+            _id: &str,
+            publication: crate::tracker::model::TrackerCommentPublication,
+        ) -> Result<crate::tracker::model::TrackerCommentReceipt, TrackerError> {
+            if self
+                .failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(TrackerError::ApiRequestFailed {
+                    reason: "transient action failure".to_string(),
+                });
+            }
+            self.publications.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::tracker::model::TrackerCommentReceipt {
+                receipt: publication.marker,
+            })
         }
     }
 
@@ -14197,6 +14268,10 @@ mod tests {
         });
         let config_dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        workspace_mgr
+            .prepare_workspace("1", "repo#1")
+            .await
+            .unwrap();
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
         let orchestrator = Orchestrator::new(
             Arc::clone(&config),
@@ -17490,6 +17565,110 @@ agent:
   stall_timeout_ms: 300000
 "#;
         parse_config(yaml).unwrap()
+    }
+
+    #[tokio::test]
+    async fn transient_action_failure_retains_owner_output_workspace_and_retries_without_producer_rerun(
+    ) {
+        let mut config = make_config();
+        config.steps[0].actions = vec![crate::config::ensemble::StepActionConfig::TrackerComment {
+            body: "/comment".to_string(),
+        }];
+        let mut downstream = config.steps[0].clone();
+        downstream.name = "downstream".to_string();
+        downstream.depends = Some(vec!["build".to_string()]);
+        downstream.actions.clear();
+        config.steps.push(downstream);
+        let config = Arc::new(RwLock::new(config));
+        let issue = test_issue("action-failure", "Todo");
+        let tracker = Arc::new(ActionPublicationTracker {
+            issues: Arc::new(RwLock::new(vec![issue.clone()])),
+            failures_remaining: AtomicUsize::new(1),
+            publications: AtomicUsize::new(0),
+        });
+        let runner_runs = Arc::new(AtomicUsize::new(0));
+        let runner: Arc<dyn AgentRunner> = Arc::new(CountingRunner {
+            runs: runner_runs.clone(),
+        });
+        let temp = tempfile::TempDir::new().unwrap();
+        let workspace_mgr = WorkspaceManager::new(temp.path(), None).unwrap();
+        workspace_mgr
+            .prepare_workspace(&issue.id, &issue.identifier)
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path(&issue.id);
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Orchestrator::new(
+            Arc::clone(&config),
+            tracker.clone(),
+            runner,
+            workspace_mgr,
+            temp.path(),
+            shutdown_rx,
+        );
+        let mut run = PipelineRun::new(
+            issue.id.clone(),
+            1,
+            build_dag(&config.read().await.steps).unwrap(),
+        );
+        run.start();
+        run.set_ownership_lease(OwnershipLease {
+            id: "lease-action".to_string(),
+            branch_name: None,
+        });
+        run.step_completed(
+            "build",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"comment": "ready"})),
+            },
+            false,
+        );
+        let pending_identity = run.pending_action("build").unwrap().identity.clone();
+        let config_snapshot = Arc::new(config.read().await.clone());
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, config_snapshot);
+        }
+
+        orchestrator.apply_pending_step_actions(&issue.id).await;
+        {
+            let state = orchestrator.state.read().await;
+            let retained = state.get_pipeline_run(&issue.id).unwrap();
+            assert_eq!(
+                retained.step_outputs["build"].output,
+                Some(serde_json::json!({"comment": "ready"}))
+            );
+            assert!(matches!(
+                retained.step_states["build"],
+                StepState::AwaitingActions { .. }
+            ));
+            assert_eq!(
+                retained.pending_action("build").unwrap().identity,
+                pending_identity
+            );
+            assert_eq!(retained.step_states["downstream"], StepState::Pending);
+            assert!(state.is_running(&issue.id));
+            assert!(state.is_claimed(&issue.id));
+        }
+        assert!(workspace_path.exists());
+        assert_eq!(runner_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(tracker.publications.load(Ordering::SeqCst), 0);
+
+        orchestrator.apply_pending_step_actions(&issue.id).await;
+        let state = orchestrator.state.read().await;
+        let recovered = state.get_pipeline_run(&issue.id).unwrap();
+        assert_eq!(
+            recovered.applied_action_evidence()[0].identity,
+            pending_identity
+        );
+        assert_eq!(recovered.step_states["build"], StepState::Passed);
+        assert!(state.is_running(&issue.id));
+        assert!(state.is_claimed(&issue.id));
+        assert_eq!(runner_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(tracker.publications.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -26198,7 +26377,8 @@ agent:
     }
 
     #[tokio::test]
-    async fn terminal_tracker_transition_failure_retains_recoverable_failed_run() {
+    async fn terminal_tracker_transition_failure_retains_applied_action_evidence_claim_and_workspace(
+    ) {
         let config = Arc::new(RwLock::new(make_always_approval_config(1)));
         let tracker: Arc<dyn IssueTracker> = Arc::new(FailingWriteTracker {
             issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
@@ -26211,6 +26391,11 @@ agent:
         });
         let config_dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(config_dir.path(), None).unwrap();
+        workspace_mgr
+            .prepare_workspace("1", "repo#1")
+            .await
+            .unwrap();
+        let workspace_path = workspace_mgr.workspace_path("1");
         let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
 
         let orchestrator = Orchestrator::new(
@@ -26269,7 +26454,13 @@ agent:
                 artifact_integrity_violations: Vec::new(),
                 artifact_access_evidence: Vec::new(),
                 gate_evidence: Default::default(),
-                applied_actions: Vec::new(),
+                applied_actions: vec![crate::pipeline::engine::AppliedStepActionEvidence {
+                    step: "build".to_string(),
+                    identity: "action:terminal".to_string(),
+                    source_output_digest: "digest-terminal".to_string(),
+                    kind: "tracker_comment".to_string(),
+                    receipt: "action:terminal".to_string(),
+                }],
             },
         );
 
@@ -26283,6 +26474,7 @@ agent:
         assert!(state.is_claimed("1"));
         assert!(state.get_pipeline_run("1").is_some());
         assert!(state.artifacts.contains_key("1"));
+        assert!(workspace_path.exists());
         let pending = state.pending_terminal_transitions.get("1").unwrap();
         assert_eq!(pending.transition.target_state, "Failed");
         assert_eq!(pending.transition.outcome, TerminalOutcome::Failed);
@@ -26294,6 +26486,19 @@ agent:
             .as_ref()
             .and_then(|record| record.artifacts.as_ref())
             .is_some());
+        assert_eq!(
+            pending
+                .transition
+                .history_record
+                .as_ref()
+                .unwrap()
+                .artifacts
+                .as_ref()
+                .unwrap()
+                .applied_actions[0]
+                .identity,
+            "action:terminal"
+        );
         drop(state);
 
         let records = orchestrator
