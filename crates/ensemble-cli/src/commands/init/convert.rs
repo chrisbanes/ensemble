@@ -78,6 +78,7 @@ impl From<&PipelineStep> for SetupStep {
             artifact_inputs: step.artifact_inputs.clone(),
             artifact_access: step.artifact_access,
             gate: step.gate.clone(),
+            route: step.route.clone(),
         }
     }
 }

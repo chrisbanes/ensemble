@@ -777,6 +777,7 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
                     crate::config::ensemble::StepKind::Agent => "agent",
                     crate::config::ensemble::StepKind::Synthesis => "synthesis",
                     crate::config::ensemble::StepKind::Gate => "gate",
+                    crate::config::ensemble::StepKind::Route => "route",
                 },
                 "tracker_state": step.tracker_state,
                 "approval": step.approval.as_ref().map(|approval| serde_json::json!({
@@ -789,6 +790,9 @@ fn setup_defaults_from_active_config(config: &EnsembleConfig) -> serde_json::Val
             }
             if let Some(gate) = &step.gate {
                 value["gate"] = serde_json::json!(gate);
+            }
+            if let Some(route) = &step.route {
+                value["route"] = serde_json::json!(route);
             }
             value
         })
@@ -1085,6 +1089,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -1454,6 +1459,7 @@ on_failure: Failed
                     artifact_inputs: Vec::new(),
                     artifact_access: Default::default(),
                     gate: None,
+                    route: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -1499,6 +1505,19 @@ steps:
   - name: build
     agent: builder
     tracker_state: Doing
+  - name: choose
+    kind: route
+    depends: [build]
+    on_failure: halt
+    route:
+      source:
+        step: build
+        pointer: /decision
+      cases:
+        agreement: [accept]
+  - name: accept
+    agent: builder
+    depends: [choose]
 on_success: Done
 on_failure: Failed
 "#
@@ -1559,6 +1578,19 @@ steps:
   - name: build
     agent: builder
     tracker_state: Doing
+  - name: choose
+    kind: route
+    depends: [build]
+    on_failure: halt
+    route:
+      source:
+        step: build
+        pointer: /decision
+      cases:
+        agreement: [accept]
+  - name: accept
+    agent: builder
+    depends: [choose]
 on_success: Done
 on_failure: Failed
 "#,
@@ -1579,6 +1611,10 @@ on_failure: Failed
         assert_eq!(response.defaults["agents"][0]["role"], "builder");
         assert_eq!(response.defaults["agents"][0]["acpx_agent"], "codex");
         assert_eq!(response.defaults["steps"][0]["name"], "build");
+        assert_eq!(
+            response.defaults["steps"][1]["route"]["source"]["step"],
+            "build"
+        );
     }
 
     #[tokio::test]
@@ -1794,6 +1830,7 @@ custom_root:
                     artifact_inputs: Vec::new(),
                     artifact_access: Default::default(),
                     gate: None,
+                    route: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -1903,6 +1940,7 @@ on_failure: Failed
                 depends: Some(vec![]),
                 tracker_state: None,
                 gate: None,
+                route: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
                 max_cycles: 3,
@@ -2057,6 +2095,7 @@ on_failure: Failed
                 depends: Some(vec![]),
                 tracker_state: None,
                 gate: None,
+                route: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
                 max_cycles: 3,
@@ -2229,6 +2268,7 @@ on_failure: Failed
                 depends: Some(vec![]),
                 tracker_state: None,
                 gate: None,
+                route: None,
             }],
             runtime: crate::config::form::GuidedRuntimeForm {
                 max_cycles: 3,
@@ -2351,6 +2391,7 @@ on_failure: Failed
                     artifact_inputs: Vec::new(),
                     artifact_access: Default::default(),
                     gate: None,
+                    route: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -2833,6 +2874,7 @@ on_failure: Failed
                     artifact_inputs: Vec::new(),
                     artifact_access: Default::default(),
                     gate: None,
+                    route: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),
@@ -2935,6 +2977,7 @@ on_failure: Failed
                     artifact_inputs: Vec::new(),
                     artifact_access: Default::default(),
                     gate: None,
+                    route: None,
                 }],
                 on_success: "Done".to_string(),
                 on_failure: "Failed".to_string(),

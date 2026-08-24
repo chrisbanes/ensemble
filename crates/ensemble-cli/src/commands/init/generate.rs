@@ -274,6 +274,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
 
         let yaml = generate_yaml(&tracker, &repos, &agents, &steps, "Done", "Failed");
@@ -328,6 +329,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
             PipelineStep {
                 name: "review".to_string(),
@@ -339,6 +341,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             },
         ];
 
@@ -403,6 +406,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
 
         let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
@@ -430,6 +434,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
         let tracker = TrackerChoice::TodoFile {
             path: PathBuf::from("TODO.md"),
@@ -461,6 +466,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
 
         let yaml = generate_yaml(&tracker, &[], &agents, &steps, "Done", "Failed");
@@ -511,6 +517,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -556,6 +563,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),
@@ -594,6 +602,7 @@ mod tests {
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             }],
             on_success: "Done".to_string(),
             on_failure: "Failed".to_string(),

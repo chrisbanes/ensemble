@@ -47,6 +47,7 @@ fn make_step(name: &str, agent: &str, depends: &[&str]) -> StepConfig {
         artifact_access: Default::default(),
         gate: None,
         authorization: None,
+        route: None,
     }
 }
 

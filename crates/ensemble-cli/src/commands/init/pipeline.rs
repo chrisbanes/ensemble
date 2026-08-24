@@ -1,6 +1,7 @@
 use crate::commands::init::agents::AgentEntry;
 use ensemble_core::config::ensemble::{
-    ArtifactAccess, ArtifactSnapshotConfig, EnsembleConfig, GateConfig, StepConfig, StepKind,
+    ArtifactAccess, ArtifactSnapshotConfig, EnsembleConfig, GateConfig, RouteConfig, StepConfig,
+    StepKind,
 };
 
 #[derive(Debug)]
@@ -14,6 +15,7 @@ pub struct PipelineStep {
     pub artifact_inputs: Vec<String>,
     pub artifact_access: ArtifactAccess,
     pub gate: Option<GateConfig>,
+    pub route: Option<RouteConfig>,
 }
 
 fn pipeline_step_from_config(step: &StepConfig) -> PipelineStep {
@@ -24,6 +26,7 @@ fn pipeline_step_from_config(step: &StepConfig) -> PipelineStep {
             StepKind::Agent => None,
             StepKind::Synthesis => Some("synthesis".to_string()),
             StepKind::Gate => Some("gate".to_string()),
+            StepKind::Route => Some("route".to_string()),
         },
         depends: step.depends.clone(),
         tracker_state: step.tracker_state.clone(),
@@ -31,6 +34,7 @@ fn pipeline_step_from_config(step: &StepConfig) -> PipelineStep {
         artifact_inputs: step.artifact_inputs.clone(),
         artifact_access: step.artifact_access,
         gate: step.gate.clone(),
+        route: step.route.clone(),
     }
 }
 
@@ -38,7 +42,7 @@ fn existing_pipeline_matches_roles(config: &EnsembleConfig, role_names: &[&str])
     config
         .steps
         .iter()
-        .all(|step| step.kind == StepKind::Gate || role_names.contains(&step.agent.as_str()))
+        .all(|step| !step.kind.requires_agent() || role_names.contains(&step.agent.as_str()))
 }
 
 pub fn ask_pipeline(
@@ -93,6 +97,7 @@ pub fn ask_pipeline(
                 artifact_inputs: Vec::new(),
                 artifact_access: Default::default(),
                 gate: None,
+                route: None,
             });
         step.tracker_state = Some(tracker_state.to_string());
         return Ok(vec![step]);
@@ -150,6 +155,7 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
         artifact_inputs: Vec::new(),
         artifact_access: Default::default(),
         gate: None,
+        route: None,
     }];
 
     if role_names.len() >= 2 {
@@ -163,6 +169,7 @@ fn default_pipeline(role_names: &[&str]) -> Vec<PipelineStep> {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         });
     }
 
@@ -204,6 +211,7 @@ fn custom_pipeline(role_names: &[&str]) -> Result<Vec<PipelineStep>, inquire::In
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         });
 
         let more = inquire::Confirm::new("Add another step?")

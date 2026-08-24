@@ -99,6 +99,7 @@ mod tests {
             artifact_inputs: Vec::new(),
             artifact_access: Default::default(),
             gate: None,
+            route: None,
         }];
 
         let request = validation_request(&tracker, &repos, &agents, &steps);

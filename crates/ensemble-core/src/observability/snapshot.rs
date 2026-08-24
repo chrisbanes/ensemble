@@ -4,7 +4,7 @@ use crate::history::artifacts::{RunArtifacts, StepTranscriptArtifact};
 use crate::interaction::store::InteractionStore;
 use crate::observability::capabilities::{IssueActionCapabilities, StepActionCapabilities};
 use crate::orchestrator::state::{FinalizeStatus, OrchestratorState, RateLimitSnapshot};
-use crate::pipeline::engine::{PipelineRun, StepState};
+use crate::pipeline::engine::{PipelineRun, RouteSkipProvenance, StepState};
 use crate::tracker::model::{RetryEntry, RunningEntry};
 use crate::workspace::key::issue_workspace_key;
 use chrono::{DateTime, Utc};
@@ -171,6 +171,8 @@ pub struct WorkflowStepInfo {
     pub state: String,
     pub can_navigate: bool,
     pub capabilities: StepActionCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_provenance: Option<Vec<RouteSkipProvenance>>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -198,6 +200,8 @@ pub struct StepDetailSnapshot {
     pub run_id: Option<String>,
     pub transcript: Option<StepTranscriptArtifact>,
     pub recent_events: Vec<crate::timeline::model::TimelineEventRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_provenance: Option<Vec<RouteSkipProvenance>>,
 }
 
 fn finalize_status_str(status: &FinalizeStatus) -> &'static str {
@@ -325,6 +329,7 @@ pub struct StepDetailState {
     pub dependencies: Vec<String>,
     pub can_navigate: bool,
     pub run_id: Option<String>,
+    pub route_provenance: Option<Vec<RouteSkipProvenance>>,
 }
 
 /// Extract step detail data from state without doing I/O.
@@ -379,6 +384,7 @@ pub fn extract_step_detail_state(
                         StepState::Pending => "pending",
                         StepState::Running { .. } => "running",
                         StepState::Passed => "passed",
+                        StepState::Skipped { .. } => "skipped",
                         StepState::Failed { .. } => "failed",
                         StepState::Errored { .. } => "failed",
                         StepState::BlockedOnHuman { .. } => "waiting",
@@ -401,9 +407,10 @@ pub fn extract_step_detail_state(
                     agent: step_config.agent.clone(),
                     kind: step_config.kind.to_string(),
                     dependencies: step_config.depends.clone().unwrap_or_default(),
-                    can_navigate: pipeline_run
-                        .map(|r| r.step_states.contains_key(step_name))
-                        .unwrap_or(false),
+                    can_navigate: !matches!(step_state, Some(StepState::Skipped { .. }))
+                        && pipeline_run
+                            .map(|r| r.step_states.contains_key(step_name))
+                            .unwrap_or(false),
                     run_id: state
                         .issue_run_ids
                         .get(&issue_id)
@@ -415,6 +422,10 @@ pub fn extract_step_detail_state(
                                 .get(&issue_id)
                                 .and_then(|e| e.run_id.clone())
                         }),
+                    route_provenance: match step_state {
+                        Some(StepState::Skipped { provenance }) => Some(provenance.clone()),
+                        _ => None,
+                    },
                 }
             })
     });
@@ -441,6 +452,7 @@ pub fn extract_step_detail_state(
                     dependencies: step.dependencies.clone(),
                     can_navigate: step.can_navigate,
                     run_id: completed.run_id.clone(),
+                    route_provenance: step.route_provenance.clone(),
                 })
         })
     })
@@ -491,6 +503,7 @@ pub fn build_step_detail_snapshot(
         run_id: detail_state.run_id,
         transcript: None,
         recent_events,
+        route_provenance: detail_state.route_provenance,
     })
 }
 
@@ -675,6 +688,7 @@ pub async fn build_issue_snapshot(
                         StepState::Pending => "pending",
                         StepState::Running { .. } => "running",
                         StepState::Passed => "passed",
+                        StepState::Skipped { .. } => "skipped",
                         StepState::Failed { .. } => "failed",
                         StepState::Errored { .. } => "failed",
                         StepState::BlockedOnHuman { .. } => "waiting",
@@ -687,14 +701,26 @@ pub async fn build_issue_snapshot(
                     kind: step.kind.to_string(),
                     dependencies: step.depends.clone().unwrap_or_default(),
                     state: state_str.to_string(),
-                    can_navigate: pipeline_run
+                    can_navigate: !matches!(
+                        pipeline_run.and_then(|run| run.step_states.get(&step.name)),
+                        Some(StepState::Skipped { .. })
+                    ) && pipeline_run
                         .map(|r| r.step_states.contains_key(&step.name))
                         .unwrap_or(false),
                     capabilities: StepActionCapabilities::for_step(
-                        pipeline_run
+                        !matches!(
+                            pipeline_run.and_then(|run| run.step_states.get(&step.name)),
+                            Some(StepState::Skipped { .. })
+                        ) && pipeline_run
                             .map(|r| r.step_states.contains_key(&step.name))
                             .unwrap_or(false),
                     ),
+                    route_provenance: pipeline_run.and_then(|run| {
+                        match run.step_states.get(&step.name) {
+                            Some(StepState::Skipped { provenance }) => Some(provenance.clone()),
+                            _ => None,
+                        }
+                    }),
                 }
             })
             .collect()
@@ -710,6 +736,7 @@ pub async fn build_issue_snapshot(
                 state: step.state.clone(),
                 can_navigate: step.can_navigate,
                 capabilities: StepActionCapabilities::for_step(step.can_navigate),
+                route_provenance: step.route_provenance.clone(),
             })
             .collect()
     } else {
@@ -1075,6 +1102,7 @@ mod tests {
                     artifact_access: Default::default(),
                     gate: None,
                     authorization: None,
+                    route: None,
                 },
                 StepConfig {
                     name: "review".to_string(),
@@ -1094,6 +1122,7 @@ mod tests {
                     artifact_access: Default::default(),
                     gate: None,
                     authorization: None,
+                    route: None,
                 },
             ],
             on_success: "finalize".to_string(),

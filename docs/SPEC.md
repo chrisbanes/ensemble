@@ -349,6 +349,8 @@ Step states:
   holds the pipeline here until a `approve_gate` or `reject_gate` signal is received.
 - `Passed` — agent exited successfully with a `succeeded` or `concern` result, or was approved at
   an approval gate
+- `Skipped` — successful terminal work excluded by a durable static route selection; it has no
+  agent attempt, output, transcript, or artifact
 - `Rejected` — agent exited successfully with a `failed` result, or was rejected at an approval gate
 - `Failed` — agent crashed, timed out, or errored
 
@@ -977,8 +979,13 @@ Pipeline step definitions forming a DAG. Each step is an object:
 - `kind` (string, optional)
   - Default: `"agent"`.
   - Step kind: `"agent"` for normal steps, `"synthesis"` for steps that merge/adjudicate direct
-    dependency outputs, or `"gate"` for deterministic non-agent assessment evaluation. Synthesis
-    steps must declare `depends` explicitly.
+    dependency outputs, `"gate"` for deterministic non-agent assessment evaluation, or `"route"`
+    for deterministic non-agent branch selection. Synthesis steps must declare `depends` explicitly.
+    A route has one direct source dependency, `on_failure: halt`, no agent, and a `route` mapping
+    whose required string-enum JSON Pointer source is exactly exhausted by case keys; cases
+    partition its direct successors. Unselected work becomes `Skipped`; shared joins run after all
+    dependencies settle when one or more passed. Dynamic graph mutation, loops, predicates,
+    coercion, and default cases are unsupported.
 - `depends` (list of strings, optional)
   - Step names this step depends on. The syntax can describe branches, but it does not guarantee
     parallel execution in the first release.
@@ -1313,7 +1320,9 @@ This section is intentionally redundant so a coding agent can implement the conf
 - `agents.<name>.prompt_template`: path, optional; file reference to prompt template (config-relative)
 - `steps[].name`: string, required; unique step identifier
 - `steps[].agent`: string, required; references a key in `agents`
-- `steps[].kind`: string, optional, default `"agent"`; `"agent"`, `"synthesis"`, or `"gate"`
+- `steps[].kind`: string, optional, default `"agent"`; `"agent"`, `"synthesis"`, `"gate"`, or `"route"`
+- `steps[].route`: required for `kind: route`; `{ source: { step, pointer }, cases }` with an
+  exact, required source string enum and direct-successor case partition
 - `steps[].depends`: list of strings, optional; step dependencies for DAG
 - `steps[].tracker_state`: string, optional; tracker state to write on step entry
 - `steps[].authorization`: optional pre-dispatch contract for agent/synthesis steps only:

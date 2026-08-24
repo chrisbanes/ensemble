@@ -333,6 +333,7 @@ fn issue_snapshot_from_history_record(
                 capabilities: crate::observability::capabilities::StepActionCapabilities::for_step(
                     true,
                 ),
+                route_provenance: None,
             })
             .collect()
     };
@@ -458,6 +459,7 @@ async fn build_step_detail_from_history(
         run_id,
         transcript,
         recent_events,
+        route_provenance: None,
     }))
 }
 
@@ -590,6 +592,7 @@ pub async fn get_step_detail(
         run_id: detail_state.run_id,
         transcript,
         recent_events,
+        route_provenance: detail_state.route_provenance,
     };
 
     (StatusCode::OK, Json(detail)).into_response()

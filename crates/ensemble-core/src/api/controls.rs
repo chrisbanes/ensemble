@@ -423,6 +423,28 @@ pub async fn post_retry(
                     "gates can be retried only through a whole-issue cycle",
                 );
             }
+            Err(ManualStepRetryError::SkippedRetryForbidden {
+                route_step,
+                source_step,
+            }) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "skipped_step_retry_forbidden",
+                    format!("skipped by route '{route_step}'; reset source step '{source_step}' to retry"),
+                );
+            }
+            Err(ManualStepRetryError::FailedRouteRetryForbidden {
+                route_step,
+                source_step,
+            }) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "failed_route_retry_forbidden",
+                    format!(
+                        "route '{route_step}' failed; reset source step '{source_step}' to retry"
+                    ),
+                );
+            }
             Err(ManualStepRetryError::MaxCyclesExhausted) => {
                 return issue_error_response(
                     StatusCode::CONFLICT,
@@ -496,6 +518,18 @@ pub async fn post_retry(
                     format!("issue '{}' is no longer retryable", identifier),
                 );
             }
+            Err(ManualStepRetryError::FailedRouteRetryForbidden {
+                route_step,
+                source_step,
+            }) => {
+                return issue_error_response(
+                    StatusCode::CONFLICT,
+                    "failed_route_retry_forbidden",
+                    format!(
+                        "route '{route_step}' failed; reset source step '{source_step}' to retry"
+                    ),
+                );
+            }
             Err(
                 error @ (ManualStepRetryError::Interaction(_)
                 | ManualStepRetryError::Persistence(_)),
@@ -518,6 +552,7 @@ pub async fn post_retry(
                 ManualStepRetryError::NoPipelineRun
                 | ManualStepRetryError::StepNotFound
                 | ManualStepRetryError::GateRetryForbidden
+                | ManualStepRetryError::SkippedRetryForbidden { .. }
                 | ManualStepRetryError::MaxCyclesExhausted,
             ) => {
                 return issue_error_response(
@@ -1035,6 +1070,7 @@ mod tests {
             artifact_access: Default::default(),
             gate: None,
             authorization: None,
+            route: None,
         }])
         .unwrap();
 
@@ -1592,6 +1628,78 @@ mod tests {
             .unwrap();
         assert_eq!(interaction.status, InteractionStatus::Cancelled);
         assert!(!interaction.awaiting_resume);
+    }
+
+    #[tokio::test]
+    async fn route_retry_controls_name_the_failed_route_and_source() {
+        let state = build_app_state_with_waiting_pipeline();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        state
+            .orchestrator_runtime
+            .install_test_command_sender(sender);
+        tokio::spawn(async move {
+            if let Some(OrchestratorCommand::QueueManualStepRetry { response, .. }) =
+                receiver.recv().await
+            {
+                let _ = response.send(Err(ManualStepRetryError::FailedRouteRetryForbidden {
+                    route_step: "choose_escalation".to_string(),
+                    source_step: "compare_policy".to_string(),
+                }));
+            }
+        });
+
+        let response = post_retry(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("choose_escalation".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "failed_route_retry_forbidden");
+        assert_eq!(
+            body["error"]["message"],
+            "route 'choose_escalation' failed; reset source step 'compare_policy' to retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn skipped_retry_control_names_its_route_and_source() {
+        let state = build_app_state_with_waiting_pipeline();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        state
+            .orchestrator_runtime
+            .install_test_command_sender(sender);
+        tokio::spawn(async move {
+            if let Some(OrchestratorCommand::QueueManualStepRetry { response, .. }) =
+                receiver.recv().await
+            {
+                let _ = response.send(Err(ManualStepRetryError::SkippedRetryForbidden {
+                    route_step: "choose_agreement".to_string(),
+                    source_step: "compare_policy".to_string(),
+                }));
+            }
+        });
+
+        let response = post_retry(
+            State(state),
+            Path("my-repo#42".to_string()),
+            Query(RetryQuery {
+                step: Some("escalate".to_string()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "skipped_step_retry_forbidden");
+        assert_eq!(
+            body["error"]["message"],
+            "skipped by route 'choose_agreement'; reset source step 'compare_policy' to retry"
+        );
     }
 
     #[tokio::test]

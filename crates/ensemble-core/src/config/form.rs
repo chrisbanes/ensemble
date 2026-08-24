@@ -7,7 +7,7 @@
 
 use crate::config::ensemble::{
     state_worker_caps_schema, GateConfig, ModeDefinition, ModelDefinition, PermissionRequestPolicy,
-    PermissionRequestPolicyMode, StepKind,
+    PermissionRequestPolicyMode, RouteConfig, StepKind,
 };
 use crate::config::secrets::{SecretDisplay, SecretEdit};
 use crate::error::ConfigError;
@@ -86,6 +86,8 @@ pub struct GuidedStepForm {
     pub tracker_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<GateConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteConfig>,
 }
 
 /// Runtime configuration in guided form.
@@ -248,6 +250,7 @@ fn config_to_guided_form(config: &crate::config::ensemble::EnsembleConfig) -> Gu
                 depends: s.depends.clone(),
                 tracker_state: s.tracker_state.clone(),
                 gate: s.gate.clone(),
+                route: s.route.clone(),
             })
             .collect(),
         runtime: GuidedRuntimeForm {
@@ -512,6 +515,15 @@ pub fn apply_guided_form(
                     "gate".into(),
                     serde_yaml::to_value(gate)
                         .unwrap_or_else(|error| panic!("failed to serialize gate config: {error}")),
+                );
+            }
+            step_mapping.remove("route");
+            if let Some(route) = &s.route {
+                step_mapping.insert(
+                    "route".into(),
+                    serde_yaml::to_value(route).unwrap_or_else(|error| {
+                        panic!("failed to serialize route config: {error}")
+                    }),
                 );
             }
             step_mapping.into()
@@ -1048,6 +1060,7 @@ on_failure: Failed
                 depends: Some(vec![]),
                 tracker_state: None,
                 gate: None,
+                route: None,
             }],
             runtime: GuidedRuntimeForm {
                 max_cycles: 3,
@@ -1560,6 +1573,59 @@ on_failure: Failed
         assert_eq!(
             step["gate"]["assessment_steps"],
             serde_yaml::to_value(["review"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn guided_form_round_trips_route_source_and_cases() {
+        let raw = r#"
+tracker:
+  kind: todo_file
+agents:
+  builder:
+    acpx_agent: claude
+    prompt: Build it.
+steps:
+  - name: compare
+    agent: builder
+  - name: choose_path
+    kind: route
+    depends: [compare]
+    on_failure: halt
+    route:
+      source:
+        step: compare
+        pointer: /decision
+      cases:
+        agreement: [accept]
+        escalation: [escalate]
+  - name: accept
+    agent: builder
+    depends: [choose_path]
+  - name: escalate
+    agent: builder
+    depends: [choose_path]
+on_success: Done
+on_failure: Failed
+"#;
+
+        let form = extract_guided_form(raw).unwrap();
+        let form_value = serde_json::to_value(&form).unwrap();
+        assert_eq!(form_value["steps"][1]["route"]["source"]["step"], "compare");
+        assert_eq!(
+            form_value["steps"][1]["route"]["cases"]["agreement"],
+            serde_json::json!(["accept"])
+        );
+
+        let merged = apply_guided_form(raw, &form).unwrap();
+        let merged: serde_yaml::Value = serde_yaml::from_str(&merged).unwrap();
+        assert_eq!(
+            merged["steps"][1]["route"]["source"]["pointer"],
+            "/decision"
+        );
+        assert_eq!(
+            merged["steps"][1]["route"]["cases"]["escalation"],
+            serde_yaml::to_value(["escalate"]).unwrap()
         );
     }
 }
