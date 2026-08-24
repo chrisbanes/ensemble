@@ -17625,6 +17625,162 @@ agent:
     }
 
     #[tokio::test]
+    async fn action_acknowledgement_cannot_overwrite_a_parallel_sibling_completion() {
+        let mut config = make_config();
+        config.steps[0].depends = Some(vec![]);
+        config.steps[0].actions = vec![crate::config::ensemble::StepActionConfig::TrackerComment {
+            body: "/comment".to_string(),
+        }];
+        let mut sibling = config.steps[0].clone();
+        sibling.name = "sibling".to_string();
+        sibling.actions.clear();
+        let mut blocker = sibling.clone();
+        blocker.name = "blocker".to_string();
+        config.steps.extend([sibling, blocker]);
+        let config = Arc::new(RwLock::new(config));
+        let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
+            issues: Arc::new(RwLock::new(vec![])),
+        });
+        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
+            delay_ms: 0,
+            observed_commands: None,
+            observed_timeouts: None,
+            cancellation_probe: None,
+        });
+        let dir = tempfile::TempDir::new().unwrap();
+        let (_shutdown_tx, shutdown_rx) = mpsc::channel(1);
+        let orchestrator = Arc::new(Orchestrator::new(
+            Arc::clone(&config),
+            tracker,
+            runner,
+            WorkspaceManager::new(dir.path(), None).unwrap(),
+            dir.path(),
+            shutdown_rx,
+        ));
+        let issue = test_issue("action-race", "Todo");
+        let mut run = PipelineRun::new(
+            issue.id.clone(),
+            1,
+            build_dag(&config.read().await.steps).unwrap(),
+        );
+        run.start();
+        for step in ["build", "sibling", "blocker"] {
+            run.mark_running(step, format!("session-{step}"));
+        }
+        run.step_completed(
+            "build",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(serde_json::json!({"comment": "ready"})),
+            },
+            false,
+        );
+        let pending_identity = run.pending_action("build").unwrap().identity.clone();
+        {
+            let mut state = orchestrator.state.write().await;
+            state.add_running(&issue, Some(1));
+            state.insert_pipeline_run(&issue.id, run, Arc::new(config.read().await.clone()));
+        }
+
+        let action_lock = orchestrator.action_mutation_lock(&issue.id);
+        let action_guard = action_lock.lock().await;
+        let mut action_candidate = orchestrator
+            .state
+            .read()
+            .await
+            .get_pipeline_run(&issue.id)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            action_candidate.acknowledge_action(
+                "build",
+                &pending_identity,
+                StepActionReceipt::TrackerComment {
+                    receipt: pending_identity.clone(),
+                },
+            ),
+            PipelineAction::Waiting
+        );
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let sibling_orchestrator = Arc::clone(&orchestrator);
+        let issue_id = issue.id.clone();
+        let mut sibling_exit = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            sibling_orchestrator
+                .handle_worker_exit(
+                    &issue_id,
+                    "sibling",
+                    WorkerResult::Success {
+                        output: succeeded_step_output(),
+                        approval_request: None,
+                    },
+                )
+                .await;
+        });
+        started_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut sibling_exit)
+                .await
+                .is_err(),
+            "same-issue sibling completion must wait for action acknowledgement publication"
+        );
+
+        let transition = {
+            let state = orchestrator.state.read().await;
+            Orchestrator::transition_input_for_snapshot(
+                &state,
+                &action_candidate,
+                PipelineTransitionTarget {
+                    issue_id: &issue.id,
+                    identifier: &issue.identifier,
+                },
+                PipelineTransitionKind::ActionApplied,
+                Some("build".to_string()),
+                Some(pending_identity.clone()),
+                None,
+            )
+            .unwrap()
+        };
+        orchestrator
+            .pipeline_journal
+            .append(transition)
+            .await
+            .unwrap();
+        orchestrator
+            .state
+            .write()
+            .await
+            .pipeline_runs
+            .insert(issue.id.clone(), action_candidate);
+        drop(action_guard);
+        sibling_exit.await.unwrap();
+
+        let state = orchestrator.state.read().await;
+        let live = state.get_pipeline_run(&issue.id).unwrap();
+        assert_eq!(live.step_states["build"], StepState::Passed);
+        assert_eq!(live.step_states["sibling"], StepState::Passed);
+        assert!(live.step_outputs.contains_key("sibling"));
+        assert_eq!(live.applied_action_evidence()[0].identity, pending_identity);
+        drop(state);
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue(&issue.id)
+            .await
+            .unwrap();
+        let recovered =
+            PipelineRun::from_snapshot(records.last().unwrap().snapshot.clone().unwrap()).unwrap();
+        assert_eq!(recovered.step_states["build"], StepState::Passed);
+        assert_eq!(recovered.step_states["sibling"], StepState::Passed);
+        assert!(recovered.step_outputs.contains_key("sibling"));
+        assert_eq!(
+            recovered.applied_action_evidence()[0].identity,
+            pending_identity
+        );
+    }
+
+    #[tokio::test]
     async fn transient_action_failure_retains_owner_output_workspace_and_retries_without_producer_rerun(
     ) {
         let mut config = make_config();

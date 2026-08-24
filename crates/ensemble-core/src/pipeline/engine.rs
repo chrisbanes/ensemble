@@ -804,46 +804,7 @@ impl PipelineRun {
         }
         match result {
             StepResult::Succeeded | StepResult::Concern { .. } => {
-                match self.gate_check(step_name, approval_requested) {
-                    ApprovalGateCheck::EligibleGating => {
-                        let approval_state = self.approval_state_for(step_name);
-                        self.step_states.insert(
-                            step_name.to_string(),
-                            StepState::AwaitingApproval {
-                                interaction_request_id: None,
-                            },
-                        );
-                        PipelineAction::AwaitingApproval {
-                            step: step_name.to_string(),
-                            approval_state,
-                        }
-                    }
-                    ApprovalGateCheck::UnconfiguredButRequested => {
-                        self.step_states.insert(
-                        step_name.to_string(),
-                        StepState::Errored {
-                            error: format!(
-                                "worker requested approval for step '{step_name}' but it has no approval configuration"
-                            ),
-                        },
-                    );
-                        PipelineAction::Failed {
-                        step: step_name.to_string(),
-                        reason: format!(
-                            "step '{step_name}' has no approval configuration but the worker requested one"
-                        ),
-                    }
-                    }
-                    ApprovalGateCheck::NotRequested => {
-                        self.step_states
-                            .insert(step_name.to_string(), StepState::Passed);
-                        if self.all_passed() {
-                            PipelineAction::Succeeded
-                        } else {
-                            self.find_dispatchable()
-                        }
-                    }
-                }
+                self.finish_completed_step(step_name, approval_requested)
             }
             StepResult::Failed { summary } => {
                 self.step_states.insert(
