@@ -211,7 +211,9 @@ producer, consume worker capacity, change `max_cycles`, or select a new Pipeline
 The public effects are marker-reconciled tracker comments and durable operator-attention upserts.
 Actions are invalid on routes and gates. Route-excluded `Skipped` steps have no output, action,
 receipt, artifact, attempt, or transcript. Retrying a producer clears its own and dependent action
-state together with their outputs.
+receipts. Completed history exposes only bounded applied-action evidence (identity, source digest,
+kind, and receipt); it never includes resolved comment bodies or attention presentation. Retrying
+a producer clears its own and dependent action state together with their outputs.
 
 The checked-in [outcome-routing example](outcome-routing.md) shows this composition with Artifact
 and authorization wiring while keeping its policy labels out of the runtime.

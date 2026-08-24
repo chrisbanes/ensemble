@@ -16553,6 +16553,7 @@ mod tests {
                 artifact_integrity_violations: Vec::new(),
                 artifact_access_evidence: Vec::new(),
                 gate_evidence: Default::default(),
+                applied_actions: Vec::new(),
             });
         let snapshot = {
             let config = orchestrator.config.read().await;
@@ -16734,6 +16735,7 @@ mod tests {
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
             gate_evidence: Default::default(),
+            applied_actions: Vec::new(),
         });
         let snapshot = {
             let config = orchestrator.config.read().await;
@@ -22297,6 +22299,7 @@ agent:
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
                     gate_evidence: Default::default(),
+                    applied_actions: Vec::new(),
                 },
             );
         }
@@ -24051,6 +24054,7 @@ agent:
                     artifact_integrity_violations: Vec::new(),
                     artifact_access_evidence: Vec::new(),
                     gate_evidence: Default::default(),
+                    applied_actions: Vec::new(),
                 },
             );
         }
@@ -26265,6 +26269,7 @@ agent:
                 artifact_integrity_violations: Vec::new(),
                 artifact_access_evidence: Vec::new(),
                 gate_evidence: Default::default(),
+                applied_actions: Vec::new(),
             },
         );
 
@@ -31299,6 +31304,7 @@ agent:
             artifact_integrity_violations: Vec::new(),
             artifact_access_evidence: Vec::new(),
             gate_evidence: Default::default(),
+            applied_actions: Vec::new(),
         };
         let mut state = orchestrator.state.write().await;
         state.add_running(&test_issue("1", "Todo"), None);

@@ -141,6 +141,17 @@ pub enum StepActionState {
     },
 }
 
+/// Bounded completed-history evidence for one acknowledged external effect.
+/// It deliberately excludes resolved action bodies and attention presentation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AppliedStepActionEvidence {
+    pub step: String,
+    pub identity: String,
+    pub source_output_digest: String,
+    pub kind: String,
+    pub receipt: String,
+}
+
 /// Durable evidence that a route selected a case from one validated producer output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RouteDecisionEvidence {
@@ -838,6 +849,42 @@ impl PipelineRun {
                 StepActionState::Pending(action) => Some(action),
                 StepActionState::Applied { .. } => None,
             })
+    }
+
+    /// Project acknowledged effects without exposing action bodies into history.
+    pub fn applied_action_evidence(&self) -> Vec<AppliedStepActionEvidence> {
+        let mut evidence = self
+            .action_states
+            .iter()
+            .flat_map(|(step, states)| {
+                states.iter().filter_map(move |state| match state {
+                    StepActionState::Applied {
+                        identity,
+                        source_output_digest,
+                        receipt,
+                    } => {
+                        let (kind, receipt) = match receipt {
+                            StepActionReceipt::TrackerComment { receipt } => {
+                                ("tracker_comment", receipt)
+                            }
+                            StepActionReceipt::OperatorAttention { receipt } => {
+                                ("operator_attention", receipt)
+                            }
+                        };
+                        Some(AppliedStepActionEvidence {
+                            step: step.clone(),
+                            identity: identity.clone(),
+                            source_output_digest: source_output_digest.clone(),
+                            kind: kind.to_string(),
+                            receipt: receipt.clone(),
+                        })
+                    }
+                    StepActionState::Pending(_) => None,
+                })
+            })
+            .collect::<Vec<_>>();
+        evidence.sort_by(|left, right| left.identity.cmp(&right.identity));
+        evidence
     }
 
     /// Record one durable external-effect receipt and advance the producer only
@@ -4432,6 +4479,55 @@ mod tests {
             },
         };
         assert!(PipelineRun::from_snapshot(snapshot).is_err());
+    }
+
+    #[test]
+    fn later_tracker_selection_starts_a_fresh_pipeline_cycle_with_distinct_action_identity() {
+        let mut producer = make_step("produce", "builder", &[]);
+        producer.actions = vec![StepActionConfig::TrackerComment {
+            body: "/comment".to_string(),
+        }];
+        let mut first = PipelineRun::new(
+            "issue-1".to_string(),
+            1,
+            build_dag(&[producer.clone()]).unwrap(),
+        );
+        first.start();
+        first.step_completed(
+            "produce",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"comment": "first"})),
+            },
+            false,
+        );
+        let first_identity = first.pending_action("produce").unwrap().identity.clone();
+        first.acknowledge_action(
+            "produce",
+            &first_identity,
+            StepActionReceipt::TrackerComment {
+                receipt: "first".to_string(),
+            },
+        );
+
+        let mut later = PipelineRun::new("issue-1".to_string(), 2, build_dag(&[producer]).unwrap());
+        assert!(later.route_decisions.is_empty());
+        assert!(later.action_states.is_empty());
+        later.start();
+        later.step_completed(
+            "produce",
+            StepOutput {
+                result: StepResult::Succeeded,
+                summary: None,
+                output: Some(json!({"comment": "first"})),
+            },
+            false,
+        );
+        assert_ne!(
+            later.pending_action("produce").unwrap().identity,
+            first_identity
+        );
     }
 
     #[test]
