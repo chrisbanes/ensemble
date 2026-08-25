@@ -69,7 +69,7 @@ importers:
         specifier: ^4.0.1
         version: 4.0.1
       shadcn:
-        specifier: ^4.18.0
+        specifier: ^4.19.0
         version: 4.19.0(typescript@7.0.2)
       tailwind-merge:
         specifier: ^3.6.0
