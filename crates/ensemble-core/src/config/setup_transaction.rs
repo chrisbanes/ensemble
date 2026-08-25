@@ -855,7 +855,7 @@ fn normalize_absolute(path: &Path) -> Result<PathBuf, ConfigError> {
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn digest_operations(operations: &[Operation]) -> Result<String, ConfigError> {

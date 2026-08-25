@@ -328,7 +328,7 @@ fn semantic_config_digest(config: &EnsembleConfig) -> Result<String, serde_json:
 
     let value = canonicalize(serde_json::to_value(config)?);
     let bytes = serde_json::to_vec(&value)?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 #[cfg(test)]

@@ -81,7 +81,7 @@ pub fn interaction_attention_fingerprint(interaction: &InteractionRequest) -> St
     });
     let encoded = serde_json::to_vec(&relevant_state)
         .expect("serialized interaction attention state contains only serializable fields");
-    format!("sha256:{:x}", Sha256::digest(encoded))
+    format!("sha256:{}", hex::encode(Sha256::digest(encoded)))
 }
 
 fn interaction_attention_references(interaction: &InteractionRequest) -> Vec<String> {
