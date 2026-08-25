@@ -15955,6 +15955,7 @@ mod tests {
             review_projection: None,
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         };
@@ -16246,6 +16247,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn review_projection_advances_from_an_earlier_frozen_delivery_state() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, delivery) =
+            recovery_test_orchestrator(remote).await;
+        let tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "In review")])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: false,
+        });
+        orchestrator.tracker = tracker.clone();
+        let mut delivery = review_ready_delivery(delivery);
+        delivery.delivery_states.waiting = Some("In review".to_string());
+        delivery.delivery_states.checks_failed = Some("CI failed".to_string());
+        delivery.selected_delivery_state =
+            Some(crate::orchestrator::delivery::DeliveryStateProjection {
+                schema_version: 1,
+                fact: crate::orchestrator::delivery::DeliveryStateFact::ChecksFailed,
+                target: "CI failed".to_string(),
+            });
+        delivery.review_projection.as_mut().unwrap().target = "CI failed".to_string();
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        let applied = orchestrator.advance_review_projection(delivery).await;
+
+        assert_eq!(
+            applied.review_projection.as_ref().unwrap().phase,
+            crate::orchestrator::delivery::ReviewProjectionPhase::Applied
+        );
+        assert_eq!(tracker.writes.load(Ordering::SeqCst), 1);
+        assert_eq!(tracker.issues.read().await[0].state, "CI failed");
+    }
+
+    #[tokio::test]
     async fn review_projection_retains_unreadable_and_unexpected_observations_as_blocked() {
         for (state, fail_reads) in [("In Progress", true), ("Done", false)] {
             let remote = Arc::new(RecoveryDeliveryRemote {
@@ -16418,7 +16463,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_delivery_retry_keeps_attention_until_fresh_open_observation() {
+    async fn closed_delivery_retry_observes_github_pr_with_todo_tracker() {
         let inner = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
             pushes: AtomicUsize::new(0),
@@ -16475,7 +16520,7 @@ mod tests {
             inner: inner.clone(),
             observations: std::sync::Mutex::new(vec![retryable, open]),
         });
-        orchestrator.config.write().await.tracker.kind = "github".to_string();
+        assert_eq!(orchestrator.config.read().await.tracker.kind, "todo_file");
         let workspace = orchestrator
             .workspace_mgr
             .prepare_workspace("1", "repo#1")
@@ -17827,6 +17872,7 @@ mod tests {
             review_projection: None,
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         }

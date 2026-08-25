@@ -91,6 +91,9 @@ pub(crate) struct DeliveryRecord {
     /// Success target copied from the selected pipeline with the delivery policy.
     #[serde(default)]
     pub success_state: Option<String>,
+    /// Failure target copied from the selected pipeline with the delivery policy.
+    #[serde(default)]
+    pub failure_state: Option<String>,
     /// Closure without merge is retained for explicit operator recovery.
     #[serde(default)]
     pub closed_without_merge_parked: bool,
@@ -168,6 +171,19 @@ impl DeliveryStates {
 }
 
 impl DeliveryRecord {
+    fn is_frozen_delivery_state(&self, observed_state: &str) -> bool {
+        [
+            self.delivery_states.waiting.as_deref(),
+            self.delivery_states.checks_failed.as_deref(),
+            self.delivery_states.changes_requested.as_deref(),
+            self.delivery_states.approved.as_deref(),
+            self.delivery_states.closed_without_merge.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|state| state.eq_ignore_ascii_case(observed_state))
+    }
+
     pub(crate) fn delivery_state_fact(&self) -> Option<DeliveryStateFact> {
         if !self.review_ready() {
             return None;
@@ -354,9 +370,10 @@ fn terminal_delivery_outcome(
         .as_deref()
         .or(legacy_success_state)
         .expect("terminal delivery has a frozen or legacy success state");
+    let failure_state = delivery.failure_state.as_deref().or(legacy_failure_state);
     if observed_state.eq_ignore_ascii_case(success_state) {
         (TerminalOutcome::Succeeded, HISTORY_OUTCOME_SUCCEEDED)
-    } else if legacy_failure_state.is_some_and(|state| observed_state.eq_ignore_ascii_case(state)) {
+    } else if failure_state.is_some_and(|state| observed_state.eq_ignore_ascii_case(state)) {
         (TerminalOutcome::Failed, HISTORY_OUTCOME_FAILED)
     } else {
         (TerminalOutcome::Failed, HISTORY_OUTCOME_STOPPED)
@@ -1585,7 +1602,9 @@ impl Orchestrator {
                         continue;
                     }
                 };
-                let legacy_pipeline_config = if delivery.success_state.is_none() {
+                let legacy_pipeline_config = if delivery.success_state.is_none()
+                    || delivery.failure_state.is_none()
+                {
                     match self.current_config_for_snapshot(snapshot.as_ref()).await {
                         Ok(config) => Some(config),
                         Err(error) => {
@@ -1891,9 +1910,6 @@ impl Orchestrator {
         if !self.delivery_remote.supports_delivery_observation() {
             return delivery;
         }
-        if self.config.read().await.tracker.kind != "github" {
-            return delivery;
-        }
         let eligible = delivery.repositories.iter().any(|(_, repository)| {
             repository.mode == DeliveryMode::PushAndPr
                 && repository.phase == DeliveryPhase::Waiting
@@ -2157,7 +2173,7 @@ impl Orchestrator {
             .iter()
             .any(|state| state.eq_ignore_ascii_case(&observed.state));
         drop(config);
-        if terminal || !active {
+        if terminal || (!active && !candidate.is_frozen_delivery_state(&observed.state)) {
             return self
                 .block_review_projection(
                     candidate,
@@ -3220,11 +3236,17 @@ impl Orchestrator {
                 },
             );
         }
-        let (delivery_states, success_state) = {
+        let (delivery_states, success_state, failure_state) = {
             let state = self.state.read().await;
             state
                 .get_pipeline_config(issue_id)
-                .map(|config| (config.delivery_states.clone(), config.on_success.clone()))
+                .map(|config| {
+                    (
+                        config.delivery_states.clone(),
+                        config.on_success.clone(),
+                        config.on_failure.clone(),
+                    )
+                })
                 .unwrap_or_default()
         };
         Ok((
@@ -3237,6 +3259,7 @@ impl Orchestrator {
                 review_projection: None,
                 delivery_states,
                 success_state: Some(success_state),
+                failure_state: Some(failure_state),
                 closed_without_merge_parked: false,
                 selected_delivery_state: None,
             },
@@ -3363,6 +3386,7 @@ mod tests {
             review_projection: None,
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         }
@@ -3470,6 +3494,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_recovery_uses_frozen_failure_state_after_config_drift() {
+        let mut record = delivery_with_observations(vec![observation_facts()]);
+        record.success_state = Some("Frozen done".to_string());
+        record.failure_state = Some("Frozen failed".to_string());
+
+        assert_eq!(
+            terminal_delivery_outcome(
+                &record,
+                "Frozen failed",
+                Some("Reloaded done"),
+                Some("Reloaded failed"),
+            ),
+            (TerminalOutcome::Failed, HISTORY_OUTCOME_FAILED)
+        );
+    }
+
+    #[test]
     fn merged_terminal_handoff_waits_for_an_in_flight_projection() {
         let mut record = delivery_with_observations(vec![observation_facts()]);
         record.review_projection = Some(ReviewProjection {
@@ -3548,6 +3589,7 @@ mod tests {
             review_projection: None,
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         };
@@ -3581,6 +3623,7 @@ mod tests {
             }),
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         };
@@ -3611,6 +3654,7 @@ mod tests {
             }),
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         };
@@ -3649,6 +3693,7 @@ mod tests {
             }),
             delivery_states: Default::default(),
             success_state: None,
+            failure_state: None,
             closed_without_merge_parked: false,
             selected_delivery_state: None,
         };

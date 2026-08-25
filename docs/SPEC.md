@@ -441,7 +441,8 @@ Pipeline run recovery:
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
 - A durable `push_and_pr` repository with an exact pull-request number and URL is observed on the
-  delivery recovery tick through one authenticated, read-only GitHub query. The version-1
+  delivery recovery tick through one authenticated, read-only GitHub query, independently of the
+  configured issue-tracker adapter. The version-1
   observation records complete pull-request facts (head identity, terminal state, mergeability,
   base freshness, checks, and review decision) together with freshness, retry, and typed
   non-secret failure metadata. A successful read replaces all facts atomically; transient reads
@@ -458,8 +459,9 @@ Pipeline run recovery:
   the configured failure state, or stopped for any other terminal state. Release removes the owned
   workspace and durable delivery claim before another candidate can dispatch.
 - Optional selected-pipeline `delivery_states` map durable delivery facts to opaque non-terminal
-  tracker states. The policy and selected fact/target are frozen in the delivery record; omitted
-  facts do not write the tracker. `merged: on_success` uses the existing durable terminal-success
+  tracker states. The policy, selected fact/target, and terminal success/failure targets are frozen
+  in the delivery record; omitted facts do not write the tracker. `merged: on_success` uses the
+  existing durable terminal-success
   transition. `closed_without_merge` retains the claim and durable operator attention for explicit
   recovery. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
   `in_flight` before the tracker write and applies only after an exact target-state read. Read
