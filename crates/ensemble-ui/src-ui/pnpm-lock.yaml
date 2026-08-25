@@ -106,7 +106,7 @@ importers:
         specifier: ^30.0.1
         version: 30.0.1
       orval:
-        specifier: ^8.24.0
+        specifier: ^8.26.0
         version: 8.26.0(typescript@7.0.2)
       typescript:
         specifier: ^7.0.2
