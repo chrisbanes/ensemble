@@ -194,7 +194,7 @@ pub struct PipelineTransitionRecord {
     #[serde(default)]
     pub terminal_transition: Option<PendingTerminalTransition>,
     #[serde(default)]
-    pub(crate) delivery: Option<DeliveryRecord>,
+    pub(crate) delivery: Option<Box<DeliveryRecord>>,
     pub written_at: DateTime<Utc>,
 }
 
@@ -226,7 +226,7 @@ pub struct PipelineTransitionInput {
     pub retry: Option<RetryEntry>,
     pub snapshot: Option<PipelineRunSnapshot>,
     pub terminal_transition: Option<PendingTerminalTransition>,
-    pub(crate) delivery: Option<DeliveryRecord>,
+    pub(crate) delivery: Option<Box<DeliveryRecord>>,
 }
 
 #[derive(Debug, Clone)]
@@ -753,6 +753,10 @@ mod tests {
             .collect(),
             terminal_history: None,
             review_projection: None,
+            delivery_states: Default::default(),
+            success_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
 
         journal
@@ -767,7 +771,7 @@ mod tests {
                 retry: None,
                 snapshot: None,
                 terminal_transition: None,
-                delivery: Some(delivery.clone()),
+                delivery: Some(Box::new(delivery.clone())),
             })
             .await
             .unwrap();
@@ -777,7 +781,7 @@ mod tests {
             .await
             .unwrap()
             .expect("delivery remains a live owner");
-        assert_eq!(latest.delivery, Some(delivery));
+        assert_eq!(latest.delivery, Some(Box::new(delivery)));
     }
 
     #[tokio::test]

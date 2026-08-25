@@ -9322,7 +9322,7 @@ impl Orchestrator {
                 .issue_run_ids
                 .insert(record.issue_id.clone(), delivery.run_id.clone());
             state.set_finalize_state(&record.issue_id, finalize);
-            state.delivery.insert(record.issue_id.clone(), delivery);
+            state.delivery.insert(record.issue_id.clone(), *delivery);
             return Ok(());
         }
         let snapshot = record
@@ -13214,6 +13214,10 @@ mod tests {
         InteractionKind, InteractionRequest, InteractionResponse, InteractionResumeStrategy,
         InteractionStatus, InteractionStore,
     };
+    use crate::orchestrator::delivery_observation::{
+        BaseFreshness, CheckSummary, DeliveryObservation, DeliveryObservationFacts, Mergeability,
+        PullRequestTerminalState, ReviewDecision,
+    };
     use crate::orchestrator::pipeline_journal::{PipelineTransitionInput, PipelineTransitionKind};
     use crate::orchestrator::retry::current_time_ms;
     use crate::pipeline::verdict::{StepOutput, StepResult};
@@ -15139,7 +15143,6 @@ mod tests {
                     enabled: true,
                     mode: FinalizeMode::Push,
                     approval_required: true,
-                    review_state: None,
                 },
             },
         )
@@ -15246,8 +15249,9 @@ mod tests {
         let (repo_temp, mut repo_config) = create_finalize_repo().await;
         repo_config.finalize.mode = FinalizeMode::PushAndPr;
         repo_config.finalize.approval_required = false;
-        repo_config.finalize.review_state = Some("In review".to_string());
-        let config = Arc::new(RwLock::new(make_config()));
+        let mut config = make_config();
+        config.delivery_states.waiting = Some("In review".to_string());
+        let config = Arc::new(RwLock::new(config));
         let issue = test_issue("1", "Todo");
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![issue.clone()])),
@@ -15317,10 +15321,14 @@ mod tests {
         );
         assert_eq!(delivery.repositories["source-repo"].pr_number, Some(420));
         assert!(delivery.terminal_history.is_some());
-        assert_eq!(
-            delivery.review_projection.as_ref().unwrap().phase,
-            crate::orchestrator::delivery::ReviewProjectionPhase::Applied
-        );
+        assert!(matches!(
+            delivery.review_projection.as_ref(),
+            Some(crate::orchestrator::delivery::ReviewProjection {
+                target,
+                phase: crate::orchestrator::delivery::ReviewProjectionPhase::Applied,
+                ..
+            }) if target == "In review"
+        ));
         assert!(!state.is_running(&issue.id));
         assert!(state.is_claimed(&issue.id));
         assert!(!state.completed.contains_key(&issue.id));
@@ -15603,6 +15611,13 @@ mod tests {
         identity_failures: AtomicUsize,
     }
 
+    struct SequencedObservationRemote {
+        inner: Arc<RecoveryDeliveryRemote>,
+        observations: std::sync::Mutex<
+            Vec<crate::orchestrator::delivery_observation::DeliveryObservationRead>,
+        >,
+    }
+
     struct ReviewProjectionTracker {
         issues: Arc<RwLock<Vec<Issue>>>,
         journal: PipelineRunJournal,
@@ -15754,6 +15769,66 @@ mod tests {
     }
 
     #[async_trait]
+    impl crate::orchestrator::delivery::DeliveryRemote for SequencedObservationRemote {
+        fn supports_delivery_observation(&self) -> bool {
+            true
+        }
+        async fn local_identity(
+            &self,
+            path: &Path,
+        ) -> Result<crate::orchestrator::delivery::LocalRepositoryIdentity, String> {
+            self.inner.local_identity(path).await
+        }
+        async fn remote_head(
+            &self,
+            path: &Path,
+            remote: &str,
+            head: &str,
+        ) -> Result<Option<String>, String> {
+            self.inner.remote_head(path, remote, head).await
+        }
+        async fn push(
+            &self,
+            path: &Path,
+            remote: &str,
+            head: &str,
+            sha: &str,
+        ) -> Result<(), String> {
+            self.inner.push(path, remote, head, sha).await
+        }
+        async fn list_pull_requests(
+            &self,
+            path: &Path,
+            key: &str,
+            policy: Option<&crate::orchestrator::delivery::PullRequestAdoptionPolicy>,
+        ) -> Result<Vec<crate::orchestrator::delivery::RemotePullRequest>, String> {
+            self.inner.list_pull_requests(path, key, policy).await
+        }
+        async fn create_pull_request(
+            &self,
+            path: &Path,
+            base: &str,
+            head: &str,
+            marker: &str,
+        ) -> Result<(), String> {
+            self.inner
+                .create_pull_request(path, base, head, marker)
+                .await
+        }
+        async fn observe_pull_request(
+            &self,
+            _path: &Path,
+            _number: u64,
+            _url: &str,
+            _base: &str,
+            _head: &str,
+            _remote: &str,
+        ) -> crate::orchestrator::delivery_observation::DeliveryObservationRead {
+            self.observations.lock().unwrap().remove(0)
+        }
+    }
+
+    #[async_trait]
     impl crate::orchestrator::delivery::DeliveryRemote for FailOnceIdentityRemote {
         async fn local_identity(
             &self,
@@ -15878,6 +15953,10 @@ mod tests {
             .collect(),
             terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
+            delivery_states: Default::default(),
+            success_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
         orchestrator
             .persist_delivery_record(&delivery, None)
@@ -16062,6 +16141,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merged_delivery_without_durable_history_retains_ownership() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote).await;
+        let tracker = Arc::new(ReviewProjectionTracker {
+            issues: Arc::new(RwLock::new(vec![test_issue("1", "In Progress")])),
+            journal: orchestrator.pipeline_journal.clone(),
+            issue_id: "1".to_string(),
+            writes: AtomicUsize::new(0),
+            saw_in_flight_before_write: AtomicBool::new(false),
+            fail_reads: false,
+        });
+        orchestrator.tracker = tracker.clone();
+        orchestrator.config.write().await.delivery_states.merged = Some("on_success".to_string());
+        orchestrator.config.write().await.on_success = "Done".to_string();
+
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.observation = Some(DeliveryObservation::successful(
+            DeliveryObservationFacts {
+                pull_request_number: 420,
+                pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+                head_sha: repository.local_sha.clone(),
+                matches_delivery: true,
+                head_diverged: false,
+                terminal_state: PullRequestTerminalState::Merged,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![],
+                check_summary: CheckSummary::Passing,
+                review_decision: ReviewDecision::Approved,
+            },
+            Utc::now(),
+        ));
+        delivery.terminal_history = None;
+        delivery.review_projection = None;
+        delivery.delivery_states.merged = Some("on_success".to_string());
+        delivery.success_state = Some("Done".to_string());
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+
+        orchestrator.reconcile_and_recover_deliveries().await;
+
+        let state = orchestrator.state.read().await;
+        assert!(state.delivery.contains_key("1"));
+        assert!(state.is_claimed("1"));
+        assert!(!state.pending_terminal_transitions.contains_key("1"));
+        assert!(!state.completed.contains_key("1"));
+        drop(state);
+        assert_eq!(tracker.writes.load(Ordering::SeqCst), 0);
+        assert!(workspace.path().exists());
+        let records = orchestrator
+            .pipeline_journal
+            .read_records_for_issue("1")
+            .await
+            .unwrap();
+        assert!(records
+            .iter()
+            .all(|record| record.kind != PipelineTransitionKind::Released));
+    }
+
+    #[tokio::test]
     async fn review_projection_adopts_already_target_state_without_write() {
         let remote = Arc::new(RecoveryDeliveryRemote {
             pull_requests: std::sync::Mutex::new(Vec::new()),
@@ -16176,6 +16326,188 @@ mod tests {
         );
         assert!(projection.diagnostic.is_none());
         assert_eq!(state.finalize["1"].status, FinalizeStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn finalize_retry_requeues_a_closed_delivery_without_republishing() {
+        let remote = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(remote.clone()).await;
+        let reporter = orchestrator.attention_reporter.clone().unwrap();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.observation = Some(DeliveryObservation::successful(
+            DeliveryObservationFacts {
+                pull_request_number: 420,
+                pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+                head_sha: repository.local_sha.clone(),
+                matches_delivery: true,
+                head_diverged: false,
+                terminal_state: PullRequestTerminalState::ClosedWithoutMerge,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![],
+                check_summary: CheckSummary::Passing,
+                review_decision: ReviewDecision::Approved,
+            },
+            Utc::now(),
+        ));
+        delivery.closed_without_merge_parked = false;
+        delivery.review_projection = Some(crate::orchestrator::delivery::ReviewProjection {
+            target: "Closed without merge".to_string(),
+            repositories: vec!["source-repo".to_string()],
+            phase: crate::orchestrator::delivery::ReviewProjectionPhase::Applied,
+            diagnostic: None,
+            last_observed_state: Some("Closed without merge".to_string()),
+            history_record: None,
+            history_persisted: false,
+        });
+        let delivery = orchestrator.park_closed_without_merge(delivery).await;
+        assert_eq!(reporter.items_for_subject("1").await.unwrap().len(), 1);
+
+        assert_eq!(
+            orchestrator
+                .retry_finalize_delivery("1", &delivery.identifier)
+                .await,
+            Ok(())
+        );
+
+        let retained = orchestrator.state.read().await.delivery["1"].clone();
+        let repository = &retained.repositories["source-repo"];
+        assert!(retained.closed_without_merge_parked);
+        assert!(retained.review_projection.is_none());
+        assert!(retained.selected_delivery_state.is_none());
+        assert!(repository.observation.is_none());
+        assert_eq!(repository.pr_number, Some(420));
+        assert_eq!(repository.phase, DeliveryPhase::Waiting);
+        assert_eq!(remote.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(remote.lists.load(Ordering::SeqCst), 0);
+
+        let mut fresh = retained;
+        fresh
+            .repositories
+            .get_mut("source-repo")
+            .unwrap()
+            .observation = Some(DeliveryObservation::successful(
+            DeliveryObservationFacts {
+                pull_request_number: 420,
+                pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+                head_sha: "0123456789abcdef".to_string(),
+                matches_delivery: true,
+                head_diverged: false,
+                terminal_state: PullRequestTerminalState::Open,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![],
+                check_summary: CheckSummary::Passing,
+                review_decision: ReviewDecision::ReviewRequired,
+            },
+            Utc::now(),
+        ));
+        let resolved = orchestrator.clear_closed_without_merge_park(fresh).await;
+        assert!(!resolved.closed_without_merge_parked);
+        assert!(reporter.items_for_subject("1").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_delivery_retry_keeps_attention_until_fresh_open_observation() {
+        let inner = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(inner.clone()).await;
+        let reporter = orchestrator.attention_reporter.clone().unwrap();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.observation = Some(DeliveryObservation::successful(
+            DeliveryObservationFacts {
+                pull_request_number: 420,
+                pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+                head_sha: repository.local_sha.clone(),
+                matches_delivery: true,
+                head_diverged: false,
+                terminal_state: PullRequestTerminalState::ClosedWithoutMerge,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![],
+                check_summary: CheckSummary::Passing,
+                review_decision: ReviewDecision::Approved,
+            },
+            Utc::now(),
+        ));
+        let delivery = orchestrator.park_closed_without_merge(delivery).await;
+        assert_eq!(reporter.items_for_subject("1").await.unwrap().len(), 1);
+        orchestrator
+            .retry_finalize_delivery("1", &delivery.identifier)
+            .await
+            .unwrap();
+        let retryable = crate::orchestrator::delivery_observation::DeliveryObservationRead::Retryable(
+            crate::orchestrator::delivery_observation::DeliveryObservationFailure::new(crate::orchestrator::delivery_observation::DeliveryObservationFailureKind::Transport, "retry"));
+        let open = crate::orchestrator::delivery_observation::DeliveryObservationRead::Observed(
+            DeliveryObservationFacts {
+                pull_request_number: 420,
+                pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+                head_sha: "0123456789abcdef".to_string(),
+                matches_delivery: true,
+                head_diverged: false,
+                terminal_state: PullRequestTerminalState::Open,
+                mergeability: Mergeability::Mergeable,
+                base_freshness: BaseFreshness::UpToDate,
+                checks: vec![],
+                check_summary: CheckSummary::Passing,
+                review_decision: ReviewDecision::ReviewRequired,
+            },
+        );
+        orchestrator.delivery_remote = Arc::new(SequencedObservationRemote {
+            inner: inner.clone(),
+            observations: std::sync::Mutex::new(vec![retryable, open]),
+        });
+        orchestrator.config.write().await.tracker.kind = "github".to_string();
+        let workspace = orchestrator
+            .workspace_mgr
+            .prepare_workspace("1", "repo#1")
+            .await
+            .unwrap();
+        assert!(workspace.worktrees.contains_key("source-repo"));
+        orchestrator.reconcile_and_recover_deliveries().await;
+        assert!(orchestrator.state.read().await.delivery["1"].closed_without_merge_parked);
+        assert_eq!(reporter.items_for_subject("1").await.unwrap().len(), 1);
+        let mut due = orchestrator.state.read().await.delivery["1"].clone();
+        due.repositories
+            .get_mut("source-repo")
+            .unwrap()
+            .observation
+            .as_mut()
+            .unwrap()
+            .retry
+            .as_mut()
+            .unwrap()
+            .due_at = Utc::now();
+        orchestrator
+            .persist_delivery_record(&due, None)
+            .await
+            .unwrap();
+        orchestrator.reconcile_and_recover_deliveries().await;
+        let retained = orchestrator.state.read().await.delivery["1"].clone();
+        assert!(!retained.closed_without_merge_parked);
+        assert_eq!(retained.repositories["source-repo"].pr_number, Some(420));
+        assert!(reporter.items_for_subject("1").await.unwrap().is_empty());
+        assert_eq!(inner.pushes.load(Ordering::SeqCst), 0);
+        assert_eq!(inner.creates.load(Ordering::SeqCst), 0);
+        assert_eq!(inner.lists.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -17493,6 +17825,10 @@ mod tests {
             .collect(),
             terminal_history: Some(Box::new(review_projection_history())),
             review_projection: None,
+            delivery_states: Default::default(),
+            success_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         }
     }
 
@@ -28487,6 +28823,7 @@ agent:
                 steps: config.steps.clone(),
                 on_success: config.on_success.clone(),
                 on_failure: config.on_failure.clone(),
+                delivery_states: Default::default(),
             },
         );
         config.scheduler = SchedulerConfig {

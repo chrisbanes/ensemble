@@ -1,4 +1,6 @@
-use crate::config::ensemble::{read_dotenv, validate_config, EnsembleConfig};
+use crate::config::ensemble::{
+    read_dotenv, reject_removed_finalize_review_state, validate_config, EnsembleConfig,
+};
 use crate::error::{ConfigError, PipelineError};
 use crate::pipeline::dag::build_dag;
 use serde::{Deserialize, Serialize};
@@ -110,10 +112,12 @@ pub(crate) fn parse_raw_yaml_with_dotenv(
             let typed: Result<EnsembleConfig, ConfigError> =
                 crate::config::ensemble::reject_unsupported_agent_max_turns(&document).and_then(
                     |_| {
-                        serde_yaml::from_value(document.clone()).map_err(|e| {
-                            ConfigError::ConfigParseError {
-                                reason: e.to_string(),
-                            }
+                        reject_removed_finalize_review_state(&document).and_then(|_| {
+                            serde_yaml::from_value(document.clone()).map_err(|e| {
+                                ConfigError::ConfigParseError {
+                                    reason: e.to_string(),
+                                }
+                            })
                         })
                     },
                 );
@@ -191,6 +195,27 @@ pub fn validate_document(document: &serde_yaml::Value) -> DraftValidationReport 
     let mut seen_sections = HashSet::new();
 
     if let Some(mapping) = document.as_mapping() {
+        if mapping
+            .get("repos")
+            .and_then(serde_yaml::Value::as_sequence)
+            .is_some_and(|repositories| {
+                repositories.iter().any(|repository| {
+                    repository
+                        .as_mapping()
+                        .and_then(|repository| repository.get("finalize"))
+                        .and_then(serde_yaml::Value::as_mapping)
+                        .is_some_and(|finalize| finalize.contains_key("review_state"))
+                })
+            })
+        {
+            issues.push(ValidationIssue {
+                kind: ValidationIssueKind::Config,
+                message: "repos[].finalize.review_state has been removed; migrate it to delivery_states.waiting".to_string(),
+                section: "workflow".to_string(),
+                field: Some("delivery_states.waiting".to_string()),
+                path: Some("delivery_states.waiting".to_string()),
+            });
+        }
         // Validate presence of required top-level sections
         let selected_mode = mapping
             .get("workflow_selection")

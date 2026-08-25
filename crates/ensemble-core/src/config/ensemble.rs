@@ -24,6 +24,9 @@ pub struct EnsembleConfig {
     pub on_success: String,
     #[serde(default)]
     pub on_failure: String,
+    /// Optional tracker-state projections for durable delivery facts in the legacy pipeline.
+    #[serde(default)]
+    pub delivery_states: DeliveryStates,
     /// Neutral named pipelines used only when `workflow_selection` is non-empty.
     #[serde(default)]
     pub pipelines: BTreeMap<String, PipelineConfig>,
@@ -58,6 +61,26 @@ pub struct PipelineConfig {
     pub steps: Vec<StepConfig>,
     pub on_success: String,
     pub on_failure: String,
+    #[serde(default)]
+    pub delivery_states: DeliveryStates,
+}
+
+/// Optional non-terminal tracker-state targets for durable delivery facts.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DeliveryStates {
+    #[serde(default)]
+    pub waiting: Option<String>,
+    #[serde(default)]
+    pub checks_failed: Option<String>,
+    #[serde(default)]
+    pub changes_requested: Option<String>,
+    #[serde(default)]
+    pub approved: Option<String>,
+    #[serde(default)]
+    pub closed_without_merge: Option<String>,
+    #[serde(default)]
+    pub merged: Option<String>,
 }
 
 /// Scheduler configuration for selected workflows.
@@ -1255,6 +1278,9 @@ impl EnsembleConfig {
         effective.steps = pipeline.steps.clone();
         effective.on_success.clone_from(&pipeline.on_success);
         effective.on_failure.clone_from(&pipeline.on_failure);
+        effective
+            .delivery_states
+            .clone_from(&pipeline.delivery_states);
         Ok(effective)
     }
 
@@ -1465,6 +1491,7 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
     reject_unsupported_agent_max_turns(&value)?;
     reject_legacy_agent_permission_policy(&value)?;
     reject_legacy_notion_tracker_keys(&value)?;
+    reject_removed_finalize_review_state(&value)?;
     let config: EnsembleConfig =
         serde_yaml::from_value(value).map_err(|e| crate::error::ConfigError::ConfigParseError {
             reason: e.to_string(),
@@ -1476,6 +1503,33 @@ pub fn parse_config(yaml: &str) -> Result<EnsembleConfig, crate::error::ConfigEr
         }
     })?;
     Ok(config)
+}
+
+pub(crate) fn reject_removed_finalize_review_state(
+    value: &serde_yaml::Value,
+) -> Result<(), crate::error::ConfigError> {
+    let Some(repositories) = value
+        .as_mapping()
+        .and_then(|root| root.get("repos"))
+        .and_then(serde_yaml::Value::as_sequence)
+    else {
+        return Ok(());
+    };
+
+    if repositories.iter().any(|repository| {
+        repository
+            .as_mapping()
+            .and_then(|repository| repository.get("finalize"))
+            .and_then(serde_yaml::Value::as_mapping)
+            .is_some_and(|finalize| finalize.contains_key("review_state"))
+    }) {
+        return Err(crate::error::ConfigError::ConfigParseError {
+            reason: "repos[].finalize.review_state has been removed; migrate it to delivery_states.waiting"
+                .to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_producer_declarations(config: &EnsembleConfig) -> Result<(), PipelineError> {
@@ -1899,95 +1953,76 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         }
     }
 
-    let effective_pipelines: Vec<(&str, &[StepConfig], &str, &str)> = if selected_mode {
-        config
-            .pipelines
-            .iter()
-            .map(|(name, pipeline)| {
-                (
-                    name.as_str(),
-                    pipeline.steps.as_slice(),
-                    pipeline.on_success.as_str(),
-                    pipeline.on_failure.as_str(),
-                )
-            })
-            .collect()
-    } else {
-        vec![(
-            "<legacy>",
-            config.steps.as_slice(),
-            config.on_success.as_str(),
-            config.on_failure.as_str(),
-        )]
-    };
+    let effective_pipelines: Vec<(&str, &[StepConfig], &str, &str, &DeliveryStates)> =
+        if selected_mode {
+            config
+                .pipelines
+                .iter()
+                .map(|(name, pipeline)| {
+                    (
+                        name.as_str(),
+                        pipeline.steps.as_slice(),
+                        pipeline.on_success.as_str(),
+                        pipeline.on_failure.as_str(),
+                        &pipeline.delivery_states,
+                    )
+                })
+                .collect()
+        } else {
+            vec![(
+                "<legacy>",
+                config.steps.as_slice(),
+                config.on_success.as_str(),
+                config.on_failure.as_str(),
+                &config.delivery_states,
+            )]
+        };
 
-    for (name, _, on_success, on_failure) in &effective_pipelines {
+    for (name, _, on_success, on_failure, delivery_states) in &effective_pipelines {
         if name.trim().is_empty() || on_success.trim().is_empty() || on_failure.trim().is_empty() {
             return Err(PipelineError::InvalidNamedPipeline {
                 pipeline: (*name).to_string(),
                 reason: "name, on_success, and on_failure must be non-blank".to_string(),
             });
         }
-    }
-
-    let mut review_state: Option<&str> = None;
-    for (index, repo) in config.repos.iter().enumerate() {
-        let Some(target) = repo.finalize.review_state.as_deref() else {
-            continue;
-        };
-        let repo_key = repository_key(repo, index);
-        if target.trim().is_empty() {
-            return Err(PipelineError::InvalidFinalizeConfig {
-                repo: repo_key,
-                reason: "review_state must not be empty".to_string(),
-            });
-        }
-        if repo.finalize.mode != crate::workspace::finalize::FinalizeMode::PushAndPr {
-            return Err(PipelineError::InvalidFinalizeConfig {
-                repo: repo_key,
-                reason: "review_state is valid only with push_and_pr finalization".to_string(),
-            });
-        }
-        if effective_pipelines
-            .iter()
-            .any(|(_, _, on_success, _)| target.eq_ignore_ascii_case(on_success))
-        {
-            return Err(PipelineError::InvalidFinalizeConfig {
-                repo: repo_key,
-                reason: "review_state must not equal on_success".to_string(),
-            });
-        }
-        if config
-            .tracker
-            .terminal_states
-            .iter()
-            .any(|state| target.eq_ignore_ascii_case(state))
-        {
-            return Err(PipelineError::InvalidFinalizeConfig {
-                repo: repo_key,
-                reason: "review_state must not be a configured terminal state".to_string(),
-            });
-        }
-        if let Some(existing) = review_state {
-            if !target.eq_ignore_ascii_case(existing) {
-                return Err(PipelineError::InvalidFinalizeConfig {
-                    repo: repo_key,
-                    reason: "all review_state values must use the same value".to_string(),
+        for (fact, target) in [
+            ("waiting", &delivery_states.waiting),
+            ("checks_failed", &delivery_states.checks_failed),
+            ("changes_requested", &delivery_states.changes_requested),
+            ("approved", &delivery_states.approved),
+            (
+                "closed_without_merge",
+                &delivery_states.closed_without_merge,
+            ),
+        ] {
+            let Some(target) = target else {
+                continue;
+            };
+            if target.trim().is_empty() {
+                return Err(PipelineError::InvalidNamedPipeline {
+                    pipeline: (*name).to_string(),
+                    reason: format!("delivery_states.{fact} must not be blank"),
                 });
             }
-        } else {
-            review_state = Some(target);
-        }
-    }
-    if review_state.is_some() {
-        for (index, repo) in config.repos.iter().enumerate() {
-            if repo.finalize.mode == crate::workspace::finalize::FinalizeMode::PushAndPr
-                && repo.finalize.review_state.is_none()
+            if config
+                .tracker
+                .terminal_states
+                .iter()
+                .any(|state| target.eq_ignore_ascii_case(state))
             {
-                return Err(PipelineError::InvalidFinalizeConfig {
-                    repo: repository_key(repo, index),
-                    reason: "all push_and_pr repositories must opt in to the review_state"
-                        .to_string(),
+                return Err(PipelineError::InvalidNamedPipeline {
+                    pipeline: (*name).to_string(),
+                    reason: format!(
+                        "delivery_states.{fact} must not be a configured terminal state"
+                    ),
+                });
+            }
+        }
+        if let Some(target) = &delivery_states.merged {
+            if target != "on_success" {
+                return Err(PipelineError::InvalidNamedPipeline {
+                    pipeline: (*name).to_string(),
+                    reason: "delivery_states.merged must equal on_success".to_string(),
                 });
             }
         }
@@ -2093,7 +2128,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         validate_name(&mut acceptance_names, "handoff", &rule.name)?;
         if effective_pipelines
             .iter()
-            .any(|(_, steps, _, _)| !steps.iter().any(|step| step.name == rule.step))
+            .any(|(_, steps, _, _, _)| !steps.iter().any(|step| step.name == rule.step))
         {
             return Err(PipelineError::InvalidAcceptanceRequirement {
                 kind: "handoff".to_string(),
@@ -2258,7 +2293,7 @@ pub fn validate_config(config: &EnsembleConfig) -> Result<(), PipelineError> {
         });
     }
 
-    for (pipeline_name, steps, _, _) in effective_pipelines {
+    for (pipeline_name, steps, _, _, _) in effective_pipelines {
         let mut seen_names = std::collections::HashSet::new();
         for step in steps {
             if !seen_names.insert(&step.name) {
@@ -3206,7 +3241,11 @@ on_failure: Failed
             branch("escalate"),
         ];
 
-        assert!(validate_config(&config).is_ok());
+        assert!(
+            validate_config(&config).is_ok(),
+            "{:?}",
+            validate_config(&config)
+        );
         let serialized = serde_yaml::to_string(&config).unwrap();
         assert!(serialized.contains("kind: route"));
         assert!(serialized.contains("pointer: /decision"));
@@ -3312,7 +3351,11 @@ on_failure: Failed
             agent("escalation_join", vec!["escalate", "escalation_review"]),
         ];
 
-        assert!(validate_config(&config).is_ok());
+        assert!(
+            validate_config(&config).is_ok(),
+            "{:?}",
+            validate_config(&config)
+        );
 
         config.steps[0].output_schema.as_mut().unwrap().schema = Some(serde_json::json!({
             "type": "object",
@@ -3899,28 +3942,22 @@ workflow_selection:
     }
 
     #[test]
-    fn review_state_requires_one_non_terminal_push_and_pr_target() {
+    fn delivery_states_are_validated_for_legacy_and_named_pipelines() {
         let valid = format!(
-            "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: In review\n",
+            "{}\ndelivery_states:\n  waiting: In review\n  checks_failed: CI failed\n  changes_requested: Changes requested\n  approved: Approved\n  closed_without_merge: Closed without merge\n  merged: on_success\n",
             minimal_yaml()
         );
         let config = parse_config(&valid).unwrap();
-        assert_eq!(
-            config.repos[0].finalize.review_state.as_deref(),
-            Some("In review")
-        );
         assert!(validate_config(&config).is_ok());
 
         let cases = [
-            ("blank", "mode: push_and_pr\n      review_state: '  '", "must not be empty"),
-            ("push", "mode: push\n      review_state: In review", "push_and_pr"),
-            ("success", "mode: push_and_pr\n      review_state: Done", "on_success"),
-            ("partial", "mode: push_and_pr\n      review_state: In review\n  - path: /tmp/other\n    branch: main\n    finalize:\n      mode: push_and_pr", "must opt in"),
-            ("conflict", "mode: push_and_pr\n      review_state: In review\n  - path: /tmp/other\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: Needs review", "same value"),
+            ("blank", "waiting: '  '", "must not be blank"),
+            ("terminal", "waiting: Done", "configured terminal state"),
+            ("merged target", "merged: Done", "must equal on_success"),
         ];
-        for (label, finalize, expected) in cases {
+        for (label, delivery_states, expected) in cases {
             let yaml = format!(
-                "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      {finalize}\n",
+                "{}\ndelivery_states:\n  {delivery_states}\n",
                 minimal_yaml()
             );
             let config = parse_config(&yaml).unwrap();
@@ -3928,14 +3965,48 @@ workflow_selection:
             assert!(error.to_string().contains(expected), "{label}: {error}");
         }
 
-        let terminal = format!(
-            "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: Failed\n",
+        let named = r#"
+tracker:
+  kind: todo_file
+  path: TODO.md
+agents:
+  build:
+    executor: claude-code
+    model: claude-opus-4-6
+    prompt: Build the thing.
+workflow_selection:
+  - name: selected
+    precedence: 1
+    pipeline: delivery
+    lane: default
+    order_by: [identifier]
+scheduler:
+  lanes:
+    default: {}
+pipelines:
+  delivery:
+    steps:
+      - name: build
+        agent: build
+    on_success: Done
+    on_failure: Failed
+    delivery_states:
+      waiting: In review
+      merged: on_success
+"#;
+        let config = parse_config(&named).unwrap();
+        assert!(
+            validate_config(&config).is_ok(),
+            "{:?}",
+            validate_config(&config)
+        );
+
+        let legacy = format!(
+            "{}\nrepos:\n  - path: /tmp/ensemble\n    branch: main\n    finalize:\n      mode: push_and_pr\n      review_state: In review\n",
             minimal_yaml()
         );
-        let mut config = parse_config(&terminal).unwrap();
-        config.tracker.terminal_states.push("Failed".to_string());
-        let error = validate_config(&config).unwrap_err();
-        assert!(error.to_string().contains("terminal"));
+        let error = parse_config(&legacy).unwrap_err();
+        assert!(error.to_string().contains("delivery_states.waiting"));
     }
 
     #[test]

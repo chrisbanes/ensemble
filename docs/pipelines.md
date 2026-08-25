@@ -436,12 +436,15 @@ retains their exact delivery and pull-request identity. An explicit finalize ret
 new suffix batch; a passing retry returns the delivery to `waiting`, while failure remains blocked.
 This path does not consume pipeline cycles or use `max_cycles`.
 
-When `repos[].finalize.review_state` is configured, review is a separate delivery-owned,
-non-terminal projection. Only after every repository has durable non-active publication evidence
-and each pull request is uniquely reconciled at its stored SHA may Ensemble write the configured
-review state. The journal records `pending`, then `in_flight` before the tracker write, and
-`applied` only after an exact tracker read. Ambiguous or unexpected reconciliation blocks the
-retained delivery without another branch, pull request, terminal transition, or agent dispatch.
+`delivery_states` is a separate delivery-owned, non-terminal projection policy. Once durable
+delivery evidence is available, Ensemble selects one fact in fixed order: closed without merge,
+requested changes, failed checks, all-repository merge, all-repository approval, then waiting.
+`merged: on_success` enters the existing durable terminal-success transition; closed without merge
+keeps the delivery claimed and upserts operator attention until recovery observes a different fact.
+The journal records `pending`, then `in_flight` before a configured tracker write, and `applied`
+only after an exact tracker read. Omitted mappings leave the tracker unchanged; ambiguous or
+unexpected reconciliation retains delivery without another branch, pull request, terminal
+transition, or agent dispatch.
 
 ## Retries and cycles
 

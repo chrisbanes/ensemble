@@ -1069,6 +1069,7 @@ mod tests {
     fn test_config_with_steps() -> std::sync::Arc<EnsembleConfig> {
         std::sync::Arc::new(EnsembleConfig {
             pipelines: Default::default(),
+            delivery_states: Default::default(),
             scheduler: Default::default(),
             workflow_selection: Default::default(),
             tracker: TrackerConfig {
