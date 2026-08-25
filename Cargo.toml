@@ -28,7 +28,7 @@ futures = "0.3.34"
 libc = "0.2.189"
 rustix = "1.1.4"
 ignore = "0.4.33"
-cap-std = "3.4.5"
+cap-std = "4.0.3"
 cap-fs-ext = "4.0.3"
 wiremock = "0.6.5"
 axum = { version = "0.8.9", features = ["ws"] }
