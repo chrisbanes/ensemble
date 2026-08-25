@@ -2915,7 +2915,18 @@ impl Orchestrator {
         }
     }
 
-    async fn handle_applied_action_outcome(
+    // Keep action continuation out of the active-pipeline dispatcher so its failure and terminal
+    // lifecycle branches do not inflate every scheduler dispatch frame.
+    fn handle_applied_action_outcome<'a>(
+        &'a self,
+        issue_id: &'a str,
+        action: PipelineAction,
+        permit: &'a DispatchPermit,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(self.handle_applied_action_outcome_inner(issue_id, action, permit))
+    }
+
+    async fn handle_applied_action_outcome_inner(
         &self,
         issue_id: &str,
         action: PipelineAction,
