@@ -15,13 +15,14 @@ use super::{
     FinalizeApprovalError, FinalizeRetryError, Orchestrator, HISTORY_OUTCOME_FAILED,
     HISTORY_OUTCOME_STOPPED, HISTORY_OUTCOME_SUCCEEDED,
 };
+use crate::config::ensemble::DeliveryStates;
 use crate::history::model::HistoryRecord;
 use crate::observability::events::PipelineEvent;
 use crate::orchestrator::delivery_observation::{
-    BaseFreshness, CheckConclusion, CheckStatus, DeliveryCheck, DeliveryObservation,
+    BaseFreshness, CheckConclusion, CheckStatus, CheckSummary, DeliveryCheck, DeliveryObservation,
     DeliveryObservationFacts, DeliveryObservationFailure, DeliveryObservationFailureKind,
-    DeliveryObservationRead, DeliveryObservationRetry, Mergeability, PullRequestTerminalState,
-    ReviewDecision,
+    DeliveryObservationRead, DeliveryObservationRetry, Mergeability, ObservationFreshness,
+    PullRequestTerminalState, ReviewDecision,
 };
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
 use crate::tracker::OwnershipConflict;
@@ -84,6 +85,29 @@ pub(crate) struct DeliveryRecord {
     pub terminal_history: Option<Box<HistoryRecord>>,
     #[serde(default)]
     pub review_projection: Option<ReviewProjection>,
+    /// Policy copied from the selected pipeline before any delivery I/O.
+    #[serde(default)]
+    pub delivery_states: DeliveryStates,
+    /// Success target copied from the selected pipeline with the delivery policy.
+    #[serde(default)]
+    pub success_state: Option<String>,
+    /// Failure target copied from the selected pipeline with the delivery policy.
+    #[serde(default)]
+    pub failure_state: Option<String>,
+    /// Closure without merge is retained for explicit operator recovery.
+    #[serde(default)]
+    pub closed_without_merge_parked: bool,
+    /// The exact fact and target selected from the frozen delivery policy before tracker I/O.
+    #[serde(default)]
+    pub selected_delivery_state: Option<DeliveryStateProjection>,
+}
+
+/// A versioned durable selection made from delivery evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeliveryStateProjection {
+    pub schema_version: u8,
+    pub fact: DeliveryStateFact,
+    pub target: String,
 }
 
 /// The durable issue-level tracker projection owned by finalization delivery.
@@ -121,7 +145,121 @@ pub(crate) enum DeliveryAggregate {
     Blocked,
 }
 
+/// The single, precedence-ordered fact projected from retained delivery evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeliveryStateFact {
+    Waiting,
+    ChecksFailed,
+    ChangesRequested,
+    Approved,
+    Merged,
+    ClosedWithoutMerge,
+}
+
+impl DeliveryStates {
+    fn target_for(&self, fact: DeliveryStateFact) -> Option<&str> {
+        match fact {
+            DeliveryStateFact::Waiting => self.waiting.as_deref(),
+            DeliveryStateFact::ChecksFailed => self.checks_failed.as_deref(),
+            DeliveryStateFact::ChangesRequested => self.changes_requested.as_deref(),
+            DeliveryStateFact::Approved => self.approved.as_deref(),
+            DeliveryStateFact::Merged => None,
+            DeliveryStateFact::ClosedWithoutMerge => self.closed_without_merge.as_deref(),
+        }
+    }
+}
+
 impl DeliveryRecord {
+    fn is_frozen_delivery_state(&self, observed_state: &str) -> bool {
+        [
+            self.delivery_states.waiting.as_deref(),
+            self.delivery_states.checks_failed.as_deref(),
+            self.delivery_states.changes_requested.as_deref(),
+            self.delivery_states.approved.as_deref(),
+            self.delivery_states.closed_without_merge.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|state| state.eq_ignore_ascii_case(observed_state))
+    }
+
+    pub(crate) fn delivery_state_fact(&self) -> Option<DeliveryStateFact> {
+        if !self.review_ready() {
+            return None;
+        }
+        let repositories = self.repositories.values().collect::<Vec<_>>();
+        let observations = repositories
+            .iter()
+            .filter(|repository| repository.mode == DeliveryMode::PushAndPr)
+            .map(|repository| repository.observation.as_ref())
+            .collect::<Option<Vec<_>>>();
+        let Some(observations) = observations else {
+            return Some(DeliveryStateFact::Waiting);
+        };
+        if observations.iter().any(|observation| {
+            observation.freshness != ObservationFreshness::Fresh
+                || observation
+                    .facts
+                    .as_ref()
+                    .is_none_or(|facts| !facts.matches_delivery || facts.head_diverged)
+        }) {
+            return Some(DeliveryStateFact::Waiting);
+        }
+        let facts = observations
+            .iter()
+            .filter_map(|observation| observation.facts.as_ref())
+            .collect::<Vec<_>>();
+        if facts
+            .iter()
+            .any(|facts| facts.terminal_state == PullRequestTerminalState::ClosedWithoutMerge)
+        {
+            return Some(DeliveryStateFact::ClosedWithoutMerge);
+        }
+        let open_facts = facts
+            .iter()
+            .copied()
+            .filter(|facts| facts.terminal_state == PullRequestTerminalState::Open)
+            .collect::<Vec<_>>();
+        if open_facts
+            .iter()
+            .any(|facts| facts.review_decision == ReviewDecision::ChangesRequested)
+        {
+            return Some(DeliveryStateFact::ChangesRequested);
+        }
+        if open_facts
+            .iter()
+            .any(|facts| facts.check_summary == CheckSummary::Failing)
+        {
+            return Some(DeliveryStateFact::ChecksFailed);
+        }
+        if repositories.iter().all(|repository| match repository.mode {
+            DeliveryMode::Push => repository.phase == DeliveryPhase::Published,
+            DeliveryMode::PushAndPr => repository
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.facts.as_ref())
+                .is_some_and(|facts| facts.terminal_state == PullRequestTerminalState::Merged),
+        }) {
+            return Some(DeliveryStateFact::Merged);
+        }
+        if repositories.iter().all(|repository| match repository.mode {
+            DeliveryMode::Push => repository.phase == DeliveryPhase::Published,
+            DeliveryMode::PushAndPr => repository
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.facts.as_ref())
+                .is_some_and(|facts| {
+                    facts.terminal_state == PullRequestTerminalState::Merged
+                        || (facts.terminal_state == PullRequestTerminalState::Open
+                            && facts.review_decision == ReviewDecision::Approved
+                            && facts.check_summary == CheckSummary::Passing)
+                }),
+        }) {
+            return Some(DeliveryStateFact::Approved);
+        }
+        Some(DeliveryStateFact::Waiting)
+    }
     pub(crate) fn aggregate(&self) -> DeliveryAggregate {
         if self
             .review_projection
@@ -193,6 +331,52 @@ impl DeliveryRecord {
                         | DeliveryPhase::Published
                 )
             })
+    }
+
+    fn has_in_flight_review_projection(&self) -> bool {
+        self.review_projection
+            .as_ref()
+            .is_some_and(|projection| projection.phase == ReviewProjectionPhase::InFlight)
+    }
+
+    fn has_fresh_nonclosed_delivery_evidence(&self) -> bool {
+        self.review_ready()
+            && self
+                .repositories
+                .values()
+                .filter(|repository| repository.mode == DeliveryMode::PushAndPr)
+                .all(|repository| {
+                    repository.observation.as_ref().is_some_and(|observation| {
+                        observation.freshness == ObservationFreshness::Fresh
+                            && observation.facts.as_ref().is_some_and(|facts| {
+                                facts.matches_delivery
+                                    && !facts.head_diverged
+                                    && facts.terminal_state
+                                        != PullRequestTerminalState::ClosedWithoutMerge
+                            })
+                    })
+                })
+    }
+}
+
+fn terminal_delivery_outcome(
+    delivery: &DeliveryRecord,
+    observed_state: &str,
+    legacy_success_state: Option<&str>,
+    legacy_failure_state: Option<&str>,
+) -> (TerminalOutcome, &'static str) {
+    let success_state = delivery
+        .success_state
+        .as_deref()
+        .or(legacy_success_state)
+        .expect("terminal delivery has a frozen or legacy success state");
+    let failure_state = delivery.failure_state.as_deref().or(legacy_failure_state);
+    if observed_state.eq_ignore_ascii_case(success_state) {
+        (TerminalOutcome::Succeeded, HISTORY_OUTCOME_SUCCEEDED)
+    } else if failure_state.is_some_and(|state| observed_state.eq_ignore_ascii_case(state)) {
+        (TerminalOutcome::Failed, HISTORY_OUTCOME_FAILED)
+    } else {
+        (TerminalOutcome::Failed, HISTORY_OUTCOME_STOPPED)
     }
 }
 
@@ -1246,6 +1430,20 @@ impl Orchestrator {
 
         let mut candidate = current;
         let mut changed = false;
+        if candidate.closed_without_merge_parked {
+            // An operator retry does not replay publication. It only discards the retained
+            // closed observation and projection so recovery must obtain fresh PR evidence.
+            candidate.review_projection = None;
+            candidate.selected_delivery_state = None;
+            for repository in candidate.repositories.values_mut() {
+                if repository.mode == DeliveryMode::PushAndPr
+                    && repository.phase == DeliveryPhase::Waiting
+                {
+                    repository.observation = None;
+                }
+            }
+            changed = true;
+        }
         for repository in candidate.repositories.values_mut() {
             if repository.phase != DeliveryPhase::Blocked {
                 continue;
@@ -1404,34 +1602,35 @@ impl Orchestrator {
                         continue;
                     }
                 };
-                let pipeline_config = match self
-                    .current_config_for_snapshot(snapshot.as_ref())
-                    .await
+                let legacy_pipeline_config = if delivery.success_state.is_none()
+                    || delivery.failure_state.is_none()
                 {
-                    Ok(config) => config,
-                    Err(error) => {
-                        warn!(
-                            issue_id = %delivery.issue_id,
-                            error = %error,
-                            "terminal delivery reconciliation could not resolve its selected workflow"
-                        );
-                        continue;
+                    match self.current_config_for_snapshot(snapshot.as_ref()).await {
+                        Ok(config) => Some(config),
+                        Err(error) => {
+                            warn!(
+                                issue_id = %delivery.issue_id,
+                                error = %error,
+                                "terminal delivery reconciliation could not resolve its legacy selected workflow"
+                            );
+                            continue;
+                        }
                     }
-                };
-                let success_state = &pipeline_config.on_success;
-                let failure_state = &pipeline_config.on_failure;
-                let outcome = if issue.state.eq_ignore_ascii_case(success_state) {
-                    TerminalOutcome::Succeeded
                 } else {
-                    TerminalOutcome::Failed
+                    None
                 };
-                let history_outcome = if issue.state.eq_ignore_ascii_case(success_state) {
-                    HISTORY_OUTCOME_SUCCEEDED
-                } else if issue.state.eq_ignore_ascii_case(failure_state) {
-                    HISTORY_OUTCOME_FAILED
-                } else {
-                    HISTORY_OUTCOME_STOPPED
-                };
+                let legacy_success_state = legacy_pipeline_config
+                    .as_ref()
+                    .map(|config| config.on_success.as_str());
+                let legacy_failure_state = legacy_pipeline_config
+                    .as_ref()
+                    .map(|config| config.on_failure.as_str());
+                let (outcome, history_outcome) = terminal_delivery_outcome(
+                    &delivery,
+                    &issue.state,
+                    legacy_success_state,
+                    legacy_failure_state,
+                );
                 self.reconcile_terminal_delivery_owner(&delivery, issue, outcome, history_outcome)
                     .await;
             } else {
@@ -1560,7 +1759,16 @@ impl Orchestrator {
             let delivery = self
                 .evaluate_post_final_acceptance(delivery, snapshot.as_ref())
                 .await;
-            let delivery = self.advance_review_projection(delivery).await;
+            // Records created before delivery-state projection retain the original projection
+            // without a selected fact. Reconcile that durable in-flight write before reading
+            // newer delivery facts, so an upgrade cannot abandon an ambiguous tracker mutation.
+            let delivery = if delivery.selected_delivery_state.is_none()
+                && delivery.review_projection.is_some()
+            {
+                self.advance_review_projection(delivery).await
+            } else {
+                delivery
+            };
             if delivery.aggregate() == DeliveryAggregate::Published {
                 self.complete_published_delivery(&delivery, snapshot.as_ref())
                     .await;
@@ -1569,6 +1777,76 @@ impl Orchestrator {
             let delivery = self
                 .reconcile_delivery_observations(delivery, snapshot.as_ref())
                 .await;
+            let fact = delivery.delivery_state_fact();
+            let delivery = if fact != Some(DeliveryStateFact::ClosedWithoutMerge)
+                && delivery.has_fresh_nonclosed_delivery_evidence()
+            {
+                self.clear_closed_without_merge_park(delivery).await
+            } else {
+                delivery
+            };
+            if fact == Some(DeliveryStateFact::Merged)
+                && delivery.delivery_states.merged.as_deref() == Some("on_success")
+            {
+                if delivery.has_in_flight_review_projection() {
+                    // A previously persisted intermediate write remains ambiguous until its
+                    // exact target has been reconciled. Never begin terminal cleanup first.
+                    self.advance_review_projection(delivery).await;
+                    continue;
+                }
+                let Some(target_state) = delivery.success_state.clone() else {
+                    warn!(issue_id = %delivery.issue_id, "merged delivery has no frozen success target");
+                    continue;
+                };
+                let selection = DeliveryStateProjection {
+                    schema_version: 1,
+                    fact: DeliveryStateFact::Merged,
+                    target: target_state.clone(),
+                };
+                let delivery = if delivery.selected_delivery_state.as_ref() != Some(&selection) {
+                    let mut updated = delivery;
+                    updated.selected_delivery_state = Some(selection);
+                    if self.persist_delivery_record(&updated, None).await.is_err() {
+                        continue;
+                    }
+                    updated
+                } else {
+                    delivery
+                };
+                let Some(history) = self
+                    .projected_terminal_history(&delivery, HISTORY_OUTCOME_SUCCEEDED)
+                    .await
+                else {
+                    warn!(
+                        issue_id = %delivery.issue_id,
+                        "merged delivery has no durable completion history"
+                    );
+                    continue;
+                };
+                self.begin_terminal_transition_for_identity(
+                    &delivery.issue_id,
+                    &delivery.identifier,
+                    None,
+                    TerminalOutcome::Succeeded,
+                    target_state,
+                    Some(history),
+                )
+                .await;
+                continue;
+            }
+            if fact == Some(DeliveryStateFact::ClosedWithoutMerge) {
+                let delivery = self.park_closed_without_merge(delivery).await;
+                let delivery = self.advance_delivery_state_projection(delivery).await;
+                self.project_delivery_artifacts(&delivery.issue_id, &delivery)
+                    .await;
+                let finalize = Self::finalize_state_from_delivery(&delivery);
+                self.state
+                    .write()
+                    .await
+                    .set_finalize_state(&delivery.issue_id, finalize);
+                continue;
+            }
+            let delivery = self.advance_delivery_state_projection(delivery).await;
             if matches!(
                 delivery.aggregate(),
                 DeliveryAggregate::Waiting | DeliveryAggregate::Blocked
@@ -1630,9 +1908,6 @@ impl Orchestrator {
         snapshot: Option<&PipelineRunSnapshot>,
     ) -> DeliveryRecord {
         if !self.delivery_remote.supports_delivery_observation() {
-            return delivery;
-        }
-        if self.config.read().await.tracker.kind != "github" {
             return delivery;
         }
         let eligible = delivery.repositories.iter().any(|(_, repository)| {
@@ -1898,7 +2173,7 @@ impl Orchestrator {
             .iter()
             .any(|state| state.eq_ignore_ascii_case(&observed.state));
         drop(config);
-        if terminal || !active {
+        if terminal || (!active && !candidate.is_frozen_delivery_state(&observed.state)) {
             return self
                 .block_review_projection(
                     candidate,
@@ -1967,6 +2242,112 @@ impl Orchestrator {
                 .await
             }
         }
+    }
+
+    async fn advance_delivery_state_projection(
+        &self,
+        mut delivery: DeliveryRecord,
+    ) -> DeliveryRecord {
+        let Some(fact) = delivery.delivery_state_fact() else {
+            return delivery;
+        };
+        let Some(target) = delivery.delivery_states.target_for(fact) else {
+            return delivery;
+        };
+        let selection = DeliveryStateProjection {
+            schema_version: 1,
+            fact,
+            target: target.to_string(),
+        };
+        let selection_changed = delivery.selected_delivery_state.as_ref() != Some(&selection);
+        if selection_changed
+            && delivery
+                .review_projection
+                .as_ref()
+                .is_some_and(|projection| projection.phase == ReviewProjectionPhase::InFlight)
+        {
+            // An ambiguous tracker write must reconcile the durable in-flight target before
+            // newer remote facts are allowed to select another projection.
+            return self.advance_review_projection(delivery).await;
+        }
+        if delivery.review_projection.is_none() || selection_changed {
+            let history_record = delivery
+                .terminal_history
+                .as_deref()
+                .cloned()
+                .map(|mut record| {
+                    record.outcome = "delivery_projected".to_string();
+                    record
+                });
+            delivery.review_projection = Some(ReviewProjection {
+                target: target.to_string(),
+                repositories: delivery.repositories.keys().cloned().collect(),
+                phase: ReviewProjectionPhase::Pending,
+                diagnostic: None,
+                last_observed_state: None,
+                history_record,
+                history_persisted: false,
+            });
+            delivery.selected_delivery_state = Some(selection);
+            if self.persist_delivery_record(&delivery, None).await.is_err() {
+                return delivery;
+            }
+        }
+        self.advance_review_projection(delivery).await
+    }
+
+    pub(super) async fn park_closed_without_merge(
+        &self,
+        mut delivery: DeliveryRecord,
+    ) -> DeliveryRecord {
+        if !delivery.closed_without_merge_parked {
+            delivery.closed_without_merge_parked = true;
+            if self.persist_delivery_record(&delivery, None).await.is_err() {
+                return delivery;
+            }
+        }
+        let Some(reporter) = self.attention_reporter.as_ref() else {
+            return delivery;
+        };
+        let observation = closed_without_merge_attention(&delivery);
+        match observation {
+            Ok(observation) => {
+                if let Err(error) = reporter.upsert_open(observation).await {
+                    warn!(issue_id = %delivery.issue_id, error = %error, "failed to persist closed-without-merge operator attention");
+                }
+            }
+            Err(error) => {
+                warn!(issue_id = %delivery.issue_id, error = %error, "could not create closed-without-merge operator attention")
+            }
+        }
+        delivery
+    }
+
+    pub(super) async fn clear_closed_without_merge_park(
+        &self,
+        mut delivery: DeliveryRecord,
+    ) -> DeliveryRecord {
+        if !delivery.closed_without_merge_parked {
+            return delivery;
+        }
+        if let Some(reporter) = self.attention_reporter.as_ref() {
+            let close = match closed_without_merge_attention_close(&delivery) {
+                Ok(close) => close,
+                Err(error) => {
+                    warn!(issue_id = %delivery.issue_id, error = %error, "could not create closed-without-merge attention resolution");
+                    return delivery;
+                }
+            };
+            if let Err(error) = reporter.resolve(close).await {
+                warn!(issue_id = %delivery.issue_id, error = %error, "failed to resolve closed-without-merge operator attention");
+                return delivery;
+            }
+        }
+        delivery.closed_without_merge_parked = false;
+        if self.persist_delivery_record(&delivery, None).await.is_err() {
+            return delivery;
+        }
+        delivery
     }
 
     async fn block_review_projection(
@@ -2746,7 +3127,7 @@ impl Orchestrator {
             retry: None,
             snapshot,
             terminal_transition: None,
-            delivery: Some(delivery.clone()),
+            delivery: Some(Box::new(delivery.clone())),
         };
         let transaction = self
             .pipeline_journal
@@ -2855,26 +3236,19 @@ impl Orchestrator {
                 },
             );
         }
-        let review_state = repository_keys.iter().find_map(|repository_key| {
-            configured_repositories
-                .get(repository_key)
-                .and_then(|config| config.finalize.review_state.clone())
-        });
-        let mut review_repositories = configured_repositories
-            .iter()
-            .filter_map(|(repository_key, config)| {
-                (config.finalize.enabled && config.finalize.mode != FinalizeMode::None)
-                    .then_some(repository_key.clone())
-            })
-            .collect::<Vec<_>>();
-        review_repositories.sort();
-        let review_history = terminal_history.clone().map(|mut record| {
-            record.outcome = "in_review".to_string();
-            record
-        });
-        if review_state.is_some() && review_history.is_none() {
-            return Err("review projection requires a live run history record".to_string());
-        }
+        let (delivery_states, success_state, failure_state) = {
+            let state = self.state.read().await;
+            state
+                .get_pipeline_config(issue_id)
+                .map(|config| {
+                    (
+                        config.delivery_states.clone(),
+                        config.on_success.clone(),
+                        config.on_failure.clone(),
+                    )
+                })
+                .unwrap_or_default()
+        };
         Ok((
             DeliveryRecord {
                 issue_id: issue_id.to_string(),
@@ -2882,19 +3256,54 @@ impl Orchestrator {
                 run_id,
                 repositories,
                 terminal_history: terminal_history.map(Box::new),
-                review_projection: review_state.map(|target| ReviewProjection {
-                    target,
-                    repositories: review_repositories,
-                    phase: ReviewProjectionPhase::Pending,
-                    diagnostic: None,
-                    last_observed_state: None,
-                    history_record: review_history,
-                    history_persisted: false,
-                }),
+                review_projection: None,
+                delivery_states,
+                success_state: Some(success_state),
+                failure_state: Some(failure_state),
+                closed_without_merge_parked: false,
+                selected_delivery_state: None,
             },
             snapshot,
         ))
     }
+}
+
+fn closed_without_merge_attention(
+    delivery: &DeliveryRecord,
+) -> Result<crate::attention::AttentionUpsert, crate::attention::AttentionError> {
+    Ok(crate::attention::AttentionUpsert::new(
+        crate::attention::AttentionIdentity::new(
+            "runtime.delivery",
+            &delivery.issue_id,
+            "runtime.delivery.closed_without_merge",
+        )?,
+        crate::attention::AttentionPresentation::new(
+            format!("{} has a pull request closed without merge", delivery.identifier),
+            "Resolve the pull request externally, then explicitly retry finalization to obtain fresh delivery evidence.",
+            vec![],
+        )?,
+        crate::attention::AttentionEvidence::new(format!(
+            "run:{}:closed_without_merge",
+            delivery.run_id
+        ))?,
+    ))
+}
+
+fn closed_without_merge_attention_close(
+    delivery: &DeliveryRecord,
+) -> Result<crate::attention::AttentionClose, crate::attention::AttentionError> {
+    crate::attention::AttentionClose::new(
+        crate::attention::AttentionIdentity::new(
+            "runtime.delivery",
+            &delivery.issue_id,
+            "runtime.delivery.closed_without_merge",
+        )?,
+        format!("run:{}:closed_without_merge", delivery.run_id),
+        crate::attention::AttentionEvidence::new(format!(
+            "run:{}:closed_without_merge:recovered",
+            delivery.run_id
+        ))?,
+    )
 }
 
 #[cfg(test)]
@@ -2937,6 +3346,210 @@ mod tests {
         }
     }
 
+    fn observed_repository(facts: DeliveryObservationFacts) -> DeliveryRepository {
+        let mut repository = repository(DeliveryPhase::Waiting);
+        repository.observed_remote_sha = Some(repository.local_sha.clone());
+        repository.pr_number = Some(facts.pull_request_number);
+        repository.pr_url = Some(facts.pull_request_url.clone());
+        repository.observation = Some(DeliveryObservation::successful(facts, Utc::now()));
+        repository
+    }
+
+    fn observation_facts() -> DeliveryObservationFacts {
+        DeliveryObservationFacts {
+            pull_request_number: 420,
+            pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+            head_sha: "0123456789abcdef".to_string(),
+            matches_delivery: true,
+            head_diverged: false,
+            terminal_state: PullRequestTerminalState::Open,
+            mergeability: Mergeability::Mergeable,
+            base_freshness: BaseFreshness::UpToDate,
+            checks: vec![],
+            check_summary: CheckSummary::Passing,
+            review_decision: ReviewDecision::ReviewRequired,
+        }
+    }
+
+    fn delivery_with_observations(observations: Vec<DeliveryObservationFacts>) -> DeliveryRecord {
+        let repositories = observations
+            .into_iter()
+            .enumerate()
+            .map(|(index, facts)| (format!("repo-{index}"), observed_repository(facts)))
+            .collect();
+        DeliveryRecord {
+            issue_id: "issue-420".to_string(),
+            identifier: "ensemble#420".to_string(),
+            run_id: "run-420".to_string(),
+            repositories,
+            terminal_history: None,
+            review_projection: None,
+            delivery_states: Default::default(),
+            success_state: None,
+            failure_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
+        }
+    }
+
+    #[test]
+    fn delivery_state_facts_use_documented_precedence() {
+        let mut closed = observation_facts();
+        closed.terminal_state = PullRequestTerminalState::ClosedWithoutMerge;
+        let mut changes_requested = observation_facts();
+        changes_requested.review_decision = ReviewDecision::ChangesRequested;
+        let mut failed = observation_facts();
+        failed.check_summary = CheckSummary::Failing;
+        let mut merged = observation_facts();
+        merged.terminal_state = PullRequestTerminalState::Merged;
+        let mut approved = observation_facts();
+        approved.review_decision = ReviewDecision::Approved;
+
+        assert_eq!(
+            delivery_with_observations(vec![closed, changes_requested.clone(), failed.clone()])
+                .delivery_state_fact(),
+            Some(DeliveryStateFact::ClosedWithoutMerge)
+        );
+        assert_eq!(
+            delivery_with_observations(vec![changes_requested, failed.clone()])
+                .delivery_state_fact(),
+            Some(DeliveryStateFact::ChangesRequested)
+        );
+        assert_eq!(
+            delivery_with_observations(vec![failed]).delivery_state_fact(),
+            Some(DeliveryStateFact::ChecksFailed)
+        );
+        assert_eq!(
+            delivery_with_observations(vec![merged]).delivery_state_fact(),
+            Some(DeliveryStateFact::Merged)
+        );
+        assert_eq!(
+            delivery_with_observations(vec![approved]).delivery_state_fact(),
+            Some(DeliveryStateFact::Approved)
+        );
+        let mut merged_with_stale_blocker = observation_facts();
+        merged_with_stale_blocker.terminal_state = PullRequestTerminalState::Merged;
+        merged_with_stale_blocker.review_decision = ReviewDecision::ChangesRequested;
+        let mut still_open_and_approved = observation_facts();
+        still_open_and_approved.review_decision = ReviewDecision::Approved;
+        assert_eq!(
+            delivery_with_observations(vec![merged_with_stale_blocker.clone()])
+                .delivery_state_fact(),
+            Some(DeliveryStateFact::Merged)
+        );
+        assert_eq!(
+            delivery_with_observations(vec![merged_with_stale_blocker, still_open_and_approved])
+                .delivery_state_fact(),
+            Some(DeliveryStateFact::Approved)
+        );
+        assert_eq!(
+            delivery_with_observations(vec![observation_facts()]).delivery_state_fact(),
+            Some(DeliveryStateFact::Waiting)
+        );
+    }
+
+    #[test]
+    fn stale_or_incomplete_observations_select_waiting() {
+        let mut record = delivery_with_observations(vec![observation_facts()]);
+        record.repositories.get_mut("repo-0").unwrap().observation = None;
+
+        assert_eq!(
+            record.delivery_state_fact(),
+            Some(DeliveryStateFact::Waiting)
+        );
+    }
+
+    #[test]
+    fn selected_delivery_fact_and_target_round_trip_durably() {
+        let mut record = delivery_with_observations(vec![observation_facts()]);
+        record.selected_delivery_state = Some(DeliveryStateProjection {
+            schema_version: 1,
+            fact: DeliveryStateFact::Waiting,
+            target: "In review".to_string(),
+        });
+
+        let restored =
+            serde_json::from_str::<DeliveryRecord>(&serde_json::to_string(&record).unwrap())
+                .unwrap();
+        assert_eq!(
+            restored.selected_delivery_state,
+            record.selected_delivery_state
+        );
+    }
+
+    #[test]
+    fn terminal_recovery_uses_frozen_success_state_after_config_drift() {
+        let mut record = delivery_with_observations(vec![observation_facts()]);
+        record.success_state = Some("Frozen done".to_string());
+
+        assert_eq!(
+            terminal_delivery_outcome(
+                &record,
+                "Frozen done",
+                Some("Reloaded done"),
+                Some("Reloaded failed"),
+            ),
+            (TerminalOutcome::Succeeded, HISTORY_OUTCOME_SUCCEEDED)
+        );
+    }
+
+    #[test]
+    fn terminal_recovery_uses_frozen_failure_state_after_config_drift() {
+        let mut record = delivery_with_observations(vec![observation_facts()]);
+        record.success_state = Some("Frozen done".to_string());
+        record.failure_state = Some("Frozen failed".to_string());
+
+        assert_eq!(
+            terminal_delivery_outcome(
+                &record,
+                "Frozen failed",
+                Some("Reloaded done"),
+                Some("Reloaded failed"),
+            ),
+            (TerminalOutcome::Failed, HISTORY_OUTCOME_FAILED)
+        );
+    }
+
+    #[test]
+    fn merged_terminal_handoff_waits_for_an_in_flight_projection() {
+        let mut record = delivery_with_observations(vec![observation_facts()]);
+        record.review_projection = Some(ReviewProjection {
+            target: "In review".to_string(),
+            repositories: vec!["repo-0".to_string()],
+            phase: ReviewProjectionPhase::InFlight,
+            diagnostic: None,
+            last_observed_state: None,
+            history_record: None,
+            history_persisted: false,
+        });
+
+        assert!(record.has_in_flight_review_projection());
+    }
+
+    #[test]
+    fn closed_without_merge_attention_is_idempotent_across_restart() {
+        let record = delivery_with_observations(vec![observation_facts()]);
+
+        let first = closed_without_merge_attention(&record).unwrap();
+        let restored =
+            serde_json::from_str::<DeliveryRecord>(&serde_json::to_string(&record).unwrap())
+                .unwrap();
+        let second = closed_without_merge_attention(&restored).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.identity.kind, "runtime.delivery.closed_without_merge");
+    }
+
+    #[test]
+    fn closed_without_merge_attention_can_be_resolved_after_recovery() {
+        let record = delivery_with_observations(vec![observation_facts()]);
+        let open = closed_without_merge_attention(&record).unwrap();
+        let close = closed_without_merge_attention_close(&record).unwrap();
+
+        assert_eq!(close.identity, open.identity);
+        assert_eq!(close.expected_fingerprint, open.evidence.fingerprint);
+    }
+
     #[test]
     fn legacy_status_contexts_contribute_to_the_complete_check_summary() {
         let success = serde_json::json!({"context": "ci", "state": "SUCCESS"});
@@ -2974,6 +3587,11 @@ mod tests {
             repositories,
             terminal_history: None,
             review_projection: None,
+            delivery_states: Default::default(),
+            success_state: None,
+            failure_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
 
         assert_eq!(record.aggregate(), DeliveryAggregate::Waiting);
@@ -3003,6 +3621,11 @@ mod tests {
                 history_record: None,
                 history_persisted: false,
             }),
+            delivery_states: Default::default(),
+            success_state: None,
+            failure_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
 
         assert!(record.review_ready());
@@ -3029,6 +3652,11 @@ mod tests {
                 history_record: None,
                 history_persisted: false,
             }),
+            delivery_states: Default::default(),
+            success_state: None,
+            failure_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
 
         assert!(!record.review_ready());
@@ -3063,6 +3691,11 @@ mod tests {
                 history_record: None,
                 history_persisted: false,
             }),
+            delivery_states: Default::default(),
+            success_state: None,
+            failure_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
 
         assert!(!record.review_ready());

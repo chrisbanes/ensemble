@@ -441,7 +441,8 @@ Pipeline run recovery:
   retained for operator recovery. A fully `published` push-only delivery continues the existing
   durable terminal-transition protocol; it does not republish the branch.
 - A durable `push_and_pr` repository with an exact pull-request number and URL is observed on the
-  delivery recovery tick through one authenticated, read-only GitHub query. The version-1
+  delivery recovery tick through one authenticated, read-only GitHub query, independently of the
+  configured issue-tracker adapter. The version-1
   observation records complete pull-request facts (head identity, terminal state, mergeability,
   base freshness, checks, and review decision) together with freshness, retry, and typed
   non-secret failure metadata. A successful read replaces all facts atomically; transient reads
@@ -450,20 +451,22 @@ Pipeline run recovery:
   A returned head other than the durable local SHA is recorded as `head_diverged` and blocks
   delivery without adopting the remote head.
 - Observing `merged` or `closed_without_merge` is evidence only. It does not create, update,
-  merge, queue, or close a pull request; project a tracker state; complete a run; release a claim
-  or workspace; or redispatch pipeline work. A blocked observation is retried only through the
-  existing explicit finalization retry path.
+  merge, queue, or close a pull request or redispatch pipeline work. Configured delivery-state
+  projection and terminal reconciliation remain journal-owned.
 - If the tracker moves a retained delivery to any configured terminal state, delivery recovery
   stops remote mutation and enters the same durable terminal-transition protocol using the
   observed state. It persists the prepared history as succeeded for the success state, failed for
   the configured failure state, or stopped for any other terminal state. Release removes the owned
   workspace and durable delivery claim before another candidate can dispatch.
-- An optional `push_and_pr` `review_state` is an issue-level retained projection, never a terminal
-  outcome. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
-  `in_flight` before the tracker write and applies only after an exact target-state read. It writes
-  only after every configured repository is non-active and every pull request is uniquely durable
-  at its stored SHA. Read failures, terminal states, and unexpected states block the delivery while
-  retaining the claim, workspace, branch, SHA, pull request, and artifacts without redispatch.
+- Optional selected-pipeline `delivery_states` map durable delivery facts to opaque non-terminal
+  tracker states. The policy, selected fact/target, and terminal success/failure targets are frozen
+  in the delivery record; omitted facts do not write the tracker. `merged: on_success` uses the
+  existing durable terminal-success
+  transition. `closed_without_merge` retains the claim and durable operator attention for explicit
+  recovery. Its journal phase is `pending`, `in_flight`, `applied`, or `blocked`; Ensemble persists
+  `in_flight` before the tracker write and applies only after an exact target-state read. Read
+  failures, terminal states, and unexpected states retain the claim, workspace, branch, SHA, pull
+  request, and artifacts without redispatch.
 - Required pull-request checks run only after the retained delivery identity reaches `waiting` or
   `published`. Results form one ordered suffix batch per evaluation. Restart resumes a partial
   batch without push, creation, or discovery; an explicit finalize retry appends a complete new

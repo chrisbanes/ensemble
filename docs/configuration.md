@@ -239,7 +239,14 @@ repos:
     finalize:
       mode: push_and_pr
       approval_required: true
-      review_state: In review
+
+delivery_states:
+  waiting: In review
+  checks_failed: CI failed
+  changes_requested: Changes requested
+  approved: Approved
+  closed_without_merge: Closed without merge
+  merged: on_success
 
 agents:
   builder:
@@ -505,7 +512,6 @@ List of repositories for workspace setup. Paths can be absolute or relative to t
 | `finalize.enabled` | bool | `true` | Whether post-pipeline finalization is enabled for this repo |
 | `finalize.mode` | string | `none` | Finalization action: `none`, `push`, or `push_and_pr` |
 | `finalize.approval_required` | bool | `false` | Requires explicit approval from web/desktop UI before finalize runs |
-| `finalize.review_state` | string | none | Optional non-terminal tracker state projected after exact `push_and_pr` delivery |
 
 `finalize.mode` defaults to `none`, so Ensemble does not push branches or open pull requests unless
 you opt in per repo. Ensemble still records durable run artifacts for each completed issue,
@@ -516,17 +522,17 @@ For `push` and `push_and_pr`, Ensemble durably records the exact repository, bra
 remote identity before mutation. Restart recovery reconciles that stored identity with the remote
 before retrying, so an ambiguous push or pull request response cannot silently duplicate
 publication. A `push_and_pr` repository remains claimed in a non-capacity-consuming waiting state
-after its uniquely matching pull request is found; merging or closing that pull request does not by
-itself project the issue to `on_success`.
+after its uniquely matching pull request is found. A merge projects the issue through the durable
+terminal-success transition only when frozen `delivery_states.merged` is `on_success`; a pull
+request closed without merge remains retained for operator recovery.
 
-`finalize.review_state` is valid only with `push_and_pr`. It must be non-blank, must not be
-`on_success` or a configured terminal state, and every opt-in pull-request repository for one
-delivery must select the same target. Ensemble persists the issue-level projection as `pending`,
-`in_flight`, `applied`, or `blocked`. It persists `in_flight` before writing to the tracker and
-reconciles the exact target after every write. An unreadable, terminal, or unexpected observed
-state blocks the retained delivery; a confirmed active-state absence may retry on a later poll.
-The branch, SHA, pull-request identity, workspace, and claim remain retained throughout; this
-state consumes no agent capacity and never uses `on_success` or cleanup.
+`delivery_states` belongs beside a legacy pipeline's `on_success` and `on_failure`, or inside a
+named pipeline. Its optional non-terminal targets are `waiting`, `checks_failed`,
+`changes_requested`, `approved`, and `closed_without_merge`; `merged` accepts only `on_success`.
+Blank or terminal targets are rejected. The selected policy is copied into the retained delivery,
+so reloading configuration cannot reinterpret work already owned by the journal. Omitted entries
+leave tracker state unchanged. `repos[].finalize.review_state` has been removed; migrate it to
+`delivery_states.waiting`.
 
 **Headless behavior:** if `finalize.approval_required: true` and Ensemble is running headless, startup emits a warning and finalize is skipped for that repo.
 

@@ -3313,7 +3313,8 @@ repos:
     finalize:
       mode: push_and_pr
       approval_required: false
-      review_state: In review
+delivery_states:
+  waiting: In review
 agents:
   builder:
     acpx_agent: {}
@@ -5631,7 +5632,7 @@ fn live_dogfood_marker_artifact_and_config_are_run_scoped() {
     assert!(config.contains("max_step_parallelism: 1"));
     assert!(config.contains("mode: push_and_pr"));
     assert!(config.contains("approval_required: false"));
-    assert!(config.contains("review_state: In review"));
+    assert!(config.contains("delivery_states:\n  waiting: In review"));
     assert!(!config.contains("api_key:"));
 }
 

@@ -1682,6 +1682,11 @@ mod tests {
             .collect(),
             terminal_history: None,
             review_projection: None,
+            delivery_states: Default::default(),
+            success_state: None,
+            failure_state: None,
+            closed_without_merge_parked: false,
+            selected_delivery_state: None,
         };
         state
             .write()
