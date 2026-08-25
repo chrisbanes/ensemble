@@ -90,6 +90,10 @@ _Avoid_: Completion, cleanup
 The durable owner of configured repository publication after pipeline work and approval are complete. It preserves exact local and remote identity until publication is confirmed, waiting on a pull request, or blocked for operator recovery.
 _Avoid_: Worker, tracker state
 
+**Delivery-state projection**:
+An optional configuration mapping from a durable delivery fact to an external tracker state. It reflects delivery without transferring runtime authority to the tracker.
+_Avoid_: Workflow state, delivery outcome
+
 **Claim**:
 Adapter-issued remote ownership evidence for one issue. It may supply an opaque workspace branch
 identity, but the orchestrator records it durably and remains the lifecycle authority.
