@@ -24364,12 +24364,13 @@ agent:
         let tracker: Arc<dyn IssueTracker> = Arc::new(MockTracker {
             issues: Arc::new(RwLock::new(vec![test_issue("1", "Todo")])),
         });
-        let (probe_tx, probe_rx) = tokio::sync::oneshot::channel();
-        let runner: Arc<dyn AgentRunner> = Arc::new(MockRunner {
-            delay_ms: 0,
-            observed_commands: None,
-            observed_timeouts: None,
-            cancellation_probe: Some(Arc::new(std::sync::Mutex::new(Some(probe_tx)))),
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (cancelled_tx, cancelled_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let runner: Arc<dyn AgentRunner> = Arc::new(BlockingDrainRunner {
+            started: std::sync::Mutex::new(Some(started_tx)),
+            cancellation_observed: std::sync::Mutex::new(Some(cancelled_tx)),
+            release: Arc::clone(&release),
         });
         let dir = tempfile::TempDir::new().unwrap();
         let workspace_mgr = WorkspaceManager::new(dir.path(), None).unwrap();
@@ -24402,23 +24403,19 @@ agent:
             orchestrator.run().await;
         });
 
-        tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                if state.read().await.is_running("1") {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        shutdown_tx.send(()).await.unwrap();
-
-        tokio::time::timeout(Duration::from_secs(2), probe_rx)
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
             .await
             .unwrap()
             .unwrap();
+        assert!(state.read().await.is_running("1"));
+
+        shutdown_tx.send(()).await.unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), cancelled_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        release.add_permits(1);
         run_handle.await.unwrap();
     }
 
