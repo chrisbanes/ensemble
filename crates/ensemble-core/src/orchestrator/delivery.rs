@@ -41,6 +41,7 @@ use crate::workspace::key::issue_workspace_key;
 
 const DELIVERY_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_REQUEST_DISCOVERY_LIMIT: usize = 1_000;
+const DELIVERY_OBSERVATION_QUERY: &str = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url state merged headRefOid headRefName baseRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } reviews: latestReviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1060,15 +1061,13 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(repository) => repository,
             Err(read) => return read,
         };
-        let query = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!, $head: String!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url state merged headRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } reviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } comparison(base: $base, head: $head) { behindBy } } }";
+        let query = DELIVERY_OBSERVATION_QUERY;
         let number = pull_request_number.to_string();
         let variables = [
             format!("query={query}"),
             format!("owner={owner}"),
             format!("name={name}"),
             format!("number={number}"),
-            format!("base={base_branch}"),
-            format!("head={head_branch}"),
         ];
         let arguments = [
             "api",
@@ -1081,10 +1080,6 @@ impl DeliveryRemote for CliDeliveryRemote {
             variables[2].as_str(),
             "-F",
             variables[3].as_str(),
-            "-F",
-            variables[4].as_str(),
-            "-F",
-            variables[5].as_str(),
         ];
         let stdout = match observation_command_stdout(repository_path, &arguments).await {
             Ok(stdout) => stdout,
@@ -1109,22 +1104,42 @@ impl DeliveryRemote for CliDeliveryRemote {
         let url = value.get("url").and_then(serde_json::Value::as_str);
         let state = value.get("state").and_then(serde_json::Value::as_str);
         let head_sha = value.get("headRefOid").and_then(serde_json::Value::as_str);
+        let observed_head = value.get("headRefName").and_then(serde_json::Value::as_str);
+        let base_sha = value.get("baseRefOid").and_then(serde_json::Value::as_str);
         let observed_base = value.get("baseRefName").and_then(serde_json::Value::as_str);
-        let Some((number, url, state, head_sha, observed_base)) = number
+        let Some((number, url, state, head_sha, observed_head, base_sha, observed_base)) = number
             .zip(url)
             .zip(state)
             .zip(head_sha)
+            .zip(observed_head)
+            .zip(base_sha)
             .zip(observed_base)
-            .map(|((((number, url), state), head_sha), observed_base)| {
-                (number, url, state, head_sha, observed_base)
-            })
+            .map(
+                |(
+                    (((((number, url), state), head_sha), observed_head), base_sha),
+                    observed_base,
+                )| {
+                    (
+                        number,
+                        url,
+                        state,
+                        head_sha,
+                        observed_head,
+                        base_sha,
+                        observed_base,
+                    )
+                },
+            )
         else {
             return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::MalformedResponse,
                 "GitHub returned an incomplete pull request observation",
             ));
         };
-        if number != pull_request_number || url != pull_request_url || observed_base != base_branch
+        if number != pull_request_number
+            || url != pull_request_url
+            || observed_head != head_branch
+            || observed_base != base_branch
         {
             return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::InvalidIdentity,
@@ -1182,6 +1197,31 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(feedback) => feedback,
             Err(failure) => return DeliveryObservationRead::Terminal(failure),
         };
+        let comparison_endpoint = format!("repos/{owner}/{name}/compare/{base_sha}...{head_sha}");
+        let comparison_arguments = ["api", comparison_endpoint.as_str()];
+        let comparison_stdout =
+            match observation_command_stdout(repository_path, &comparison_arguments).await {
+                Ok(stdout) => stdout,
+                Err(read) => return read,
+            };
+        let comparison: serde_json::Value = match serde_json::from_str(&comparison_stdout) {
+            Ok(value) => value,
+            Err(_) => {
+                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned an invalid base comparison",
+                ));
+            }
+        };
+        let Some(behind_by) = comparison
+            .get("behind_by")
+            .and_then(serde_json::Value::as_u64)
+        else {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an incomplete base comparison",
+            ));
+        };
         DeliveryObservationRead::Observed(DeliveryObservationFacts {
             pull_request_number: number,
             pull_request_url: url.to_string(),
@@ -1190,13 +1230,9 @@ impl DeliveryRemote for CliDeliveryRemote {
             head_diverged: false,
             terminal_state,
             mergeability,
-            base_freshness: match response
-                .pointer("/data/repository/comparison/behindBy")
-                .and_then(serde_json::Value::as_u64)
-            {
-                Some(0) => BaseFreshness::UpToDate,
-                Some(_) => BaseFreshness::Behind,
-                None => BaseFreshness::Unknown,
+            base_freshness: match behind_by {
+                0 => BaseFreshness::UpToDate,
+                _ => BaseFreshness::Behind,
             },
             checks,
             check_summary: crate::orchestrator::delivery_observation::CheckSummary::Pending,
@@ -1311,21 +1347,15 @@ fn complete_feedback(
         .filter(|review| {
             review.get("state").and_then(serde_json::Value::as_str) == Some("CHANGES_REQUESTED")
         })
-        .map(|review| {
+        .filter_map(|review| {
             review
                 .get("body")
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|body| !body.is_empty())
                 .map(str::to_string)
-                .ok_or_else(|| {
-                    DeliveryObservationFailure::new(
-                        DeliveryObservationFailureKind::MalformedResponse,
-                        "GitHub returned a change request without a body",
-                    )
-                })
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect();
 
     let threads = value.get("reviewThreads").ok_or_else(|| {
         DeliveryObservationFailure::new(
@@ -4998,6 +5028,30 @@ mod tests {
         assert_eq!(feedback.change_request_bodies, vec!["Please fix"]);
         assert_eq!(feedback.unresolved_threads.len(), 1);
         assert_eq!(feedback.unresolved_threads[0].body, "rename");
+    }
+
+    #[test]
+    fn delivery_observation_query_uses_current_reviews_and_exact_ref_identity() {
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("reviews: latestReviews(first: 100)"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("baseRefOid"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("headRefName"));
+        assert!(!DELIVERY_OBSERVATION_QUERY.contains("comparison("));
+    }
+
+    #[test]
+    fn complete_feedback_ignores_empty_change_request_summaries() {
+        let observation = serde_json::json!({
+            "reviews": { "totalCount": 1, "nodes": [{ "state": "CHANGES_REQUESTED", "body": "  " }] },
+            "reviewThreads": { "totalCount": 1, "nodes": [
+                { "isResolved": false, "isOutdated": false, "comments": { "totalCount": 1, "nodes": [{ "body": "inline feedback", "path": "src/lib.rs", "line": 7 }] } }
+            ] },
+        });
+
+        let feedback = complete_feedback(&observation).unwrap();
+
+        assert!(feedback.change_request_bodies.is_empty());
+        assert_eq!(feedback.unresolved_threads.len(), 1);
+        assert_eq!(feedback.unresolved_threads[0].body, "inline feedback");
     }
 
     #[test]
