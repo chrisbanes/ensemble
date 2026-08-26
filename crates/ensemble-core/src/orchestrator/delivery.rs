@@ -905,6 +905,7 @@ pub(crate) struct PullRequestObservationRequest<'a> {
     pub head_branch: &'a str,
     pub remote: &'a str,
     pub collect_automatic_merge_policy: bool,
+    pub direct_merge_method: Option<DeliveryMergeMethod>,
 }
 
 pub(crate) struct CliDeliveryRemote;
@@ -1181,6 +1182,7 @@ impl DeliveryRemote for CliDeliveryRemote {
             head_branch,
             remote,
             collect_automatic_merge_policy,
+            direct_merge_method,
         } = request;
         let (owner, name) = match github_repository_identity(repository_path, remote).await {
             Ok(repository) => repository,
@@ -1404,6 +1406,7 @@ impl DeliveryRemote for CliDeliveryRemote {
                     has_requested_changes,
                     has_unresolved_review_threads,
                     base_freshness,
+                    direct_merge_method,
                     queue_supported,
                     queued,
                 },
@@ -1630,9 +1633,11 @@ fn github_path_segment(value: &str) -> String {
 struct AutomaticMergeRequirements {
     required_checks: Vec<(String, Option<u64>)>,
     required_approvals: u64,
+    requires_approval_review: bool,
     requires_resolved_review_threads: bool,
     requires_current_base: bool,
     requires_merge_queue: bool,
+    direct_merge_method_unsupported: bool,
 }
 
 struct AutomaticMergeStatus<'a> {
@@ -1641,6 +1646,7 @@ struct AutomaticMergeStatus<'a> {
     has_requested_changes: bool,
     has_unresolved_review_threads: bool,
     base_freshness: BaseFreshness,
+    direct_merge_method: Option<DeliveryMergeMethod>,
     queue_supported: bool,
     queued: bool,
 }
@@ -1686,9 +1692,29 @@ fn automatic_merge_evidence_from_policy(
                     rule.pointer("/parameters/required_approving_review_count")?
                         .as_u64()?,
                 );
+                requirements.requires_approval_review |= rule
+                    .pointer("/parameters/require_code_owner_review")?
+                    .as_bool()?
+                    || rule
+                        .pointer("/parameters/require_last_push_approval")?
+                        .as_bool()?;
                 requirements.requires_resolved_review_threads |= rule
                     .pointer("/parameters/required_review_thread_resolution")?
                     .as_bool()?;
+                let allowed_merge_methods = rule
+                    .pointer("/parameters/allowed_merge_methods")?
+                    .as_array()?;
+                let mut configured_method_allowed = status.direct_merge_method.is_none();
+                for allowed_method in allowed_merge_methods {
+                    let allowed_method = match allowed_method.as_str()? {
+                        "merge" => DeliveryMergeMethod::Merge,
+                        "squash" => DeliveryMergeMethod::Squash,
+                        "rebase" => DeliveryMergeMethod::Rebase,
+                        _ => return None,
+                    };
+                    configured_method_allowed |= Some(allowed_method) == status.direct_merge_method;
+                }
+                requirements.direct_merge_method_unsupported |= !configured_method_allowed;
             }
             "merge_queue" => {
                 rule.get("parameters")?.as_object()?;
@@ -1728,6 +1754,9 @@ fn automatic_merge_evidence_from_policy(
             requirements.required_approvals = requirements
                 .required_approvals
                 .max(reviews.get("required_approving_review_count")?.as_u64()?);
+            requirements.requires_approval_review |=
+                reviews.get("require_code_owner_reviews")?.as_bool()?
+                    || reviews.get("require_last_push_approval")?.as_bool()?;
         }
         let conversation_resolution = protection.get("required_conversation_resolution")?;
         if !conversation_resolution.is_null() {
@@ -1757,13 +1786,15 @@ fn automatic_merge_evidence_from_policy(
             });
     Some(AutomaticMergeEvidence {
         required_checks_passing,
-        required_reviews_satisfied: requirements.required_approvals == 0
+        required_reviews_satisfied: (requirements.required_approvals == 0
+            && !requirements.requires_approval_review)
             || status.review_decision == ReviewDecision::Approved,
         required_review_threads_resolved: !requirements.requires_resolved_review_threads
             || !status.has_unresolved_review_threads,
         strict_base_satisfied: !requirements.requires_current_base
             || status.base_freshness == BaseFreshness::UpToDate,
-        direct_merge_supported: !requirements.requires_merge_queue,
+        direct_merge_supported: !requirements.requires_merge_queue
+            && !requirements.direct_merge_method_unsupported,
         // `latestReviews` was completeness-checked with the rest of feedback. This is explicit
         // current-review evidence and does not reinterpret a nullable reviewDecision as safe.
         no_requested_changes: !status.has_requested_changes,
@@ -2525,6 +2556,13 @@ impl Orchestrator {
             if repository.phase != DeliveryPhase::Blocked {
                 continue;
             }
+            if repository
+                .merge_mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.phase == DeliveryMergePhase::Blocked)
+            {
+                repository.merge_mutation = None;
+            }
             if repository.approval_required {
                 repository.phase = DeliveryPhase::AwaitingApproval;
             } else {
@@ -3056,6 +3094,10 @@ impl Orchestrator {
                     remote: &repository.remote,
                     collect_automatic_merge_policy: repository.merge.is_automatic()
                         && repository.merge_mutation.is_none(),
+                    direct_merge_method: match &repository.merge {
+                        DeliveryMergeConfig::Auto { method } => Some(*method),
+                        DeliveryMergeConfig::Manual | DeliveryMergeConfig::MergeQueue => None,
+                    },
                 })
                 .await;
             // A guarded repair push is reconciling one newer, already-durable local
@@ -3256,6 +3298,10 @@ impl Orchestrator {
                 head_branch: &repository.head_branch,
                 remote: &repository.remote,
                 collect_automatic_merge_policy: repository.merge_mutation.is_none(),
+                direct_merge_method: match &repository.merge {
+                    DeliveryMergeConfig::Auto { method } => Some(*method),
+                    DeliveryMergeConfig::Manual | DeliveryMergeConfig::MergeQueue => None,
+                },
             })
             .await;
         let DeliveryObservationRead::Observed(facts) = read else {
@@ -3314,9 +3360,14 @@ impl Orchestrator {
             };
             updated.merge_mutation = Some(DeliveryMergeMutation {
                 phase,
-                last_error: diagnostic,
+                last_error: diagnostic.clone(),
                 ..mutation
             });
+            if phase == DeliveryMergePhase::Blocked {
+                updated.phase = DeliveryPhase::Blocked;
+                updated.retry_from = Some(DeliveryPhase::Waiting);
+                updated.last_error = diagnostic;
+            }
             return self
                 .persist_delivery_candidate(&current, observed.clone(), snapshot)
                 .await
@@ -3370,10 +3421,13 @@ impl Orchestrator {
                     .await
             }
         };
-        let mutation = in_flight
+        let repository = in_flight
             .repositories
             .get_mut(&repository_key)
-            .and_then(|repository| repository.merge_mutation.as_mut())
+            .expect("repository key was selected from this delivery");
+        let mutation = repository
+            .merge_mutation
+            .as_mut()
             .expect("persisted automatic merge intent");
         match outcome {
             DeliveryMergeRemoteOutcome::Submitted => {
@@ -3382,7 +3436,10 @@ impl Orchestrator {
             }
             DeliveryMergeRemoteOutcome::Rejected(error) => {
                 mutation.phase = DeliveryMergePhase::Blocked;
-                mutation.last_error = Some(error);
+                mutation.last_error = Some(error.clone());
+                repository.phase = DeliveryPhase::Blocked;
+                repository.retry_from = Some(DeliveryPhase::Waiting);
+                repository.last_error = Some(error);
             }
             DeliveryMergeRemoteOutcome::Ambiguous(error) => {
                 mutation.phase = DeliveryMergePhase::Reconciling;
@@ -6315,7 +6372,10 @@ mod tests {
                 "type": "pull_request",
                 "parameters": {
                     "required_approving_review_count": 1,
-                    "required_review_thread_resolution": false
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
                 }
             }
         ]);
@@ -6334,6 +6394,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: true,
                 queued: false,
             },
@@ -6355,6 +6416,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: true,
                 queued: false,
             },
@@ -6370,6 +6432,7 @@ mod tests {
                 has_requested_changes: true,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: true,
                 queued: false,
             },
@@ -6386,6 +6449,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: true,
                 queued: false,
             },
@@ -6402,6 +6466,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: true,
                 queued: false,
             },
@@ -6420,6 +6485,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6427,6 +6493,146 @@ mod tests {
         .unwrap();
 
         assert!(evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_requires_approval_for_independent_review_rules() {
+        let rules = [
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": true,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
+                }
+            }]),
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": true,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
+                }
+            }]),
+        ];
+        for rules in rules {
+            let evidence = automatic_merge_evidence_from_policy(
+                &rules,
+                None,
+                AutomaticMergeStatus {
+                    checks: &[],
+                    review_decision: ReviewDecision::Unknown,
+                    has_requested_changes: false,
+                    has_unresolved_review_threads: false,
+                    base_freshness: BaseFreshness::UpToDate,
+                    direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                    queue_supported: false,
+                    queued: false,
+                },
+            )
+            .unwrap();
+
+            assert!(!evidence.is_eligible_for_direct_merge());
+        }
+
+        let classic = serde_json::json!({
+            "required_status_checks": null,
+            "required_pull_request_reviews": {
+                "required_approving_review_count": 0,
+                "require_code_owner_reviews": true,
+                "require_last_push_approval": false
+            },
+            "required_conversation_resolution": null
+        });
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&classic),
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Unknown,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_requires_configured_method_to_be_allowed() {
+        let rules = serde_json::json!([{
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "required_review_thread_resolution": false,
+                "require_code_owner_review": false,
+                "require_last_push_approval": false,
+                "allowed_merge_methods": ["rebase"]
+            }
+        }]);
+        let status = |method| AutomaticMergeStatus {
+            checks: &[],
+            review_decision: ReviewDecision::Unknown,
+            has_requested_changes: false,
+            has_unresolved_review_threads: false,
+            base_freshness: BaseFreshness::UpToDate,
+            direct_merge_method: Some(method),
+            queue_supported: false,
+            queued: false,
+        };
+
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            status(DeliveryMergeMethod::Squash),
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            status(DeliveryMergeMethod::Rebase),
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+
+        for malformed in [
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false
+                }
+            }]),
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["unknown"]
+                }
+            }]),
+        ] {
+            assert!(automatic_merge_evidence_from_policy(
+                &malformed,
+                None,
+                status(DeliveryMergeMethod::Squash),
+            )
+            .is_none());
+        }
     }
 
     #[test]
@@ -6455,6 +6661,7 @@ mod tests {
                     has_requested_changes: false,
                     has_unresolved_review_threads: false,
                     base_freshness: BaseFreshness::UpToDate,
+                    direct_merge_method: Some(DeliveryMergeMethod::Squash),
                     queue_supported: false,
                     queued: false,
                 },
@@ -6484,6 +6691,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::Behind,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6499,7 +6707,10 @@ mod tests {
             "type": "pull_request",
             "parameters": {
                 "required_approving_review_count": 0,
-                "required_review_thread_resolution": true
+                "required_review_thread_resolution": true,
+                "require_code_owner_review": false,
+                "require_last_push_approval": false,
+                "allowed_merge_methods": ["merge", "squash", "rebase"]
             }
         }]);
 
@@ -6512,6 +6723,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: true,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6537,7 +6749,10 @@ mod tests {
                 "type": "pull_request",
                 "parameters": {
                     "required_approving_review_count": 1,
-                    "required_review_thread_resolution": false
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
                 }
             }]
         ]);
@@ -6548,7 +6763,9 @@ mod tests {
                 "checks": [{"context": "classic", "app_id": 2}]
             },
             "required_pull_request_reviews": {
-                "required_approving_review_count": 2
+                "required_approving_review_count": 2,
+                "require_code_owner_reviews": false,
+                "require_last_push_approval": false
             },
             "required_conversation_resolution": {"enabled": true}
         });
@@ -6576,6 +6793,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6592,6 +6810,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::Behind,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6607,6 +6826,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: true,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6641,6 +6861,7 @@ mod tests {
             has_requested_changes: false,
             has_unresolved_review_threads: false,
             base_freshness: BaseFreshness::UpToDate,
+            direct_merge_method: Some(DeliveryMergeMethod::Squash),
             queue_supported: false,
             queued: false,
         };
@@ -6692,6 +6913,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
                 queue_supported: false,
                 queued: false,
             },
@@ -6712,6 +6934,7 @@ mod tests {
                 has_requested_changes: false,
                 has_unresolved_review_threads: false,
                 base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: None,
                 queue_supported: true,
                 queued: false,
             },

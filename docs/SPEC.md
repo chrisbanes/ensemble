@@ -488,7 +488,9 @@ Pipeline run recovery:
   classic branch protection, no requested changes, any required review-thread resolution,
   strict-check base freshness, mergeability, and confirmed queue support when applicable.
   Required checks accept GitHub's successful terminal conclusions, including neutral and skipped;
-  a review decision is needed only when the effective policy requires approving reviews.
+  a review decision is needed when the effective policy requires an approval count, code-owner
+  approval, or approval of the last push. A configured direct merge method must appear in every
+  applicable pull-request rule's allowed methods; missing or malformed method policy fails closed.
   Version-1 retained observations remain readable but cannot authorize mutation. Labels,
   assignees, aggregate non-required checks, and stale evidence are not merge authority.
   Manual delivery does not read rulesets or classic branch protection because those policies are
@@ -503,6 +505,9 @@ Pipeline run recovery:
   cannot reinterpret confirmed admission as rejection. Policy is read only while authorizing a
   new mutation, not while reconciling one already journaled. Rejection, conflict, unsupported queue,
   changed head, and unconfirmed outcomes retain the PR, claim, and workspace.
+  A confirmed rejection or unconfirmed mutation becomes a visible blocked repository with its
+  diagnostic. Explicit retry clears only that known-blocked intent and reauthorizes from fresh
+  policy; ambiguous in-flight or reconciling intent remains observe-first.
   A retained repair attempt or repair push excludes automatic merge activity.
 - Observing `merged` or `closed_without_merge` is evidence only. It does not create, update,
   merge, queue, or close a pull request or redispatch pipeline work. Configured delivery-state

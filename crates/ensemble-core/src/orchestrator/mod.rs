@@ -15740,6 +15740,8 @@ mod tests {
             Vec<crate::orchestrator::delivery_observation::DeliveryObservationRead>,
         >,
         automatic_policy_reads: std::sync::Mutex<Vec<bool>>,
+        merge_outcomes:
+            std::sync::Mutex<Vec<crate::orchestrator::delivery::DeliveryMergeRemoteOutcome>>,
         merge_calls: AtomicUsize,
         journaled_issue: Option<(PipelineRunJournal, String)>,
     }
@@ -16108,7 +16110,12 @@ mod tests {
                 }));
             }
             self.merge_calls.fetch_add(1, Ordering::SeqCst);
-            crate::orchestrator::delivery::DeliveryMergeRemoteOutcome::Submitted
+            let mut outcomes = self.merge_outcomes.lock().unwrap();
+            if outcomes.is_empty() {
+                crate::orchestrator::delivery::DeliveryMergeRemoteOutcome::Submitted
+            } else {
+                outcomes.remove(0)
+            }
         }
 
         async fn enqueue_pull_request(
@@ -16136,7 +16143,12 @@ mod tests {
                 }));
             }
             self.merge_calls.fetch_add(1, Ordering::SeqCst);
-            crate::orchestrator::delivery::DeliveryMergeRemoteOutcome::Submitted
+            let mut outcomes = self.merge_outcomes.lock().unwrap();
+            if outcomes.is_empty() {
+                crate::orchestrator::delivery::DeliveryMergeRemoteOutcome::Submitted
+            } else {
+                outcomes.remove(0)
+            }
         }
     }
 
@@ -16351,6 +16363,7 @@ mod tests {
                 observation(PullRequestTerminalState::Merged),
             ]),
             automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
+            merge_outcomes: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
             journaled_issue: Some((
                 orchestrator.pipeline_journal.clone(),
@@ -16376,6 +16389,116 @@ mod tests {
             .as_ref()
             .and_then(|observation| observation.facts.as_ref())
             .is_some_and(|facts| { facts.terminal_state == PullRequestTerminalState::Merged }));
+    }
+
+    #[tokio::test]
+    async fn rejected_delivery_merge_is_exposed_and_retryable() {
+        let bootstrap = Arc::new(RecoveryDeliveryRemote {
+            pull_requests: std::sync::Mutex::new(Vec::new()),
+            pushes: AtomicUsize::new(0),
+            creates: AtomicUsize::new(0),
+            lists: AtomicUsize::new(0),
+        });
+        let (mut orchestrator, _workspace, _repo, mut delivery) =
+            recovery_test_orchestrator(bootstrap.clone()).await;
+        orchestrator
+            .workspace_mgr
+            .prepare_workspace(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        let repository = delivery.repositories.get_mut("source-repo").unwrap();
+        repository.phase = DeliveryPhase::Waiting;
+        repository.pr_number = Some(420);
+        repository.pr_url = Some("https://github.com/example/project/pull/420".to_string());
+        repository.last_error = None;
+        repository.merge = crate::workspace::finalize::DeliveryMergeConfig::Auto {
+            method: crate::workspace::finalize::DeliveryMergeMethod::Squash,
+        };
+        orchestrator
+            .persist_delivery_record(&delivery, None)
+            .await
+            .unwrap();
+        let observation =
+            crate::orchestrator::delivery_observation::DeliveryObservationRead::Observed(
+                DeliveryObservationFacts {
+                    pull_request_node_id: Some("PR_node".to_string()),
+                    pull_request_number: 420,
+                    pull_request_url: "https://github.com/example/project/pull/420".to_string(),
+                    head_sha: "0123456789abcdef".to_string(),
+                    matches_delivery: false,
+                    head_diverged: false,
+                    terminal_state: PullRequestTerminalState::Open,
+                    mergeability: Mergeability::Mergeable,
+                    base_freshness: BaseFreshness::UpToDate,
+                    checks: vec![],
+                    check_summary: CheckSummary::Passing,
+                    review_decision: ReviewDecision::Approved,
+                    in_merge_queue: false,
+                    automatic_merge: Some(
+                        crate::orchestrator::delivery_observation::AutomaticMergeEvidence {
+                            required_checks_passing: true,
+                            required_reviews_satisfied: true,
+                            required_review_threads_resolved: true,
+                            strict_base_satisfied: true,
+                            direct_merge_supported: true,
+                            no_requested_changes: true,
+                            queue_supported: false,
+                            queued: false,
+                        },
+                    ),
+                    feedback: Default::default(),
+                },
+            );
+        let remote = Arc::new(SequencedObservationRemote {
+            inner: bootstrap,
+            observations: std::sync::Mutex::new(vec![observation]),
+            automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
+            merge_outcomes: std::sync::Mutex::new(vec![
+                crate::orchestrator::delivery::DeliveryMergeRemoteOutcome::Rejected(
+                    "repository policy rejected merge".to_string(),
+                ),
+            ]),
+            merge_calls: AtomicUsize::new(0),
+            journaled_issue: Some((
+                orchestrator.pipeline_journal.clone(),
+                delivery.issue_id.clone(),
+            )),
+        });
+        orchestrator.delivery_remote = remote;
+
+        let blocked = orchestrator
+            .advance_delivery_merge(delivery.clone(), None)
+            .await;
+        let repository = &blocked.repositories["source-repo"];
+        assert_eq!(repository.phase, DeliveryPhase::Blocked);
+        assert_eq!(repository.retry_from, Some(DeliveryPhase::Waiting));
+        assert_eq!(
+            repository.last_error.as_deref(),
+            Some("repository policy rejected merge")
+        );
+        assert!(repository.merge_mutation.as_ref().is_some_and(|mutation| {
+            mutation.phase == crate::orchestrator::delivery::DeliveryMergePhase::Blocked
+                && mutation.last_error.as_deref() == Some("repository policy rejected merge")
+        }));
+        let finalize = crate::orchestrator::Orchestrator::finalize_state_from_delivery(&blocked);
+        assert_eq!(
+            finalize.status,
+            crate::orchestrator::state::FinalizeStatus::Failed
+        );
+        assert_eq!(
+            finalize.repos[0].last_error.as_deref(),
+            Some("repository policy rejected merge")
+        );
+
+        orchestrator
+            .retry_finalize_delivery(&delivery.issue_id, &delivery.identifier)
+            .await
+            .unwrap();
+        let retried = orchestrator.state.read().await.delivery[&delivery.issue_id].clone();
+        let repository = &retried.repositories["source-repo"];
+        assert_eq!(repository.phase, DeliveryPhase::Waiting);
+        assert!(repository.merge_mutation.is_none());
+        assert!(repository.last_error.is_none());
     }
 
     #[tokio::test]
@@ -16446,6 +16569,7 @@ mod tests {
                 observation(true, None),
             ]),
             automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
+            merge_outcomes: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
             journaled_issue: Some((
                 orchestrator.pipeline_journal.clone(),
@@ -19301,6 +19425,7 @@ mod tests {
             inner: inner.clone(),
             observations: std::sync::Mutex::new(vec![retryable, open]),
             automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
+            merge_outcomes: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
             journaled_issue: None,
         });

@@ -540,7 +540,9 @@ terminal-green effective required checks, satisfied required reviews, required r
 resolved, strict-check base freshness, and no requested changes; queue mode also requires confirmed
 queue support. Ensemble combines every applicable ruleset page with classic branch protection.
 Successful required-check conclusions include GitHub's success, neutral, and skipped outcomes; a
-review decision is needed only when the effective policy requires approving reviews.
+review decision is needed when the effective policy requires an approval count, code-owner
+approval, or approval of the last push. A configured direct merge method must appear in every
+applicable pull-request rule's allowed methods; missing or malformed method policy fails closed.
 Effective policy data that is missing, incomplete, or unauthorized fails closed. Manual mode skips
 ruleset and classic-protection reads because it performs observation-only reconciliation. An
 applicable merge-queue rule permits queue admission but prevents direct automatic merge from
@@ -551,6 +553,9 @@ membership is reconciled independently of a later effective-policy read, so a tr
 failure does not turn confirmed admission into a rejection. Policy reads stop once a merge or queue
 mutation is journaled for reconciliation. Active delivery repair excludes
 automatic merge activity.
+A confirmed rejection or unconfirmed mutation blocks the repository with a visible diagnostic. An
+explicit retry clears only that known-blocked mutation and obtains fresh policy before another
+attempt; ambiguous in-flight or reconciling mutations remain observation-only.
 
 `delivery_states` belongs beside a legacy pipeline's `on_success` and `on_failure`, or inside a
 named pipeline. Its optional non-terminal targets are `waiting`, `checks_failed`,
