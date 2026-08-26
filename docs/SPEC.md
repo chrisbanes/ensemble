@@ -489,6 +489,9 @@ Pipeline run recovery:
   strict-check base freshness, mergeability, and confirmed queue support when applicable.
   Version-1 retained observations remain readable but cannot authorize mutation. Labels,
   assignees, aggregate non-required checks, and stale evidence are not merge authority.
+  Manual delivery does not read rulesets or classic branch protection because those policies are
+  not needed for observation-only reconciliation. An applicable merge-queue rule authorizes only
+  queue admission; it prevents direct automatic merge from bypassing the queue.
 - One orchestrator-wide permit serializes the short merge/queue mutation section across issues.
   After acquiring it, Ensemble re-observes the exact PR, journals the PR node, expected head SHA,
   operation, and configured method as in flight, performs at most one mutation, and returns to

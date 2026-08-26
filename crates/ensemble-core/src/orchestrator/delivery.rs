@@ -865,12 +865,7 @@ pub(crate) trait DeliveryRemote: Send + Sync {
 
     async fn observe_pull_request(
         &self,
-        _repository_path: &Path,
-        _pull_request_number: u64,
-        _pull_request_url: &str,
-        _base_branch: &str,
-        _head_branch: &str,
-        _remote: &str,
+        _request: PullRequestObservationRequest<'_>,
     ) -> DeliveryObservationRead {
         DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
             DeliveryObservationFailureKind::UnsupportedResponse,
@@ -900,6 +895,16 @@ pub(crate) trait DeliveryRemote: Send + Sync {
             "delivery remote does not support merge queue admission".to_string(),
         )
     }
+}
+
+pub(crate) struct PullRequestObservationRequest<'a> {
+    pub repository_path: &'a Path,
+    pub pull_request_number: u64,
+    pub pull_request_url: &'a str,
+    pub base_branch: &'a str,
+    pub head_branch: &'a str,
+    pub remote: &'a str,
+    pub collect_automatic_merge_policy: bool,
 }
 
 pub(crate) struct CliDeliveryRemote;
@@ -1166,13 +1171,17 @@ impl DeliveryRemote for CliDeliveryRemote {
 
     async fn observe_pull_request(
         &self,
-        repository_path: &Path,
-        pull_request_number: u64,
-        pull_request_url: &str,
-        base_branch: &str,
-        head_branch: &str,
-        remote: &str,
+        request: PullRequestObservationRequest<'_>,
     ) -> DeliveryObservationRead {
+        let PullRequestObservationRequest {
+            repository_path,
+            pull_request_number,
+            pull_request_url,
+            base_branch,
+            head_branch,
+            remote,
+            collect_automatic_merge_policy,
+        } = request;
         let (owner, name) = match github_repository_identity(repository_path, remote).await {
             Ok(repository) => repository,
             Err(read) => return read,
@@ -1345,57 +1354,63 @@ impl DeliveryRemote for CliDeliveryRemote {
             0 => BaseFreshness::UpToDate,
             _ => BaseFreshness::Behind,
         };
-        let encoded_base_branch = github_path_segment(base_branch);
-        let rules_endpoint = format!("repos/{owner}/{name}/rules/branches/{encoded_base_branch}");
-        let rules_arguments = repository_rules_arguments(&rules_endpoint);
-        let rules_stdout = match observation_command_stdout(repository_path, &rules_arguments).await
-        {
-            Ok(stdout) => stdout,
-            Err(read) => return read,
-        };
-        let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
-            Ok(value) => value,
-            Err(_) => {
-                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
-                    DeliveryObservationFailureKind::MalformedResponse,
-                    "GitHub returned invalid repository rules",
-                ));
-            }
-        };
-        let protection_endpoint =
-            format!("repos/{owner}/{name}/branches/{encoded_base_branch}/protection");
-        let protection_arguments = ["api", protection_endpoint.as_str()];
-        let protection_stdout =
-            match optional_observation_command_stdout(repository_path, &protection_arguments).await
-            {
-                Ok(stdout) => stdout,
-                Err(read) => return read,
-            };
-        let protection = match protection_stdout {
-            Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
-                Ok(value) => Some(value),
+        let automatic_merge = if collect_automatic_merge_policy {
+            let encoded_base_branch = github_path_segment(base_branch);
+            let rules_endpoint =
+                format!("repos/{owner}/{name}/rules/branches/{encoded_base_branch}");
+            let rules_arguments = repository_rules_arguments(&rules_endpoint);
+            let rules_stdout =
+                match observation_command_stdout(repository_path, &rules_arguments).await {
+                    Ok(stdout) => stdout,
+                    Err(read) => return read,
+                };
+            let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
+                Ok(value) => value,
                 Err(_) => {
                     return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
                         DeliveryObservationFailureKind::MalformedResponse,
-                        "GitHub returned invalid classic branch protection",
+                        "GitHub returned invalid repository rules",
                     ));
                 }
-            },
-            None => None,
+            };
+            let protection_endpoint =
+                format!("repos/{owner}/{name}/branches/{encoded_base_branch}/protection");
+            let protection_arguments = ["api", protection_endpoint.as_str()];
+            let protection_stdout =
+                match optional_observation_command_stdout(repository_path, &protection_arguments)
+                    .await
+                {
+                    Ok(stdout) => stdout,
+                    Err(read) => return read,
+                };
+            let protection = match protection_stdout {
+                Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                            DeliveryObservationFailureKind::MalformedResponse,
+                            "GitHub returned invalid classic branch protection",
+                        ));
+                    }
+                },
+                None => None,
+            };
+            automatic_merge_evidence_from_policy(
+                &rules,
+                protection.as_ref(),
+                AutomaticMergeStatus {
+                    checks: &checks,
+                    review_decision,
+                    has_requested_changes,
+                    has_unresolved_review_threads,
+                    base_freshness,
+                    queue_supported,
+                    queued,
+                },
+            )
+        } else {
+            None
         };
-        let automatic_merge = automatic_merge_evidence_from_policy(
-            &rules,
-            protection.as_ref(),
-            AutomaticMergeStatus {
-                checks: &checks,
-                review_decision,
-                has_requested_changes,
-                has_unresolved_review_threads,
-                base_freshness,
-                queue_supported,
-                queued,
-            },
-        );
         DeliveryObservationRead::Observed(DeliveryObservationFacts {
             pull_request_node_id: Some(node_id.to_string()),
             pull_request_number: number,
@@ -1617,6 +1632,7 @@ struct AutomaticMergeRequirements {
     required_approvals: u64,
     requires_resolved_review_threads: bool,
     requires_current_base: bool,
+    requires_merge_queue: bool,
 }
 
 struct AutomaticMergeStatus<'a> {
@@ -1673,6 +1689,10 @@ fn automatic_merge_evidence_from_policy(
                 requirements.requires_resolved_review_threads |= rule
                     .pointer("/parameters/required_review_thread_resolution")?
                     .as_bool()?;
+            }
+            "merge_queue" => {
+                rule.get("parameters")?.as_object()?;
+                requirements.requires_merge_queue = true;
             }
             "deletion" | "non_fast_forward" => {}
             _ => return None,
@@ -1737,6 +1757,7 @@ fn automatic_merge_evidence_from_policy(
             || !status.has_unresolved_review_threads,
         strict_base_satisfied: !requirements.requires_current_base
             || status.base_freshness == BaseFreshness::UpToDate,
+        direct_merge_supported: !requirements.requires_merge_queue,
         // `latestReviews` was completeness-checked with the rest of feedback. This is explicit
         // current-review evidence and does not reinterpret a nullable reviewDecision as safe.
         no_requested_changes: !status.has_requested_changes,
@@ -3020,14 +3041,15 @@ impl Orchestrator {
             let now = Utc::now();
             let read = self
                 .delivery_remote
-                .observe_pull_request(
-                    worktree,
+                .observe_pull_request(PullRequestObservationRequest {
+                    repository_path: worktree,
                     pull_request_number,
                     pull_request_url,
-                    &repository.base_branch,
-                    &repository.head_branch,
-                    &repository.remote,
-                )
+                    base_branch: &repository.base_branch,
+                    head_branch: &repository.head_branch,
+                    remote: &repository.remote,
+                    collect_automatic_merge_policy: repository.merge.is_automatic(),
+                })
                 .await;
             // A guarded repair push is reconciling one newer, already-durable local
             // head. Validate that exact head rather than marking the expected repair
@@ -3219,14 +3241,15 @@ impl Orchestrator {
         };
         let read = self
             .delivery_remote
-            .observe_pull_request(
-                worktree,
+            .observe_pull_request(PullRequestObservationRequest {
+                repository_path: worktree,
                 pull_request_number,
                 pull_request_url,
-                &repository.base_branch,
-                &repository.head_branch,
-                &repository.remote,
-            )
+                base_branch: &repository.base_branch,
+                head_branch: &repository.head_branch,
+                remote: &repository.remote,
+                collect_automatic_merge_policy: true,
+            })
             .await;
         let DeliveryObservationRead::Observed(facts) = read else {
             return current;
@@ -6613,6 +6636,27 @@ mod tests {
         .unwrap();
 
         assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_routes_merge_queue_rules_to_queue_admission() {
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([[{"type": "merge_queue", "parameters": {}}]]),
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+        assert!(evidence.is_eligible_for_queue());
     }
 
     #[test]

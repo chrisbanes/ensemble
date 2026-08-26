@@ -15739,6 +15739,7 @@ mod tests {
         observations: std::sync::Mutex<
             Vec<crate::orchestrator::delivery_observation::DeliveryObservationRead>,
         >,
+        automatic_policy_reads: std::sync::Mutex<Vec<bool>>,
         merge_calls: AtomicUsize,
         journaled_issue: Option<(PipelineRunJournal, String)>,
     }
@@ -16006,12 +16007,7 @@ mod tests {
 
         async fn observe_pull_request(
             &self,
-            _repository_path: &Path,
-            _pull_request_number: u64,
-            _pull_request_url: &str,
-            _base_branch: &str,
-            _head_branch: &str,
-            _remote: &str,
+            _request: crate::orchestrator::delivery::PullRequestObservationRequest<'_>,
         ) -> crate::orchestrator::delivery_observation::DeliveryObservationRead {
             self.observations.lock().unwrap().pop().unwrap_or_else(|| {
                 crate::orchestrator::delivery_observation::DeliveryObservationRead::Retryable(
@@ -16073,13 +16069,12 @@ mod tests {
         }
         async fn observe_pull_request(
             &self,
-            _path: &Path,
-            _number: u64,
-            _url: &str,
-            _base: &str,
-            _head: &str,
-            _remote: &str,
+            request: crate::orchestrator::delivery::PullRequestObservationRequest<'_>,
         ) -> crate::orchestrator::delivery_observation::DeliveryObservationRead {
+            self.automatic_policy_reads
+                .lock()
+                .unwrap()
+                .push(request.collect_automatic_merge_policy);
             self.observations.lock().unwrap().remove(0)
         }
 
@@ -16339,6 +16334,7 @@ mod tests {
                             required_reviews_satisfied: true,
                             required_review_threads_resolved: true,
                             strict_base_satisfied: true,
+                            direct_merge_supported: true,
                             no_requested_changes: true,
                             queue_supported: false,
                             queued: false,
@@ -16354,6 +16350,7 @@ mod tests {
                 observation(PullRequestTerminalState::Open),
                 observation(PullRequestTerminalState::Merged),
             ]),
+            automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
             journaled_issue: Some((
                 orchestrator.pipeline_journal.clone(),
@@ -16438,6 +16435,7 @@ mod tests {
                             required_reviews_satisfied: true,
                             required_review_threads_resolved: true,
                             strict_base_satisfied: true,
+                            direct_merge_supported: true,
                             no_requested_changes: true,
                             queue_supported: true,
                             queued: false,
@@ -16446,6 +16444,7 @@ mod tests {
                 ),
                 observation(true, None),
             ]),
+            automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
             journaled_issue: Some((
                 orchestrator.pipeline_journal.clone(),
@@ -19284,12 +19283,14 @@ mod tests {
                 feedback: Default::default(),
             },
         );
-        orchestrator.delivery_remote = Arc::new(SequencedObservationRemote {
+        let remote = Arc::new(SequencedObservationRemote {
             inner: inner.clone(),
             observations: std::sync::Mutex::new(vec![retryable, open]),
+            automatic_policy_reads: std::sync::Mutex::new(Vec::new()),
             merge_calls: AtomicUsize::new(0),
             journaled_issue: None,
         });
+        orchestrator.delivery_remote = remote.clone();
         assert_eq!(orchestrator.config.read().await.tracker.kind, "todo_file");
         let workspace = orchestrator
             .workspace_mgr
@@ -19323,6 +19324,10 @@ mod tests {
         assert_eq!(inner.pushes.load(Ordering::SeqCst), 0);
         assert_eq!(inner.creates.load(Ordering::SeqCst), 0);
         assert_eq!(inner.lists.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            *remote.automatic_policy_reads.lock().unwrap(),
+            vec![false, false]
+        );
     }
 
     #[tokio::test]

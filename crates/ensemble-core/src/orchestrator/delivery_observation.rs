@@ -168,13 +168,16 @@ pub struct AutomaticMergeEvidence {
     /// Missing legacy evidence fails closed.
     #[serde(default)]
     pub strict_base_satisfied: bool,
+    /// Missing legacy evidence fails closed for direct merge.
+    #[serde(default)]
+    pub direct_merge_supported: bool,
     pub no_requested_changes: bool,
     pub queue_supported: bool,
     pub queued: bool,
 }
 
 impl AutomaticMergeEvidence {
-    pub(crate) fn is_eligible_for_direct_merge(&self) -> bool {
+    fn policy_requirements_satisfied(&self) -> bool {
         self.required_checks_passing
             && self.required_reviews_satisfied
             && self.required_review_threads_resolved
@@ -182,8 +185,12 @@ impl AutomaticMergeEvidence {
             && self.no_requested_changes
     }
 
+    pub(crate) fn is_eligible_for_direct_merge(&self) -> bool {
+        self.policy_requirements_satisfied() && self.direct_merge_supported
+    }
+
     pub(crate) fn is_eligible_for_queue(&self) -> bool {
-        self.is_eligible_for_direct_merge() && self.queue_supported && !self.queued
+        self.policy_requirements_satisfied() && self.queue_supported && !self.queued
     }
 }
 
@@ -552,6 +559,7 @@ mod tests {
             required_reviews_satisfied: true,
             required_review_threads_resolved: true,
             strict_base_satisfied: true,
+            direct_merge_supported: true,
             no_requested_changes: true,
             queue_supported: true,
             queued: false,
@@ -562,6 +570,23 @@ mod tests {
 
         facts.mergeability = Mergeability::Unknown;
         assert!(facts.automatic_merge_evidence().is_none());
+    }
+
+    #[test]
+    fn legacy_automatic_merge_evidence_cannot_authorize_direct_merge() {
+        let evidence = serde_json::from_value::<AutomaticMergeEvidence>(serde_json::json!({
+            "required_checks_passing": true,
+            "required_reviews_satisfied": true,
+            "required_review_threads_resolved": true,
+            "strict_base_satisfied": true,
+            "no_requested_changes": true,
+            "queue_supported": true,
+            "queued": false
+        }))
+        .unwrap();
+
+        assert!(!evidence.direct_merge_supported);
+        assert!(!evidence.is_eligible_for_direct_merge());
     }
 
     #[test]
