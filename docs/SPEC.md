@@ -484,10 +484,11 @@ Pipeline run recovery:
   delivery without adopting the remote head.
 - Each repository freezes `finalize.merge` as `manual` (the default), direct `auto` with an explicit
   method, or `merge_queue`. Automatic modes use only a fresh version-2 exact-head observation with
-  complete effective required-check and review evidence, no requested changes, mergeability, and
-  confirmed queue support when applicable. Version-1 retained observations remain readable but
-  cannot authorize mutation. Labels, assignees, aggregate non-required checks, and stale evidence
-  are not merge authority.
+  complete effective required-check and review evidence from every applicable ruleset page and
+  classic branch protection, no requested changes, any required review-thread resolution,
+  strict-check base freshness, mergeability, and confirmed queue support when applicable.
+  Version-1 retained observations remain readable but cannot authorize mutation. Labels,
+  assignees, aggregate non-required checks, and stale evidence are not merge authority.
 - One orchestrator-wide permit serializes the short merge/queue mutation section across issues.
   After acquiring it, Ensemble re-observes the exact PR, journals the PR node, expected head SHA,
   operation, and configured method as in flight, performs at most one mutation, and returns to

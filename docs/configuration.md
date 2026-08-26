@@ -536,13 +536,15 @@ requires `finalize.mode: push_and_pr` and an explicit repository merge method. `
 requires `push_and_pr` and admits an eligible pull request to GitHub's queue without treating
 admission as merge completion. The selected policy is frozen into the retained repository entry.
 Automatic modes require a fresh exact-head version-2 observation, a mergeable pull request,
-terminal-green effective required checks, satisfied required reviews, no requested changes, and—
-for queue mode—confirmed queue support. Effective policy data that is missing, incomplete, or
-unauthorized fails closed. Ensemble journals the exact PR node, head SHA, operation, and method
-before one serialized mutation, then observes GitHub again; a command response alone never proves
-merge or queue admission. Once submitted, queue membership is reconciled independently of a later
-effective-policy read, so a transient rules failure does not turn confirmed admission into a
-rejection. Active delivery repair excludes automatic merge activity.
+terminal-green effective required checks, satisfied required reviews, required review threads
+resolved, strict-check base freshness, and no requested changes; queue mode also requires confirmed
+queue support. Ensemble combines every applicable ruleset page with classic branch protection.
+Effective policy data that is missing, incomplete, or unauthorized fails closed. Ensemble journals
+the exact PR node, head SHA, operation, and method before one serialized mutation, then observes
+GitHub again; a command response alone never proves merge or queue admission. Once submitted, queue
+membership is reconciled independently of a later effective-policy read, so a transient rules
+failure does not turn confirmed admission into a rejection. Active delivery repair excludes
+automatic merge activity.
 
 `delivery_states` belongs beside a legacy pipeline's `on_success` and `on_failure`, or inside a
 named pipeline. Its optional non-terminal targets are `waiting`, `checks_failed`,

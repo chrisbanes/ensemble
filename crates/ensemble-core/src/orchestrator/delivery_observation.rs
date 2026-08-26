@@ -162,6 +162,12 @@ pub struct DeliveryObservationFacts {
 pub struct AutomaticMergeEvidence {
     pub required_checks_passing: bool,
     pub required_reviews_satisfied: bool,
+    /// Missing legacy evidence fails closed.
+    #[serde(default)]
+    pub required_review_threads_resolved: bool,
+    /// Missing legacy evidence fails closed.
+    #[serde(default)]
+    pub strict_base_satisfied: bool,
     pub no_requested_changes: bool,
     pub queue_supported: bool,
     pub queued: bool,
@@ -169,7 +175,11 @@ pub struct AutomaticMergeEvidence {
 
 impl AutomaticMergeEvidence {
     pub(crate) fn is_eligible_for_direct_merge(&self) -> bool {
-        self.required_checks_passing && self.required_reviews_satisfied && self.no_requested_changes
+        self.required_checks_passing
+            && self.required_reviews_satisfied
+            && self.required_review_threads_resolved
+            && self.strict_base_satisfied
+            && self.no_requested_changes
     }
 
     pub(crate) fn is_eligible_for_queue(&self) -> bool {
@@ -540,6 +550,8 @@ mod tests {
         facts.automatic_merge = Some(AutomaticMergeEvidence {
             required_checks_passing: true,
             required_reviews_satisfied: true,
+            required_review_threads_resolved: true,
+            strict_base_satisfied: true,
             no_requested_changes: true,
             queue_supported: true,
             queued: false,

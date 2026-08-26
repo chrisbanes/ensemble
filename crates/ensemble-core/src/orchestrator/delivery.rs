@@ -1177,30 +1177,10 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(repository) => repository,
             Err(read) => return read,
         };
-        let query = DELIVERY_OBSERVATION_QUERY;
-        let number = pull_request_number.to_string();
-        let variables = [
-            format!("query={query}"),
-            format!("owner={owner}"),
-            format!("name={name}"),
-            format!("number={number}"),
-            format!("base={base_branch}"),
-        ];
-        let arguments = [
-            "api",
-            "graphql",
-            "-f",
-            variables[0].as_str(),
-            "-F",
-            variables[1].as_str(),
-            "-F",
-            variables[2].as_str(),
-            "-F",
-            variables[3].as_str(),
-            "-F",
-            variables[4].as_str(),
-        ];
-        let stdout = match observation_command_stdout(repository_path, &arguments).await {
+        let arguments =
+            delivery_observation_arguments(&owner, &name, pull_request_number, base_branch);
+        let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let stdout = match observation_command_stdout(repository_path, &argument_refs).await {
             Ok(stdout) => stdout,
             Err(read) => return read,
         };
@@ -1316,7 +1296,7 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(checks) => checks,
             Err(failure) => return DeliveryObservationRead::Terminal(failure),
         };
-        let feedback = match complete_feedback(value) {
+        let (feedback, has_unresolved_review_threads) = match complete_feedback(value) {
             Ok(feedback) => feedback,
             Err(failure) => return DeliveryObservationRead::Terminal(failure),
         };
@@ -1361,22 +1341,61 @@ impl DeliveryRemote for CliDeliveryRemote {
                 "GitHub returned an incomplete base comparison",
             ));
         };
-        let rules_endpoint = format!("repos/{owner}/{name}/rules/branches/{base_branch}");
-        let automatic_merge =
-            command_stdout(repository_path, "gh", &["api", rules_endpoint.as_str()])
-                .await
-                .ok()
-                .and_then(|stdout| serde_json::from_str::<serde_json::Value>(&stdout).ok())
-                .and_then(|rules| {
-                    automatic_merge_evidence_from_rules(
-                        &rules,
-                        &checks,
-                        review_decision,
-                        has_requested_changes,
-                        queue_supported,
-                        queued,
-                    )
-                });
+        let base_freshness = match behind_by {
+            0 => BaseFreshness::UpToDate,
+            _ => BaseFreshness::Behind,
+        };
+        let encoded_base_branch = github_path_segment(base_branch);
+        let rules_endpoint = format!("repos/{owner}/{name}/rules/branches/{encoded_base_branch}");
+        let rules_arguments = repository_rules_arguments(&rules_endpoint);
+        let rules_stdout = match observation_command_stdout(repository_path, &rules_arguments).await
+        {
+            Ok(stdout) => stdout,
+            Err(read) => return read,
+        };
+        let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
+            Ok(value) => value,
+            Err(_) => {
+                return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                    DeliveryObservationFailureKind::MalformedResponse,
+                    "GitHub returned invalid repository rules",
+                ));
+            }
+        };
+        let protection_endpoint =
+            format!("repos/{owner}/{name}/branches/{encoded_base_branch}/protection");
+        let protection_arguments = ["api", protection_endpoint.as_str()];
+        let protection_stdout =
+            match optional_observation_command_stdout(repository_path, &protection_arguments).await
+            {
+                Ok(stdout) => stdout,
+                Err(read) => return read,
+            };
+        let protection = match protection_stdout {
+            Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                        DeliveryObservationFailureKind::MalformedResponse,
+                        "GitHub returned invalid classic branch protection",
+                    ));
+                }
+            },
+            None => None,
+        };
+        let automatic_merge = automatic_merge_evidence_from_policy(
+            &rules,
+            protection.as_ref(),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision,
+                has_requested_changes,
+                has_unresolved_review_threads,
+                base_freshness,
+                queue_supported,
+                queued,
+            },
+        );
         DeliveryObservationRead::Observed(DeliveryObservationFacts {
             pull_request_node_id: Some(node_id.to_string()),
             pull_request_number: number,
@@ -1386,10 +1405,7 @@ impl DeliveryRemote for CliDeliveryRemote {
             head_diverged: false,
             terminal_state,
             mergeability,
-            base_freshness: match behind_by {
-                0 => BaseFreshness::UpToDate,
-                _ => BaseFreshness::Behind,
-            },
+            base_freshness,
             checks,
             check_summary: crate::orchestrator::delivery_observation::CheckSummary::Pending,
             review_decision,
@@ -1553,25 +1569,95 @@ fn parse_check(value: &serde_json::Value) -> Option<DeliveryCheck> {
     })
 }
 
-fn automatic_merge_evidence_from_rules(
-    rules: &serde_json::Value,
-    checks: &[DeliveryCheck],
+fn delivery_observation_arguments(
+    owner: &str,
+    name: &str,
+    pull_request_number: u64,
+    base_branch: &str,
+) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={DELIVERY_OBSERVATION_QUERY}"),
+        "-f".to_string(),
+        format!("owner={owner}"),
+        "-f".to_string(),
+        format!("name={name}"),
+        "-F".to_string(),
+        format!("number={pull_request_number}"),
+        "-f".to_string(),
+        format!("base={base_branch}"),
+    ]
+}
+
+fn repository_rules_arguments(endpoint: &str) -> [&str; 4] {
+    ["api", "--paginate", "--slurp", endpoint]
+}
+
+fn github_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+#[derive(Default)]
+struct AutomaticMergeRequirements {
+    required_checks: Vec<(String, Option<u64>)>,
+    required_approvals: u64,
+    requires_resolved_review_threads: bool,
+    requires_current_base: bool,
+}
+
+struct AutomaticMergeStatus<'a> {
+    checks: &'a [DeliveryCheck],
     review_decision: ReviewDecision,
     has_requested_changes: bool,
+    has_unresolved_review_threads: bool,
+    base_freshness: BaseFreshness,
     queue_supported: bool,
     queued: bool,
+}
+
+fn automatic_merge_evidence_from_policy(
+    rules: &serde_json::Value,
+    classic_protection: Option<&serde_json::Value>,
+    status: AutomaticMergeStatus<'_>,
 ) -> Option<AutomaticMergeEvidence> {
-    let rules = rules.as_array()?;
-    let mut required_checks = Vec::new();
-    let mut required_approvals = 0_u64;
+    let mut requirements = AutomaticMergeRequirements::default();
+    let pages = rules.as_array()?;
+    let rules = if pages.iter().all(serde_json::Value::is_array) {
+        let mut rules = Vec::new();
+        for page in pages {
+            rules.extend(page.as_array()?);
+        }
+        rules
+    } else if pages.iter().any(serde_json::Value::is_array) {
+        return None;
+    } else {
+        pages.iter().collect::<Vec<_>>()
+    };
     for rule in rules {
         match rule.get("type").and_then(serde_json::Value::as_str)? {
             "required_status_checks" => {
+                requirements.requires_current_base |= rule
+                    .pointer("/parameters/strict_required_status_checks_policy")?
+                    .as_bool()?;
                 let configured = rule
                     .pointer("/parameters/required_status_checks")?
                     .as_array()?;
                 for check in configured {
-                    required_checks.push((
+                    requirements.required_checks.push((
                         check.get("context")?.as_str()?.to_string(),
                         check
                             .get("integration_id")
@@ -1580,32 +1666,82 @@ fn automatic_merge_evidence_from_rules(
                 }
             }
             "pull_request" => {
-                required_approvals = required_approvals.max(
+                requirements.required_approvals = requirements.required_approvals.max(
                     rule.pointer("/parameters/required_approving_review_count")?
                         .as_u64()?,
                 );
+                requirements.requires_resolved_review_threads |= rule
+                    .pointer("/parameters/required_review_thread_resolution")?
+                    .as_bool()?;
             }
             "deletion" | "non_fast_forward" => {}
             _ => return None,
         }
     }
-    let required_checks_passing = required_checks.iter().all(|(name, integration_id)| {
-        checks.iter().any(|check| {
-            check.name == *name
-                && integration_id.is_none_or(|required| check.integration_id == Some(required))
-                && check.status == CheckStatus::Completed
-                && check.conclusion == Some(CheckConclusion::Success)
-        })
-    });
+    if let Some(protection) = classic_protection {
+        protection.as_object()?;
+        let required_status_checks = protection.get("required_status_checks")?;
+        if !required_status_checks.is_null() {
+            requirements.requires_current_base |=
+                required_status_checks.get("strict")?.as_bool()?;
+            for context in required_status_checks.get("contexts")?.as_array()? {
+                requirements
+                    .required_checks
+                    .push((context.as_str()?.to_string(), None));
+            }
+            for check in required_status_checks.get("checks")?.as_array()? {
+                let app_id = match check.get("app_id")? {
+                    value if value.is_null() => None,
+                    value => match value.as_i64()? {
+                        -1 => None,
+                        id if id >= 0 => Some(id as u64),
+                        _ => return None,
+                    },
+                };
+                requirements
+                    .required_checks
+                    .push((check.get("context")?.as_str()?.to_string(), app_id));
+            }
+        }
+        let reviews = protection.get("required_pull_request_reviews")?;
+        if !reviews.is_null() {
+            requirements.required_approvals = requirements
+                .required_approvals
+                .max(reviews.get("required_approving_review_count")?.as_u64()?);
+        }
+        let conversation_resolution = protection.get("required_conversation_resolution")?;
+        if !conversation_resolution.is_null() {
+            requirements.requires_resolved_review_threads |=
+                conversation_resolution.get("enabled")?.as_bool()?;
+        }
+    }
+    let required_checks_passing =
+        requirements
+            .required_checks
+            .iter()
+            .all(|(name, integration_id)| {
+                status.checks.iter().any(|check| {
+                    check.name == *name
+                        && integration_id
+                            .is_none_or(|required| check.integration_id == Some(required))
+                        && check.status == CheckStatus::Completed
+                        && check.conclusion == Some(CheckConclusion::Success)
+                })
+            });
     Some(AutomaticMergeEvidence {
         required_checks_passing,
-        required_reviews_satisfied: review_decision != ReviewDecision::Unknown
-            && (required_approvals == 0 || review_decision == ReviewDecision::Approved),
+        required_reviews_satisfied: status.review_decision != ReviewDecision::Unknown
+            && (requirements.required_approvals == 0
+                || status.review_decision == ReviewDecision::Approved),
+        required_review_threads_resolved: !requirements.requires_resolved_review_threads
+            || !status.has_unresolved_review_threads,
+        strict_base_satisfied: !requirements.requires_current_base
+            || status.base_freshness == BaseFreshness::UpToDate,
         // `latestReviews` was completeness-checked with the rest of feedback. This is explicit
         // current-review evidence and does not reinterpret a nullable reviewDecision as safe.
-        no_requested_changes: !has_requested_changes,
-        queue_supported,
-        queued,
+        no_requested_changes: !status.has_requested_changes,
+        queue_supported: status.queue_supported,
+        queued: status.queued,
     })
 }
 
@@ -1659,8 +1795,13 @@ fn complete_checks(
 
 fn complete_feedback(
     value: &serde_json::Value,
-) -> Result<crate::orchestrator::delivery_observation::DeliveryFeedback, DeliveryObservationFailure>
-{
+) -> Result<
+    (
+        crate::orchestrator::delivery_observation::DeliveryFeedback,
+        bool,
+    ),
+    DeliveryObservationFailure,
+> {
     use crate::orchestrator::delivery_observation::{DeliveryFeedback, DeliveryFeedbackThread};
 
     let reviews = value.get("reviews").ok_or_else(|| {
@@ -1691,6 +1832,7 @@ fn complete_feedback(
         )
     })?;
     let mut unresolved_threads = Vec::new();
+    let mut has_unresolved_review_threads = false;
     for thread in complete_connection_nodes(threads, "pull request review threads")? {
         let resolved = thread
             .get("isResolved")
@@ -1717,6 +1859,7 @@ fn complete_feedback(
             )
         })?;
         let comments = complete_connection_nodes(comments, "review thread comments")?;
+        has_unresolved_review_threads |= !resolved;
         if resolved || outdated {
             continue;
         }
@@ -1753,10 +1896,13 @@ fn complete_feedback(
             body: body.to_string(),
         });
     }
-    Ok(DeliveryFeedback {
-        change_request_bodies,
-        unresolved_threads,
-    })
+    Ok((
+        DeliveryFeedback {
+            change_request_bodies,
+            unresolved_threads,
+        },
+        has_unresolved_review_threads,
+    ))
 }
 
 fn complete_connection_nodes<'a>(
@@ -1856,6 +2002,60 @@ async fn observation_command_stdout(
         ));
     };
     Err(DeliveryObservationRead::Terminal(failure))
+}
+
+async fn optional_observation_command_stdout(
+    repository_path: &Path,
+    arguments: &[&str],
+) -> Result<Option<String>, DeliveryObservationRead> {
+    let output = run_delivery_command(repository_path, "gh", arguments)
+        .await
+        .map_err(observation_command_error)?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stderr.contains("http 404") && is_unprotected_branch_response(&stdout) {
+        return Ok(None);
+    }
+    let failure = if stderr.contains("authentication") || stderr.contains("401") {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::Authentication,
+            "GitHub authentication failed while observing delivery",
+        )
+    } else if stderr.contains("forbidden")
+        || stderr.contains("403")
+        || stderr.contains("resource not accessible")
+        || stderr.contains("404")
+    {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::Authorization,
+            "GitHub authorization failed while observing delivery",
+        )
+    } else {
+        return Err(DeliveryObservationRead::Retryable(
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::Transport,
+                "GitHub observation request failed",
+            ),
+        ));
+    };
+    Err(DeliveryObservationRead::Terminal(failure))
+}
+
+fn is_unprotected_branch_response(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .is_some_and(|response| {
+            response.get("message").and_then(serde_json::Value::as_str)
+                == Some("Branch not protected")
+                && response.get("status").is_some_and(|status| {
+                    status.as_str() == Some("404") || status.as_u64() == Some(404)
+                })
+        })
 }
 
 enum DeliveryCommandError {
@@ -5575,11 +5775,12 @@ mod tests {
             ] },
         });
 
-        let feedback = complete_feedback(&complete).unwrap();
+        let (feedback, has_unresolved_review_threads) = complete_feedback(&complete).unwrap();
 
         assert_eq!(feedback.change_request_bodies, vec!["Please fix"]);
         assert_eq!(feedback.unresolved_threads.len(), 1);
         assert_eq!(feedback.unresolved_threads[0].body, "rename");
+        assert!(has_unresolved_review_threads);
     }
 
     #[test]
@@ -5599,11 +5800,34 @@ mod tests {
             ] },
         });
 
-        let feedback = complete_feedback(&observation).unwrap();
+        let (feedback, has_unresolved_review_threads) = complete_feedback(&observation).unwrap();
 
         assert!(feedback.change_request_bodies.is_empty());
         assert_eq!(feedback.unresolved_threads.len(), 1);
         assert_eq!(feedback.unresolved_threads[0].body, "inline feedback");
+        assert!(has_unresolved_review_threads);
+    }
+
+    #[test]
+    fn complete_feedback_keeps_outdated_unresolved_threads_in_merge_authority() {
+        let observation = serde_json::json!({
+            "reviews": { "totalCount": 0, "nodes": [] },
+            "reviewThreads": { "totalCount": 1, "nodes": [
+                { "isResolved": false, "isOutdated": true, "comments": { "totalCount": 1, "nodes": [{ "body": "old feedback", "path": "src/lib.rs", "line": 7 }] } }
+            ] },
+        });
+
+        let (feedback, has_unresolved_review_threads) = complete_feedback(&observation).unwrap();
+
+        assert!(feedback.unresolved_threads.is_empty());
+        assert!(has_unresolved_review_threads);
+    }
+
+    #[test]
+    fn github_rest_paths_percent_encode_branch_segments() {
+        assert_eq!(github_path_segment("release/2026"), "release%2F2026");
+        assert_eq!(github_path_segment("feature #1"), "feature%20%231");
+        assert_eq!(github_path_segment("main"), "main");
     }
 
     #[test]
@@ -6051,6 +6275,7 @@ mod tests {
             {
                 "type": "required_status_checks",
                 "parameters": {
+                    "strict_required_status_checks_policy": false,
                     "required_status_checks": [
                         {"context": "test", "integration_id": 15368}
                     ]
@@ -6058,7 +6283,10 @@ mod tests {
             },
             {
                 "type": "pull_request",
-                "parameters": {"required_approving_review_count": 1}
+                "parameters": {
+                    "required_approving_review_count": 1,
+                    "required_review_thread_resolution": false
+                }
             }
         ]);
         let checks = vec![DeliveryCheck {
@@ -6067,13 +6295,18 @@ mod tests {
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Success),
         }];
-        let evidence = automatic_merge_evidence_from_rules(
+        let evidence = automatic_merge_evidence_from_policy(
             &rules,
-            &checks,
-            ReviewDecision::Approved,
-            false,
-            true,
-            false,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: true,
+                queued: false,
+            },
         )
         .unwrap();
         assert!(evidence.is_eligible_for_direct_merge());
@@ -6083,47 +6316,339 @@ mod tests {
             integration_id: Some(1),
             ..checks[0].clone()
         }];
-        assert!(!automatic_merge_evidence_from_rules(
+        assert!(!automatic_merge_evidence_from_policy(
             &rules,
-            &wrong_integration,
-            ReviewDecision::Approved,
-            false,
-            true,
-            false,
+            None,
+            AutomaticMergeStatus {
+                checks: &wrong_integration,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: true,
+                queued: false,
+            },
         )
         .unwrap()
         .is_eligible_for_direct_merge());
-        assert!(!automatic_merge_evidence_from_rules(
+        assert!(!automatic_merge_evidence_from_policy(
             &rules,
-            &checks,
-            ReviewDecision::ChangesRequested,
-            true,
-            true,
-            false,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::ChangesRequested,
+                has_requested_changes: true,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: true,
+                queued: false,
+            },
         )
         .unwrap()
         .is_eligible_for_direct_merge());
 
-        assert!(!automatic_merge_evidence_from_rules(
+        assert!(!automatic_merge_evidence_from_policy(
             &rules,
-            &checks,
-            ReviewDecision::Unknown,
-            false,
-            true,
-            false,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Unknown,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: true,
+                queued: false,
+            },
         )
         .unwrap()
         .is_eligible_for_direct_merge());
         let unsupported = serde_json::json!([{"type": "required_deployments"}]);
-        assert!(automatic_merge_evidence_from_rules(
+        assert!(automatic_merge_evidence_from_policy(
             &unsupported,
-            &checks,
-            ReviewDecision::Approved,
-            false,
-            true,
-            false,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: true,
+                queued: false,
+            },
         )
         .is_none());
+    }
+
+    #[test]
+    fn automatic_merge_policy_fails_closed_when_strict_freshness_is_not_proven() {
+        let rules = serde_json::json!([{
+            "type": "required_status_checks",
+            "parameters": {
+                "strict_required_status_checks_policy": true,
+                "required_status_checks": []
+            }
+        }]);
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::Behind,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_fails_closed_when_thread_resolution_is_not_proven() {
+        let rules = serde_json::json!([{
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "required_review_thread_resolution": true
+            }
+        }]);
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: true,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_combines_paginated_rules_and_classic_protection() {
+        let rules = serde_json::json!([
+            [{
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": false,
+                    "required_status_checks": [
+                        {"context": "ruleset", "integration_id": 1}
+                    ]
+                }
+            }],
+            [{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 1,
+                    "required_review_thread_resolution": false
+                }
+            }]
+        ]);
+        let protection = serde_json::json!({
+            "required_status_checks": {
+                "strict": true,
+                "contexts": ["classic"],
+                "checks": [{"context": "classic", "app_id": 2}]
+            },
+            "required_pull_request_reviews": {
+                "required_approving_review_count": 2
+            },
+            "required_conversation_resolution": {"enabled": true}
+        });
+        let checks = vec![
+            DeliveryCheck {
+                name: "ruleset".to_string(),
+                integration_id: Some(1),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Success),
+            },
+            DeliveryCheck {
+                name: "classic".to_string(),
+                integration_id: Some(2),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Success),
+            },
+        ];
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(evidence.is_eligible_for_direct_merge());
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::Behind,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: true,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_rejects_malformed_classic_check_identity() {
+        let malformed_checks = serde_json::json!({
+            "required_status_checks": {
+                "strict": false,
+                "contexts": ["test"],
+                "checks": "not-an-array"
+            },
+            "required_pull_request_reviews": null,
+            "required_conversation_resolution": null
+        });
+        let missing_app_identity = serde_json::json!({
+            "required_status_checks": {
+                "strict": false,
+                "contexts": ["test"],
+                "checks": [{"context": "test"}]
+            },
+            "required_pull_request_reviews": null,
+            "required_conversation_resolution": null
+        });
+        let status = || AutomaticMergeStatus {
+            checks: &[],
+            review_decision: ReviewDecision::Approved,
+            has_requested_changes: false,
+            has_unresolved_review_threads: false,
+            base_freshness: BaseFreshness::UpToDate,
+            queue_supported: false,
+            queued: false,
+        };
+
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&malformed_checks),
+            status(),
+        )
+        .is_none());
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&missing_app_identity),
+            status(),
+        )
+        .is_none());
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&serde_json::json!([])),
+            status(),
+        )
+        .is_none());
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&serde_json::json!({})),
+            status(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn automatic_merge_policy_requires_every_classic_check_representation() {
+        let protection = serde_json::json!({
+            "required_status_checks": {
+                "strict": false,
+                "contexts": ["legacy"],
+                "checks": []
+            },
+            "required_pull_request_reviews": null,
+            "required_conversation_resolution": null
+        });
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn absent_classic_protection_requires_the_exact_github_response() {
+        assert!(is_unprotected_branch_response(
+            r#"{"message":"Branch not protected","status":"404"}"#
+        ));
+        assert!(!is_unprotected_branch_response(
+            r#"{"message":"Not Found","status":"404"}"#
+        ));
+        assert!(!is_unprotected_branch_response("not-json"));
+    }
+
+    #[test]
+    fn delivery_observation_sends_string_variables_without_type_coercion() {
+        let arguments = delivery_observation_arguments("owner", "repo", 42, "123");
+
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "base=123"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-f", "owner=owner"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "name=repo"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-F", "number=42"]));
+    }
+
+    #[test]
+    fn repository_rules_request_all_pages_as_one_json_value() {
+        assert_eq!(
+            repository_rules_arguments("repos/owner/repo/rules/branches/main"),
+            [
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/owner/repo/rules/branches/main"
+            ]
+        );
     }
 
     #[test]

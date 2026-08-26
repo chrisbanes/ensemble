@@ -16337,6 +16337,8 @@ mod tests {
                         crate::orchestrator::delivery_observation::AutomaticMergeEvidence {
                             required_checks_passing: true,
                             required_reviews_satisfied: true,
+                            required_review_threads_resolved: true,
+                            strict_base_satisfied: true,
                             no_requested_changes: true,
                             queue_supported: false,
                             queued: false,
@@ -16434,6 +16436,8 @@ mod tests {
                         crate::orchestrator::delivery_observation::AutomaticMergeEvidence {
                             required_checks_passing: true,
                             required_reviews_satisfied: true,
+                            required_review_threads_resolved: true,
+                            strict_base_satisfied: true,
                             no_requested_changes: true,
                             queue_supported: true,
                             queued: false,
