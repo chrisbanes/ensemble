@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 
-const OBSERVATION_SCHEMA_VERSION: u8 = 1;
+const OBSERVATION_SCHEMA_VERSION: u8 = 2;
 const MAX_DIAGNOSTIC_LENGTH: usize = 256;
 
 /// A versioned, read-only observation of a durable pull-request delivery.
@@ -33,7 +33,7 @@ impl<'de> Deserialize<'de> for DeliveryObservation {
         D: Deserializer<'de>,
     {
         let wire = DeliveryObservationWire::deserialize(deserializer)?;
-        if wire.schema_version != OBSERVATION_SCHEMA_VERSION {
+        if wire.schema_version != 1 && wire.schema_version != OBSERVATION_SCHEMA_VERSION {
             return Err(serde::de::Error::custom(format!(
                 "unsupported delivery observation schema version {}",
                 wire.schema_version
@@ -132,6 +132,9 @@ pub enum DeliveryObservationFailureKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DeliveryObservationFacts {
+    /// Stable GraphQL identity required by GitHub merge mutations. Legacy observations omit it.
+    #[serde(default)]
+    pub pull_request_node_id: Option<String>,
     pub pull_request_number: u64,
     pub pull_request_url: String,
     pub head_sha: String,
@@ -143,9 +146,53 @@ pub struct DeliveryObservationFacts {
     pub checks: Vec<DeliveryCheck>,
     pub check_summary: CheckSummary,
     pub review_decision: ReviewDecision,
+    /// Authoritative queue membership, independent of branch-policy eligibility evidence.
+    #[serde(default)]
+    pub in_merge_queue: bool,
+    /// Complete GitHub policy evidence required only for automatic merge modes.
+    #[serde(default)]
+    pub automatic_merge: Option<AutomaticMergeEvidence>,
     /// Complete head-associated feedback retained for a possible delivery repair.
     #[serde(default)]
     pub feedback: DeliveryFeedback,
+}
+
+/// Fresh, effective branch-policy evidence for an automatic delivery mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct AutomaticMergeEvidence {
+    pub required_checks_passing: bool,
+    pub required_reviews_satisfied: bool,
+    /// Missing legacy evidence fails closed.
+    #[serde(default)]
+    pub required_review_threads_resolved: bool,
+    /// Missing legacy evidence fails closed.
+    #[serde(default)]
+    pub strict_base_satisfied: bool,
+    /// Missing legacy evidence fails closed for direct merge.
+    #[serde(default)]
+    pub direct_merge_supported: bool,
+    pub no_requested_changes: bool,
+    pub queue_supported: bool,
+    pub queued: bool,
+}
+
+impl AutomaticMergeEvidence {
+    fn shared_policy_requirements_satisfied(&self) -> bool {
+        self.required_checks_passing
+            && self.required_reviews_satisfied
+            && self.required_review_threads_resolved
+            && self.no_requested_changes
+    }
+
+    pub(crate) fn is_eligible_for_direct_merge(&self) -> bool {
+        self.shared_policy_requirements_satisfied()
+            && self.strict_base_satisfied
+            && self.direct_merge_supported
+    }
+
+    pub(crate) fn is_eligible_for_queue(&self) -> bool {
+        self.shared_policy_requirements_satisfied() && self.queue_supported && !self.queued
+    }
 }
 
 /// Bounded review evidence read with a pull-request observation.
@@ -206,6 +253,15 @@ impl DeliveryObservationFacts {
         self.head_diverged = !self.matches_delivery;
         self.check_summary = CheckSummary::from_checks(&self.checks);
         self
+    }
+
+    pub(crate) fn automatic_merge_evidence(&self) -> Option<&AutomaticMergeEvidence> {
+        (self.matches_delivery
+            && !self.head_diverged
+            && self.terminal_state == PullRequestTerminalState::Open
+            && self.mergeability == Mergeability::Mergeable)
+            .then_some(self.automatic_merge.as_ref())
+            .flatten()
     }
 
     /// Returns only feedback that is safe to act on for the observed delivery head.
@@ -269,6 +325,9 @@ impl DeliveryObservationFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct DeliveryCheck {
     pub name: String,
+    /// GitHub App integration identity when supplied for a check run.
+    #[serde(default)]
+    pub integration_id: Option<u64>,
     pub status: CheckStatus,
     pub conclusion: Option<CheckConclusion>,
 }
@@ -375,6 +434,7 @@ mod tests {
 
     fn facts() -> DeliveryObservationFacts {
         DeliveryObservationFacts {
+            pull_request_node_id: None,
             pull_request_number: 42,
             pull_request_url: "https://github.com/example/repo/pull/42".to_string(),
             head_sha: "expected".to_string(),
@@ -386,6 +446,8 @@ mod tests {
             checks: vec![],
             check_summary: CheckSummary::Pending,
             review_decision: ReviewDecision::ReviewRequired,
+            in_merge_queue: false,
+            automatic_merge: None,
             feedback: DeliveryFeedback::default(),
         }
     }
@@ -412,6 +474,7 @@ mod tests {
     fn checks_are_failing_when_any_completed_check_has_a_failure_conclusion() {
         let checks = vec![DeliveryCheck {
             name: "test".to_string(),
+            integration_id: None,
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Failure),
         }];
@@ -430,11 +493,13 @@ mod tests {
         facts.checks = vec![
             DeliveryCheck {
                 name: "test".to_string(),
+                integration_id: None,
                 status: CheckStatus::Completed,
                 conclusion: Some(CheckConclusion::Failure),
             },
             DeliveryCheck {
                 name: "deploy".to_string(),
+                integration_id: None,
                 status: CheckStatus::InProgress,
                 conclusion: None,
             },
@@ -450,6 +515,7 @@ mod tests {
         let mut facts = facts().for_delivery("expected");
         facts.checks = vec![DeliveryCheck {
             name: "test".to_string(),
+            integration_id: None,
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Failure),
         }];
@@ -486,6 +552,45 @@ mod tests {
     }
 
     #[test]
+    fn automatic_merge_evidence_requires_a_fresh_matching_mergeable_delivery() {
+        let mut facts = facts().for_delivery("expected");
+        facts.pull_request_node_id = Some("PR_node".to_string());
+        facts.automatic_merge = Some(AutomaticMergeEvidence {
+            required_checks_passing: true,
+            required_reviews_satisfied: true,
+            required_review_threads_resolved: true,
+            strict_base_satisfied: true,
+            direct_merge_supported: true,
+            no_requested_changes: true,
+            queue_supported: true,
+            queued: false,
+        });
+        assert!(facts
+            .automatic_merge_evidence()
+            .is_some_and(AutomaticMergeEvidence::is_eligible_for_direct_merge));
+
+        facts.mergeability = Mergeability::Unknown;
+        assert!(facts.automatic_merge_evidence().is_none());
+    }
+
+    #[test]
+    fn legacy_automatic_merge_evidence_cannot_authorize_direct_merge() {
+        let evidence = serde_json::from_value::<AutomaticMergeEvidence>(serde_json::json!({
+            "required_checks_passing": true,
+            "required_reviews_satisfied": true,
+            "required_review_threads_resolved": true,
+            "strict_base_satisfied": true,
+            "no_requested_changes": true,
+            "queue_supported": true,
+            "queued": false
+        }))
+        .unwrap();
+
+        assert!(!evidence.direct_merge_supported);
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
     fn actionable_feedback_excludes_diverged_heads_and_resolved_or_outdated_threads() {
         let mut facts = facts().for_delivery("expected");
         facts.feedback.unresolved_threads = vec![DeliveryFeedbackThread {
@@ -506,7 +611,7 @@ mod tests {
     #[test]
     fn unsupported_explicit_schema_versions_fail_closed() {
         let observation = serde_json::json!({
-            "schema_version": 2,
+            "schema_version": 3,
             "freshness": "fresh",
             "observed_at": null,
             "last_attempt_at": "2026-08-11T17:00:00Z",

@@ -473,14 +473,48 @@ Pipeline run recovery:
   durable terminal-transition protocol; it does not republish the branch.
 - A durable `push_and_pr` repository with an exact pull-request number and URL is observed on the
   delivery recovery tick through one authenticated, read-only GitHub query, independently of the
-  configured issue-tracker adapter. The version-1
+  configured issue-tracker adapter. The version-2
   observation records complete pull-request facts (head identity, terminal state, mergeability,
-  base freshness, checks, and review decision) together with freshness, retry, and typed
+  base freshness, checks, review decision, PR node identity, authoritative merge-queue membership,
+  and optional effective automatic-merge policy evidence) together with freshness, retry, and typed
   non-secret failure metadata. A successful read replaces all facts atomically; transient reads
   retain prior facts as stale and use delivery-local exponential backoff. Authentication,
   authorization, malformed, unsupported, and identity failures block the retained repository.
   A returned head other than the durable local SHA is recorded as `head_diverged` and blocks
   delivery without adopting the remote head.
+- Each repository freezes `finalize.merge` as `manual` (the default), direct `auto` with an explicit
+  method, or `merge_queue`. Automatic modes use only a fresh version-2 exact-head observation with
+  complete effective required-check and review evidence from every applicable ruleset page and
+  classic branch protection, no requested changes, any required review-thread resolution,
+  mergeability, and confirmed queue support when applicable. Direct merge also requires
+  strict-check base freshness; queue admission lets GitHub validate a current merge-group commit.
+  Required checks accept GitHub's successful terminal conclusions, including neutral and skipped;
+  an expected legacy status remains pending until it reports a terminal state. A review decision
+  is needed when the effective policy requires an approval count, code-owner
+  approval, or approval of the last push. A configured direct merge method must be enabled in the
+  repository and appear in every applicable pull-request rule's allowed methods; missing or
+  malformed method-capability or ruleset policy fails closed. Draft pull requests do not collect
+  automatic-mutation evidence and become eligible only after a fresh ready-for-review observation.
+  Version-1 retained observations remain readable but cannot authorize mutation. Labels,
+  assignees, aggregate non-required checks, and stale evidence are not merge authority.
+  Manual delivery does not read rulesets or classic branch protection because those policies are
+  not needed for observation-only reconciliation. An applicable merge-queue rule authorizes only
+  queue admission; it prevents direct automatic merge from bypassing the queue.
+- One orchestrator-wide permit serializes the short merge/queue mutation section across issues.
+  Within a multi-repository delivery, a waiting repository with fresh eligible evidence is selected
+  ahead of ineligible peers, while already-journaled mutations retain reconciliation priority.
+  After acquiring it, Ensemble re-observes the exact PR, journals the PR node, expected head SHA,
+  operation, and configured method as in flight, performs at most one mutation, and returns to
+  reconciliation. Restart and ambiguous responses observe first rather than replaying the write;
+  queue admission remains waiting until an observation confirms the merge. Queue membership is
+  reconciled independently of a later effective-policy read, so a transient policy-read failure
+  cannot reinterpret confirmed admission as rejection. Policy is read only while authorizing a
+  new mutation, not while reconciling one already journaled. Rejection, conflict, unsupported queue,
+  changed head, and unconfirmed outcomes retain the PR, claim, and workspace.
+  A confirmed rejection or unconfirmed mutation becomes a visible blocked repository with its
+  diagnostic. Explicit retry clears only that known-blocked intent and reauthorizes from fresh
+  policy; ambiguous in-flight or reconciling intent remains observe-first.
+  A retained repair attempt or repair push excludes automatic merge activity.
 - Observing `merged` or `closed_without_merge` is evidence only. It does not create, update,
   merge, queue, or close a pull request or redispatch pipeline work. Configured delivery-state
   projection and terminal reconciliation remain journal-owned.

@@ -29,19 +29,20 @@ use crate::interaction::{
 };
 use crate::observability::events::PipelineEvent;
 use crate::orchestrator::delivery_observation::{
-    BaseFreshness, CheckConclusion, CheckStatus, CheckSummary, DeliveryCheck, DeliveryObservation,
-    DeliveryObservationFacts, DeliveryObservationFailure, DeliveryObservationFailureKind,
-    DeliveryObservationRead, DeliveryObservationRetry, DeliveryRepairFeedback, Mergeability,
-    ObservationFreshness, PullRequestTerminalState, ReviewDecision,
+    AutomaticMergeEvidence, BaseFreshness, CheckConclusion, CheckStatus, CheckSummary,
+    DeliveryCheck, DeliveryObservation, DeliveryObservationFacts, DeliveryObservationFailure,
+    DeliveryObservationFailureKind, DeliveryObservationRead, DeliveryObservationRetry,
+    DeliveryRepairFeedback, Mergeability, ObservationFreshness, PullRequestTerminalState,
+    ReviewDecision,
 };
 use crate::pipeline::engine::{PipelineRun, PipelineRunSnapshot};
 use crate::tracker::{model::Issue, OwnershipConflict};
-use crate::workspace::finalize::FinalizeMode;
+use crate::workspace::finalize::{DeliveryMergeConfig, DeliveryMergeMethod, FinalizeMode};
 use crate::workspace::key::issue_workspace_key;
 
 const DELIVERY_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_REQUEST_DISCOVERY_LIMIT: usize = 1_000;
-const DELIVERY_OBSERVATION_QUERY: &str = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { number url state merged headRefOid headRefName baseRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion } ... on StatusContext { context state } } } } reviews: latestReviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } } }";
+const DELIVERY_OBSERVATION_QUERY: &str = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!) { repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed mergeQueue(branch: $base) { id } pullRequest(number: $number) { id number url state merged isDraft isInMergeQueue headRefOid headRefName baseRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion app { databaseId } } ... on StatusContext { context state } } } } reviews: latestReviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,12 +65,49 @@ pub(crate) enum DeliveryPhase {
     Blocked,
 }
 
+/// One automatic GitHub operation that is owned by the retained delivery repository.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DeliveryMergeMutation {
+    pub operation: DeliveryMergeOperation,
+    pub pull_request_node_id: String,
+    pub expected_head_sha: String,
+    pub phase: DeliveryMergePhase,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub(crate) enum DeliveryMergeOperation {
+    Direct { method: DeliveryMergeMethod },
+    Queue,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DeliveryMergePhase {
+    InFlight,
+    Reconciling,
+    Queued,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DeliveryMergeRemoteOutcome {
+    Submitted,
+    Rejected(String),
+    Ambiguous(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct DeliveryRepository {
     pub mode: DeliveryMode,
     pub phase: DeliveryPhase,
     #[serde(default)]
     pub approval_required: bool,
+    /// Repository policy frozen when this delivery begins.
+    #[serde(default)]
+    pub merge: DeliveryMergeConfig,
     pub remote: String,
     pub base_branch: String,
     pub head_branch: String,
@@ -80,6 +118,9 @@ pub(crate) struct DeliveryRepository {
     pub pr_url: Option<String>,
     #[serde(default)]
     pub observation: Option<crate::orchestrator::delivery_observation::DeliveryObservation>,
+    /// Durable automatic merge or queue-admission intent, when configured.
+    #[serde(default)]
+    pub merge_mutation: Option<DeliveryMergeMutation>,
     #[serde(default)]
     pub ownership_conflict: Option<OwnershipConflict>,
     pub last_error: Option<String>,
@@ -659,6 +700,76 @@ fn terminal_delivery_outcome(
     }
 }
 
+fn automatic_merge_candidate(repository: &DeliveryRepository) -> bool {
+    repository.mode == DeliveryMode::PushAndPr
+        && repository.phase == DeliveryPhase::Waiting
+        && repository.merge.is_automatic()
+        && repository.pr_number.is_some()
+        && repository.pr_url.is_some()
+        && !repository
+            .observation
+            .as_ref()
+            .and_then(|observation| observation.facts.as_ref())
+            .is_some_and(|facts| facts.terminal_state == PullRequestTerminalState::Merged)
+}
+
+fn automatic_merge_candidate_has_eligible_evidence(repository: &DeliveryRepository) -> bool {
+    let Some(observation) = repository.observation.as_ref() else {
+        return false;
+    };
+    if observation.freshness != ObservationFreshness::Fresh {
+        return false;
+    }
+    let Some(evidence) = observation
+        .facts
+        .as_ref()
+        .and_then(DeliveryObservationFacts::automatic_merge_evidence)
+    else {
+        return false;
+    };
+    match repository.merge {
+        DeliveryMergeConfig::Manual => false,
+        DeliveryMergeConfig::Auto { .. } => evidence.is_eligible_for_direct_merge(),
+        DeliveryMergeConfig::MergeQueue => evidence.is_eligible_for_queue(),
+    }
+}
+
+fn automatic_merge_candidate_key(
+    repositories: &BTreeMap<String, DeliveryRepository>,
+) -> Option<String> {
+    repositories
+        .iter()
+        .find_map(|(key, repository)| {
+            (automatic_merge_candidate(repository)
+                && repository.merge_mutation.as_ref().is_some_and(|mutation| {
+                    matches!(
+                        mutation.phase,
+                        DeliveryMergePhase::InFlight | DeliveryMergePhase::Reconciling
+                    )
+                }))
+            .then(|| key.clone())
+        })
+        .or_else(|| {
+            repositories.iter().find_map(|(key, repository)| {
+                (automatic_merge_candidate(repository)
+                    && repository.merge_mutation.is_none()
+                    && automatic_merge_candidate_has_eligible_evidence(repository))
+                .then(|| key.clone())
+            })
+        })
+        .or_else(|| {
+            repositories.iter().find_map(|(key, repository)| {
+                (automatic_merge_candidate(repository) && repository.merge_mutation.is_none())
+                    .then(|| key.clone())
+            })
+        })
+        .or_else(|| {
+            repositories.iter().find_map(|(key, repository)| {
+                automatic_merge_candidate(repository).then(|| key.clone())
+            })
+        })
+}
+
 pub(crate) fn canonical_marker(run_id: &str, issue_id: &str, repository_key: &str) -> String {
     fn hex(value: &str) -> String {
         value
@@ -783,18 +894,47 @@ pub(crate) trait DeliveryRemote: Send + Sync {
 
     async fn observe_pull_request(
         &self,
-        _repository_path: &Path,
-        _pull_request_number: u64,
-        _pull_request_url: &str,
-        _base_branch: &str,
-        _head_branch: &str,
-        _remote: &str,
+        _request: PullRequestObservationRequest<'_>,
     ) -> DeliveryObservationRead {
         DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
             DeliveryObservationFailureKind::UnsupportedResponse,
             "delivery remote does not support pull request observation",
         ))
     }
+
+    async fn merge_pull_request(
+        &self,
+        _repository_path: &Path,
+        _pull_request_node_id: &str,
+        _expected_head_sha: &str,
+        _method: DeliveryMergeMethod,
+    ) -> DeliveryMergeRemoteOutcome {
+        DeliveryMergeRemoteOutcome::Rejected(
+            "delivery remote does not support automatic merge".to_string(),
+        )
+    }
+
+    async fn enqueue_pull_request(
+        &self,
+        _repository_path: &Path,
+        _pull_request_node_id: &str,
+        _expected_head_sha: &str,
+    ) -> DeliveryMergeRemoteOutcome {
+        DeliveryMergeRemoteOutcome::Rejected(
+            "delivery remote does not support merge queue admission".to_string(),
+        )
+    }
+}
+
+pub(crate) struct PullRequestObservationRequest<'a> {
+    pub repository_path: &'a Path,
+    pub pull_request_number: u64,
+    pub pull_request_url: &'a str,
+    pub base_branch: &'a str,
+    pub head_branch: &'a str,
+    pub remote: &'a str,
+    pub collect_automatic_merge_policy: bool,
+    pub direct_merge_method: Option<DeliveryMergeMethod>,
 }
 
 pub(crate) struct CliDeliveryRemote;
@@ -1061,38 +1201,26 @@ impl DeliveryRemote for CliDeliveryRemote {
 
     async fn observe_pull_request(
         &self,
-        repository_path: &Path,
-        pull_request_number: u64,
-        pull_request_url: &str,
-        base_branch: &str,
-        head_branch: &str,
-        remote: &str,
+        request: PullRequestObservationRequest<'_>,
     ) -> DeliveryObservationRead {
+        let PullRequestObservationRequest {
+            repository_path,
+            pull_request_number,
+            pull_request_url,
+            base_branch,
+            head_branch,
+            remote,
+            collect_automatic_merge_policy,
+            direct_merge_method,
+        } = request;
         let (owner, name) = match github_repository_identity(repository_path, remote).await {
             Ok(repository) => repository,
             Err(read) => return read,
         };
-        let query = DELIVERY_OBSERVATION_QUERY;
-        let number = pull_request_number.to_string();
-        let variables = [
-            format!("query={query}"),
-            format!("owner={owner}"),
-            format!("name={name}"),
-            format!("number={number}"),
-        ];
-        let arguments = [
-            "api",
-            "graphql",
-            "-f",
-            variables[0].as_str(),
-            "-F",
-            variables[1].as_str(),
-            "-F",
-            variables[2].as_str(),
-            "-F",
-            variables[3].as_str(),
-        ];
-        let stdout = match observation_command_stdout(repository_path, &arguments).await {
+        let arguments =
+            delivery_observation_arguments(&owner, &name, pull_request_number, base_branch);
+        let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+        let stdout = match observation_command_stdout(repository_path, &argument_refs).await {
             Ok(stdout) => stdout,
             Err(read) => return read,
         };
@@ -1105,12 +1233,19 @@ impl DeliveryRemote for CliDeliveryRemote {
                 ));
             }
         };
-        let Some(value) = response.pointer("/data/repository/pullRequest") else {
+        let Some(repository) = response.pointer("/data/repository") else {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an incomplete repository observation",
+            ));
+        };
+        let Some(value) = repository.get("pullRequest") else {
             return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::MalformedResponse,
                 "GitHub returned an incomplete pull request observation",
             ));
         };
+        let node_id = value.get("id").and_then(serde_json::Value::as_str);
         let number = value.get("number").and_then(serde_json::Value::as_u64);
         let url = value.get("url").and_then(serde_json::Value::as_str);
         let state = value.get("state").and_then(serde_json::Value::as_str);
@@ -1118,29 +1253,32 @@ impl DeliveryRemote for CliDeliveryRemote {
         let observed_head = value.get("headRefName").and_then(serde_json::Value::as_str);
         let base_sha = value.get("baseRefOid").and_then(serde_json::Value::as_str);
         let observed_base = value.get("baseRefName").and_then(serde_json::Value::as_str);
-        let Some((number, url, state, head_sha, observed_head, base_sha, observed_base)) = number
-            .zip(url)
-            .zip(state)
-            .zip(head_sha)
-            .zip(observed_head)
-            .zip(base_sha)
-            .zip(observed_base)
-            .map(
-                |(
-                    (((((number, url), state), head_sha), observed_head), base_sha),
-                    observed_base,
-                )| {
-                    (
-                        number,
-                        url,
-                        state,
-                        head_sha,
-                        observed_head,
-                        base_sha,
+        let Some((node_id, number, url, state, head_sha, observed_head, base_sha, observed_base)) =
+            node_id
+                .zip(number)
+                .zip(url)
+                .zip(state)
+                .zip(head_sha)
+                .zip(observed_head)
+                .zip(base_sha)
+                .zip(observed_base)
+                .map(
+                    |(
+                        ((((((node_id, number), url), state), head_sha), observed_head), base_sha),
                         observed_base,
-                    )
-                },
-            )
+                    )| {
+                        (
+                            node_id,
+                            number,
+                            url,
+                            state,
+                            head_sha,
+                            observed_head,
+                            base_sha,
+                            observed_base,
+                        )
+                    },
+                )
         else {
             return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
                 DeliveryObservationFailureKind::MalformedResponse,
@@ -1204,10 +1342,32 @@ impl DeliveryRemote for CliDeliveryRemote {
             Ok(checks) => checks,
             Err(failure) => return DeliveryObservationRead::Terminal(failure),
         };
-        let feedback = match complete_feedback(value) {
+        let (feedback, has_unresolved_review_threads) = match complete_feedback(value) {
             Ok(feedback) => feedback,
             Err(failure) => return DeliveryObservationRead::Terminal(failure),
         };
+        let has_requested_changes = value
+            .pointer("/reviews/nodes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|reviews| {
+                reviews.iter().any(|review| {
+                    review.get("state").and_then(serde_json::Value::as_str)
+                        == Some("CHANGES_REQUESTED")
+                })
+            });
+        let queued = value
+            .get("isInMergeQueue")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let Some(is_draft) = value.get("isDraft").and_then(serde_json::Value::as_bool) else {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an incomplete pull request readiness observation",
+            ));
+        };
+        let queue_supported = response
+            .pointer("/data/repository/mergeQueue")
+            .is_some_and(serde_json::Value::is_object);
         let comparison_endpoint = format!("repos/{owner}/{name}/compare/{base_sha}...{head_sha}");
         let comparison_arguments = ["api", comparison_endpoint.as_str()];
         let comparison_stdout =
@@ -1233,7 +1393,78 @@ impl DeliveryRemote for CliDeliveryRemote {
                 "GitHub returned an incomplete base comparison",
             ));
         };
+        let base_freshness = match behind_by {
+            0 => BaseFreshness::UpToDate,
+            _ => BaseFreshness::Behind,
+        };
+        let automatic_merge =
+            if automatic_merge_policy_needed(collect_automatic_merge_policy, is_draft) {
+                let repository_merge_method_supported =
+                    repository_merge_method_supported(repository, direct_merge_method);
+                let encoded_base_branch = github_path_segment(base_branch);
+                let rules_endpoint =
+                    format!("repos/{owner}/{name}/rules/branches/{encoded_base_branch}");
+                let rules_arguments = repository_rules_arguments(&rules_endpoint);
+                let rules_stdout =
+                    match observation_command_stdout(repository_path, &rules_arguments).await {
+                        Ok(stdout) => stdout,
+                        Err(read) => return read,
+                    };
+                let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                            DeliveryObservationFailureKind::MalformedResponse,
+                            "GitHub returned invalid repository rules",
+                        ));
+                    }
+                };
+                let protection_endpoint =
+                    format!("repos/{owner}/{name}/branches/{encoded_base_branch}/protection");
+                let protection_arguments = ["api", protection_endpoint.as_str()];
+                let protection_stdout = match optional_observation_command_stdout(
+                    repository_path,
+                    &protection_arguments,
+                )
+                .await
+                {
+                    Ok(stdout) => stdout,
+                    Err(read) => return read,
+                };
+                let protection = match protection_stdout {
+                    Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
+                        Ok(value) => Some(value),
+                        Err(_) => {
+                            return DeliveryObservationRead::Terminal(
+                                DeliveryObservationFailure::new(
+                                    DeliveryObservationFailureKind::MalformedResponse,
+                                    "GitHub returned invalid classic branch protection",
+                                ),
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                automatic_merge_evidence_from_policy(
+                    &rules,
+                    protection.as_ref(),
+                    AutomaticMergeStatus {
+                        checks: &checks,
+                        review_decision,
+                        has_requested_changes,
+                        has_unresolved_review_threads,
+                        base_freshness,
+                        direct_merge_method,
+                        repository_merge_method_supported,
+                        queue_supported,
+                        queued,
+                    },
+                )
+            } else {
+                None
+            };
         DeliveryObservationRead::Observed(DeliveryObservationFacts {
+            pull_request_node_id: Some(node_id.to_string()),
             pull_request_number: number,
             pull_request_url: url.to_string(),
             head_sha: head_sha.to_string(),
@@ -1241,15 +1472,124 @@ impl DeliveryRemote for CliDeliveryRemote {
             head_diverged: false,
             terminal_state,
             mergeability,
-            base_freshness: match behind_by {
-                0 => BaseFreshness::UpToDate,
-                _ => BaseFreshness::Behind,
-            },
+            base_freshness,
             checks,
             check_summary: crate::orchestrator::delivery_observation::CheckSummary::Pending,
             review_decision,
+            in_merge_queue: queued,
+            automatic_merge,
             feedback,
         })
+    }
+
+    async fn merge_pull_request(
+        &self,
+        repository_path: &Path,
+        pull_request_node_id: &str,
+        expected_head_sha: &str,
+        method: DeliveryMergeMethod,
+    ) -> DeliveryMergeRemoteOutcome {
+        let method = match method {
+            DeliveryMergeMethod::Merge => "MERGE",
+            DeliveryMergeMethod::Squash => "SQUASH",
+            DeliveryMergeMethod::Rebase => "REBASE",
+        };
+        run_graphql_delivery_mutation(
+            repository_path,
+            "mutation($id:ID!,$head:GitObjectID!,$method:PullRequestMergeMethod!){mergePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head,mergeMethod:$method}){pullRequest{id}}}",
+            pull_request_node_id,
+            expected_head_sha,
+            Some(method),
+            "/data/mergePullRequest/pullRequest/id",
+        )
+        .await
+    }
+
+    async fn enqueue_pull_request(
+        &self,
+        repository_path: &Path,
+        pull_request_node_id: &str,
+        expected_head_sha: &str,
+    ) -> DeliveryMergeRemoteOutcome {
+        run_graphql_delivery_mutation(
+            repository_path,
+            "mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head}){mergeQueueEntry{id}}}",
+            pull_request_node_id,
+            expected_head_sha,
+            None,
+            "/data/enqueuePullRequest/mergeQueueEntry/id",
+        )
+        .await
+    }
+}
+
+async fn run_graphql_delivery_mutation(
+    repository_path: &Path,
+    query: &str,
+    pull_request_node_id: &str,
+    expected_head_sha: &str,
+    method: Option<&str>,
+    success_pointer: &str,
+) -> DeliveryMergeRemoteOutcome {
+    let mut owned = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={query}"),
+        "-F".to_string(),
+        format!("id={pull_request_node_id}"),
+        "-F".to_string(),
+        format!("head={expected_head_sha}"),
+    ];
+    if let Some(method) = method {
+        owned.extend(["-F".to_string(), format!("method={method}")]);
+    }
+    let arguments = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = match run_delivery_command(repository_path, "gh", &arguments).await {
+        Ok(output) => output,
+        Err(_) => {
+            return DeliveryMergeRemoteOutcome::Ambiguous(
+                "GitHub delivery mutation did not return a confirmed response".to_string(),
+            )
+        }
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        let message = if stderr.contains("graphql")
+            || stderr.contains("unprocessable")
+            || stderr.contains("conflict")
+            || stderr.contains("forbidden")
+        {
+            "GitHub rejected the delivery mutation"
+        } else {
+            "GitHub delivery mutation outcome is ambiguous"
+        };
+        return if message.contains("rejected") {
+            DeliveryMergeRemoteOutcome::Rejected(message.to_string())
+        } else {
+            DeliveryMergeRemoteOutcome::Ambiguous(message.to_string())
+        };
+    }
+    let response = match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+        Ok(response) => response,
+        Err(_) => {
+            return DeliveryMergeRemoteOutcome::Ambiguous(
+                "GitHub delivery mutation returned malformed confirmation".to_string(),
+            )
+        }
+    };
+    if response
+        .pointer(success_pointer)
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        DeliveryMergeRemoteOutcome::Submitted
+    } else if response.get("errors").is_some() {
+        DeliveryMergeRemoteOutcome::Rejected("GitHub rejected the delivery mutation".to_string())
+    } else {
+        DeliveryMergeRemoteOutcome::Ambiguous(
+            "GitHub delivery mutation returned incomplete confirmation".to_string(),
+        )
     }
 }
 
@@ -1264,14 +1604,14 @@ fn parse_check(value: &serde_json::Value) -> Option<DeliveryCheck> {
         .or_else(|| value.get("state"))
         .and_then(serde_json::Value::as_str)?;
     let status = match raw_status {
-        "PENDING" => CheckStatus::Pending,
+        "PENDING" | "EXPECTED" => CheckStatus::Pending,
         "QUEUED" => CheckStatus::Queued,
         "IN_PROGRESS" => CheckStatus::InProgress,
-        "COMPLETED" | "SUCCESS" | "FAILURE" | "ERROR" | "EXPECTED" => CheckStatus::Completed,
+        "COMPLETED" | "SUCCESS" | "FAILURE" | "ERROR" => CheckStatus::Completed,
         _ => return None,
     };
     let conclusion = match value.get("conclusion").and_then(serde_json::Value::as_str) {
-        Some("SUCCESS") | Some("EXPECTED") => Some(CheckConclusion::Success),
+        Some("SUCCESS") => Some(CheckConclusion::Success),
         Some("NEUTRAL") => Some(CheckConclusion::Neutral),
         Some("SKIPPED") => Some(CheckConclusion::Skipped),
         Some("FAILURE") | Some("ERROR") => Some(CheckConclusion::Failure),
@@ -1280,7 +1620,7 @@ fn parse_check(value: &serde_json::Value) -> Option<DeliveryCheck> {
         Some("ACTION_REQUIRED") => Some(CheckConclusion::ActionRequired),
         Some("STARTUP_FAILURE") => Some(CheckConclusion::StartupFailure),
         None => match raw_status {
-            "SUCCESS" | "EXPECTED" => Some(CheckConclusion::Success),
+            "SUCCESS" => Some(CheckConclusion::Success),
             "FAILURE" | "ERROR" => Some(CheckConclusion::Failure),
             _ => None,
         },
@@ -1288,8 +1628,247 @@ fn parse_check(value: &serde_json::Value) -> Option<DeliveryCheck> {
     };
     Some(DeliveryCheck {
         name,
+        integration_id: value
+            .pointer("/app/databaseId")
+            .and_then(serde_json::Value::as_u64),
         status,
         conclusion,
+    })
+}
+
+fn repository_merge_method_supported(
+    repository: &serde_json::Value,
+    method: Option<DeliveryMergeMethod>,
+) -> Option<bool> {
+    let field = match method {
+        Some(DeliveryMergeMethod::Merge) => "mergeCommitAllowed",
+        Some(DeliveryMergeMethod::Squash) => "squashMergeAllowed",
+        Some(DeliveryMergeMethod::Rebase) => "rebaseMergeAllowed",
+        None => return Some(true),
+    };
+    repository.get(field)?.as_bool()
+}
+
+fn automatic_merge_policy_needed(requested: bool, is_draft: bool) -> bool {
+    requested && !is_draft
+}
+
+fn delivery_observation_arguments(
+    owner: &str,
+    name: &str,
+    pull_request_number: u64,
+    base_branch: &str,
+) -> Vec<String> {
+    vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        "-f".to_string(),
+        format!("query={DELIVERY_OBSERVATION_QUERY}"),
+        "-f".to_string(),
+        format!("owner={owner}"),
+        "-f".to_string(),
+        format!("name={name}"),
+        "-F".to_string(),
+        format!("number={pull_request_number}"),
+        "-f".to_string(),
+        format!("base={base_branch}"),
+    ]
+}
+
+fn repository_rules_arguments(endpoint: &str) -> [&str; 4] {
+    ["api", "--paginate", "--slurp", endpoint]
+}
+
+fn github_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+            encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+#[derive(Default)]
+struct AutomaticMergeRequirements {
+    required_checks: Vec<(String, Option<u64>)>,
+    required_approvals: u64,
+    requires_approval_review: bool,
+    requires_resolved_review_threads: bool,
+    requires_current_base: bool,
+    requires_merge_queue: bool,
+    direct_merge_method_unsupported: bool,
+}
+
+struct AutomaticMergeStatus<'a> {
+    checks: &'a [DeliveryCheck],
+    review_decision: ReviewDecision,
+    has_requested_changes: bool,
+    has_unresolved_review_threads: bool,
+    base_freshness: BaseFreshness,
+    direct_merge_method: Option<DeliveryMergeMethod>,
+    repository_merge_method_supported: Option<bool>,
+    queue_supported: bool,
+    queued: bool,
+}
+
+fn automatic_merge_evidence_from_policy(
+    rules: &serde_json::Value,
+    classic_protection: Option<&serde_json::Value>,
+    status: AutomaticMergeStatus<'_>,
+) -> Option<AutomaticMergeEvidence> {
+    let repository_merge_method_supported = status.repository_merge_method_supported?;
+    let mut requirements = AutomaticMergeRequirements::default();
+    let pages = rules.as_array()?;
+    let rules = if pages.iter().all(serde_json::Value::is_array) {
+        let mut rules = Vec::new();
+        for page in pages {
+            rules.extend(page.as_array()?);
+        }
+        rules
+    } else if pages.iter().any(serde_json::Value::is_array) {
+        return None;
+    } else {
+        pages.iter().collect::<Vec<_>>()
+    };
+    for rule in rules {
+        match rule.get("type").and_then(serde_json::Value::as_str)? {
+            "required_status_checks" => {
+                requirements.requires_current_base |= rule
+                    .pointer("/parameters/strict_required_status_checks_policy")?
+                    .as_bool()?;
+                let configured = rule
+                    .pointer("/parameters/required_status_checks")?
+                    .as_array()?;
+                for check in configured {
+                    requirements.required_checks.push((
+                        check.get("context")?.as_str()?.to_string(),
+                        check
+                            .get("integration_id")
+                            .and_then(serde_json::Value::as_u64),
+                    ));
+                }
+            }
+            "pull_request" => {
+                requirements.required_approvals = requirements.required_approvals.max(
+                    rule.pointer("/parameters/required_approving_review_count")?
+                        .as_u64()?,
+                );
+                requirements.requires_approval_review |= rule
+                    .pointer("/parameters/require_code_owner_review")?
+                    .as_bool()?
+                    || rule
+                        .pointer("/parameters/require_last_push_approval")?
+                        .as_bool()?;
+                requirements.requires_resolved_review_threads |= rule
+                    .pointer("/parameters/required_review_thread_resolution")?
+                    .as_bool()?;
+                let allowed_merge_methods = rule
+                    .pointer("/parameters/allowed_merge_methods")?
+                    .as_array()?;
+                let mut configured_method_allowed = status.direct_merge_method.is_none();
+                for allowed_method in allowed_merge_methods {
+                    let allowed_method = match allowed_method.as_str()? {
+                        "merge" => DeliveryMergeMethod::Merge,
+                        "squash" => DeliveryMergeMethod::Squash,
+                        "rebase" => DeliveryMergeMethod::Rebase,
+                        _ => return None,
+                    };
+                    configured_method_allowed |= Some(allowed_method) == status.direct_merge_method;
+                }
+                requirements.direct_merge_method_unsupported |= !configured_method_allowed;
+            }
+            "merge_queue" => {
+                rule.get("parameters")?.as_object()?;
+                requirements.requires_merge_queue = true;
+            }
+            "deletion" | "non_fast_forward" => {}
+            _ => return None,
+        }
+    }
+    if let Some(protection) = classic_protection {
+        protection.as_object()?;
+        let required_status_checks = protection.get("required_status_checks")?;
+        if !required_status_checks.is_null() {
+            requirements.requires_current_base |=
+                required_status_checks.get("strict")?.as_bool()?;
+            for context in required_status_checks.get("contexts")?.as_array()? {
+                requirements
+                    .required_checks
+                    .push((context.as_str()?.to_string(), None));
+            }
+            for check in required_status_checks.get("checks")?.as_array()? {
+                let app_id = match check.get("app_id")? {
+                    value if value.is_null() => None,
+                    value => match value.as_i64()? {
+                        -1 => None,
+                        id if id >= 0 => Some(id as u64),
+                        _ => return None,
+                    },
+                };
+                requirements
+                    .required_checks
+                    .push((check.get("context")?.as_str()?.to_string(), app_id));
+            }
+        }
+        let reviews = protection.get("required_pull_request_reviews")?;
+        if !reviews.is_null() {
+            requirements.required_approvals = requirements
+                .required_approvals
+                .max(reviews.get("required_approving_review_count")?.as_u64()?);
+            requirements.requires_approval_review |=
+                reviews.get("require_code_owner_reviews")?.as_bool()?
+                    || reviews.get("require_last_push_approval")?.as_bool()?;
+        }
+        let conversation_resolution = protection.get("required_conversation_resolution")?;
+        if !conversation_resolution.is_null() {
+            requirements.requires_resolved_review_threads |=
+                conversation_resolution.get("enabled")?.as_bool()?;
+        }
+    }
+    let required_checks_passing =
+        requirements
+            .required_checks
+            .iter()
+            .all(|(name, integration_id)| {
+                status.checks.iter().any(|check| {
+                    check.name == *name
+                        && integration_id
+                            .is_none_or(|required| check.integration_id == Some(required))
+                        && check.status == CheckStatus::Completed
+                        && matches!(
+                            check.conclusion,
+                            Some(
+                                CheckConclusion::Success
+                                    | CheckConclusion::Neutral
+                                    | CheckConclusion::Skipped
+                            )
+                        )
+                })
+            });
+    Some(AutomaticMergeEvidence {
+        required_checks_passing,
+        required_reviews_satisfied: (requirements.required_approvals == 0
+            && !requirements.requires_approval_review)
+            || status.review_decision == ReviewDecision::Approved,
+        required_review_threads_resolved: !requirements.requires_resolved_review_threads
+            || !status.has_unresolved_review_threads,
+        strict_base_satisfied: !requirements.requires_current_base
+            || status.base_freshness == BaseFreshness::UpToDate,
+        direct_merge_supported: !requirements.requires_merge_queue
+            && !requirements.direct_merge_method_unsupported
+            && repository_merge_method_supported,
+        // `latestReviews` was completeness-checked with the rest of feedback. This is explicit
+        // current-review evidence and does not reinterpret a nullable reviewDecision as safe.
+        no_requested_changes: !status.has_requested_changes,
+        queue_supported: status.queue_supported,
+        queued: status.queued,
     })
 }
 
@@ -1343,8 +1922,13 @@ fn complete_checks(
 
 fn complete_feedback(
     value: &serde_json::Value,
-) -> Result<crate::orchestrator::delivery_observation::DeliveryFeedback, DeliveryObservationFailure>
-{
+) -> Result<
+    (
+        crate::orchestrator::delivery_observation::DeliveryFeedback,
+        bool,
+    ),
+    DeliveryObservationFailure,
+> {
     use crate::orchestrator::delivery_observation::{DeliveryFeedback, DeliveryFeedbackThread};
 
     let reviews = value.get("reviews").ok_or_else(|| {
@@ -1375,6 +1959,7 @@ fn complete_feedback(
         )
     })?;
     let mut unresolved_threads = Vec::new();
+    let mut has_unresolved_review_threads = false;
     for thread in complete_connection_nodes(threads, "pull request review threads")? {
         let resolved = thread
             .get("isResolved")
@@ -1401,6 +1986,7 @@ fn complete_feedback(
             )
         })?;
         let comments = complete_connection_nodes(comments, "review thread comments")?;
+        has_unresolved_review_threads |= !resolved;
         if resolved || outdated {
             continue;
         }
@@ -1437,10 +2023,13 @@ fn complete_feedback(
             body: body.to_string(),
         });
     }
-    Ok(DeliveryFeedback {
-        change_request_bodies,
-        unresolved_threads,
-    })
+    Ok((
+        DeliveryFeedback {
+            change_request_bodies,
+            unresolved_threads,
+        },
+        has_unresolved_review_threads,
+    ))
 }
 
 fn complete_connection_nodes<'a>(
@@ -1540,6 +2129,60 @@ async fn observation_command_stdout(
         ));
     };
     Err(DeliveryObservationRead::Terminal(failure))
+}
+
+async fn optional_observation_command_stdout(
+    repository_path: &Path,
+    arguments: &[&str],
+) -> Result<Option<String>, DeliveryObservationRead> {
+    let output = run_delivery_command(repository_path, "gh", arguments)
+        .await
+        .map_err(observation_command_error)?;
+    if output.status.success() {
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stderr.contains("http 404") && is_unprotected_branch_response(&stdout) {
+        return Ok(None);
+    }
+    let failure = if stderr.contains("authentication") || stderr.contains("401") {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::Authentication,
+            "GitHub authentication failed while observing delivery",
+        )
+    } else if stderr.contains("forbidden")
+        || stderr.contains("403")
+        || stderr.contains("resource not accessible")
+        || stderr.contains("404")
+    {
+        DeliveryObservationFailure::new(
+            DeliveryObservationFailureKind::Authorization,
+            "GitHub authorization failed while observing delivery",
+        )
+    } else {
+        return Err(DeliveryObservationRead::Retryable(
+            DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::Transport,
+                "GitHub observation request failed",
+            ),
+        ));
+    };
+    Err(DeliveryObservationRead::Terminal(failure))
+}
+
+fn is_unprotected_branch_response(stdout: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(stdout)
+        .ok()
+        .is_some_and(|response| {
+            response.get("message").and_then(serde_json::Value::as_str)
+                == Some("Branch not protected")
+                && response.get("status").is_some_and(|status| {
+                    status.as_str() == Some("404") || status.as_u64() == Some(404)
+                })
+        })
 }
 
 enum DeliveryCommandError {
@@ -1982,6 +2625,13 @@ impl Orchestrator {
             if repository.phase != DeliveryPhase::Blocked {
                 continue;
             }
+            if repository
+                .merge_mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.phase == DeliveryMergePhase::Blocked)
+            {
+                repository.merge_mutation = None;
+            }
             if repository.approval_required {
                 repository.phase = DeliveryPhase::AwaitingApproval;
             } else {
@@ -2319,6 +2969,9 @@ impl Orchestrator {
             self.ensure_delivery_repair_interaction(&delivery).await;
             self.reconcile_delivery_repair_push(&delivery).await;
             self.advance_delivery_repair_push(&delivery).await;
+            let delivery = self
+                .advance_delivery_merge(delivery, snapshot.as_ref())
+                .await;
             let fact = delivery.delivery_state_fact();
             let delivery = if fact != Some(DeliveryStateFact::ClosedWithoutMerge)
                 && delivery.has_fresh_nonclosed_delivery_evidence()
@@ -2501,14 +3154,20 @@ impl Orchestrator {
             let now = Utc::now();
             let read = self
                 .delivery_remote
-                .observe_pull_request(
-                    worktree,
+                .observe_pull_request(PullRequestObservationRequest {
+                    repository_path: worktree,
                     pull_request_number,
                     pull_request_url,
-                    &repository.base_branch,
-                    &repository.head_branch,
-                    &repository.remote,
-                )
+                    base_branch: &repository.base_branch,
+                    head_branch: &repository.head_branch,
+                    remote: &repository.remote,
+                    collect_automatic_merge_policy: repository.merge.is_automatic()
+                        && repository.merge_mutation.is_none(),
+                    direct_merge_method: match &repository.merge {
+                        DeliveryMergeConfig::Auto { method } => Some(*method),
+                        DeliveryMergeConfig::Manual | DeliveryMergeConfig::MergeQueue => None,
+                    },
+                })
                 .await;
             // A guarded repair push is reconciling one newer, already-durable local
             // head. Validate that exact head rather than marking the expected repair
@@ -2655,6 +3314,212 @@ impl Orchestrator {
         current
     }
 
+    pub(super) async fn advance_delivery_merge(
+        &self,
+        delivery: DeliveryRecord,
+        snapshot: Option<&PipelineRunSnapshot>,
+    ) -> DeliveryRecord {
+        if delivery.repair.is_some() {
+            return delivery;
+        }
+        let Some(repository_key) = automatic_merge_candidate_key(&delivery.repositories) else {
+            return delivery;
+        };
+
+        let _mutation_guard = self.delivery_merge_mutation_lock.lock().await;
+        let current = self
+            .state
+            .read()
+            .await
+            .delivery
+            .get(&delivery.issue_id)
+            .cloned()
+            .unwrap_or(delivery);
+        if current.repair.is_some() {
+            return current;
+        }
+        let Some(repository) = current.repositories.get(&repository_key).cloned() else {
+            return current;
+        };
+        if repository.phase != DeliveryPhase::Waiting || !repository.merge.is_automatic() {
+            return current;
+        }
+        let Some(pull_request_number) = repository.pr_number else {
+            return current;
+        };
+        let Some(pull_request_url) = repository.pr_url.as_deref() else {
+            return current;
+        };
+        let worktrees = match self.workspace_mgr.owned_worktree_paths(&current.issue_id) {
+            Ok(worktrees) => worktrees,
+            Err(_) => return current,
+        };
+        let Some(worktree) = worktrees.get(&repository_key).filter(|path| path.is_dir()) else {
+            return current;
+        };
+        let read = self
+            .delivery_remote
+            .observe_pull_request(PullRequestObservationRequest {
+                repository_path: worktree,
+                pull_request_number,
+                pull_request_url,
+                base_branch: &repository.base_branch,
+                head_branch: &repository.head_branch,
+                remote: &repository.remote,
+                collect_automatic_merge_policy: repository.merge_mutation.is_none(),
+                direct_merge_method: match &repository.merge {
+                    DeliveryMergeConfig::Auto { method } => Some(*method),
+                    DeliveryMergeConfig::Manual | DeliveryMergeConfig::MergeQueue => None,
+                },
+            })
+            .await;
+        let DeliveryObservationRead::Observed(facts) = read else {
+            return current;
+        };
+        if facts
+            .validate_identity(pull_request_number, pull_request_url)
+            .is_err()
+        {
+            return current;
+        }
+        let facts = facts.for_delivery(&repository.local_sha);
+        let mut observed = current.clone();
+        observed
+            .repositories
+            .get_mut(&repository_key)
+            .expect("repository key was selected from this delivery")
+            .observation = Some(DeliveryObservation::successful(facts.clone(), Utc::now()));
+        let Ok(mut observed) = self
+            .persist_delivery_candidate(&current, observed, snapshot)
+            .await
+        else {
+            return current;
+        };
+
+        if facts.terminal_state == PullRequestTerminalState::Merged {
+            observed
+                .repositories
+                .get_mut(&repository_key)
+                .expect("repository key was selected from this delivery")
+                .merge_mutation = None;
+            return self
+                .persist_delivery_candidate(&current, observed.clone(), snapshot)
+                .await
+                .unwrap_or(observed);
+        }
+
+        if let Some(mutation) = repository.merge_mutation {
+            let updated = observed
+                .repositories
+                .get_mut(&repository_key)
+                .expect("repository key was selected from this delivery");
+            let same_head = facts.matches_delivery && !facts.head_diverged;
+            let queued = facts.in_merge_queue;
+            let (phase, diagnostic) = match mutation.operation {
+                DeliveryMergeOperation::Queue if same_head && queued => {
+                    (DeliveryMergePhase::Queued, None)
+                }
+                _ => (
+                    DeliveryMergePhase::Blocked,
+                    Some(
+                        "automatic delivery mutation was not confirmed by authoritative observation"
+                            .to_string(),
+                    ),
+                ),
+            };
+            updated.merge_mutation = Some(DeliveryMergeMutation {
+                phase,
+                last_error: diagnostic.clone(),
+                ..mutation
+            });
+            if phase == DeliveryMergePhase::Blocked {
+                updated.phase = DeliveryPhase::Blocked;
+                updated.retry_from = Some(DeliveryPhase::Waiting);
+                updated.last_error = diagnostic;
+            }
+            return self
+                .persist_delivery_candidate(&current, observed.clone(), snapshot)
+                .await
+                .unwrap_or(observed);
+        }
+
+        let Some(evidence) = facts.automatic_merge_evidence() else {
+            return observed;
+        };
+        let Some(pull_request_node_id) = facts.pull_request_node_id.clone() else {
+            return observed;
+        };
+        let operation = match repository.merge {
+            DeliveryMergeConfig::Manual => return observed,
+            DeliveryMergeConfig::Auto { method } if evidence.is_eligible_for_direct_merge() => {
+                DeliveryMergeOperation::Direct { method }
+            }
+            DeliveryMergeConfig::MergeQueue if evidence.is_eligible_for_queue() => {
+                DeliveryMergeOperation::Queue
+            }
+            _ => return observed,
+        };
+        let intent = DeliveryMergeMutation {
+            operation: operation.clone(),
+            pull_request_node_id: pull_request_node_id.clone(),
+            expected_head_sha: facts.head_sha.clone(),
+            phase: DeliveryMergePhase::InFlight,
+            last_error: None,
+        };
+        let before_intent = observed.clone();
+        observed
+            .repositories
+            .get_mut(&repository_key)
+            .expect("repository key was selected from this delivery")
+            .merge_mutation = Some(intent);
+        let Ok(mut in_flight) = self
+            .persist_delivery_candidate(&before_intent, observed, snapshot)
+            .await
+        else {
+            return before_intent;
+        };
+        let outcome = match operation {
+            DeliveryMergeOperation::Direct { method } => {
+                self.delivery_remote
+                    .merge_pull_request(worktree, &pull_request_node_id, &facts.head_sha, method)
+                    .await
+            }
+            DeliveryMergeOperation::Queue => {
+                self.delivery_remote
+                    .enqueue_pull_request(worktree, &pull_request_node_id, &facts.head_sha)
+                    .await
+            }
+        };
+        let repository = in_flight
+            .repositories
+            .get_mut(&repository_key)
+            .expect("repository key was selected from this delivery");
+        let mutation = repository
+            .merge_mutation
+            .as_mut()
+            .expect("persisted automatic merge intent");
+        match outcome {
+            DeliveryMergeRemoteOutcome::Submitted => {
+                mutation.phase = DeliveryMergePhase::Reconciling;
+                mutation.last_error = None;
+            }
+            DeliveryMergeRemoteOutcome::Rejected(error) => {
+                mutation.phase = DeliveryMergePhase::Blocked;
+                mutation.last_error = Some(error.clone());
+                repository.phase = DeliveryPhase::Blocked;
+                repository.retry_from = Some(DeliveryPhase::Waiting);
+                repository.last_error = Some(error);
+            }
+            DeliveryMergeRemoteOutcome::Ambiguous(error) => {
+                mutation.phase = DeliveryMergePhase::Reconciling;
+                mutation.last_error = Some(error);
+            }
+        }
+        self.persist_delivery_candidate(&before_intent, in_flight.clone(), snapshot)
+            .await
+            .unwrap_or(in_flight)
+    }
+
     /// Makes a repair launch durable before the recovery loop is allowed to reserve a worker or
     /// invoke an agent. On restart, `dispatch_in_flight` is retained and therefore cannot create a
     /// second launch merely because the process stopped between those effects.
@@ -2663,6 +3528,14 @@ impl Orchestrator {
         delivery: DeliveryRecord,
         snapshot: Option<&PipelineRunSnapshot>,
     ) -> DeliveryRecord {
+        if delivery.repositories.values().any(|repository| {
+            repository
+                .merge_mutation
+                .as_ref()
+                .is_some_and(|mutation| mutation.phase != DeliveryMergePhase::Blocked)
+        }) {
+            return delivery;
+        }
         let mut candidate = delivery.clone();
         match candidate.begin_repair_dispatch() {
             RepairDispatch::Dispatch => match self
@@ -4515,6 +5388,7 @@ impl Orchestrator {
                         DeliveryPhase::Prepared
                     },
                     approval_required: config.finalize.approval_required,
+                    merge: config.finalize.merge.clone(),
                     remote: config.git_remote.clone(),
                     base_branch: config.branch.clone(),
                     head_branch: identity.head_branch,
@@ -4524,6 +5398,7 @@ impl Orchestrator {
                     pr_number: None,
                     pr_url: None,
                     observation: None,
+                    merge_mutation: None,
                     ownership_conflict: None,
                     last_error: None,
                     retry_from: None,
@@ -4642,6 +5517,7 @@ mod tests {
             mode: DeliveryMode::PushAndPr,
             phase,
             approval_required: false,
+            merge: DeliveryMergeConfig::Manual,
             remote: "origin".to_string(),
             base_branch: "main".to_string(),
             head_branch: "ensemble/issue-420".to_string(),
@@ -4651,6 +5527,7 @@ mod tests {
             pr_number: None,
             pr_url: None,
             observation: None,
+            merge_mutation: None,
             ownership_conflict: None,
             last_error: None,
             retry_from: None,
@@ -4756,6 +5633,7 @@ mod tests {
 
     fn observation_facts() -> DeliveryObservationFacts {
         DeliveryObservationFacts {
+            pull_request_node_id: None,
             pull_request_number: 420,
             pull_request_url: "https://github.com/example/project/pull/420".to_string(),
             head_sha: "0123456789abcdef".to_string(),
@@ -4767,6 +5645,8 @@ mod tests {
             checks: vec![],
             check_summary: CheckSummary::Passing,
             review_decision: ReviewDecision::ReviewRequired,
+            in_merge_queue: false,
+            automatic_merge: None,
             feedback: Default::default(),
         }
     }
@@ -4858,6 +5738,7 @@ mod tests {
         let mut facts = observation_facts();
         facts.checks = vec![DeliveryCheck {
             name: "test".to_string(),
+            integration_id: None,
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Failure),
         }];
@@ -4883,6 +5764,7 @@ mod tests {
         let mut facts = observation_facts();
         facts.checks = vec![DeliveryCheck {
             name: "test".to_string(),
+            integration_id: None,
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Failure),
         }];
@@ -4922,6 +5804,7 @@ mod tests {
         first_repository.head_sha = "shared-head".to_string();
         first_repository.checks = vec![DeliveryCheck {
             name: "test".to_string(),
+            integration_id: None,
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Failure),
         }];
@@ -5015,6 +5898,7 @@ mod tests {
         let mut facts = observation_facts();
         facts.checks = vec![DeliveryCheck {
             name: "test".to_string(),
+            integration_id: None,
             status: CheckStatus::Completed,
             conclusion: Some(CheckConclusion::Failure),
         }];
@@ -5047,11 +5931,12 @@ mod tests {
             ] },
         });
 
-        let feedback = complete_feedback(&complete).unwrap();
+        let (feedback, has_unresolved_review_threads) = complete_feedback(&complete).unwrap();
 
         assert_eq!(feedback.change_request_bodies, vec!["Please fix"]);
         assert_eq!(feedback.unresolved_threads.len(), 1);
         assert_eq!(feedback.unresolved_threads[0].body, "rename");
+        assert!(has_unresolved_review_threads);
     }
 
     #[test]
@@ -5059,7 +5944,51 @@ mod tests {
         assert!(DELIVERY_OBSERVATION_QUERY.contains("reviews: latestReviews(first: 100)"));
         assert!(DELIVERY_OBSERVATION_QUERY.contains("baseRefOid"));
         assert!(DELIVERY_OBSERVATION_QUERY.contains("headRefName"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("mergeCommitAllowed"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("squashMergeAllowed"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("rebaseMergeAllowed"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("isDraft"));
         assert!(!DELIVERY_OBSERVATION_QUERY.contains("comparison("));
+    }
+
+    #[test]
+    fn repository_merge_method_capability_matches_the_configured_method() {
+        let repository = serde_json::json!({
+            "mergeCommitAllowed": true,
+            "squashMergeAllowed": false,
+            "rebaseMergeAllowed": true
+        });
+
+        assert_eq!(
+            repository_merge_method_supported(&repository, Some(DeliveryMergeMethod::Merge)),
+            Some(true)
+        );
+        assert_eq!(
+            repository_merge_method_supported(&repository, Some(DeliveryMergeMethod::Squash)),
+            Some(false)
+        );
+        assert_eq!(
+            repository_merge_method_supported(&repository, Some(DeliveryMergeMethod::Rebase)),
+            Some(true)
+        );
+        assert_eq!(
+            repository_merge_method_supported(&repository, None),
+            Some(true)
+        );
+        assert_eq!(
+            repository_merge_method_supported(
+                &serde_json::json!({}),
+                Some(DeliveryMergeMethod::Squash)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn draft_pull_requests_cannot_collect_automatic_merge_evidence() {
+        assert!(!automatic_merge_policy_needed(true, true));
+        assert!(automatic_merge_policy_needed(true, false));
+        assert!(!automatic_merge_policy_needed(false, false));
     }
 
     #[test]
@@ -5071,11 +6000,34 @@ mod tests {
             ] },
         });
 
-        let feedback = complete_feedback(&observation).unwrap();
+        let (feedback, has_unresolved_review_threads) = complete_feedback(&observation).unwrap();
 
         assert!(feedback.change_request_bodies.is_empty());
         assert_eq!(feedback.unresolved_threads.len(), 1);
         assert_eq!(feedback.unresolved_threads[0].body, "inline feedback");
+        assert!(has_unresolved_review_threads);
+    }
+
+    #[test]
+    fn complete_feedback_keeps_outdated_unresolved_threads_in_merge_authority() {
+        let observation = serde_json::json!({
+            "reviews": { "totalCount": 0, "nodes": [] },
+            "reviewThreads": { "totalCount": 1, "nodes": [
+                { "isResolved": false, "isOutdated": true, "comments": { "totalCount": 1, "nodes": [{ "body": "old feedback", "path": "src/lib.rs", "line": 7 }] } }
+            ] },
+        });
+
+        let (feedback, has_unresolved_review_threads) = complete_feedback(&observation).unwrap();
+
+        assert!(feedback.unresolved_threads.is_empty());
+        assert!(has_unresolved_review_threads);
+    }
+
+    #[test]
+    fn github_rest_paths_percent_encode_branch_segments() {
+        assert_eq!(github_path_segment("release/2026"), "release%2F2026");
+        assert_eq!(github_path_segment("feature #1"), "feature%20%231");
+        assert_eq!(github_path_segment("main"), "main");
     }
 
     #[test]
@@ -5194,6 +6146,18 @@ mod tests {
             crate::orchestrator::delivery_observation::CheckSummary::from_checks(&checks),
             crate::orchestrator::delivery_observation::CheckSummary::Failing
         );
+    }
+
+    #[test]
+    fn expected_legacy_status_context_stays_pending() {
+        let expected = parse_check(&serde_json::json!({
+            "context": "ci",
+            "state": "EXPECTED"
+        }))
+        .unwrap();
+
+        assert_eq!(expected.status, CheckStatus::Pending);
+        assert_eq!(expected.conclusion, None);
     }
 
     #[test]
@@ -5515,5 +6479,793 @@ mod tests {
             } if pr_url.as_deref() == Some("https://github.com/example/project/pull/420")
         ));
         assert!(failed.summary.contains("URL"));
+    }
+
+    #[test]
+    fn automatic_merge_policy_matches_required_check_integration_and_reviews() {
+        let rules = serde_json::json!([
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": false,
+                    "required_status_checks": [
+                        {"context": "test", "integration_id": 15368}
+                    ]
+                }
+            },
+            {
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 1,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
+                }
+            }
+        ]);
+        let checks = vec![DeliveryCheck {
+            name: "test".to_string(),
+            integration_id: Some(15368),
+            status: CheckStatus::Completed,
+            conclusion: Some(CheckConclusion::Success),
+        }];
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .unwrap();
+        assert!(evidence.is_eligible_for_direct_merge());
+        assert!(evidence.is_eligible_for_queue());
+
+        let wrong_integration = [DeliveryCheck {
+            integration_id: Some(1),
+            ..checks[0].clone()
+        }];
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &wrong_integration,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::ChangesRequested,
+                has_requested_changes: true,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Unknown,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        let unsupported = serde_json::json!([{"type": "required_deployments"}]);
+        assert!(automatic_merge_evidence_from_policy(
+            &unsupported,
+            None,
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn automatic_merge_policy_needs_a_review_decision_only_when_reviews_are_required() {
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Unknown,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_requires_approval_for_independent_review_rules() {
+        let rules = [
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": true,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
+                }
+            }]),
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": true,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
+                }
+            }]),
+        ];
+        for rules in rules {
+            let evidence = automatic_merge_evidence_from_policy(
+                &rules,
+                None,
+                AutomaticMergeStatus {
+                    checks: &[],
+                    review_decision: ReviewDecision::Unknown,
+                    has_requested_changes: false,
+                    has_unresolved_review_threads: false,
+                    base_freshness: BaseFreshness::UpToDate,
+                    direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                    repository_merge_method_supported: Some(true),
+                    queue_supported: false,
+                    queued: false,
+                },
+            )
+            .unwrap();
+
+            assert!(!evidence.is_eligible_for_direct_merge());
+        }
+
+        let classic = serde_json::json!({
+            "required_status_checks": null,
+            "required_pull_request_reviews": {
+                "required_approving_review_count": 0,
+                "require_code_owner_reviews": true,
+                "require_last_push_approval": false
+            },
+            "required_conversation_resolution": null
+        });
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&classic),
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Unknown,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_requires_configured_method_to_be_allowed() {
+        let rules = serde_json::json!([{
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "required_review_thread_resolution": false,
+                "require_code_owner_review": false,
+                "require_last_push_approval": false,
+                "allowed_merge_methods": ["rebase"]
+            }
+        }]);
+        let status = |method, repository_merge_method_supported| AutomaticMergeStatus {
+            checks: &[],
+            review_decision: ReviewDecision::Unknown,
+            has_requested_changes: false,
+            has_unresolved_review_threads: false,
+            base_freshness: BaseFreshness::UpToDate,
+            direct_merge_method: Some(method),
+            repository_merge_method_supported,
+            queue_supported: false,
+            queued: false,
+        };
+
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            status(DeliveryMergeMethod::Squash, Some(true)),
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            status(DeliveryMergeMethod::Rebase, Some(true)),
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            status(DeliveryMergeMethod::Rebase, Some(false)),
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            status(DeliveryMergeMethod::Rebase, None),
+        )
+        .is_none());
+
+        for malformed in [
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false
+                }
+            }]),
+            serde_json::json!([{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 0,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["unknown"]
+                }
+            }]),
+        ] {
+            assert!(automatic_merge_evidence_from_policy(
+                &malformed,
+                None,
+                status(DeliveryMergeMethod::Squash, Some(true)),
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn automatic_merge_policy_accepts_successful_required_check_conclusions() {
+        let rules = serde_json::json!([{
+            "type": "required_status_checks",
+            "parameters": {
+                "strict_required_status_checks_policy": false,
+                "required_status_checks": [{"context": "test"}]
+            }
+        }]);
+
+        for conclusion in [CheckConclusion::Neutral, CheckConclusion::Skipped] {
+            let checks = [DeliveryCheck {
+                name: "test".to_string(),
+                integration_id: None,
+                status: CheckStatus::Completed,
+                conclusion: Some(conclusion),
+            }];
+            let evidence = automatic_merge_evidence_from_policy(
+                &rules,
+                None,
+                AutomaticMergeStatus {
+                    checks: &checks,
+                    review_decision: ReviewDecision::Unknown,
+                    has_requested_changes: false,
+                    has_unresolved_review_threads: false,
+                    base_freshness: BaseFreshness::UpToDate,
+                    direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                    repository_merge_method_supported: Some(true),
+                    queue_supported: false,
+                    queued: false,
+                },
+            )
+            .unwrap();
+
+            assert!(evidence.is_eligible_for_direct_merge(), "{conclusion:?}");
+        }
+    }
+
+    #[test]
+    fn automatic_merge_policy_fails_closed_when_strict_freshness_is_not_proven() {
+        let rules = serde_json::json!([{
+            "type": "required_status_checks",
+            "parameters": {
+                "strict_required_status_checks_policy": true,
+                "required_status_checks": []
+            }
+        }]);
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::Behind,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_fails_closed_when_thread_resolution_is_not_proven() {
+        let rules = serde_json::json!([{
+            "type": "pull_request",
+            "parameters": {
+                "required_approving_review_count": 0,
+                "required_review_thread_resolution": true,
+                "require_code_owner_review": false,
+                "require_last_push_approval": false,
+                "allowed_merge_methods": ["merge", "squash", "rebase"]
+            }
+        }]);
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: true,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_combines_paginated_rules_and_classic_protection() {
+        let rules = serde_json::json!([
+            [{
+                "type": "required_status_checks",
+                "parameters": {
+                    "strict_required_status_checks_policy": false,
+                    "required_status_checks": [
+                        {"context": "ruleset", "integration_id": 1}
+                    ]
+                }
+            }],
+            [{
+                "type": "pull_request",
+                "parameters": {
+                    "required_approving_review_count": 1,
+                    "required_review_thread_resolution": false,
+                    "require_code_owner_review": false,
+                    "require_last_push_approval": false,
+                    "allowed_merge_methods": ["merge", "squash", "rebase"]
+                }
+            }]
+        ]);
+        let protection = serde_json::json!({
+            "required_status_checks": {
+                "strict": true,
+                "contexts": ["classic"],
+                "checks": [{"context": "classic", "app_id": 2}]
+            },
+            "required_pull_request_reviews": {
+                "required_approving_review_count": 2,
+                "require_code_owner_reviews": false,
+                "require_last_push_approval": false
+            },
+            "required_conversation_resolution": {"enabled": true}
+        });
+        let checks = vec![
+            DeliveryCheck {
+                name: "ruleset".to_string(),
+                integration_id: Some(1),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Success),
+            },
+            DeliveryCheck {
+                name: "classic".to_string(),
+                integration_id: Some(2),
+                status: CheckStatus::Completed,
+                conclusion: Some(CheckConclusion::Success),
+            },
+        ];
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &rules,
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(evidence.is_eligible_for_direct_merge());
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::Behind,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+        assert!(!automatic_merge_evidence_from_policy(
+            &rules,
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &checks,
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: true,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap()
+        .is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_rejects_malformed_classic_check_identity() {
+        let malformed_checks = serde_json::json!({
+            "required_status_checks": {
+                "strict": false,
+                "contexts": ["test"],
+                "checks": "not-an-array"
+            },
+            "required_pull_request_reviews": null,
+            "required_conversation_resolution": null
+        });
+        let missing_app_identity = serde_json::json!({
+            "required_status_checks": {
+                "strict": false,
+                "contexts": ["test"],
+                "checks": [{"context": "test"}]
+            },
+            "required_pull_request_reviews": null,
+            "required_conversation_resolution": null
+        });
+        let status = || AutomaticMergeStatus {
+            checks: &[],
+            review_decision: ReviewDecision::Approved,
+            has_requested_changes: false,
+            has_unresolved_review_threads: false,
+            base_freshness: BaseFreshness::UpToDate,
+            direct_merge_method: Some(DeliveryMergeMethod::Squash),
+            repository_merge_method_supported: Some(true),
+            queue_supported: false,
+            queued: false,
+        };
+
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&malformed_checks),
+            status(),
+        )
+        .is_none());
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&missing_app_identity),
+            status(),
+        )
+        .is_none());
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&serde_json::json!([])),
+            status(),
+        )
+        .is_none());
+        assert!(automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&serde_json::json!({})),
+            status(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn automatic_merge_policy_requires_every_classic_check_representation() {
+        let protection = serde_json::json!({
+            "required_status_checks": {
+                "strict": false,
+                "contexts": ["legacy"],
+                "checks": []
+            },
+            "required_pull_request_reviews": null,
+            "required_conversation_resolution": null
+        });
+
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([]),
+            Some(&protection),
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::UpToDate,
+                direct_merge_method: Some(DeliveryMergeMethod::Squash),
+                repository_merge_method_supported: Some(true),
+                queue_supported: false,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+    }
+
+    #[test]
+    fn automatic_merge_policy_routes_merge_queue_rules_to_queue_admission() {
+        let evidence = automatic_merge_evidence_from_policy(
+            &serde_json::json!([[
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": true,
+                        "required_status_checks": []
+                    }
+                },
+                {"type": "merge_queue", "parameters": {}}
+            ]]),
+            None,
+            AutomaticMergeStatus {
+                checks: &[],
+                review_decision: ReviewDecision::Approved,
+                has_requested_changes: false,
+                has_unresolved_review_threads: false,
+                base_freshness: BaseFreshness::Behind,
+                direct_merge_method: None,
+                repository_merge_method_supported: Some(true),
+                queue_supported: true,
+                queued: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!evidence.is_eligible_for_direct_merge());
+        assert!(evidence.is_eligible_for_queue());
+    }
+
+    #[test]
+    fn absent_classic_protection_requires_the_exact_github_response() {
+        assert!(is_unprotected_branch_response(
+            r#"{"message":"Branch not protected","status":"404"}"#
+        ));
+        assert!(!is_unprotected_branch_response(
+            r#"{"message":"Not Found","status":"404"}"#
+        ));
+        assert!(!is_unprotected_branch_response("not-json"));
+    }
+
+    #[test]
+    fn delivery_observation_sends_string_variables_without_type_coercion() {
+        let arguments = delivery_observation_arguments("owner", "repo", 42, "123");
+
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "base=123"]));
+        assert!(arguments
+            .windows(2)
+            .any(|pair| pair == ["-f", "owner=owner"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-f", "name=repo"]));
+        assert!(arguments.windows(2).any(|pair| pair == ["-F", "number=42"]));
+    }
+
+    #[test]
+    fn repository_rules_request_all_pages_as_one_json_value() {
+        assert_eq!(
+            repository_rules_arguments("repos/owner/repo/rules/branches/main"),
+            [
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/owner/repo/rules/branches/main"
+            ]
+        );
+    }
+
+    #[test]
+    fn automatic_merge_selection_does_not_starve_the_next_repository() {
+        let mut merged = repository(DeliveryPhase::Waiting);
+        merged.merge = DeliveryMergeConfig::Auto {
+            method: DeliveryMergeMethod::Squash,
+        };
+        merged.pr_number = Some(1);
+        merged.pr_url = Some("https://example.test/pr/1".to_string());
+        let mut merged_facts = observation_facts().for_delivery(&merged.local_sha);
+        merged_facts.terminal_state = PullRequestTerminalState::Merged;
+        merged.observation = Some(DeliveryObservation::successful(merged_facts, Utc::now()));
+
+        let mut waiting = repository(DeliveryPhase::Waiting);
+        waiting.merge = DeliveryMergeConfig::Auto {
+            method: DeliveryMergeMethod::Squash,
+        };
+        waiting.pr_number = Some(2);
+        waiting.pr_url = Some("https://example.test/pr/2".to_string());
+
+        let repositories = BTreeMap::from([
+            ("a-completed".to_string(), merged),
+            ("b-waiting".to_string(), waiting.clone()),
+        ]);
+        assert_eq!(
+            automatic_merge_candidate_key(&repositories).as_deref(),
+            Some("b-waiting")
+        );
+
+        let automatic_evidence = |required_checks_passing| AutomaticMergeEvidence {
+            required_checks_passing,
+            required_reviews_satisfied: true,
+            required_review_threads_resolved: true,
+            strict_base_satisfied: true,
+            direct_merge_supported: true,
+            no_requested_changes: true,
+            queue_supported: false,
+            queued: false,
+        };
+        let mut ineligible = waiting.clone();
+        let mut ineligible_facts = observation_facts().for_delivery(&ineligible.local_sha);
+        ineligible_facts.automatic_merge = Some(automatic_evidence(false));
+        ineligible.observation = Some(DeliveryObservation::successful(
+            ineligible_facts,
+            Utc::now(),
+        ));
+        let mut eligible = waiting.clone();
+        eligible.pr_number = Some(3);
+        eligible.pr_url = Some("https://example.test/pr/3".to_string());
+        let mut eligible_facts = observation_facts().for_delivery(&eligible.local_sha);
+        eligible_facts.automatic_merge = Some(automatic_evidence(true));
+        eligible.observation = Some(DeliveryObservation::successful(eligible_facts, Utc::now()));
+        let repositories = BTreeMap::from([
+            ("a-ineligible".to_string(), ineligible),
+            ("b-eligible".to_string(), eligible),
+        ]);
+        assert_eq!(
+            automatic_merge_candidate_key(&repositories).as_deref(),
+            Some("b-eligible")
+        );
+
+        for phase in [DeliveryMergePhase::Queued, DeliveryMergePhase::Blocked] {
+            let mut completed = repository(DeliveryPhase::Waiting);
+            completed.merge = DeliveryMergeConfig::Auto {
+                method: DeliveryMergeMethod::Squash,
+            };
+            completed.pr_number = Some(1);
+            completed.pr_url = Some("https://example.test/pr/1".to_string());
+            let operation = match phase {
+                DeliveryMergePhase::Queued => DeliveryMergeOperation::Queue,
+                DeliveryMergePhase::Blocked => DeliveryMergeOperation::Direct {
+                    method: DeliveryMergeMethod::Squash,
+                },
+                _ => unreachable!(),
+            };
+            completed.merge_mutation = Some(DeliveryMergeMutation {
+                pull_request_node_id: "PR_node".to_string(),
+                expected_head_sha: completed.local_sha.clone(),
+                operation,
+                phase,
+                last_error: None,
+            });
+
+            let repositories = BTreeMap::from([
+                ("a-completed".to_string(), completed),
+                ("b-waiting".to_string(), waiting.clone()),
+            ]);
+            assert_eq!(
+                automatic_merge_candidate_key(&repositories).as_deref(),
+                Some("b-waiting")
+            );
+        }
+
+        for phase in [
+            DeliveryMergePhase::InFlight,
+            DeliveryMergePhase::Reconciling,
+        ] {
+            let mut active = repository(DeliveryPhase::Waiting);
+            active.merge = DeliveryMergeConfig::Auto {
+                method: DeliveryMergeMethod::Squash,
+            };
+            active.pr_number = Some(1);
+            active.pr_url = Some("https://example.test/pr/1".to_string());
+            active.merge_mutation = Some(DeliveryMergeMutation {
+                pull_request_node_id: "PR_node".to_string(),
+                expected_head_sha: active.local_sha.clone(),
+                operation: DeliveryMergeOperation::Direct {
+                    method: DeliveryMergeMethod::Squash,
+                },
+                phase,
+                last_error: None,
+            });
+
+            let repositories = BTreeMap::from([
+                ("a-active".to_string(), active),
+                ("b-waiting".to_string(), waiting.clone()),
+            ]);
+            assert_eq!(
+                automatic_merge_candidate_key(&repositories).as_deref(),
+                Some("a-active")
+            );
+        }
     }
 }
