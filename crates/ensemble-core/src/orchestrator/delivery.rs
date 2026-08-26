@@ -42,7 +42,7 @@ use crate::workspace::key::issue_workspace_key;
 
 const DELIVERY_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const PULL_REQUEST_DISCOVERY_LIMIT: usize = 1_000;
-const DELIVERY_OBSERVATION_QUERY: &str = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!) { repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed mergeQueue(branch: $base) { id } pullRequest(number: $number) { id number url state merged isInMergeQueue headRefOid headRefName baseRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion app { databaseId } } ... on StatusContext { context state } } } } reviews: latestReviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } } }";
+const DELIVERY_OBSERVATION_QUERY: &str = "query DeliveryObservation($owner: String!, $name: String!, $number: Int!, $base: String!) { repository(owner: $owner, name: $name) { mergeCommitAllowed squashMergeAllowed rebaseMergeAllowed mergeQueue(branch: $base) { id } pullRequest(number: $number) { id number url state merged isDraft isInMergeQueue headRefOid headRefName baseRefOid baseRefName mergeable reviewDecision statusCheckRollup { contexts(first: 100) { totalCount nodes { __typename ... on CheckRun { name status conclusion app { databaseId } } ... on StatusContext { context state } } } } reviews: latestReviews(first: 100) { totalCount nodes { state body } } reviewThreads(first: 100) { totalCount nodes { isResolved isOutdated comments(first: 100) { totalCount nodes { body path line } } } } } } }";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1330,6 +1330,12 @@ impl DeliveryRemote for CliDeliveryRemote {
             .get("isInMergeQueue")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
+        let Some(is_draft) = value.get("isDraft").and_then(serde_json::Value::as_bool) else {
+            return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                DeliveryObservationFailureKind::MalformedResponse,
+                "GitHub returned an incomplete pull request readiness observation",
+            ));
+        };
         let queue_supported = response
             .pointer("/data/repository/mergeQueue")
             .is_some_and(serde_json::Value::is_object);
@@ -1362,67 +1368,72 @@ impl DeliveryRemote for CliDeliveryRemote {
             0 => BaseFreshness::UpToDate,
             _ => BaseFreshness::Behind,
         };
-        let automatic_merge = if collect_automatic_merge_policy {
-            let repository_merge_method_supported =
-                repository_merge_method_supported(repository, direct_merge_method);
-            let encoded_base_branch = github_path_segment(base_branch);
-            let rules_endpoint =
-                format!("repos/{owner}/{name}/rules/branches/{encoded_base_branch}");
-            let rules_arguments = repository_rules_arguments(&rules_endpoint);
-            let rules_stdout =
-                match observation_command_stdout(repository_path, &rules_arguments).await {
-                    Ok(stdout) => stdout,
-                    Err(read) => return read,
+        let automatic_merge =
+            if automatic_merge_policy_needed(collect_automatic_merge_policy, is_draft) {
+                let repository_merge_method_supported =
+                    repository_merge_method_supported(repository, direct_merge_method);
+                let encoded_base_branch = github_path_segment(base_branch);
+                let rules_endpoint =
+                    format!("repos/{owner}/{name}/rules/branches/{encoded_base_branch}");
+                let rules_arguments = repository_rules_arguments(&rules_endpoint);
+                let rules_stdout =
+                    match observation_command_stdout(repository_path, &rules_arguments).await {
+                        Ok(stdout) => stdout,
+                        Err(read) => return read,
+                    };
+                let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
+                            DeliveryObservationFailureKind::MalformedResponse,
+                            "GitHub returned invalid repository rules",
+                        ));
+                    }
                 };
-            let rules = match serde_json::from_str::<serde_json::Value>(&rules_stdout) {
-                Ok(value) => value,
-                Err(_) => {
-                    return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
-                        DeliveryObservationFailureKind::MalformedResponse,
-                        "GitHub returned invalid repository rules",
-                    ));
-                }
-            };
-            let protection_endpoint =
-                format!("repos/{owner}/{name}/branches/{encoded_base_branch}/protection");
-            let protection_arguments = ["api", protection_endpoint.as_str()];
-            let protection_stdout =
-                match optional_observation_command_stdout(repository_path, &protection_arguments)
-                    .await
+                let protection_endpoint =
+                    format!("repos/{owner}/{name}/branches/{encoded_base_branch}/protection");
+                let protection_arguments = ["api", protection_endpoint.as_str()];
+                let protection_stdout = match optional_observation_command_stdout(
+                    repository_path,
+                    &protection_arguments,
+                )
+                .await
                 {
                     Ok(stdout) => stdout,
                     Err(read) => return read,
                 };
-            let protection = match protection_stdout {
-                Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
-                    Ok(value) => Some(value),
-                    Err(_) => {
-                        return DeliveryObservationRead::Terminal(DeliveryObservationFailure::new(
-                            DeliveryObservationFailureKind::MalformedResponse,
-                            "GitHub returned invalid classic branch protection",
-                        ));
-                    }
-                },
-                None => None,
+                let protection = match protection_stdout {
+                    Some(stdout) => match serde_json::from_str::<serde_json::Value>(&stdout) {
+                        Ok(value) => Some(value),
+                        Err(_) => {
+                            return DeliveryObservationRead::Terminal(
+                                DeliveryObservationFailure::new(
+                                    DeliveryObservationFailureKind::MalformedResponse,
+                                    "GitHub returned invalid classic branch protection",
+                                ),
+                            );
+                        }
+                    },
+                    None => None,
+                };
+                automatic_merge_evidence_from_policy(
+                    &rules,
+                    protection.as_ref(),
+                    AutomaticMergeStatus {
+                        checks: &checks,
+                        review_decision,
+                        has_requested_changes,
+                        has_unresolved_review_threads,
+                        base_freshness,
+                        direct_merge_method,
+                        repository_merge_method_supported,
+                        queue_supported,
+                        queued,
+                    },
+                )
+            } else {
+                None
             };
-            automatic_merge_evidence_from_policy(
-                &rules,
-                protection.as_ref(),
-                AutomaticMergeStatus {
-                    checks: &checks,
-                    review_decision,
-                    has_requested_changes,
-                    has_unresolved_review_threads,
-                    base_freshness,
-                    direct_merge_method,
-                    repository_merge_method_supported,
-                    queue_supported,
-                    queued,
-                },
-            )
-        } else {
-            None
-        };
         DeliveryObservationRead::Observed(DeliveryObservationFacts {
             pull_request_node_id: Some(node_id.to_string()),
             pull_request_number: number,
@@ -1607,6 +1618,10 @@ fn repository_merge_method_supported(
         None => return Some(true),
     };
     repository.get(field)?.as_bool()
+}
+
+fn automatic_merge_policy_needed(requested: bool, is_draft: bool) -> bool {
+    requested && !is_draft
 }
 
 fn delivery_observation_arguments(
@@ -5903,6 +5918,7 @@ mod tests {
         assert!(DELIVERY_OBSERVATION_QUERY.contains("mergeCommitAllowed"));
         assert!(DELIVERY_OBSERVATION_QUERY.contains("squashMergeAllowed"));
         assert!(DELIVERY_OBSERVATION_QUERY.contains("rebaseMergeAllowed"));
+        assert!(DELIVERY_OBSERVATION_QUERY.contains("isDraft"));
         assert!(!DELIVERY_OBSERVATION_QUERY.contains("comparison("));
     }
 
@@ -5937,6 +5953,13 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn draft_pull_requests_cannot_collect_automatic_merge_evidence() {
+        assert!(!automatic_merge_policy_needed(true, true));
+        assert!(automatic_merge_policy_needed(true, false));
+        assert!(!automatic_merge_policy_needed(false, false));
     }
 
     #[test]

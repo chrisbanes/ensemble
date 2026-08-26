@@ -544,7 +544,8 @@ legacy expected status remains pending until it reports a terminal state. A revi
 needed when the effective policy requires an approval count, code-owner
 approval, or approval of the last push. A configured direct merge method must be enabled in the
 repository and appear in every applicable pull-request rule's allowed methods; missing or
-malformed method-capability or ruleset policy fails closed.
+malformed method-capability or ruleset policy fails closed. Draft pull requests do not collect
+automatic-mutation evidence and become eligible only after a fresh ready-for-review observation.
 Effective policy data that is missing, incomplete, or unauthorized fails closed. Manual mode skips
 ruleset and classic-protection reads because it performs observation-only reconciliation. An
 applicable merge-queue rule permits queue admission but prevents direct automatic merge from

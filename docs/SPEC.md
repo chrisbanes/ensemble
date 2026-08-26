@@ -492,7 +492,8 @@ Pipeline run recovery:
   is needed when the effective policy requires an approval count, code-owner
   approval, or approval of the last push. A configured direct merge method must be enabled in the
   repository and appear in every applicable pull-request rule's allowed methods; missing or
-  malformed method-capability or ruleset policy fails closed.
+  malformed method-capability or ruleset policy fails closed. Draft pull requests do not collect
+  automatic-mutation evidence and become eligible only after a fresh ready-for-review observation.
   Version-1 retained observations remain readable but cannot authorize mutation. Labels,
   assignees, aggregate non-required checks, and stale evidence are not merge authority.
   Manual delivery does not read rulesets or classic branch protection because those policies are
